@@ -323,9 +323,19 @@ def status() -> None:
 
 
 @app.command()
-def dashboard() -> None:
-    """Generate and open the HTML dashboard in your browser."""
+def dashboard(
+    serve: bool = typer.Option(False, "--serve", help="Run the interactive local operator dashboard."),
+    port: int = typer.Option(8765, "--port", help="Port for --serve."),
+    no_open: bool = typer.Option(False, "--no-open", help="Do not open the browser automatically."),
+) -> None:
+    """Generate/open the dashboard, or run the interactive local dashboard."""
     _bootstrap()
+
+    if serve:
+        from applypilot.web_dashboard import serve_dashboard
+
+        serve_dashboard(port=port, open_browser=not no_open)
+        return
 
     from applypilot.view import open_dashboard
 

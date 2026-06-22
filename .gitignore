@@ -2,6 +2,8 @@
 profile.json
 resume.txt
 resume.pdf
+*Resume.pdf
+*Resume.txt
 *.env
 .env.*
 !.env.example
@@ -19,6 +21,8 @@ logs/
 .mcp*.json
 
 # Python
+.venv/
+venv/
 __pycache__/
 *.py[cod]
 *$py.class

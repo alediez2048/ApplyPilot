@@ -111,7 +111,8 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
                 FROM jobs
                 WHERE (url = ? OR application_url = ? OR application_url LIKE ? OR url LIKE ?)
                   AND tailored_resume_path IS NOT NULL
-                  AND apply_status != 'in_progress'
+                  AND applied_at IS NULL
+                  AND (apply_status IS NULL OR apply_status != 'in_progress')
                 LIMIT 1
             """, (target_url, target_url, like, like)).fetchone()
         else:
@@ -466,20 +467,17 @@ def run_job(job: dict, port: int, worker_id: int = 0,
             return re.sub(r'[*`"]+$', '', s).strip()
 
         for result_status in ["APPLIED", "EXPIRED", "CAPTCHA", "LOGIN_ISSUE"]:
-            if f"RESULT:{result_status}" in output:
+            if re.search(rf"RESULT:\s*{result_status}\b", output, re.IGNORECASE):
                 add_event(f"[W{worker_id}] {result_status} ({elapsed}s): {job['title'][:30]}")
                 update_state(worker_id, status=result_status.lower(),
                              last_action=f"{result_status} ({elapsed}s)")
                 return result_status.lower(), duration_ms
 
-        if "RESULT:FAILED" in output:
+        if re.search(r"RESULT:\s*FAILED", output, re.IGNORECASE):
             for out_line in output.split("\n"):
-                if "RESULT:FAILED" in out_line:
-                    reason = (
-                        out_line.split("RESULT:FAILED:")[-1].strip()
-                        if ":" in out_line[out_line.index("FAILED") + 6:]
-                        else "unknown"
-                    )
+                match = re.search(r"RESULT:\s*FAILED(?::\s*(.*))?", out_line, re.IGNORECASE)
+                if match:
+                    reason = (match.group(1) or "unknown").strip()
                     reason = _clean_reason(reason)
                     PROMOTE_TO_STATUS = {"captcha", "expired", "login_issue"}
                     if reason in PROMOTE_TO_STATUS:

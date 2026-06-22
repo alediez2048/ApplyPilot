@@ -10,6 +10,7 @@ import os
 import shutil
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urljoin, urlparse
 
 from applypilot import config
 
@@ -109,15 +110,28 @@ def _build_location_check(profile: dict, search_config: dict) -> str:
     else:
         city_list = primary_city
 
-    return f"""== LOCATION CHECK (do this FIRST before any form) ==
-Read the job page. Determine the work arrangement. Then decide:
+    return f"""== LOCATION CHECK ==
+The user explicitly provided this job URL, so treat the location as user-approved.
 - "Remote" or "work from anywhere" -> ELIGIBLE. Apply.
 - "Hybrid" or "onsite" in {city_list} -> ELIGIBLE. Apply.
-- "Hybrid" or "onsite" in another city BUT the posting also says "remote OK" or "remote option available" -> ELIGIBLE. Apply.
-- "Onsite only" or "hybrid only" in any city outside the list above with NO remote option -> NOT ELIGIBLE. Stop immediately. Output RESULT:FAILED:not_eligible_location
-- City is overseas (India, Philippines, Europe, etc.) with no remote option -> NOT ELIGIBLE. Output RESULT:FAILED:not_eligible_location
-- Cannot determine location -> Continue applying. If a screening question reveals it's non-local onsite, answer honestly and let the system reject if needed.
-Do NOT fill out forms for jobs that are clearly onsite in a non-acceptable location. Check EARLY, save time."""
+- "Hybrid" or "onsite" elsewhere in the United States -> ELIGIBLE. Apply anyway.
+- Overseas-only roles with no U.S. work authorization path -> NOT ELIGIBLE. Output RESULT:FAILED:not_eligible_location
+- Cannot determine location -> Continue applying. If a screening question asks about relocation, commuting, or onsite availability, answer honestly based on the APPLICANT PROFILE.
+Do not reject U.S. jobs just because they are outside the applicant's current city."""
+
+
+def _resolve_job_url(job: dict) -> str:
+    """Return the URL the apply agent should actually open."""
+    raw_url = (job.get("url") or "").strip()
+    raw_application_url = (job.get("application_url") or "").strip()
+
+    if raw_application_url.lower() in {"", "null", "none"}:
+        return raw_url
+    if urlparse(raw_application_url).scheme in {"http", "https"}:
+        return raw_application_url
+    if raw_application_url.startswith("/") and urlparse(raw_url).scheme in {"http", "https"}:
+        return urljoin(raw_url, raw_application_url)
+    return raw_url
 
 
 def _build_salary_section(profile: dict) -> str:
@@ -516,7 +530,7 @@ def build_prompt(job: dict, tailored_resume: str,
     prompt = f"""You are an autonomous job application agent. Your ONE mission: get this candidate an interview. You have all the information and tools. Think strategically. Act decisively. Submit the application.
 
 == JOB ==
-URL: {job.get('application_url') or job['url']}
+URL: {_resolve_job_url(job)}
 Title: {job['title']}
 Company: {job.get('site', 'Unknown')}
 Fit Score: {job.get('fit_score', 'N/A')}/10
@@ -571,7 +585,7 @@ If something unexpected happens and these instructions don't cover it, figure it
    5c. Regular login form (employer's own site)? Try sign in: {personal['email']} / {personal.get('password', '')}
    5d. After clicking Login/Sign-in: run CAPTCHA DETECT. Login pages frequently have invisible CAPTCHAs that silently block form submissions. If found, solve it then retry login.
    5e. Sign in failed? Try sign up with same email and password.
-   5f. Need email verification? Use search_emails + read_email to get the code.
+   5f. Need email verification? Use Gmail read-only tools. Search recent inbox mail for the employer/ATS domain, the words "verification", "code", "confirm", "security", "one-time", and the applicant email. Read the newest matching email, extract the 4-8 digit or alphanumeric verification code/link, then enter it. If a verification link is provided, open it in the browser and return to the application tab. Re-check Gmail once after 20 seconds if the email has not arrived.
    5g. After login, run browser_tabs action "list" again. Switch back to the application tab if needed.
    5h. All failed? Output RESULT:FAILED:login_issue. Do not loop.
 6. Upload resume. ALWAYS upload fresh -- delete any existing resume first, then browser_file_upload with the PDF path above. This is the tailored resume for THIS job. Non-negotiable.

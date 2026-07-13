@@ -266,6 +266,13 @@ def run_dashboard_prepare(limit: int = 0, validation_mode: str = "lenient") -> d
                 prefix = _safe_material_prefix(job)
                 txt_path = TAILORED_DIR / f"{prefix}.txt"
                 txt_path.write_text(tailored_text, encoding="utf-8")
+
+                # Structured JSON sidecar so the React-PDF renderer uses the
+                # clean structured path (matches `applypilot run tailor`).
+                resume_data = report.pop("resume_data", None)
+                if resume_data is not None:
+                    (TAILORED_DIR / f"{prefix}_DATA.json").write_text(
+                        json.dumps(resume_data, indent=2), encoding="utf-8")
                 (TAILORED_DIR / f"{prefix}_JOB.txt").write_text(
                     (
                         f"Title: {job.get('title')}\n"

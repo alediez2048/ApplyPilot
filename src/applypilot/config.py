@@ -229,7 +229,8 @@ def get_tier() -> int:
     """
     load_env()
 
-    has_llm = any(os.environ.get(k) for k in ("GEMINI_API_KEY", "OPENAI_API_KEY", "LLM_URL"))
+    has_llm = any(os.environ.get(k) for k in (
+        "GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "CLAUDE_API_KEY", "LLM_URL"))
     if not has_llm:
         return 1
 
@@ -261,7 +262,8 @@ def check_tier(required: int, feature: str) -> None:
     _console = Console(stderr=True)
 
     missing: list[str] = []
-    if required >= 2 and not any(os.environ.get(k) for k in ("GEMINI_API_KEY", "OPENAI_API_KEY", "LLM_URL")):
+    if required >= 2 and not any(os.environ.get(k) for k in (
+            "GEMINI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "CLAUDE_API_KEY", "LLM_URL")):
         missing.append("LLM API key — run [bold]applypilot init[/bold] or set GEMINI_API_KEY")
     if required >= 3:
         if not shutil.which("claude"):

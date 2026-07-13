@@ -539,6 +539,17 @@ def scrape_detail_page(page, url: str) -> dict:
     }
     t0 = time.time()
 
+    # Tier 0: ATS public API (Greenhouse/Lever/Ashby) — no browser needed.
+    from applypilot.enrichment.ats import fetch_ats_job
+    ats_result = fetch_ats_job(url)
+    if ats_result and ats_result.get("full_description"):
+        result["full_description"] = ats_result["full_description"]
+        result["application_url"] = ats_result.get("application_url")
+        result["tier_used"] = "ats"
+        result["status"] = "ok" if result.get("application_url") else "partial"
+        result["elapsed"] = time.time() - t0
+        return result
+
     try:
         resp = page.goto(url, timeout=45000)
         if resp and resp.status in PERMANENT_FAILURES:

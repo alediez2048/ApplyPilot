@@ -411,6 +411,7 @@ p:last-child {{ margin-top: 4px; }}
 
 def _split_contact(contact: str) -> tuple[str, str, list[str]]:
     """Split a "a | b | c" contact line into (email, phone, links)."""
+    from applypilot.scoring.resume_render import _clean_link
     email, phone = "", ""
     links: list[str] = []
     for part in (p.strip() for p in (contact or "").split("|") if p.strip()):
@@ -419,7 +420,7 @@ def _split_contact(contact: str) -> tuple[str, str, list[str]]:
         elif not phone and any(ch.isdigit() for ch in part) and part.count(" ") <= 2 and "/" not in part:
             phone = part
         else:
-            links.append(part)
+            links.append(_clean_link(part))
     return email, phone, links
 
 

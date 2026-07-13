@@ -18,7 +18,7 @@ import ReactPDF from '@react-pdf/renderer'
 import { DEFAULT_THEME, createDynamicStyles } from './styles.mjs'
 import { adjustStyling } from './onePage.mjs'
 import { ResumeDocument } from './document.mjs'
-import { CoverLetterDocument, createCoverStyles } from './cover.mjs'
+import { CoverLetterDocument } from './cover.mjs'
 
 const h = React.createElement
 
@@ -59,8 +59,7 @@ function validateCover(req) {
 
 async function renderCoverLetter(req, outPath) {
   validateCover(req)
-  const styles = createCoverStyles(req.coverLetter.styling || {})
-  const el = h(CoverLetterDocument, { cover: req.coverLetter, styles })
+  const el = h(CoverLetterDocument, { cover: req.coverLetter })
   let buf
   try {
     buf = await renderToBuffer(el)

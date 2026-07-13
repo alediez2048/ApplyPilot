@@ -139,9 +139,10 @@ def test_cover_letter_from_text_builds_block_from_profile():
                             "phone": "555", "city": "London", "province_state": "UK"}}
     cover = rr.cover_letter_from_text("Dear Hiring Manager,\n\nHi.\n\nSincerely,\nAda",
                                       profile, date="July 13, 2026")
+    # candidate reuses the résumé contactInfo shape (shared header)
     assert cover["candidate"]["name"] == "Ada Lovelace"
-    assert "ada@x.com" in cover["candidate"]["contact"]
-    assert "London, UK" in cover["candidate"]["contact"]
+    assert cover["candidate"]["email"] == "ada@x.com"
+    assert cover["candidate"]["location"] == "London, UK"
     assert cover["date"] == "July 13, 2026"
     assert cover["body"].startswith("Dear Hiring Manager,")
 

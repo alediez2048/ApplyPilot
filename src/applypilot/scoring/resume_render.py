@@ -236,23 +236,13 @@ def node_renderer_available() -> bool:
 def cover_letter_from_text(text: str, profile: dict, date: str | None = None) -> dict:
     """Map an ApplyPilot cover-letter prose file + profile into a coverLetter block.
 
+    The candidate block reuses the résumé's contactInfo shape so the renderer can
+    share the exact same header (centered name, blue "–"-separated links, no rule).
     ApplyPilot letters are full prose (salutation … sign-off); the renderer styles
     the salutation/body/sign-off from the paragraph structure.
     """
-    personal = (profile or {}).get("personal", {})
-    contact_bits = []
-    if personal.get("email"):
-        contact_bits.append(str(personal["email"]))
-    if personal.get("phone"):
-        contact_bits.append(str(personal["phone"]))
-    loc = _location_from_profile(personal)
-    if loc:
-        contact_bits.append(loc)
     return {
-        "candidate": {
-            "name": personal.get("full_name") or personal.get("preferred_name") or "",
-            "contact": "  |  ".join(contact_bits),
-        },
+        "candidate": _contact_from_profile(profile, ""),  # {name, email, phone, links, ...}
         "date": date or "",
         "body": text.strip(),
     }

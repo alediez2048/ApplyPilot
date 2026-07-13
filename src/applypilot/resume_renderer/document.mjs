@@ -15,8 +15,9 @@ function isLink(s) {
 /**
  * Contact line: phone – email – links, centered, with links in blue underline.
  * Matches the reference resume's "(phone) – email – linkedin – github" style.
+ * Exported so the cover letter can share the exact same header.
  */
-function ContactLine(styles, contact) {
+export function ContactLine(styles, contact) {
   // Matches the reference: phone – email – links (location is not shown here).
   const parts = []
   if (contact.phone) parts.push(String(contact.phone))

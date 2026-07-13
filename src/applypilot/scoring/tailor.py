@@ -420,11 +420,13 @@ def tailor_resume(
                 continue
             # Last attempt — assemble whatever we got
             tailored = assemble_resume_text(data, profile)
+            report["resume_data"] = data
             report["status"] = "failed_validation"
             return tailored, report
 
         # Assemble text (header injected by code, em dashes auto-fixed)
         tailored = assemble_resume_text(data, profile)
+        report["resume_data"] = data
 
         # Layer 2: LLM judge (catches subtle fabrication) — skipped in lenient mode
         if validation_mode == "lenient":
@@ -498,6 +500,13 @@ def run_tailoring(min_score: int = 7, limit: int = 20,
             # Save tailored resume text
             txt_path = TAILORED_DIR / f"{prefix}.txt"
             txt_path.write_text(tailored, encoding="utf-8")
+
+            # Save structured resume JSON for the React-PDF renderer (sidecar).
+            # Kept separate from the validation report; the renderer reads this.
+            resume_data = report.pop("resume_data", None)
+            if resume_data is not None:
+                data_path = TAILORED_DIR / f"{prefix}_DATA.json"
+                data_path.write_text(json.dumps(resume_data, indent=2), encoding="utf-8")
 
             # Save job description for traceability
             job_path = TAILORED_DIR / f"{prefix}_JOB.txt"

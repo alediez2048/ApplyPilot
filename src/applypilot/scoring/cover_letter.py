@@ -249,7 +249,7 @@ def run_cover_letters(min_score: int = 7, limit: int = 20,
             pdf_path = None
             try:
                 from applypilot.scoring.pdf import convert_to_pdf
-                pdf_path = str(convert_to_pdf(cl_path))
+                pdf_path = str(convert_to_pdf(cl_path, kind="cover_letter"))
             except Exception:
                 log.debug("PDF generation failed for %s", cl_path, exc_info=True)
 

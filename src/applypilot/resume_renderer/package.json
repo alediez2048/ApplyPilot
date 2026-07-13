@@ -1,0 +1,14 @@
+{
+  "name": "applypilot-resume-renderer",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Headless React-PDF renderer for ApplyPilot tailored resumes and cover letters.",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "react": "^18.2.0",
+    "@react-pdf/renderer": "3.4.5"
+  }
+}

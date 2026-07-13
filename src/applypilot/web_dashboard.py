@@ -334,7 +334,7 @@ def run_dashboard_prepare(limit: int = 0, validation_mode: str = "lenient") -> d
                 cl_path.write_text(letter, encoding="utf-8")
                 try:
                     from applypilot.scoring.pdf import convert_to_pdf
-                    convert_to_pdf(cl_path)
+                    convert_to_pdf(cl_path, kind="cover_letter")
                 except Exception as exc:
                     print(f"  PDF warning: {exc}", flush=True)
                 conn.execute(

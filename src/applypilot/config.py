@@ -29,6 +29,29 @@ APPLY_WORKER_DIR = APP_DIR / "apply-workers"
 PACKAGE_DIR = Path(__file__).parent
 CONFIG_DIR = PACKAGE_DIR / "config"
 
+# React-PDF resume renderer: source ships in the package (no node_modules); a
+# writable runtime copy (with installed deps) is materialized in APP_DIR on first use.
+RESUME_RENDERER_SRC = PACKAGE_DIR / "resume_renderer"
+RESUME_RENDERER_RUNTIME = APP_DIR / "resume_renderer_runtime"
+
+
+def get_node_path() -> str | None:
+    """Return the `node` executable path, or None if Node.js is unavailable.
+
+    Honors the NODE_PATH env var (pointing at the binary) before falling back to
+    a PATH search. Returns None when Node isn't installed, in which case callers
+    fall back to the Chromium HTML renderer.
+    """
+    env_node = os.environ.get("NODE_BIN")
+    if env_node and Path(env_node).exists():
+        return env_node
+    return shutil.which("node")
+
+
+def get_npm_path() -> str | None:
+    """Return the `npm` executable path, or None if unavailable."""
+    return shutil.which("npm")
+
 
 def get_chrome_path() -> str:
     """Auto-detect Chrome/Chromium executable path, cross-platform.

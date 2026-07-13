@@ -5,6 +5,25 @@ All notable changes to ApplyPilot will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **React-PDF resume renderer** - tailored resumes now render via a bundled headless
+  Node/React-PDF renderer (`resume_renderer/`) for polished, deterministic, one-page PDFs
+  with automatic content-density fitting (sparse resumes expand, dense ones compact to a
+  single page). Node.js is a soft dependency: if it (or the renderer) is unavailable, the
+  pipeline falls back to the previous Chromium HTML renderer. `applypilot doctor` reports
+  renderer readiness.
+- **React-PDF cover letters** - cover letters render through the same engine as a classic
+  Times business letter (letterhead, date, justified body, sign-off), with a Chromium
+  prose-letter fallback.
+
+### Changed
+- **Resume PDF path no longer round-trips through text parsing** - the tailor stage now
+  persists the LLM's structured JSON (`*_DATA.json`), which the renderer consumes directly
+  instead of re-parsing the flattened `.txt`. Legacy `.txt`-only files still render (adapted
+  on the fly).
+
 ## [0.2.0] - 2026-02-17
 
 ### Added

@@ -4,6 +4,8 @@ Parses the structured text resume format, renders via an HTML/CSS template,
 and exports to PDF using headless Chromium via Playwright.
 """
 
+import html as _html
+import json
 import logging
 from pathlib import Path
 
@@ -355,38 +357,218 @@ def render_pdf(html: str, output_path: str) -> None:
         browser.close()
 
 
+# ── Cover letter rendering (prose, not resume sections) ──────────────────
+
+def build_cover_letter_html(text: str, profile: dict | None = None) -> str:
+    """Render a cover letter as a clean prose letter (optional letterhead).
+
+    Cover letters are free prose ("Dear Hiring Manager," … name), so they must
+    NOT go through the resume section parser. This produces a simple, professional
+    single-column letter.
+    """
+    personal = (profile or {}).get("personal", {}) if profile else {}
+    name = personal.get("full_name") or personal.get("preferred_name") or ""
+    bits = []
+    if personal.get("email"):
+        bits.append(personal["email"])
+    if personal.get("phone"):
+        bits.append(personal["phone"])
+    loc = ", ".join(p for p in (personal.get("city"), personal.get("province_state")) if p)
+    if loc:
+        bits.append(loc)
+    contact_line = " &nbsp;|&nbsp; ".join(_html.escape(b) for b in bits)
+
+    letterhead = ""
+    if name:
+        letterhead = (
+            f'<div class="letterhead"><div class="lh-name">{_html.escape(name)}</div>'
+            f'<div class="lh-contact">{contact_line}</div></div>'
+        )
+
+    paragraphs = [p.strip() for p in text.strip().split("\n\n") if p.strip()]
+    body = "".join(
+        f"<p>{_html.escape(p).replace(chr(10), '<br>')}</p>" for p in paragraphs
+    )
+
+    return f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><style>
+@page {{ size: letter; margin: 0.9in 1in; }}
+* {{ margin: 0; padding: 0; box-sizing: border-box; }}
+body {{ font-family: 'Calibri', 'Segoe UI', Arial, sans-serif; font-size: 11pt;
+        line-height: 1.5; color: #1a1a1a; }}
+.letterhead {{ border-bottom: 1.5px solid #1a3a5c; padding-bottom: 8px; margin-bottom: 18px; }}
+.lh-name {{ font-size: 18pt; font-weight: 700; color: #1a3a5c; }}
+.lh-contact {{ font-size: 9.5pt; color: #555; margin-top: 2px; }}
+p {{ margin-bottom: 11px; text-align: left; }}
+p:last-child {{ margin-top: 4px; }}
+</style></head><body>
+{letterhead}
+{body}
+</body></html>"""
+
+
+# ── React-PDF resume block builders ──────────────────────────────────────
+
+def _split_contact(contact: str) -> tuple[str, str, list[str]]:
+    """Split a "a | b | c" contact line into (email, phone, links)."""
+    email, phone = "", ""
+    links: list[str] = []
+    for part in (p.strip() for p in (contact or "").split("|") if p.strip()):
+        if "@" in part and " " not in part:
+            email = part
+        elif not phone and any(ch.isdigit() for ch in part) and part.count(" ") <= 2 and "/" not in part:
+            phone = part
+        else:
+            links.append(part)
+    return email, phone, links
+
+
+def _resume_block_from_text(text: str) -> dict:
+    """Build a RenderRequest ``resume`` block from structured resume text.
+
+    Used for legacy files that lack a ``_DATA.json`` sidecar, so the nicer Node
+    renderer can still be used instead of the HTML fallback.
+    """
+    parsed = parse_resume(text)
+    sections = parsed["sections"]
+    email, phone, links = _split_contact(parsed["contact"])
+
+    def entries(name: str) -> list[dict]:
+        out = []
+        for e in parse_entries(sections.get(name, "")):
+            out.append({"header": e["title"], "subtitle": e.get("subtitle", ""),
+                        "location": "", "date": "", "bullets": e.get("bullets", [])})
+        return out
+
+    skills = [{"category": cat, "value": val}
+              for cat, val in parse_skills(sections.get("TECHNICAL SKILLS", ""))]
+
+    education = []
+    if sections.get("EDUCATION"):
+        edu_lines = [ln.strip() for ln in sections["EDUCATION"].splitlines() if ln.strip()]
+        if edu_lines:
+            education = [{"school": edu_lines[0], "degree": "",
+                          "detail": " · ".join(edu_lines[1:]), "date": ""}]
+
+    return {
+        "contactInfo": {
+            "name": parsed["name"], "title": parsed["title"],
+            "email": email, "phone": phone,
+            "location": parsed["location"], "links": links,
+        },
+        "summary": sections.get("SUMMARY") or None,
+        "skills": skills,
+        "experience": entries("EXPERIENCE"),
+        "projects": entries("PROJECTS"),
+        "education": education,
+    }
+
+
+def _resume_block_for(text_path: Path, text: str) -> dict | None:
+    """Prefer the structured LLM ``_DATA.json`` sidecar; else parse the text."""
+    data_path = text_path.parent / f"{text_path.stem}_DATA.json"
+    if data_path.exists():
+        try:
+            from applypilot.config import load_profile
+            from applypilot.scoring import resume_render
+            data = json.loads(data_path.read_text(encoding="utf-8"))
+            try:
+                profile = load_profile()
+            except Exception:  # noqa: BLE001 - header falls back to whatever's in data
+                profile = {}
+            return resume_render.resume_from_llm_data(data, profile)
+        except Exception:  # noqa: BLE001
+            log.debug("Failed to build resume block from %s", data_path, exc_info=True)
+    try:
+        return _resume_block_from_text(text)
+    except Exception:  # noqa: BLE001
+        log.debug("Failed to build resume block from text for %s", text_path, exc_info=True)
+        return None
+
+
 # ── Public API ───────────────────────────────────────────────────────────
 
+def _load_profile_safe() -> dict:
+    try:
+        from applypilot.config import load_profile
+        return load_profile()
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 def convert_to_pdf(
-    text_path: Path, output_path: Path | None = None, html_only: bool = False
+    text_path: Path, output_path: Path | None = None, html_only: bool = False,
+    kind: str = "resume",
 ) -> Path:
     """Convert a text resume/cover letter to PDF.
+
+    Resumes prefer the bundled React-PDF (Node) renderer for polished, one-page
+    output, falling back to the Chromium HTML template when Node is unavailable.
+    Cover letters (``kind="cover_letter"``) render as prose via a dedicated letter
+    template — they must never go through the resume section parser.
 
     Args:
         text_path: Path to the .txt file to convert.
         output_path: Optional override for the output path. Defaults to same
             name with .pdf extension.
         html_only: If True, output HTML instead of PDF.
+        kind: "resume" (default) or "cover_letter".
 
     Returns:
         Path to the generated PDF (or HTML) file.
     """
     text_path = Path(text_path)
     text = text_path.read_text(encoding="utf-8")
-    resume = parse_resume(text)
-    html = build_html(resume)
+
+    # Cover letters: prose letter, never the resume section parser.
+    # Prefer React-PDF (Node); fall back to the Chromium prose template.
+    if kind == "cover_letter":
+        profile = _load_profile_safe()
+        if html_only:
+            out = Path(output_path or text_path.with_suffix(".html"))
+            out.write_text(build_cover_letter_html(text, profile), encoding="utf-8")
+            log.info("HTML generated: %s", out)
+            return out
+
+        out = Path(output_path or text_path.with_suffix(".pdf"))
+        try:
+            from datetime import datetime
+            from applypilot.scoring import resume_render
+            now = datetime.now()
+            date_str = f"{now:%B} {now.day}, {now.year}"
+            cover = resume_render.cover_letter_from_text(text, profile, date=date_str)
+            if resume_render.render_cover_with_node(cover, out):
+                log.info("Cover letter PDF generated (react-pdf): %s", out)
+                return out
+        except Exception:  # noqa: BLE001 - fall through to HTML
+            log.debug("React-PDF cover renderer errored; using HTML fallback", exc_info=True)
+
+        render_pdf(build_cover_letter_html(text, profile), str(out))
+        log.info("Cover letter PDF generated (html fallback): %s", out)
+        return out
 
     if html_only:
-        out = output_path or text_path.with_suffix(".html")
-        out = Path(out)
-        out.write_text(html, encoding="utf-8")
+        out = Path(output_path or text_path.with_suffix(".html"))
+        out.write_text(build_html(parse_resume(text)), encoding="utf-8")
         log.info("HTML generated: %s", out)
         return out
 
-    out = output_path or text_path.with_suffix(".pdf")
-    out = Path(out)
-    render_pdf(html, str(out))
-    log.info("PDF generated: %s", out)
+    out = Path(output_path or text_path.with_suffix(".pdf"))
+
+    # Preferred: React-PDF via Node.
+    resume_block = _resume_block_for(text_path, text)
+    if resume_block is not None:
+        try:
+            from applypilot.scoring import resume_render
+            if resume_render.render_with_node(resume_block, out):
+                log.info("PDF generated (react-pdf): %s", out)
+                return out
+        except Exception:  # noqa: BLE001 - fall through to HTML
+            log.debug("React-PDF renderer errored; using HTML fallback", exc_info=True)
+
+    # Fallback: Chromium HTML template.
+    render_pdf(build_html(parse_resume(text)), str(out))
+    log.info("PDF generated (html fallback): %s", out)
     return out
 
 

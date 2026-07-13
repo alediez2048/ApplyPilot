@@ -430,6 +430,20 @@ def doctor() -> None:
         results.append(("Node.js (npx)", fail_mark,
                         "Install Node.js 18+ from nodejs.org (needed for auto-apply)"))
 
+    # React-PDF resume renderer (optional; falls back to HTML/Chromium if absent)
+    try:
+        from applypilot.scoring.resume_render import node_renderer_available
+        if node_renderer_available():
+            results.append(("Resume renderer", ok_mark, "React-PDF (Node) — polished one-page PDFs"))
+        elif npx_bin:  # node present but renderer source missing
+            results.append(("Resume renderer", "[dim]optional[/dim]",
+                            "Falls back to HTML/Chromium renderer"))
+        else:
+            results.append(("Resume renderer", "[dim]optional[/dim]",
+                            "Install Node.js for polished React-PDF resumes (HTML fallback otherwise)"))
+    except Exception:
+        results.append(("Resume renderer", "[dim]optional[/dim]", "HTML/Chromium fallback"))
+
     # CapSolver (optional)
     capsolver = os.environ.get("CAPSOLVER_API_KEY")
     if capsolver:

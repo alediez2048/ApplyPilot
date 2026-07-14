@@ -162,6 +162,85 @@ class CommandRunner:
 _runner = CommandRunner()
 
 
+class NetworkRunner:
+    """Keyed in-process registry for 'Find contacts' runs (one task per job_url).
+
+    Networking is in-process Python (no subprocess), so it runs concurrently with
+    prepare/apply and with other jobs' finds — unlike the single CommandRunner.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._tasks: dict[str, dict] = {}  # job_url -> {running, note, error, finished_at}
+
+    def is_running(self, job_url: str) -> bool:
+        with self._lock:
+            t = self._tasks.get(job_url)
+            return bool(t and t.get("running"))
+
+    def statuses(self) -> dict:
+        with self._lock:
+            return {k: dict(v) for k, v in self._tasks.items()}
+
+    def start(self, job_url: str, per_job: int, use_linkedin: bool) -> tuple[bool, str]:
+        with self._lock:
+            if self._tasks.get(job_url, {}).get("running"):
+                return False, "already finding contacts for this job"
+            self._tasks[job_url] = {"running": True, "note": "searching…", "error": "",
+                                    "finished_at": None}
+        threading.Thread(
+            target=self._run, args=(job_url, per_job, use_linkedin), daemon=True
+        ).start()
+        return True, "started"
+
+    def _run(self, job_url: str, per_job: int, use_linkedin: bool) -> None:
+        note, error = "done", ""
+        try:
+            from applypilot.config import require_apollo_key
+            from applypilot.database import get_connection
+            from applypilot.networking import service
+            from applypilot.networking.store import init_contacts
+
+            # Apollo gate (raises SystemExit if unusable) — convert to a task error.
+            try:
+                require_apollo_key("networking")
+            except SystemExit:
+                raise RuntimeError("Apollo API key not configured (paid plan + master key)")
+
+            conn = get_connection()
+            init_contacts(conn)
+            row = conn.execute(
+                "SELECT url, title, company, site, application_url, full_description "
+                "FROM jobs WHERE url = ? OR application_url = ? LIMIT 1", (job_url, job_url)
+            ).fetchone()
+            if not row:
+                raise RuntimeError("job not found")
+            job = dict(zip(row.keys(), row))
+            res = service.find_contacts_for_job(job, per_job=per_job, use_linkedin=use_linkedin)
+            note = f"{res['found']} found, {res['revealed']} with email ({res['note']})"
+        except Exception as exc:  # noqa: BLE001
+            error = str(exc)
+            note = "error"
+        with self._lock:
+            self._tasks[job_url] = {"running": False, "note": note, "error": error,
+                                    "finished_at": time.time()}
+
+
+_network = NetworkRunner()
+
+
+def _origin_ok(handler: BaseHTTPRequestHandler) -> bool:
+    """Reject cross-origin state-changing POSTs (DNS-rebinding guard on localhost)."""
+    origin = handler.headers.get("Origin")
+    if origin:
+        host = urlparse(origin).hostname
+        if host not in ("127.0.0.1", "localhost", "::1"):
+            return False
+    # Host header must also be a loopback address:port
+    hosthdr = (handler.headers.get("Host") or "").split(":")[0]
+    return hosthdr in ("127.0.0.1", "localhost", "::1", "")
+
+
 def _rows_to_dicts(rows: list) -> list[dict]:
     if rows and not isinstance(rows[0], dict):
         return [dict(zip(row.keys(), row)) for row in rows]
@@ -492,9 +571,29 @@ def _serve_material(handler: BaseHTTPRequestHandler, raw_path: str) -> None:
     handler.wfile.write(body)
 
 
+def _networking_available() -> bool:
+    return bool(os.environ.get("APOLLO_API_KEY"))
+
+
+def _contact_payload(c: dict) -> dict:
+    return {
+        "full_name": c.get("full_name") or "",
+        "title": c.get("title") or "",
+        "email": c.get("email") or "",
+        "email_status": c.get("email_status") or "none",
+        "linkedin_url": c.get("linkedin_url") or "",
+        "match_reason": c.get("match_reason") or "",
+        "outreach_status": c.get("outreach_status") or "none",
+    }
+
+
 def _status_payload() -> dict:
     init_db()
     conn = get_connection()
+    from applypilot.networking.store import init_contacts, get_contacts_for_job
+    from applypilot.networking import derive as _derive
+    init_contacts(conn)
+    _net_tasks = _network.statuses()
 
     stats = conn.execute(f"""
         SELECT
@@ -564,10 +663,14 @@ def _status_payload() -> dict:
             *_material_entries("Resume", row["tailored_resume_path"]),
             *_material_entries("Cover Letter", row["cover_letter_path"]),
         ]
+        job_row = dict(zip(row.keys(), row))
+        contacts = [_contact_payload(c) for c in get_contacts_for_job(row["url"], conn)]
+        net_task = _net_tasks.get(row["url"], {})
         jobs.append({
             "url": row["url"],
             "title": row["title"] or "Untitled",
             "company": row["site"] or "",
+            "contact_company": _derive.derive_company(job_row) or row["site"] or "",
             "salary": row["salary"] or "",
             "location": row["location"] or "",
             "description": desc[:900],
@@ -580,6 +683,10 @@ def _status_payload() -> dict:
             "applied_at": row["applied_at"] or "",
             "last_attempted_at": row["last_attempted_at"] or "",
             "materials": materials,
+            "contacts": contacts,
+            "network_running": bool(net_task.get("running")),
+            "network_note": net_task.get("note") or "",
+            "network_error": net_task.get("error") or "",
         })
 
     worker_log = _tail_file(config.LOG_DIR / "worker-0.log")
@@ -599,6 +706,7 @@ def _status_payload() -> dict:
         "worker_log": worker_log,
         "claude_log": claude_log,
         "app_dir": str(config.APP_DIR),
+        "networking_available": _networking_available(),
     }
 
 
@@ -704,9 +812,9 @@ def _import_urls(text: str) -> dict:
         title = f"{company} uploaded job"
         try:
             conn.execute(
-                "INSERT INTO jobs (url, title, site, strategy, discovered_at, application_url) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (url, title, company, "dashboard_upload", now, url),
+                "INSERT INTO jobs (url, title, company, site, strategy, discovered_at, application_url) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (url, title, company, company, "dashboard_upload", now, url),
             )
             inserted += 1
         except Exception:
@@ -727,6 +835,8 @@ def _import_urls(text: str) -> dict:
 def _delete_job(url: str) -> dict:
     init_db()
     conn = get_connection()
+    from applypilot.networking.store import init_contacts
+    init_contacts(conn)
     if not url:
         return {"ok": False, "message": "Missing job URL"}
 
@@ -738,6 +848,7 @@ def _delete_job(url: str) -> dict:
         return {"ok": False, "message": "Application not found"}
 
     conn.execute(f"DELETE FROM jobs WHERE url = ? AND {_URL_QUEUE_SQL}", (url,))
+    conn.execute("DELETE FROM contacts WHERE job_url = ?", (url,))  # no SQLite FK cascade
     conn.commit()
     return {
         "ok": True,
@@ -789,8 +900,26 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = urlparse(self.path).path
+        # Reject cross-origin state-changing requests (guards irreversible actions).
+        if not _origin_ok(self):
+            _json_response(self, {"error": "cross-origin request rejected"}, HTTPStatus.FORBIDDEN)
+            return
         try:
             data = _read_json(self)
+            if path == "/api/network":
+                url = data.get("url", "")
+                per_job = int(data.get("per_job") or 5)
+                use_linkedin = str(data.get("use_linkedin", "")).lower() in {"1", "true", "yes", "on"}
+                if not url:
+                    _json_response(self, {"ok": False, "message": "url required"}, 400)
+                    return
+                if not _networking_available():
+                    _json_response(self, {"ok": False,
+                                          "message": "Set APOLLO_API_KEY (paid plan + master key) to find contacts"}, 409)
+                    return
+                ok, msg = _network.start(url, per_job, use_linkedin)
+                _json_response(self, {"ok": ok, "message": msg}, 200 if ok else 409)
+                return
             if path == "/api/import":
                 _json_response(self, _import_urls(data.get("urls", "")))
                 return
@@ -1008,6 +1137,20 @@ _INDEX_HTML = r"""<!doctype html>
   }
   tr:hover td { background:rgba(59,167,255,.07); }
   td.desc { color:#44576a; max-width:370px; }
+  td.people button { white-space:nowrap; }
+  td.people .neterr { color:#9f2e29; font-size:11px; margin-top:3px; max-width:150px; }
+  tr.contacts-row td { background:#f7fafc; }
+  .contacts-wrap { padding:6px 10px 8px; }
+  .contacts-wrap > strong { color:#1a3a5c; font-size:12px; letter-spacing:.4px; text-transform:uppercase; }
+  .contact { margin-top:7px; padding-left:4px; border-left:2px solid #d7e2ec; padding-bottom:2px; }
+  .cname { font-weight:600; color:#22303c; }
+  .cname .ctitle { font-weight:400; color:#55707f; }
+  .cmeta { font-size:12px; color:#44576a; margin-top:1px; }
+  .chip { display:inline-block; margin-left:6px; padding:0 7px; border-radius:9px; background:#e6eef6; color:#2b5478; font-size:10px; }
+  .ebadge { display:inline-block; padding:0 6px; border-radius:8px; font-size:10px; }
+  .ebadge.ok { background:#e6f7ef; color:#137a4b; }
+  .ebadge.warn { background:#fff5e6; color:#9a6b00; }
+  .ebadge.none { background:#eef0f2; color:#68727c; }
   .badge {
     display:inline-block;
     padding:3px 8px;
@@ -1108,7 +1251,7 @@ _INDEX_HTML = r"""<!doctype html>
     <h2>Applications</h2>
     <div class="table-wrap">
       <table>
-        <thead><tr><th>Status</th><th>Company</th><th>Title</th><th>Salary</th><th>Location</th><th>Description</th><th>Materials</th><th>Error</th><th>Links</th><th>Actions</th></tr></thead>
+        <thead><tr><th>Status</th><th>Company</th><th>Title</th><th>Salary</th><th>Location</th><th>Description</th><th>Materials</th><th>People</th><th>Error</th><th>Links</th><th>Actions</th></tr></thead>
         <tbody id="jobs"></tbody>
       </table>
     </div>
@@ -1151,6 +1294,42 @@ async function deleteJob(url, label) {
   await refresh();
 }
 function badge(status) { return `<span class="badge ${esc(status)}">${esc(status || 'new')}</span>`; }
+let NET_AVAIL = false;
+async function findContacts(url) {
+  const r = await post('/api/network', {url, per_job: 5});
+  if (!r.ok) alert(r.message || 'Could not start');
+  refresh();
+}
+function emailBadge(s) {
+  if (s === 'verified') return '<span class="ebadge ok">verified</span>';
+  if (s === 'unverified') return '<span class="ebadge warn">unverified</span>';
+  return '<span class="ebadge none">no email</span>';
+}
+function peopleCell(j) {
+  const n = (j.contacts || []).length;
+  const running = j.network_running;
+  const label = running ? 'finding…' : (n ? `${n} contact${n>1?'s':''}` : 'Find contacts');
+  const dis = (running || !NET_AVAIL) ? 'disabled' : '';
+  const title = NET_AVAIL ? '' : 'Set APOLLO_API_KEY to enable';
+  let out = `<button ${dis} title="${title}" onclick="findContacts(decodeURIComponent('${encodeURIComponent(j.url)}'))">${label}</button>`;
+  if (j.network_error) out += `<div class="neterr">${esc(j.network_error)}</div>`;
+  return out;
+}
+function contactsRow(j, ncols) {
+  if (!(j.contacts && j.contacts.length)) return '';
+  const rows = j.contacts.map(c => `
+    <div class="contact">
+      <div class="cname">${esc(c.full_name)} <span class="ctitle">— ${esc(c.title)}</span>
+        ${c.match_reason ? `<span class="chip">${esc(c.match_reason)}</span>` : ''}</div>
+      <div class="cmeta">
+        ${c.email ? `✉ <a href="mailto:${esc(c.email)}">${esc(c.email)}</a>` : '✉ —'} ${emailBadge(c.email_status)}
+        ${c.linkedin_url ? ` · 🔗 <a href="${esc(c.linkedin_url)}" target="_blank">LinkedIn</a>` : ''}
+        · ☎ —
+      </div>
+    </div>`).join('');
+  return `<tr class="contacts-row"><td colspan="${ncols}"><div class="contacts-wrap">
+    <strong>People at ${esc(j.contact_company)}</strong>${rows}</div></td></tr>`;
+}
 function materialLinks(materials) {
   if (!materials || !materials.length) return '';
   return materials.map(m => `<a href="${esc(m.url)}" target="_blank">${esc(m.label)}</a>`).join(' · ');
@@ -1179,6 +1358,7 @@ async function refresh() {
   document.getElementById('command').textContent = c.running ? `Running: ${c.name}` : (c.name ? `Last: ${c.name}, exit ${c.returncode}` : 'Idle');
   document.getElementById('cmdLog').textContent = (c.log || []).join('\n');
   document.getElementById('applyLog').textContent = [...(data.worker_log || []), '', ...(data.claude_log || [])].join('\n');
+  NET_AVAIL = !!data.networking_available;
   document.getElementById('jobs').innerHTML = (data.jobs || []).map(j => `
     <tr>
       <td>${badge(j.status)}</td>
@@ -1188,10 +1368,11 @@ async function refresh() {
       <td>${esc(j.location)}</td>
       <td class="desc">${esc(j.description)}</td>
       <td>${materialLinks(j.materials)}</td>
+      <td class="people">${peopleCell(j)}</td>
       <td>${esc(j.apply_error)}</td>
       <td><a href="${esc(j.url)}" target="_blank">job</a>${j.application_url ? ` · <a href="${esc(j.application_url)}" target="_blank">apply</a>` : ''}</td>
       <td><button class="danger" onclick="deleteJob(decodeURIComponent('${encodeURIComponent(j.url)}'), decodeURIComponent('${encodeURIComponent(`${j.company} - ${j.title}`)}'))">Delete</button></td>
-    </tr>`).join('');
+    </tr>${contactsRow(j, 11)}`).join('');
 }
 setInterval(refresh, 2500);
 refresh();

@@ -13,7 +13,7 @@ draft and send outreach email. Source of truth: [`../networking-outreach-prd.md`
 | Ticket | Phase | Title | Depends on | Size | Status |
 |--------|-------|-------|-----------|------|--------|
 | [NET-1](NET-1-apollo-core.md) | 1 | Apollo core: contact discovery + `applypilot network` CLI | — | L | ✅ Done |
-| [NET-2](NET-2-dashboard-contacts.md) | 2 | Dashboard contacts panel (name/title/email/phone/LinkedIn) | NET-1 | M | Todo |
+| [NET-2](NET-2-dashboard-contacts.md) | 2 | Dashboard contacts panel (name/title/email/phone/LinkedIn) | NET-1 | M | ✅ Done |
 | [NET-3](NET-3-outreach-drafting.md) | 3 | AI outreach drafting (subject + body, editable) | NET-1, NET-2 | M | Todo |
 | [NET-4](NET-4-gmail-send.md) | 4 | Gmail send automation + safeguards | NET-2, NET-3 | M | Todo |
 | [NET-5](NET-5-linkedin-fallback.md) | 5 | LinkedIn browser-agent fallback | NET-1 | M | Todo |

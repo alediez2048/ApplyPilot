@@ -257,6 +257,72 @@ def apply(
 
 
 @app.command()
+def network(
+    url: Optional[str] = typer.Option(None, "--url", help="Find contacts for a specific job URL."),
+    per_job: int = typer.Option(5, "--per-job", help="How many contacts to find per job."),
+    limit: int = typer.Option(10, "--limit", "-l", help="Max jobs to process (no --url)."),
+    no_linkedin: bool = typer.Option(False, "--no-linkedin", help="Apollo only (skip LinkedIn fallback)."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Search + rank only; no Apollo reveal (no credits)."),
+) -> None:
+    """Find people at target companies (Apollo) and store their contact info."""
+    _bootstrap()
+
+    from applypilot.config import require_apollo_key
+    require_apollo_key("networking")
+
+    from applypilot.database import get_connection
+    from applypilot.networking import service
+    from applypilot.networking.store import init_contacts
+
+    conn = get_connection()
+    init_contacts(conn)
+
+    if url:
+        row = conn.execute(
+            "SELECT url, title, company, site, application_url, full_description "
+            "FROM jobs WHERE url = ? OR application_url = ? LIMIT 1", (url, url)
+        ).fetchone()
+        if not row:
+            console.print(f"[red]No job found for URL:[/red] {url}")
+            raise typer.Exit(code=1)
+        jobs = [dict(zip(row.keys(), row))]
+    else:
+        rows = conn.execute(
+            "SELECT j.url, j.title, j.company, j.site, j.application_url, j.full_description "
+            "FROM jobs j "
+            "WHERE j.applied_at IS NOT NULL "
+            "AND NOT EXISTS (SELECT 1 FROM contacts c WHERE c.job_url = j.url) "
+            "ORDER BY j.applied_at DESC LIMIT ?", (limit,)
+        ).fetchall()
+        jobs = [dict(zip(r.keys(), r)) for r in rows]
+
+    if not jobs:
+        console.print("[yellow]No jobs to process[/yellow] (applied jobs already have contacts, or none applied).")
+        return
+
+    console.print(f"\n[bold blue]Networking[/bold blue] — {len(jobs)} job(s), up to {per_job} contacts each"
+                  f"{' [dry-run]' if dry_run else ''}\n")
+
+    total_found = total_revealed = 0
+    for job in jobs:
+        res = service.find_contacts_for_job(
+            job, per_job=per_job, use_linkedin=not no_linkedin, dry_run=dry_run
+        )
+        total_found += res["found"]
+        total_revealed += res["revealed"]
+        company = res.get("company") or job.get("site") or "?"
+        console.print(f"  [cyan]{company}[/cyan] — {res['found']} found, "
+                      f"{res['revealed']} with email  [dim]({res['note']})[/dim]")
+        for c in res["contacts"]:
+            badge = {"verified": "[green]✓[/green]", "unverified": "[yellow]?[/yellow]"}.get(
+                c.get("email_status"), "[dim]—[/dim]")
+            console.print(f"      {c.get('full_name') or '?'} — {c.get('title') or '?'} "
+                          f"[dim]{c.get('match_reason') or ''}[/dim]  {badge} {c.get('email') or ''}")
+
+    console.print(f"\n[bold]Total:[/bold] {total_found} contacts, {total_revealed} with email\n")
+
+
+@app.command()
 def status() -> None:
     """Show pipeline statistics from the database."""
     _bootstrap()
@@ -439,6 +505,18 @@ def doctor() -> None:
                             "Install Node.js for polished React-PDF resumes (HTML fallback otherwise)"))
     except Exception:
         results.append(("Resume renderer", "[dim]optional[/dim]", "HTML/Chromium fallback"))
+
+    # Apollo (networking, optional) — live probe, not mere env presence
+    if os.environ.get("APOLLO_API_KEY"):
+        try:
+            from applypilot.networking import apollo
+            ok, msg = apollo.probe()
+            results.append(("Apollo API key", ok_mark if ok else fail_mark, msg))
+        except Exception:
+            results.append(("Apollo API key", warn_mark, "probe failed"))
+    else:
+        results.append(("Apollo API key", "[dim]optional[/dim]",
+                        "Set APOLLO_API_KEY for networking (paid plan + master key)"))
 
     # CapSolver (optional)
     capsolver = os.environ.get("CAPSOLVER_API_KEY")

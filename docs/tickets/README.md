@@ -16,7 +16,7 @@ draft and send outreach email. Source of truth: [`../networking-outreach-prd.md`
 | [NET-2](NET-2-dashboard-contacts.md) | 2 | Dashboard contacts panel (name/title/email/phone/LinkedIn) | NET-1 | M | ✅ Done |
 | [NET-3](NET-3-outreach-drafting.md) | 3 | AI outreach drafting (subject + body, editable) | NET-1, NET-2 | M | ✅ Done |
 | [NET-4](NET-4-gmail-send.md) | 4 | Gmail send automation + safeguards | NET-2, NET-3 | M | ✅ Done (SMTP; OAuth → NET-6) |
-| [NET-5](NET-5-linkedin-fallback.md) | 5 | LinkedIn browser-agent fallback | NET-1 | M | Todo |
+| [NET-5](NET-5-linkedin-fallback.md) | 5 | LinkedIn browser-agent fallback (hardened) | NET-1 | M | ✅ Done (live run unverified) |
 | [NET-6](NET-6-future.md) | 6 | Future: OAuth send, follow-ups, reply tracking, auto-send | NET-4 | L | Backlog |
 
 **Build order:** NET-1 → NET-2 → NET-3 → NET-4 → NET-5. NET-5 (LinkedIn) can slot in

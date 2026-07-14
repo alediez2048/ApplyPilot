@@ -68,6 +68,34 @@ def draft_for_contact(contact_id: str) -> dict | None:
     return draft
 
 
+def _augment_with_linkedin(selected: list[dict], company: str | None,
+                           role: str | None, per_job: int, result: dict) -> list[dict]:
+    """Fill the gap with LinkedIn-found people (read-only), Apollo-enriched by URL."""
+    from applypilot.networking import linkedin_agent
+    need = per_job - len(selected)
+    people = linkedin_agent.find_people(company or "", role, n=need)
+    if not people:
+        return selected
+    have_urls = {(c.get("linkedin_url") or "").lower() for c in selected}
+    added = 0
+    for p in people:
+        url = (p.get("linkedin_url") or "").lower()
+        if not url or url in have_urls:
+            continue
+        p = dict(p)
+        p["match_reason"] = "same team"
+        p["source"] = "linkedin"
+        p.setdefault("company", company)
+        selected.append(p)
+        have_urls.add(url)
+        added += 1
+        if len(selected) >= per_job:
+            break
+    if added:
+        result["note"] = f"{added} via LinkedIn fallback"
+    return selected
+
+
 def find_contacts_for_job(
     job: dict,
     per_job: int = 5,
@@ -114,6 +142,12 @@ def find_contacts_for_job(
         return result
 
     selected = rank.select(candidates, role, n=per_job)
+
+    # LinkedIn fallback (opt-in): when Apollo under-covers this company, read the
+    # company People page and Apollo-enrich the found profiles by linkedin_url.
+    if use_linkedin and len(selected) < per_job:
+        selected = _augment_with_linkedin(selected, company, role, per_job, result)
+
     result["found"] = len(selected)
 
     # Reveal contact info only for the selected few (credit discipline).
@@ -141,13 +175,13 @@ def find_contacts_for_job(
             "full_name": c.get("full_name"),
             "title": c.get("title"),
             "company": company or c.get("company"),
-            "linkedin_url": rev.get("linkedin_url"),
+            "linkedin_url": rev.get("linkedin_url") or c.get("linkedin_url"),
             "email": rev.get("email"),
             "email_status": rev.get("email_status", "none"),
             "location": c.get("location"),
             "seniority": c.get("seniority"),
             "match_reason": c.get("match_reason"),
-            "source": "apollo",
+            "source": c.get("source", "apollo"),
             "apollo_id": c.get("apollo_id"),
         }
         if not dry_run:

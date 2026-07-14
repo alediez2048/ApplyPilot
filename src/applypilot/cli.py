@@ -262,11 +262,27 @@ def network(
     per_job: int = typer.Option(5, "--per-job", help="How many contacts to find per job."),
     limit: int = typer.Option(10, "--limit", "-l", help="Max jobs to process (no --url)."),
     no_linkedin: bool = typer.Option(False, "--no-linkedin", help="Apollo only (skip LinkedIn fallback)."),
+    linkedin_login: bool = typer.Option(False, "--linkedin-login", help="One-time: open Chrome to log into LinkedIn (for the fallback)."),
     draft: bool = typer.Option(True, "--draft/--no-draft", help="Draft outreach emails for found contacts."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Search + rank only; no Apollo reveal (no credits)."),
 ) -> None:
     """Find people at target companies (Apollo), store contacts, draft outreach."""
     _bootstrap()
+
+    # One-time LinkedIn login for the opt-in fallback (needs consent first).
+    if linkedin_login:
+        from applypilot.networking import linkedin_agent
+        if not linkedin_agent.has_consent():
+            console.print("\n[yellow]LinkedIn fallback — please read:[/yellow]\n")
+            console.print(linkedin_agent.CONSENT_TEXT)
+            if not typer.confirm("Acknowledge the risk and enable the LinkedIn fallback?", default=False):
+                console.print("[dim]Cancelled — LinkedIn fallback not enabled.[/dim]")
+                raise typer.Exit()
+            linkedin_agent.record_consent()
+        console.print("[cyan]Opening Chrome — log into LinkedIn, then close the window.[/cyan]")
+        linkedin_agent.open_login_browser()
+        console.print("[green]Done. Set NETWORKING_LINKEDIN=1 to enable the fallback.[/green]")
+        return
 
     from applypilot.config import require_apollo_key
     require_apollo_key("networking")
@@ -518,6 +534,21 @@ def doctor() -> None:
     else:
         results.append(("Apollo API key", "[dim]optional[/dim]",
                         "Set APOLLO_API_KEY for networking (paid plan + master key)"))
+
+    # LinkedIn fallback (networking, optional, opt-in)
+    try:
+        from applypilot.networking import linkedin_agent
+        if not linkedin_agent.enabled():
+            results.append(("LinkedIn fallback", "[dim]optional[/dim]",
+                            "off (set NETWORKING_LINKEDIN=1 + `network --linkedin-login`)"))
+        elif not linkedin_agent.has_consent() or not linkedin_agent.login_state_ok():
+            results.append(("LinkedIn fallback", warn_mark,
+                            "enabled but needs `applypilot network --linkedin-login`"))
+        else:
+            used, cap = linkedin_agent.companies_today(), linkedin_agent._daily_limit()
+            results.append(("LinkedIn fallback", ok_mark, f"ready ({used}/{cap} companies today)"))
+    except Exception:
+        results.append(("LinkedIn fallback", "[dim]optional[/dim]", "off"))
 
     # Gmail send (outreach, optional) — live AUTH-only probe
     if os.environ.get("GMAIL_ADDRESS") and os.environ.get("GMAIL_APP_PASSWORD"):

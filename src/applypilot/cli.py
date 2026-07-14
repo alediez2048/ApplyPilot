@@ -519,6 +519,18 @@ def doctor() -> None:
         results.append(("Apollo API key", "[dim]optional[/dim]",
                         "Set APOLLO_API_KEY for networking (paid plan + master key)"))
 
+    # Gmail send (outreach, optional) — live AUTH-only probe
+    if os.environ.get("GMAIL_ADDRESS") and os.environ.get("GMAIL_APP_PASSWORD"):
+        try:
+            from applypilot.networking.gmail_send import auth_probe
+            ok, msg = auth_probe()
+            results.append(("Gmail outreach send", ok_mark if ok else fail_mark, msg))
+        except Exception:
+            results.append(("Gmail outreach send", warn_mark, "probe failed"))
+    else:
+        results.append(("Gmail outreach send", "[dim]optional[/dim]",
+                        "Set GMAIL_ADDRESS + GMAIL_APP_PASSWORD to send outreach"))
+
     # CapSolver (optional)
     capsolver = os.environ.get("CAPSOLVER_API_KEY")
     if capsolver:

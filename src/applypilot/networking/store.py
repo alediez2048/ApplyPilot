@@ -8,7 +8,7 @@ service) so a fresh DB never raises "no such table: contacts".
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from hashlib import sha1
 
 from applypilot.database import get_connection
@@ -119,6 +119,95 @@ def upsert_contact(contact: dict, conn: sqlite3.Connection | None = None) -> str
         )
     conn.commit()
     return cid
+
+
+def get_contact(contact_id: str, conn: sqlite3.Connection | None = None) -> dict | None:
+    if conn is None:
+        conn = get_connection()
+    init_contacts(conn)
+    row = conn.execute("SELECT * FROM contacts WHERE id = ?", (contact_id,)).fetchone()
+    return dict(zip(row.keys(), row)) if row else None
+
+
+def _norm_email(email: str | None) -> str:
+    return (email or "").strip().lower()
+
+
+def sent_today(conn: sqlite3.Connection | None = None) -> int:
+    """Count emails submitted in the last 24h (for the daily cap)."""
+    if conn is None:
+        conn = get_connection()
+    init_contacts(conn)
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    row = conn.execute(
+        "SELECT COUNT(*) FROM contacts WHERE outreach_status = 'submitted' AND submitted_at >= ?",
+        (cutoff,),
+    ).fetchone()
+    return row[0] if row else 0
+
+
+def already_contacted_email(
+    email: str, cooldown_days: int = 30, exclude_id: str | None = None,
+    conn: sqlite3.Connection | None = None,
+) -> str | None:
+    """Cross-job dedupe: return the submitted_at if this email was emailed recently."""
+    norm = _norm_email(email)
+    if not norm:
+        return None
+    if conn is None:
+        conn = get_connection()
+    init_contacts(conn)
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=cooldown_days)).isoformat()
+    row = conn.execute(
+        "SELECT submitted_at FROM contacts WHERE lower(trim(email)) = ? "
+        "AND outreach_status = 'submitted' AND submitted_at >= ? AND id != ? "
+        "ORDER BY submitted_at DESC LIMIT 1",
+        (norm, cutoff, exclude_id or ""),
+    ).fetchone()
+    return row[0] if row else None
+
+
+def claim_for_send(contact_id: str, conn: sqlite3.Connection | None = None) -> bool:
+    """Atomically claim a contact for sending. Returns True only for the winning caller.
+
+    Mirrors apply/launcher.py::acquire_job — the UPDATE succeeds for exactly one racer
+    (submitted_at IS NULL guard), preventing double-send under the threading server.
+    """
+    if conn is None:
+        conn = get_connection()
+    init_contacts(conn)
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute("BEGIN IMMEDIATE")
+    cur = conn.execute(
+        "UPDATE contacts SET outreach_status = 'sending', submitted_at = ? "
+        "WHERE id = ? AND submitted_at IS NULL",
+        (now, contact_id),
+    )
+    conn.commit()
+    return cur.rowcount == 1
+
+
+def mark_sent(contact_id: str, message_id: str, conn: sqlite3.Connection | None = None) -> None:
+    if conn is None:
+        conn = get_connection()
+    conn.execute(
+        "UPDATE contacts SET outreach_status = 'submitted', sent_message_id = ?, "
+        "send_error = NULL, updated_at = ? WHERE id = ?",
+        (message_id, datetime.now(timezone.utc).isoformat(), contact_id),
+    )
+    conn.commit()
+
+
+def mark_send_failed(contact_id: str, error: str, conn: sqlite3.Connection | None = None) -> None:
+    """Roll a claimed send back to 'failed' and clear submitted_at so it can be retried."""
+    if conn is None:
+        conn = get_connection()
+    conn.execute(
+        "UPDATE contacts SET outreach_status = 'failed', submitted_at = NULL, "
+        "send_error = ?, updated_at = ? WHERE id = ?",
+        (error[:300], datetime.now(timezone.utc).isoformat(), contact_id),
+    )
+    conn.commit()
 
 
 def get_contacts_for_job(job_url: str, conn: sqlite3.Connection | None = None) -> list[dict]:

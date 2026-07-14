@@ -710,6 +710,7 @@ def _status_payload() -> dict:
         "claude_log": claude_log,
         "app_dir": str(config.APP_DIR),
         "networking_available": _networking_available(),
+        "gmail_available": bool(os.environ.get("GMAIL_ADDRESS") and os.environ.get("GMAIL_APP_PASSWORD")),
     }
 
 
@@ -957,6 +958,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if path == "/api/outreach":
                 _json_response(self, _save_or_regen_draft(data))
                 return
+            if path == "/api/outreach/send":
+                cid = data.get("contact_id", "")
+                confirm = str(data.get("confirm_unverified", "")).lower() in {"1", "true", "yes", "on"}
+                if not cid:
+                    _json_response(self, {"ok": False, "message": "contact_id required"}, 400)
+                    return
+                from applypilot.networking.gmail_send import send_outreach
+                res = send_outreach(cid, confirm_unverified=confirm)
+                _json_response(self, res, 200 if res["ok"] else 409)
+                return
             if path == "/api/import":
                 _json_response(self, _import_urls(data.get("urls", "")))
                 return
@@ -1193,6 +1204,8 @@ _INDEX_HTML = r"""<!doctype html>
   .draft .d-body { width:100%; font-size:12px; padding:5px 6px; border:1px solid #d7e2ec; border-radius:5px; font-family:inherit; resize:vertical; }
   .draft .dbtns { margin-top:3px; display:flex; gap:6px; }
   .draft .dbtns button { font-size:11px; padding:2px 9px; }
+  .draft .dbtns button.send { background:linear-gradient(180deg,#eef7ff,#dcefff); border-color:#a9cdf0; color:#1a5aa0; font-weight:600; }
+  .draft .sent-tag { font-size:11px; color:#137a4b; font-weight:600; align-self:center; }
   .badge {
     display:inline-block;
     padding:3px 8px;
@@ -1357,20 +1370,37 @@ function peopleCell(j) {
   if (j.network_error) out += `<div class="neterr">${esc(j.network_error)}</div>`;
   return out;
 }
+let GMAIL_AVAIL = false;
 function draftBlock(c) {
   if (!c.email) return '';  // nothing to draft/send without an address
   const has = c.outreach_message || c.outreach_subject;
   const subj = esc(c.outreach_subject);
   const body = esc(c.outreach_message);
+  const sent = c.outreach_status === 'submitted';
+  let sendBtn;
+  if (sent) sendBtn = `<span class="sent-tag">✓ submitted</span>`;
+  else if (!GMAIL_AVAIL) sendBtn = `<button disabled title="Set GMAIL_ADDRESS + GMAIL_APP_PASSWORD">Send email</button>`;
+  else sendBtn = `<button class="send" onclick="sendEmail('${esc(c.id)}', ${c.email_status==='verified'}, this)">Send email</button>`;
   return `<div class="draft" data-cid="${esc(c.id)}">
-      <input class="d-subj" value="${subj}" placeholder="Subject…" />
-      <textarea class="d-body" rows="4" placeholder="${has ? '' : 'No draft yet — click Regenerate'}">${body}</textarea>
+      <input class="d-subj" value="${subj}" placeholder="Subject…" ${sent?'disabled':''} />
+      <textarea class="d-body" rows="4" ${sent?'disabled':''} placeholder="${has ? '' : 'No draft yet — click Regenerate'}">${body}</textarea>
       <div class="dbtns">
-        <button onclick="saveDraft('${esc(c.id)}', this)">Save</button>
-        <button onclick="regenDraft('${esc(c.id)}', this)">Regenerate</button>
+        ${sent?'':`<button onclick="saveDraft('${esc(c.id)}', this)">Save</button>
+        <button onclick="regenDraft('${esc(c.id)}', this)">Regenerate</button>`}
         <button onclick="copyDraft(this)">Copy</button>
+        ${sendBtn}
       </div>
     </div>`;
+}
+async function sendEmail(cid, verified, btn) {
+  const first = verified
+    ? 'Send this outreach email now?'
+    : '⚠ This email address is UNVERIFIED — it may bounce. Send anyway?';
+  if (!confirm(first)) return;
+  btn.disabled = true; btn.textContent = 'Sending…';
+  const r = await post('/api/outreach/send', {contact_id: cid, confirm_unverified: !verified});
+  if (r.ok) { refresh(); }
+  else { btn.disabled = false; btn.textContent = 'Send email'; alert(r.message || 'Send failed'); }
 }
 function contactsRow(j, ncols) {
   if (!(j.contacts && j.contacts.length)) return '';
@@ -1434,6 +1464,7 @@ async function refresh() {
   document.getElementById('cmdLog').textContent = (c.log || []).join('\n');
   document.getElementById('applyLog').textContent = [...(data.worker_log || []), '', ...(data.claude_log || [])].join('\n');
   NET_AVAIL = !!data.networking_available;
+  GMAIL_AVAIL = !!data.gmail_available;
   document.getElementById('jobs').innerHTML = (data.jobs || []).map(j => `
     <tr>
       <td>${badge(j.status)}</td>

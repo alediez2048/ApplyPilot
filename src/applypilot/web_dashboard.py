@@ -577,12 +577,15 @@ def _networking_available() -> bool:
 
 def _contact_payload(c: dict) -> dict:
     return {
+        "id": c.get("id") or "",
         "full_name": c.get("full_name") or "",
         "title": c.get("title") or "",
         "email": c.get("email") or "",
         "email_status": c.get("email_status") or "none",
         "linkedin_url": c.get("linkedin_url") or "",
         "match_reason": c.get("match_reason") or "",
+        "outreach_subject": c.get("outreach_subject") or "",
+        "outreach_message": c.get("outreach_message") or "",
         "outreach_status": c.get("outreach_status") or "none",
     }
 
@@ -832,6 +835,37 @@ def _import_urls(text: str) -> dict:
     }
 
 
+def _save_or_regen_draft(data: dict) -> dict:
+    """Save an edited outreach draft, or regenerate it via the LLM."""
+    init_db()
+    conn = get_connection()
+    from applypilot.networking.store import init_contacts, upsert_contact
+    init_contacts(conn)
+
+    cid = data.get("contact_id", "")
+    if not cid:
+        return {"ok": False, "message": "contact_id required"}
+    row = conn.execute("SELECT id, job_url FROM contacts WHERE id = ?", (cid,)).fetchone()
+    if not row:
+        return {"ok": False, "message": "contact not found"}
+
+    if data.get("regenerate"):
+        from applypilot.networking import service
+        draft = service.draft_for_contact(cid)
+        if not draft:
+            return {"ok": False, "message": "regeneration failed (LLM/Apollo)"}
+        return {"ok": True, "subject": draft["subject"], "body": draft["body"]}
+
+    # Save an edit
+    upsert_contact({
+        "id": cid, "job_url": row["job_url"],
+        "outreach_subject": data.get("subject", ""),
+        "outreach_message": data.get("body", ""),
+        "outreach_status": "drafted",
+    })
+    return {"ok": True, "message": "saved"}
+
+
 def _delete_job(url: str) -> dict:
     init_db()
     conn = get_connection()
@@ -919,6 +953,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     return
                 ok, msg = _network.start(url, per_job, use_linkedin)
                 _json_response(self, {"ok": ok, "message": msg}, 200 if ok else 409)
+                return
+            if path == "/api/outreach":
+                _json_response(self, _save_or_regen_draft(data))
                 return
             if path == "/api/import":
                 _json_response(self, _import_urls(data.get("urls", "")))
@@ -1151,6 +1188,11 @@ _INDEX_HTML = r"""<!doctype html>
   .ebadge.ok { background:#e6f7ef; color:#137a4b; }
   .ebadge.warn { background:#fff5e6; color:#9a6b00; }
   .ebadge.none { background:#eef0f2; color:#68727c; }
+  .draft { margin-top:5px; max-width:560px; }
+  .draft .d-subj { width:100%; font-size:12px; padding:4px 6px; border:1px solid #d7e2ec; border-radius:5px; margin-bottom:3px; }
+  .draft .d-body { width:100%; font-size:12px; padding:5px 6px; border:1px solid #d7e2ec; border-radius:5px; font-family:inherit; resize:vertical; }
+  .draft .dbtns { margin-top:3px; display:flex; gap:6px; }
+  .draft .dbtns button { font-size:11px; padding:2px 9px; }
   .badge {
     display:inline-block;
     padding:3px 8px;
@@ -1315,6 +1357,21 @@ function peopleCell(j) {
   if (j.network_error) out += `<div class="neterr">${esc(j.network_error)}</div>`;
   return out;
 }
+function draftBlock(c) {
+  if (!c.email) return '';  // nothing to draft/send without an address
+  const has = c.outreach_message || c.outreach_subject;
+  const subj = esc(c.outreach_subject);
+  const body = esc(c.outreach_message);
+  return `<div class="draft" data-cid="${esc(c.id)}">
+      <input class="d-subj" value="${subj}" placeholder="Subject…" />
+      <textarea class="d-body" rows="4" placeholder="${has ? '' : 'No draft yet — click Regenerate'}">${body}</textarea>
+      <div class="dbtns">
+        <button onclick="saveDraft('${esc(c.id)}', this)">Save</button>
+        <button onclick="regenDraft('${esc(c.id)}', this)">Regenerate</button>
+        <button onclick="copyDraft(this)">Copy</button>
+      </div>
+    </div>`;
+}
 function contactsRow(j, ncols) {
   if (!(j.contacts && j.contacts.length)) return '';
   const rows = j.contacts.map(c => `
@@ -1326,9 +1383,27 @@ function contactsRow(j, ncols) {
         ${c.linkedin_url ? ` · 🔗 <a href="${esc(c.linkedin_url)}" target="_blank">LinkedIn</a>` : ''}
         · ☎ —
       </div>
+      ${draftBlock(c)}
     </div>`).join('');
   return `<tr class="contacts-row"><td colspan="${ncols}"><div class="contacts-wrap">
     <strong>People at ${esc(j.contact_company)}</strong>${rows}</div></td></tr>`;
+}
+async function saveDraft(cid, btn) {
+  const d = btn.closest('.draft');
+  await post('/api/outreach', {contact_id: cid, subject: d.querySelector('.d-subj').value, body: d.querySelector('.d-body').value});
+  btn.textContent = 'Saved ✓'; setTimeout(()=>btn.textContent='Save', 1200);
+}
+async function regenDraft(cid, btn) {
+  btn.disabled = true; btn.textContent = 'Drafting…';
+  const r = await post('/api/outreach', {contact_id: cid, regenerate: true});
+  btn.disabled = false; btn.textContent = 'Regenerate';
+  if (r.ok) { const d = btn.closest('.draft'); d.querySelector('.d-subj').value = r.subject; d.querySelector('.d-body').value = r.body; }
+  else alert(r.message || 'Failed');
+}
+function copyDraft(btn) {
+  const d = btn.closest('.draft');
+  const text = `Subject: ${d.querySelector('.d-subj').value}\n\n${d.querySelector('.d-body').value}`;
+  navigator.clipboard.writeText(text); btn.textContent = 'Copied ✓'; setTimeout(()=>btn.textContent='Copy', 1200);
 }
 function materialLinks(materials) {
   if (!materials || !materials.length) return '';

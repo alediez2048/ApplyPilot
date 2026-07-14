@@ -14,11 +14,66 @@ from applypilot.networking import apollo, derive, rank, store
 log = logging.getLogger(__name__)
 
 
+def _draft_and_store(profile: dict, job: dict, contact: dict) -> None:
+    """Best-effort outreach draft for one contact; failures are non-fatal."""
+    from applypilot.networking import outreach
+    try:
+        draft = outreach.draft_email(profile, job, contact)
+        store.upsert_contact({
+            "id": contact.get("id"),
+            "job_url": contact["job_url"],
+            "linkedin_url": contact.get("linkedin_url"),
+            "full_name": contact.get("full_name"),
+            "outreach_subject": draft["subject"],
+            "outreach_message": draft["body"],
+            "outreach_status": "drafted",
+            "outreach_channel": "email",
+        })
+    except Exception as e:  # noqa: BLE001
+        log.debug("Outreach draft failed for %s: %s", contact.get("full_name"), e)
+
+
+def draft_for_contact(contact_id: str) -> dict | None:
+    """Regenerate the outreach draft for a stored contact. Returns the new draft or None."""
+    from applypilot.config import load_profile
+    from applypilot.database import get_connection
+    from applypilot.networking import outreach
+
+    conn = get_connection()
+    store.init_contacts(conn)
+    row = conn.execute("SELECT * FROM contacts WHERE id = ?", (contact_id,)).fetchone()
+    if not row:
+        return None
+    contact = dict(zip(row.keys(), row))
+    jrow = conn.execute(
+        "SELECT url, title, company, site, full_description FROM jobs WHERE url = ?",
+        (contact["job_url"],),
+    ).fetchone()
+    job = dict(zip(jrow.keys(), jrow)) if jrow else {"title": contact.get("title")}
+    try:
+        profile = load_profile()
+    except Exception:  # noqa: BLE001
+        profile = {}
+    try:
+        draft = outreach.draft_email(profile, job, contact)
+    except Exception as e:  # noqa: BLE001
+        log.warning("Regenerate draft failed for %s: %s", contact_id, e)
+        return None
+    store.upsert_contact({
+        "id": contact_id, "job_url": contact["job_url"],
+        "linkedin_url": contact.get("linkedin_url"), "full_name": contact.get("full_name"),
+        "outreach_subject": draft["subject"], "outreach_message": draft["body"],
+        "outreach_status": "drafted", "outreach_channel": "email",
+    })
+    return draft
+
+
 def find_contacts_for_job(
     job: dict,
     per_job: int = 5,
     use_linkedin: bool = False,
     dry_run: bool = False,
+    draft: bool = True,
 ) -> dict:
     """Find + persist up to `per_job` contacts for a job.
 
@@ -67,6 +122,17 @@ def find_contacts_for_job(
         revealed = apollo.bulk_enrich([c["apollo_id"] for c in selected if c.get("apollo_id")])
         result["revealed"] = sum(1 for r in revealed.values() if r.get("email"))
 
+    _profile_cache: dict = {}
+
+    def _profile_for_drafting() -> dict:
+        if "p" not in _profile_cache:
+            from applypilot.config import load_profile
+            try:
+                _profile_cache["p"] = load_profile()
+            except Exception:  # noqa: BLE001
+                _profile_cache["p"] = {}
+        return _profile_cache["p"]
+
     stored_contacts = []
     for c in selected:
         rev = revealed.get(c.get("apollo_id"), {})
@@ -85,7 +151,11 @@ def find_contacts_for_job(
             "apollo_id": c.get("apollo_id"),
         }
         if not dry_run:
-            store.upsert_contact(contact)
+            cid = store.upsert_contact(contact)
+            contact["id"] = cid
+            # Draft outreach for contacts that have an email (skip no-address ones).
+            if draft and contact.get("email"):
+                _draft_and_store(_profile_for_drafting(), job, contact)
         stored_contacts.append(contact)
 
     result["contacts"] = stored_contacts

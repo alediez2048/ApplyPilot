@@ -143,3 +143,35 @@ def test_probe_no_key(monkeypatch):
 def test_search_people_no_key_returns_empty(monkeypatch):
     monkeypatch.delenv("APOLLO_API_KEY", raising=False)
     assert apollo.search_people(domains=["x.com"], titles=["Eng"]) == []
+
+
+# ── outreach drafting ───────────────────────────────────────────────────────
+
+def test_draft_email_uses_llm_and_falls_back_subject(monkeypatch):
+    from applypilot.networking import outreach
+
+    class _C:
+        def chat(self, msgs, **k):
+            return '{"subject": "", "body": "Hi Jane, I applied for the AI role. — Jorge"}'
+    monkeypatch.setattr(outreach, "get_client", lambda: _C())
+
+    d = outreach.draft_email(
+        {"personal": {"full_name": "Jorge Diez", "preferred_name": "Jorge"},
+         "experience": {"target_role": "AI Engineer"}, "skills_boundary": {"languages": ["Python"]}},
+        {"title": "AI Solutions Engineer", "company": "Affirm", "full_description": "Build AI"},
+        {"full_name": "Jane Smith", "title": "Staff AI Engineer", "match_reason": "same role"},
+    )
+    assert "Affirm" in d["subject"] or "AI Solutions Engineer" in d["subject"]  # fallback subject
+    assert d["body"].startswith("Hi Jane")
+
+
+def test_draft_email_empty_body_raises(monkeypatch):
+    from applypilot.networking import outreach
+
+    class _C:
+        def chat(self, msgs, **k):
+            return '{"subject": "hi", "body": ""}'
+    monkeypatch.setattr(outreach, "get_client", lambda: _C())
+    import pytest
+    with pytest.raises(ValueError):
+        outreach.draft_email({}, {"title": "X"}, {"full_name": "Y"})

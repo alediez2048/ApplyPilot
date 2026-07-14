@@ -29,13 +29,16 @@ def test_origin_ok_rejects_cross_origin():
 
 def test_contact_payload_shape():
     p = wd._contact_payload({
-        "full_name": "Jane", "title": "Eng", "email": "j@x.com",
+        "id": "c1", "full_name": "Jane", "title": "Eng", "email": "j@x.com",
         "email_status": "verified", "linkedin_url": "https://l/in/j", "match_reason": "same role",
+        "outreach_subject": "Hi", "outreach_message": "Body", "outreach_status": "drafted",
     })
-    assert p == {
-        "full_name": "Jane", "title": "Eng", "email": "j@x.com", "email_status": "verified",
-        "linkedin_url": "https://l/in/j", "match_reason": "same role", "outreach_status": "none",
-    }
+    assert p["id"] == "c1" and p["full_name"] == "Jane" and p["email"] == "j@x.com"
+    assert p["outreach_subject"] == "Hi" and p["outreach_message"] == "Body"
+    assert p["outreach_status"] == "drafted"
+    # missing fields default cleanly
+    empty = wd._contact_payload({})
+    assert empty["email_status"] == "none" and empty["outreach_status"] == "none"
 
 
 def test_network_runner_rejects_concurrent_same_job(monkeypatch):

@@ -262,9 +262,10 @@ def network(
     per_job: int = typer.Option(5, "--per-job", help="How many contacts to find per job."),
     limit: int = typer.Option(10, "--limit", "-l", help="Max jobs to process (no --url)."),
     no_linkedin: bool = typer.Option(False, "--no-linkedin", help="Apollo only (skip LinkedIn fallback)."),
+    draft: bool = typer.Option(True, "--draft/--no-draft", help="Draft outreach emails for found contacts."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Search + rank only; no Apollo reveal (no credits)."),
 ) -> None:
-    """Find people at target companies (Apollo) and store their contact info."""
+    """Find people at target companies (Apollo), store contacts, draft outreach."""
     _bootstrap()
 
     from applypilot.config import require_apollo_key
@@ -306,7 +307,7 @@ def network(
     total_found = total_revealed = 0
     for job in jobs:
         res = service.find_contacts_for_job(
-            job, per_job=per_job, use_linkedin=not no_linkedin, dry_run=dry_run
+            job, per_job=per_job, use_linkedin=not no_linkedin, dry_run=dry_run, draft=draft
         )
         total_found += res["found"]
         total_revealed += res["revealed"]

@@ -44,20 +44,34 @@ def _log_credits(resp: httpx.Response) -> None:
 
 
 def probe() -> tuple[bool, str]:
-    """Cheap auth check. Returns (ok, message). Detects missing/invalid/master-key errors."""
+    """Honest access check. Verifies the key can actually run a people search.
+
+    auth/health passes even on the free plan (which has NO API search access), so we
+    additionally issue a minimal, credit-free api_search and detect the free-plan 403.
+    """
     if not _api_key():
         return False, "APOLLO_API_KEY not set"
     try:
-        resp = httpx.get(f"{BASE_URL}/auth/health", headers=_headers(), timeout=_TIMEOUT)
+        health = httpx.get(f"{BASE_URL}/auth/health", headers=_headers(), timeout=_TIMEOUT)
     except Exception as e:  # noqa: BLE001
         return False, f"Apollo unreachable: {e}"
-    if resp.status_code == 200:
-        return True, "Apollo API reachable"
-    if resp.status_code == 401:
+    if health.status_code == 401:
         return False, "Apollo key invalid (401)"
-    if resp.status_code == 403:
-        return False, "Apollo 403 — needs a PAID plan + a MASTER API key"
-    return False, f"Apollo probe HTTP {resp.status_code}"
+
+    # The real gate: can this key run a people search? (search consumes no credits)
+    try:
+        s = httpx.post(f"{BASE_URL}/mixed_people/api_search", headers=_headers(),
+                       json={"per_page": 1, "page": 1}, timeout=_TIMEOUT)
+    except Exception as e:  # noqa: BLE001
+        return False, f"Apollo search unreachable: {e}"
+    if s.status_code == 200:
+        return True, "Apollo people search available"
+    if s.status_code == 403:
+        return False, ("Apollo key works but the PLAN has no API access — people search "
+                       "requires a PAID plan (upgrade at app.apollo.io)")
+    if s.status_code == 401:
+        return False, "Apollo key invalid / not a master key (401)"
+    return False, f"Apollo search HTTP {s.status_code}: {s.text[:120]}"
 
 
 def _map_email_status(apollo_status: str | None, email: str | None) -> str:

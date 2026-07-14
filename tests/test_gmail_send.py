@@ -32,8 +32,9 @@ def _contact(**over):
 def test_can_send_blocks_without_gmail(tmp_path, monkeypatch):
     _fresh_db(tmp_path, monkeypatch)
     monkeypatch.delenv("GMAIL_ADDRESS", raising=False)
+    monkeypatch.delenv("GMAIL_APP_PASSWORD", raising=False)
     ok, why = gmail_send.can_send(_contact())
-    assert ok is False and "Gmail not configured" in why
+    assert ok is False and "Gmail not connected" in why
 
 
 def test_can_send_blocks_no_address(tmp_path, monkeypatch):
@@ -103,6 +104,28 @@ def test_send_outreach_happy_path(tmp_path, monkeypatch):
     # persisted + dedupe now blocks a resend
     assert store.get_contact(cid)["outreach_status"] == "submitted"
     assert gmail_send.send_outreach(cid)["ok"] is False
+
+
+def test_send_outreach_prefers_oauth_when_available(tmp_path, monkeypatch):
+    _fresh_db(tmp_path, monkeypatch)
+    # OAuth available -> transport() should pick it over SMTP; use the Gmail API path
+    from applypilot.networking import gmail_oauth
+    monkeypatch.setattr(gmail_oauth, "available", lambda: True)
+    monkeypatch.setattr(gmail_oauth, "connected_email", lambda: "me@utexas.edu")
+    captured = {}
+
+    def fake_oauth_send(to, subject, body, from_addr, from_name=""):
+        captured.update(to=to, from_addr=from_addr, body=body)
+        return "gmail-real-id-123"
+    monkeypatch.setattr(gmail_oauth, "send", fake_oauth_send)
+    # ensure SMTP is NOT used
+    monkeypatch.setattr(gmail_send, "_smtp_send", lambda *a: (_ for _ in ()).throw(AssertionError("SMTP used")))
+
+    cid = store.upsert_contact(_contact())
+    res = gmail_send.send_outreach(cid)
+    assert res["ok"] and "oauth" in res["message"]
+    assert captured["to"] == "jane@x.com" and captured["from_addr"] == "me@utexas.edu"
+    assert store.get_contact(cid)["sent_message_id"] == "gmail-real-id-123"  # real Gmail id
 
 
 def test_send_outreach_dry_run_does_not_send(tmp_path, monkeypatch):

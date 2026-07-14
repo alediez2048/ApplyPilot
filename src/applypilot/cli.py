@@ -263,6 +263,7 @@ def network(
     limit: int = typer.Option(10, "--limit", "-l", help="Max jobs to process (no --url)."),
     no_linkedin: bool = typer.Option(False, "--no-linkedin", help="Apollo only (skip LinkedIn fallback)."),
     linkedin_login: bool = typer.Option(False, "--linkedin-login", help="One-time: open Chrome to log into LinkedIn (for the fallback)."),
+    gmail_connect: bool = typer.Option(False, "--gmail-connect", help="One-time: connect Gmail via OAuth for sending outreach."),
     draft: bool = typer.Option(True, "--draft/--no-draft", help="Draft outreach emails for found contacts."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Search + rank only; no Apollo reveal (no credits)."),
 ) -> None:
@@ -283,6 +284,14 @@ def network(
         linkedin_agent.open_login_browser()
         console.print("[green]Done. Set NETWORKING_LINKEDIN=1 to enable the fallback.[/green]")
         return
+
+    # One-time Gmail OAuth connect for outreach sending.
+    if gmail_connect:
+        from applypilot.networking import gmail_oauth
+        console.print("[cyan]Connecting Gmail (opens a browser to authorize send-only access)…[/cyan]")
+        ok, msg = gmail_oauth.connect()
+        console.print(f"[green]{msg}[/green]" if ok else f"[red]{msg}[/red]")
+        raise typer.Exit(code=0 if ok else 1)
 
     from applypilot.config import require_apollo_key
     require_apollo_key("networking")
@@ -550,17 +559,17 @@ def doctor() -> None:
     except Exception:
         results.append(("LinkedIn fallback", "[dim]optional[/dim]", "off"))
 
-    # Gmail send (outreach, optional) — live AUTH-only probe
-    if os.environ.get("GMAIL_ADDRESS") and os.environ.get("GMAIL_APP_PASSWORD"):
-        try:
-            from applypilot.networking.gmail_send import auth_probe
+    # Gmail send (outreach, optional) — OAuth preferred, else SMTP; live probe
+    try:
+        from applypilot.networking.gmail_send import auth_probe, transport
+        if transport() is not None:
             ok, msg = auth_probe()
             results.append(("Gmail outreach send", ok_mark if ok else fail_mark, msg))
-        except Exception:
-            results.append(("Gmail outreach send", warn_mark, "probe failed"))
-    else:
-        results.append(("Gmail outreach send", "[dim]optional[/dim]",
-                        "Set GMAIL_ADDRESS + GMAIL_APP_PASSWORD to send outreach"))
+        else:
+            results.append(("Gmail outreach send", "[dim]optional[/dim]",
+                            "Run `applypilot network --gmail-connect` (OAuth) to send outreach"))
+    except Exception:
+        results.append(("Gmail outreach send", warn_mark, "probe failed"))
 
     # CapSolver (optional)
     capsolver = os.environ.get("CAPSOLVER_API_KEY")

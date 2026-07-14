@@ -3,6 +3,13 @@
 Epic: **NET** — find people at target companies, surface contacts in the dashboard,
 draft and send outreach email. Source of truth: [`../networking-outreach-prd.md`](../networking-outreach-prd.md).
 
+> **Revised v2** after a 5-dimension adversarial review (GO WITH CHANGES). Key corrections
+> folded into the PRD + tickets: phone dropped (Apollo async webhook); Apollo needs a **paid
+> plan + master key** with corrected endpoints; `company` must be derived + stored; `contacts`
+> is its own table; sends are atomically claimed + de-duped across jobs; sender is @utexas.edu
+> so NET-4 ships SMTP **+ OAuth fallback**; NET-5 kept but hardened (enforced read-only, login
+> precheck, global cap, consent gate).
+
 | Ticket | Phase | Title | Depends on | Size | Status |
 |--------|-------|-------|-----------|------|--------|
 | [NET-1](NET-1-apollo-core.md) | 1 | Apollo core: contact discovery + `applypilot network` CLI | — | L | Todo |

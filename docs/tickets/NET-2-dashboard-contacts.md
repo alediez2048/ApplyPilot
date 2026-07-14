@@ -1,7 +1,20 @@
 # NET-2 — Dashboard contacts panel
 
 **Phase:** 2 · **Size:** M · **Depends on:** NET-1 · **Status:** Todo
-**PRD:** §7 · **Core requirement**
+**PRD:** §7 · **Core requirement** · **Revised** after review (B6, B8, minors)
+
+## Review corrections (v2 — must-fix)
+- **B6 — job scope.** The dashboard only renders URL-imported jobs
+  (`strategy IN ('dashboard_upload','manual_url_batch')`, `web_dashboard.py:37-38,521-533`).
+  Either scope contacts to URL-imported jobs, **or** broaden `_status_payload`'s job query to
+  include applied jobs regardless of strategy. Don't imply all applied jobs appear until done.
+- **B8 — concurrency.** The single global `CommandRunner` (`:162`) refuses to start if busy and
+  shares one log. Add a **keyed background-task registry** (task per `job_url`, independent
+  logs) so "Find contacts" runs alongside prepare/apply/other finds.
+- **Origin check.** Add an Origin/Host allowlist on `POST /api/network` (and all state-changing
+  POSTs) — localhost DNS-rebinding guard.
+- **Fields:** show email (+status badge) and LinkedIn; **phone shows `—`** (not in v1).
+- **Cleanup:** delete a job's contacts in `_delete_job` (`:740`) — no SQLite FK enforcement.
 
 ## Summary
 Populate the **current** operator dashboard with the contacts found in NET-1. Each

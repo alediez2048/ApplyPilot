@@ -1,34 +1,40 @@
-# PRD: Networking & Outreach — find people at target companies, get contacts, draft outreach
+# PRD: Networking & Outreach — find people at target companies, get contacts, draft & send outreach
 
-**Status:** Draft · **Author:** ApplyPilot · **Depends on:** existing apply stack, `llm.py` (multi-provider), operator dashboard
+**Status:** Draft v2 (revised after adversarial review — see `tickets/` and the review punch list)
+**Depends on:** existing apply stack, `llm.py` (multi-provider), operator dashboard
 
 For each job you apply to, automatically find 3–5 relevant people at that company
-(peers in the role, recruiters, hiring managers), retrieve their contact info,
-**display it in the operator dashboard** (names, positions, emails, phone numbers,
-LinkedIn), draft a tailored outreach email, and **send it via Gmail** — with review
-and explicit confirmation.
+(peers in the role, recruiters, hiring managers), retrieve their **email + LinkedIn URL**,
+**display them in the operator dashboard**, draft a tailored outreach email, and **send it
+via Gmail** — with review and explicit confirmation.
+
+> **v2 changes from review:** phone dropped (Apollo delivers it async via webhook — not
+> obtainable by a localhost tool); Apollo requires a **paid plan + master API key**;
+> Apollo endpoints/params corrected; `company` must be derived (the pipeline stores the
+> job-board name, not the employer); `contacts` is its own table; sends are atomically
+> claimed and de-duped across jobs; LinkedIn fallback kept but hardened; Gmail sender is
+> the user's @utexas.edu (Workspace) so NET-4 must handle SMTP **and** an OAuth fallback.
 
 ---
 
 ## 1. Goals / non-goals
 
 **Goals**
-- Given an applied (or prepared) job, find **3–5 relevant people** at that company.
-- Retrieve **contact info**: full name, position/title, **email, phone**, LinkedIn URL.
-- **Populate the current operator dashboard** with those contacts per job (a first-class
-  requirement, not a side panel afterthought).
+- Given an applied/prepared job, find **3–5 relevant people** at that company.
+- Retrieve **contact info**: full name, position/title, **email (+status)**, LinkedIn URL.
+- **Populate the current operator dashboard** with those contacts per job.
 - **Draft a tailored outreach email** per contact (editable).
-- **Send the outreach email via Gmail** from a dashboard button — with review + a
-  per-send confirmation, verified-email gating, and a daily cap.
-- Reuse existing infrastructure: the `jobs` DB, the multi-provider LLM client, the
-  operator dashboard, the already-wired Gmail integration, and — only as a fallback —
-  the apply browser-agent stack.
+- **Send it via Gmail** from a dashboard button — user-initiated, confirmed, verified-gated,
+  daily-capped, cross-job de-duped.
+- Reuse existing infra: `jobs` DB, `llm.py`, the operator dashboard, the apply
+  browser-agent primitives (for the LinkedIn fallback).
 
 **Non-goals (v1)**
-- No **silent/bulk auto-send**. Every send is user-initiated and confirmed; no campaign
-  sequencing, no send-to-everyone. (Sequencing/auto-send-after-apply is a later phase.)
-- No bulk prospecting / CRM. Scope is the companies you're actually applying to.
-- No LinkedIn connection automation (clicking "Connect"/InMail) — high ban risk.
+- **Phone numbers** — Apollo reveals phone only via an async public HTTPS webhook a local
+  tool can't receive. Out of scope for v1 (revisit with a hosted callback later).
+- **Silent/bulk auto-send** — every send is user-initiated + confirmed; no campaigns/sequencing.
+- **LinkedIn messaging/connection automation** (Connect/InMail) — high ban risk, excluded.
+- No bulk prospecting / CRM.
 
 ---
 
@@ -36,276 +42,315 @@ and explicit confirmation.
 
 | Path | Verdict | Notes |
 |------|---------|-------|
-| **Official LinkedIn API** | ❌ Not viable | No public people-search-by-company API. Sales Navigator / Talent APIs are enterprise-partner gated and disallow third-party people search. |
-| **LinkedIn browser agent** | ⚠️ Works, use sparingly | Auth is solved (reuse the persistent authenticated Chrome profile the apply flow already clones). Risk is LinkedIn's anti-automation: CAPTCHAs, the "commercial use limit" on search, soft bans. Safe only at low volume (3–5/company), opt-in, human-paced. |
-| **Apollo.io API** | ✅ Primary source | Real REST API. People Search by **org + titles + keywords** → names, titles, LinkedIn URLs; Enrichment reveals **verified email + phone**. Legal, reliable, no scraping. |
+| **Official LinkedIn API** | ❌ Not viable | No public people-search-by-company API; enterprise-partner gated. |
+| **LinkedIn browser agent** | ⚠️ Kept, hardened, opt-in | Reuses the apply Chrome/agent primitives. **Real risk:** automating your *primary* LinkedIn account against LinkedIn's no-bots ToS can cause **permanent account restriction** (not just a "soft ban") + the monthly commercial-use search lock. Auth is **best-effort** — only works if the cloned Chrome profile was LinkedIn-logged-in; needs a one-time login + precheck. See §5. |
+| **Apollo.io API** | ✅ Primary source | Real REST API. People Search by **org + titles + keywords** → names, titles, seniority; enrichment reveals **verified email** + LinkedIn URL. **Requires a paid plan + master API key** (free tier has no API access as of late 2025). |
 
-**Decision:** Apollo API is the primary source; the LinkedIn browser agent is an
-**optional fallback** invoked only when Apollo returns too few results.
+**Decision:** Apollo API is primary; the hardened LinkedIn agent is an opt-in fallback when
+Apollo returns too few people.
 
 ---
 
 ## 3. Architecture
 
-New subsystem `networking/`, a new `contacts` table, a `network` pipeline verb, and
-a dashboard panel. Nothing in the existing pipeline changes.
+New subsystem `networking/`, a new `contacts` table (its **own** init, not `_ALL_COLUMNS`),
+a `network` CLI verb, and a dashboard panel. Nothing in the existing pipeline changes.
 
 ```
 applied/prepared job
-   │  (company = job.site, role = job.title)
+   │  role = job.title
+   │  company = derived (JSON-LD > careers hostname > LLM from full_description > job.site)
+   │  domain  = derived company domain (for Apollo people search)
    ▼
-networking/apollo.py ──► People Search (org+titles+keywords)  →  candidates (masked)
+networking/apollo.py ─► People Search (domain/org + titles + keywords)  → candidates (masked; no email/LinkedIn yet)
    │                                              │
-   │  rank & pick 3–5                             │  if fewer than N found
+   │  rank & pick 3–5                             │  if fewer than N found AND LinkedIn enabled
    ▼                                              ▼
-Apollo Enrichment (reveal email/phone)   networking/linkedin_agent.py  (reuses apply stack:
-   │                                       claude -p + Playwright MCP + persistent Chrome)
+Apollo bulk enrichment (reveal email + LinkedIn)  networking/linkedin_agent.py (hardened, opt-in)
    │                                              │  names + profile URLs
-   └───────────────► merge + dedupe ◄────────────┘
+   └───────────────► merge + dedupe ◄────────────┘  (Apollo-enrich by linkedin_url)
                            │
                            ▼
-              networking/outreach.py  (LLM drafts a message per contact)
+              networking/outreach.py  (LLM drafts subject + body per contact)
                            │
                            ▼
-                 contacts table  ──►  operator dashboard panel
+                 contacts table  ──►  operator dashboard panel  ──►  Gmail send (§8)
 ```
 
-### 3.1 Data model — new `contacts` table
+**Company/domain derivation (NET-1, before any Apollo call):** the pipeline does **not**
+store the employer — jobspy parses `company` then discards it and `site` holds the
+job-board name (Indeed/LinkedIn). NET-1 adds a `company` column (auto-migrated), populates
+it going forward (jobspy store path + dashboard `_infer_company`), and derives it for
+existing rows from JSON-LD → careers hostname → LLM-from-`full_description` → fallback.
+Company **domain** (for `q_organization_domains_list[]`) is derived from the company /
+`application_url` hostname.
 
-One row per person per job. Added to `database._ALL_COLUMNS`-style registry (its own
-table + forward-only migration, mirroring the `jobs` pattern).
+### 3.1 Data model — new `contacts` table (owned by `store.py`, not `_ALL_COLUMNS`)
+
+`store.py` provides `init_contacts()` / `ensure_contacts_columns()` (mirrors the pattern in
+`database.py` but for its own table) and is invoked from `init_db`-adjacent startup, the
+dashboard server, and the `network` CLI so every read path guarantees the table exists.
 
 ```sql
 CREATE TABLE IF NOT EXISTS contacts (
-    id              TEXT PRIMARY KEY,   -- sha1(job_url + linkedin_url|name)
-    job_url         TEXT NOT NULL,      -- FK -> jobs.url
-    full_name       TEXT,
-    title           TEXT,
-    company         TEXT,
-    linkedin_url    TEXT,
-    email           TEXT,
-    email_status    TEXT,               -- verified | guessed | locked | none
-    phone           TEXT,
-    location        TEXT,
-    seniority       TEXT,               -- e.g. senior, manager, director
-    match_reason    TEXT,               -- "same role", "recruiter", "hiring manager", "same team"
-    source          TEXT,               -- apollo | linkedin
-    apollo_id       TEXT,
-    outreach_subject TEXT,              -- drafted email subject
-    outreach_message TEXT,              -- drafted email body (editable)
-    outreach_status TEXT DEFAULT 'none',-- none | drafted | sent | failed
-    outreach_channel TEXT,              -- email | linkedin
-    sent_at         TEXT,               -- when the email was actually sent
-    sent_message_id TEXT,               -- Gmail message id / SMTP id for audit
-    send_error      TEXT,
-    discovered_at   TEXT,
-    updated_at      TEXT
+    id               TEXT PRIMARY KEY,   -- sha1("{job_url}\x1f{linkedin_url or ''}\x1f{name or ''}")  (delimited)
+    job_url          TEXT NOT NULL,      -- references jobs.url (no FK enforcement in SQLite; cleaned up in _delete_job)
+    full_name        TEXT,
+    title            TEXT,
+    company          TEXT,
+    linkedin_url     TEXT,               -- from enrichment (NOT from search)
+    email            TEXT,
+    email_status     TEXT,               -- internal: verified | unverified | none  (mapped from Apollo)
+    location         TEXT,
+    seniority        TEXT,
+    match_reason     TEXT,               -- same role | recruiter | hiring manager | same team
+    source           TEXT,               -- apollo | linkedin
+    apollo_id        TEXT,
+    outreach_subject TEXT,
+    outreach_message TEXT,
+    outreach_status  TEXT DEFAULT 'none',-- none | drafted | sending | submitted | failed
+    outreach_channel TEXT,               -- email
+    submitted_at     TEXT,               -- set atomically at send-claim (see §8); "submitted" ≠ delivered
+    sent_message_id  TEXT,               -- client-generated Message-ID (SMTP returns none)
+    send_error       TEXT,
+    discovered_at    TEXT,
+    updated_at       TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_contacts_job ON contacts(job_url);
+CREATE INDEX IF NOT EXISTS idx_contacts_email ON contacts(email);
+CREATE INDEX IF NOT EXISTS idx_contacts_status ON contacts(outreach_status, submitted_at);
 ```
+
+**Key + dedupe:** the PK hash is **delimited** (`\x1f`) to avoid collisions. Contacts never
+switch identity once stored. **Cross-job dedupe** for sending is keyed on **normalized email**
+(and/or normalized `linkedin_url`) across *all* jobs — the same human is emailed at most once
+within a cooldown window, even across multiple applications. The dashboard surfaces
+"already contacted for another role."
+
+**`email_status` mapping (Apollo → internal):** `verified → verified`; `unverified` /
+`extrapolated` / any non-verified with an address → `unverified` (needs 2nd confirm to send);
+no address revealed → `none` (Send disabled). `locked` is **not** an Apollo value.
 
 ### 3.2 Module map (`src/applypilot/networking/`)
 
 | File | Role |
 |------|------|
-| `apollo.py` | Apollo client: org resolution, People Search, People Enrichment (reveal). Credit-aware. |
-| `linkedin_agent.py` | Fallback: spawns `claude -p` + Playwright MCP against the persistent Chrome profile to search LinkedIn People and extract names + profile URLs. Reuses `apply/chrome.py` + `apply/launcher.py` primitives. |
-| `prompt.py` | Builds the LinkedIn-agent instruction prompt (company, role keywords, "return N people as JSON"). |
-| `rank.py` | Selects the best 3–5 candidates: title similarity to the role + a useful mix (peers + 1–2 recruiters/hiring managers). Pure, testable. |
-| `outreach.py` | LLM drafts a tailored email per contact (profile + job + contact). Reuses `llm.py`. |
-| `gmail_send.py` | Sends an outreach email via Gmail (SMTP app-password default; Gmail API OAuth optional). Records send status; enforces daily cap + verified-email gate. |
-| `service.py` | Orchestrator: `find_contacts_for_job(job, opts)` → Apollo → (fallback) → merge → enrich → draft → persist. |
-| `store.py` | `contacts` table schema, upserts, queries (mirrors `database.py`). |
+| `apollo.py` | Apollo client (paid + **master** key): company/domain resolution, People Search (`mixed_people/api_search`), bulk enrichment (`people/bulk_match`) to reveal email + LinkedIn. Credit-aware. |
+| `linkedin_agent.py` | **New** thin agent spawner (copies only the Popen/stream-json pattern from `apply/launcher.py::run_job` — not verbatim reuse). Parameterized Playwright-only MCP config (drops Gmail), enforced read-only tools, login precheck, JSON-array parser. |
+| `prompt.py` | Builds the LinkedIn-agent instruction (company, role keywords, "return N people as JSON"). |
+| `rank.py` | Pure: select best 3–5 (title/seniority similarity + role mix; peers + ≥1 recruiter/hiring manager). Ranks on title/seniority only (LinkedIn URL isn't available pre-enrichment). |
+| `outreach.py` | LLM drafts subject + body per contact. Reuses `llm.py` + validator guardrails. |
+| `gmail_send.py` | Gmail send: SMTP app-password **and** OAuth fallback (the user's @utexas.edu is Workspace). Atomic send-claim, verified-gate, daily cap, dry-run, `doctor` AUTH probe. |
+| `service.py` | Orchestrator: `find_contacts_for_job(job, opts)` → derive company/domain → Apollo search → rank → enrich top-N → (opt-in LinkedIn fallback) → merge → draft → persist. |
+| `store.py` | Owns `contacts` table (`init_contacts`, upserts, queries, atomic send-claim, cross-job dedupe). |
 
 ### 3.3 Pipeline & CLI
 
-New verb, gated like apply (needs Apollo key; LinkedIn fallback needs Tier 3):
-
 ```bash
-applypilot network                 # for all applied jobs missing contacts
-applypilot network --url URL       # one specific job
-applypilot network --per-job 5     # how many contacts to find (default 5)
-applypilot network --no-linkedin   # Apollo only, skip browser fallback
-applypilot network --draft/--no-draft   # toggle outreach drafting (default on)
+applypilot network --url URL        # one job (primary usage)
+applypilot network                  # jobs missing contacts
+applypilot network --per-job 5      # how many contacts (default 5)
+applypilot network --no-linkedin    # Apollo only (default respects NETWORKING_LINKEDIN)
+applypilot network --linkedin-login # one-time: open Chrome to log into LinkedIn
+applypilot network --draft/--no-draft
+applypilot network --dry-run        # search + rank only; no reveal, no send
 ```
 
-Runs after `apply` (you network on jobs you've applied to), but can run on any
-prepared job. Also a **dashboard button** ("Find contacts") per job.
+Gated by a real `require_apollo_key()` helper (mirrors `config.check_tier`'s stderr +
+`SystemExit(1)`), independent of the numeric tier system. Also a **dashboard button** per job.
 
 ---
 
-## 4. Apollo integration (`apollo.py`)
+## 4. Apollo integration (`apollo.py`) — corrected against current docs
 
-**Auth:** `APOLLO_API_KEY` in `~/.applypilot/.env`, sent as `X-Api-Key` header.
+**Auth:** `APOLLO_API_KEY` (a **master** key; **paid plan required**) in `.env`, header `X-Api-Key`.
+Base URL: `https://api.apollo.io/api/v1` (note the `/api`).
 
-**Endpoints (verify against current Apollo docs before implementing):**
-1. **Org resolution** — `POST /v1/organizations/enrich` (or search) with the company
-   name → canonical `organization_id` + primary domain. Improves people-search precision.
-2. **People Search** — `POST /v1/mixed_people/search` with
-   `organization_ids`/`q_organization_domains`, `person_titles[]` (derived from the
-   job title + synonyms), `q_keywords`, `page`, `per_page`. Returns candidates with
-   name, title, seniority, `linkedin_url`, `id`. **Emails are masked here** (cheap).
-3. **People Enrichment / reveal** — `POST /v1/people/match` with the person `id`
-   (and `reveal_personal_emails`/`reveal_phone_number`) → **verified email + phone**.
-   **Consumes credits.**
+1. **Company/domain resolution.** Prefer **skipping** org-enrich and passing the derived
+   company domain directly to people search via `q_organization_domains_list[]`. If org IDs
+   are needed, use company **search** (`mixed_companies/search`) to get `organization_ids[]`.
+   Avoid `GET /organizations/enrich` — it **consumes a credit per record**.
+2. **People Search** — `POST /mixed_people/api_search` (`api_search`, not the deprecated
+   `search`). Params: `q_organization_domains_list[]` (or `organization_ids[]`),
+   `person_titles[]`, `person_seniorities[]`, `q_keywords`, `page`, `per_page`. Returns
+   candidates with name, title, seniority, `id`. **Email + LinkedIn URL are NOT in this
+   response** (cheap; masked).
+3. **Bulk enrichment / reveal** — `POST /people/bulk_match` with the selected `id`s and
+   `reveal_personal_emails=true` → **verified email + `linkedin_url`**. **Consumes credits.**
+   (Phone requires an async `webhook_url` → out of scope, see §1.)
 
-**Credit discipline (important):** Search is cheap and returns masked candidates.
-We **rank first, then reveal only the selected 3–5** — never enrich the full result
-set. `--per-job` caps reveals. Log remaining-credit headers if Apollo returns them.
+**Credit discipline:** search is cheap and masked. **Rank first, then bulk-enrich only the
+selected 3–5.** Never enrich the full result set. `--per-job` caps reveals; `--dry-run`
+performs zero reveals. Log remaining-credit headers when Apollo returns them.
 
-**Title derivation:** map the job title to `person_titles` + synonyms
-(e.g. "Senior Technical Product Manager" → ["Technical Product Manager", "Product
-Manager", "Senior Product Manager"]) and always add recruiter/talent titles so we
-surface a hiring contact. Small static synonym map + optional LLM expansion.
+**Title derivation:** map the job title to `person_titles[]` + synonyms and always add
+recruiter/talent titles so a hiring contact surfaces. Small static map (+ optional LLM
+expansion, off by default).
+
+**Gating:** `doctor` and the CLI probe the key against a cheap endpoint (auth/usage health)
+and detect **403 / master-key** errors — presence of the env var is not sufficient.
 
 ---
 
-## 5. LinkedIn fallback (`linkedin_agent.py`)
+## 5. LinkedIn fallback (`linkedin_agent.py`) — hardened, opt-in
 
-Invoked **only** when Apollo yields `< per_job` contacts. Reuses the apply stack verbatim:
+Invoked **only** when Apollo yields `< per_job` AND LinkedIn is enabled. Reuses the apply
+Chrome primitives; **spawns a new thin agent** (copies the Popen/stream-json pattern from
+`run_job` — not verbatim reuse).
 
-- `apply/chrome.py::launch_chrome` → isolated Chrome on a CDP port, **persistent
-  worker profile** (already carries your LinkedIn session cookies).
-- Spawn `claude -p --mcp-config <playwright-only> --permission-mode bypassPermissions`
-  exactly like `apply/launcher.py::run_agent`, piping the networking prompt.
-- The agent: open `linkedin.com`, search the company, click **People**, filter by the
-  role keywords, read the first page, return **N people as JSON**
-  `[{name, title, profile_url}]`. **Read-only** — no Connect/message clicks.
+- **Enforced read-only** — pass `--allowedTools` limited to read/navigate/snapshot Playwright
+  tools and `--disallowedTools` for `browser_click`/`browser_fill_form`/etc. (mirrors how
+  apply restricts Gmail tools). Read-only is **tool-enforced**, not prompt-only.
+- **Parameterized MCP** — a Playwright-only config (drops the Gmail server that
+  `_make_mcp_config` hardcodes).
+- **Login is best-effort** — a one-time `applypilot network --linkedin-login` opens the worker
+  profile to log in once; a **login-state precheck** aborts cleanly ("not logged into
+  LinkedIn") before spawning. Isolate the networking Chrome user-data-dir + CDP port range
+  from apply's to avoid collisions.
+- **The agent:** open LinkedIn → search company → **People** → filter by role keywords → read
+  page 1 → return `[{name, title, profile_url}]` as JSON. Read-only; no Connect/message.
+- **Recovery:** Apollo-enrich the found people by **`linkedin_url`** (Apollo's strongest match
+  key). Expect misses in low-Apollo-coverage companies → some contacts have no email; the
+  dashboard shows them with Send disabled.
 
-**Risk mitigations (encoded, not aspirational):**
-- Hard cap: one company at a time, ≤ 5 profiles, one search page.
-- Human-paced (the agent naturally is); a per-run cooldown between companies.
-- Read-only tool scope (no connect/InMail actions in the prompt).
-- Feature flag `NETWORKING_LINKEDIN=0` to disable entirely.
-- Names+URLs from LinkedIn are then **Apollo-enriched by name+company** to get email.
-- Doc + dashboard note: LinkedIn automation is best-effort and at the user's discretion
-  (ToS). Off by default via `--no-linkedin` if the user prefers Apollo-only.
+**Caps & consent (enforced in code):**
+- Global **`NETWORKING_LINKEDIN_DAILY_LIMIT`** (default 3–5 companies/day), persisted across runs.
+- ≤5 profiles/company, single page, cooldown between companies.
+- **Off by default** (`NETWORKING_LINKEDIN=0`, `--no-linkedin`); a one-time explicit consent
+  acknowledgement that names the real stake: *possible permanent restriction of your primary
+  LinkedIn account.* Recommend a secondary account.
+- Graceful empty result on login wall / CAPTCHA / parse failure — never crashes.
 
 ---
 
 ## 6. Outreach drafting (`outreach.py`)
 
-For each stored contact, the LLM drafts a short, specific **email** (subject + body) using:
-- your `profile.json` (who you are, relevant skills),
-- the job (`title`, `full_description` snippet, company),
-- the contact (`full_name`, `title`, `match_reason`).
-
-Body: 3–4 sentences — mention the specific role you applied to, one relevant proof point,
-a soft ask (15-min chat / question about the team). Optionally a short LinkedIn-note
-variant (≤ 300 chars). Reuses the tailoring guardrails (no fabrication, plain voice).
-Stored in `outreach_subject`/`outreach_message`; **editable in the dashboard before send**.
+LLM drafts a short email (subject + body) using `profile.json`, the job (`title`,
+`full_description` snippet, company), and the contact (`full_name`, `title`, `match_reason`).
+Body 3–4 sentences: name the exact role, one proof point, a soft ask. Reuses the tailoring
+guardrails (no fabrication, plain voice). Stored in `outreach_subject`/`outreach_message`,
+editable in the dashboard before send.
 
 ---
 
 ## 7. Dashboard UX (operator dashboard) — contact display is core
 
-Per applied job, a **"People at {company}"** section populated in the **current**
-operator dashboard. Each contact shows the full set of fields:
+Per job, a **"People at {company}"** section in the current dashboard. Per contact:
+full name · position/title · email (+status badge) · LinkedIn URL · `match_reason` chip ·
+editable subject + draft · `[copy] [edit] [send email]`. (**Phone shows `—`** in v1.)
 
 ```
 People at Affirm                                   [ Find contacts ]
 ─────────────────────────────────────────────────────────────────
-● Jane Smith                                       [same role]
-  Staff AI Engineer
-  ✉ jane.smith@affirm.com  ✅ verified   ☎ +1 415-555-0142
-  🔗 linkedin.com/in/janesmith
+● Jane Smith — Staff AI Engineer            [same role]
+  ✉ jane.smith@affirm.com  ✅ verified        🔗 linkedin.com/in/janesmith
   Subject: Question about the AI Solutions Engineer role
   ▸ "Hi Jane — I just applied for the AI Solutions Engineer role…"   (editable)
-      [ copy ]   [ edit ]   [ send email ✅ verified ]
-● Omar Reyes                                       [recruiter]
-  Technical Recruiter
-  ✉ omar@affirm.com  ⚠ guessed          ☎ —
-  🔗 linkedin.com/in/omarreyes
-      [ copy ]   [ edit ]   [ send email — confirm (guessed) ]
+      [ copy ]   [ edit ]   [ send email ]
+● Omar Reyes — Technical Recruiter          [recruiter]
+  ✉ omar@affirm.com  ⚠ unverified            🔗 —
+      [ copy ]   [ edit ]   [ send email — confirm (unverified) ]
 ```
 
-**Displayed fields (hard requirement):** full name, position/title, email (+status
-badge), phone number, LinkedIn URL, `match_reason` chip, editable subject + draft.
+**Scope note (must-fix):** the current dashboard only renders **URL-imported** jobs
+(`strategy IN ('dashboard_upload','manual_url_batch')`). NET-2 either (a) scopes contacts to
+URL-imported jobs, or (b) broadens the job query to include applied jobs regardless of
+strategy. The PRD must not imply all applied jobs appear until (b) is done.
 
-- **[Find contacts]** → `POST /api/network` → runs `service.find_contacts_for_job`; live
-  status via the existing command-log pattern; contacts render as they land.
-- **[Send email]** → `POST /api/outreach/send` → sends via Gmail (see §8). Verified
-  emails send after one confirm; **guessed/unverified require an extra explicit confirm**.
-  Row flips to **✅ sent {timestamp}** (or **failed** with the error).
-- **[copy]** / **[edit]** for manual sending or tweaking the draft first.
+**Concurrency (must-fix):** the dashboard has one global `CommandRunner` that refuses to
+start if busy and shares one log. NET-2 adds a **keyed background-task registry** (task per
+`job_url`, independent logs) so "Find contacts" can run without colliding with prepare/apply.
 
-New endpoints: `POST /api/network` (run for a job), contacts folded into the existing
-job payload (`GET`), `POST /api/outreach` (regenerate/save a draft),
-`POST /api/outreach/send` (send one email).
+**Send semantics:** verified → one confirm; **unverified → second explicit confirm**; **no
+address (`none`) → Send disabled**. Row flips to **submitted {timestamp}** (not "delivered")
+or **failed**. Cross-job dedupe warns "already contacted for another role."
+
+**Security (must-fix):** state-changing POSTs (`/api/network`, `/api/outreach`,
+`/api/outreach/send`) get an **Origin/Host allowlist** check (the send endpoint fires
+irreversible email; guards against DNS-rebinding to localhost).
+
+Endpoints: `POST /api/network`, contacts folded into the job payload (`GET`),
+`POST /api/outreach` (save/regenerate draft), `POST /api/outreach/send`.
 
 ---
 
 ## 8. Gmail send automation (`gmail_send.py`)
 
-A dashboard **Send** button that actually emails the contact from your Gmail.
+A dashboard **Send** button that emails the contact from the user's Gmail
+(**sender: jorgediez2408@utexas.edu**, a Google **Workspace** account).
 
-**Auth (pick one; detected at runtime):**
-1. **SMTP app-password (default, zero new deps).** `smtplib` (stdlib) + a Gmail
-   **App Password**. Set `GMAIL_ADDRESS` + `GMAIL_APP_PASSWORD` (and optional
-   `OUTREACH_FROM_NAME`) in `.env`. Simplest and most reliable for a local tool;
-   requires 2-Step Verification on the account.
-2. **Gmail API OAuth (optional upgrade).** `google-api-python-client` + OAuth; sends
-   as the user, better threading/deliverability. Reuses the same OAuth the wired Gmail
-   MCP performs (token under `~/.gmail-mcp/`). Added only if the app-password path
-   proves insufficient.
-3. **Existing Gmail MCP** (`@gongrzhe/server-gmail-autoauth-mcp`, already in the apply
-   stack, `send_email` already allowed) — available for an agent-driven send, but heavier
-   than a direct SMTP call for a button.
+**Transport — SMTP with an OAuth fallback (both in NET-4, not deferred):**
+1. **SMTP + App Password** (`smtplib.SMTP_SSL('smtp.gmail.com', 465)`). Simple, no deps.
+   **Workspace caveat:** admins can disable app-password generation; a blocked tenant fails
+   as SMTP **535**. Detect 535 → show "your Google/Workspace admin may have disabled app
+   passwords — use the OAuth path."
+2. **Gmail API OAuth (fallback, in scope for NET-4 given the Workspace sender).** Adds
+   `google-api-python-client` + a one-time OAuth. Needed if the utexas tenant blocks app
+   passwords. Yields Gmail's real message id + better deliverability.
 
-**Send flow:** build a MIME message (from = `GMAIL_ADDRESS`, reply-to = same,
-`OUTREACH_FROM_NAME` for display), send, record `sent_at` + `sent_message_id`, set
-`outreach_status='sent'`. On failure record `send_error`, status `'failed'`.
+`doctor` performs a **live AUTH-only** login test (connect+login+quit, no send) so a
+blocked/revoked credential is caught up front, not at send time.
 
-**Safeguards (sending is outward-facing and unreversible):**
-- **User-initiated only** — never auto-sends; one click + confirm per email.
-- **Verified-email gate** — `email_status='guessed'|'locked'` requires a second explicit
-  confirm; never silently emails a guessed address.
-- **Daily cap** — `OUTREACH_DAILY_LIMIT` (default 20) across all jobs; refuses beyond it.
-- **De-dupe** — never send twice to the same contact for the same job (`sent_at` guard).
-- **Dry-run** — `applypilot network --dry-run` / a dashboard toggle logs the email
-  instead of sending, for review.
-- **Footer** — appends a short, honest sign-off; no misleading headers.
+**Send flow (atomic, race-safe):** claim the row like `apply/launcher.py::acquire_job`:
+`UPDATE contacts SET outreach_status='sending', submitted_at=<now> WHERE id=? AND submitted_at IS NULL`;
+send only if `rowcount==1`; roll status back on SMTP/OAuth failure. Enforce the daily cap in
+the same transaction. Store a **client-generated `Message-ID`** (`email.utils.make_msgid()`);
+SMTP returns no server id.
+
+**Safeguards (all enforced):**
+- User-initiated only; one click + confirm per email; **no auto-send**.
+- **Verified-gate:** `verified` → one confirm; `unverified` → second explicit confirm;
+  `none` (no address) → Send disabled.
+- **Daily cap** `OUTREACH_DAILY_LIMIT` (default 20), enforced atomically.
+- **Cross-job dedupe** on normalized email — never twice to one human within a cooldown.
+- **Dry-run** logs the email instead of sending.
+- Honest footer; state labeled **submitted** (SMTP acceptance ≠ delivery; async bounces from
+  unverified addresses harm sender reputation — warn, and prefer verified-only).
+- Credentials read only from `.env`; never logged; TLS only.
+
+> **.edu note:** cold outreach from an institutional address can violate the university AUP
+> and risk the account. Surfaced to the user; a personal gmail.com remains the safer sender
+> if utexas proves restricted.
 
 ---
 
-## 9. Config / tiers
+## 9. Config / gating
 
-- **`APOLLO_API_KEY`** → gates contact discovery (like the LLM key gates Tier 2).
-- **`GMAIL_ADDRESS` + `GMAIL_APP_PASSWORD`** → enable the Send button (SMTP path).
-  `OUTREACH_FROM_NAME`, `OUTREACH_DAILY_LIMIT` optional.
-- `doctor` reports: Apollo key, Gmail-send readiness, LinkedIn-fallback readiness.
-- LinkedIn fallback requires Tier 3 (Claude CLI + Chrome + Node) — same as apply.
-- `NETWORKING_LINKEDIN=0` and `--no-linkedin` disable the browser path.
+- **`APOLLO_API_KEY`** — a **master** key on a **paid** Apollo plan. Gated via
+  `require_apollo_key()` + a live `doctor` probe (detects 403/master-key errors).
+- **`GMAIL_ADDRESS` + `GMAIL_APP_PASSWORD`** (SMTP) and/or Gmail OAuth creds; `OUTREACH_FROM_NAME`,
+  `OUTREACH_DAILY_LIMIT` (20). `doctor` does an AUTH-only probe.
+- **`NETWORKING_LINKEDIN`** (0/1, off), **`NETWORKING_LINKEDIN_DAILY_LIMIT`** (3–5).
+- `.env.example` gains `APOLLO_API_KEY`, `GMAIL_ADDRESS`, `GMAIL_APP_PASSWORD`.
+- LinkedIn fallback needs Tier 3 (Claude CLI + Chrome + Node).
 
 ---
 
 ## 10. Phased rollout
 
-1. **Phase 1 — Apollo core (ship first):** `apollo.py` + `store.py` + `rank.py` +
-   `service.py` (Apollo-only) + `applypilot network` CLI. Contacts (name, title, email,
-   phone, LinkedIn) land in the DB.
-2. **Phase 2 — Dashboard contacts:** populate the current operator dashboard with the
-   contact fields + "Find contacts" button + endpoints. (Core requirement.)
-3. **Phase 3 — Outreach drafting:** `outreach.py` + editable subject/body in the dashboard.
-4. **Phase 4 — Gmail send:** `gmail_send.py` (SMTP app-password) + "Send email" button +
-   `POST /api/outreach/send` + safeguards (confirm, verified-gate, daily cap, dry-run).
-5. **Phase 5 — LinkedIn fallback:** `linkedin_agent.py` + `prompt.py`, gated + capped.
-6. **Phase 6 (future):** optional Gmail API OAuth path, threaded follow-ups, reply
-   tracking, opt-in auto-send-after-apply.
-
-Each phase is independently useful and testable.
+1. **NET-1 — Apollo core:** `company` column + derivation; `store.py` (`init_contacts`);
+   `apollo.py` (corrected endpoints, master-key gate); `rank.py`; `service.py` (Apollo-only);
+   `applypilot network` CLI + `require_apollo_key`. Contacts (name/title/email/LinkedIn) in DB.
+2. **NET-2 — Dashboard contacts:** populate the dashboard (job-scope fix + keyed task registry
+   + Origin check); "Find contacts" button + endpoints.
+3. **NET-3 — Outreach drafting:** `outreach.py`, editable subject/body.
+4. **NET-4 — Gmail send:** `gmail_send.py` (SMTP **+ OAuth fallback**), atomic claim,
+   verified-gate, daily cap, cross-job dedupe, dry-run, `doctor` AUTH probe.
+5. **NET-5 — LinkedIn fallback (hardened):** enforced read-only, login setup + precheck,
+   global daily cap, consent gate, enrich-by-linkedin_url.
+6. **NET-6 (backlog):** phone via hosted webhook, threaded follow-ups, reply tracking,
+   opt-in verified-only auto-send.
 
 ---
 
 ## 11. Testing
 
-- **Pure/unit:** `rank.py` selection (title-similarity + role mix), title→`person_titles`
-  synonym mapping, contact dedupe/merge, `store.py` upserts. Apollo client with mocked
-  HTTP (search masked → enrich reveal). `gmail_send.py` MIME assembly + daily-cap /
-  verified-gate / dedupe logic with SMTP stubbed. No network in tests.
-- **Integration (gated):** real Apollo call and a real Gmail send-to-self behind
-  env-flag tests (skipped in CI), mirroring the gated Node-render test.
-- **LinkedIn agent:** prompt-builder unit test; the agent run itself is manual/opt-in.
+- **Pure/unit:** `rank.select` (title/seniority + role mix), title→`person_titles`, company/
+  domain derivation, contact key/dedupe, `store` upsert + atomic send-claim (concurrent
+  attempts), `gmail_send` MIME + verified-gate + cap. Apollo & SMTP mocked. No network in CI.
+- **Integration (gated, skipped in CI):** real Apollo call + a real Gmail AUTH/send-to-self,
+  behind env flags — kept out of the per-ticket CI DoD (they bake in live paid deps).
+- **LinkedIn agent:** prompt-builder + read-only tool-scoping unit test; agent run manual/opt-in.
 
 ---
 
@@ -313,19 +358,25 @@ Each phase is independently useful and testable.
 
 | Risk | Mitigation |
 |------|------------|
-| Apollo credit burn | Reveal only selected 3–5; `--per-job` cap; log remaining credits |
-| Apollo coverage gaps (small companies) | LinkedIn fallback; graceful "no contacts found" |
-| LinkedIn ToS / bans | Opt-in, ≤5/company, read-only, cooldowns, `--no-linkedin`, off-by-default flag |
-| **Emailing the wrong / guessed address** | `email_status` badge; guessed needs 2nd confirm; never silent-send; dry-run |
-| **Cold-email spam / sender reputation** | User-initiated + confirm per send; daily cap; no bulk; honest footer; de-dupe |
-| Gmail app-password security | Stored only in the local `.env`; never logged; SMTP over TLS |
-| PII handling | Contacts stored locally in the user's own DB only; no external sync |
+| Apollo paid/master-key required | Gate on live probe; document the paid dependency |
+| Apollo credit burn | Reveal only selected 3–5; `--per-job`; `--dry-run`; log credits |
+| Emailing unverified/guessed address | Status badge; 2nd confirm; Send disabled when no address; dry-run |
+| Cold-email spam / sender reputation | User-initiated + confirm; daily cap; cross-job dedupe; "submitted" label; prefer verified |
+| Workspace app-password blocked (@utexas) | Detect 535; OAuth fallback in NET-4; `doctor` AUTH probe |
+| .edu AUP for cold email | Surface to user; personal gmail.com recommended alternative |
+| Send race (double-send / cap bypass) | Atomic DB claim (`submitted_at IS NULL`) + cap in same txn |
+| localhost CSRF / DNS-rebinding | Origin/Host allowlist on state-changing POSTs |
+| **LinkedIn permanent account restriction** | Opt-in + off by default; consent gate naming the real stake; global daily cap; enforced read-only; secondary-account recommendation |
+| Gmail MCP prompt-injection (`send_email` allowed in apply) | Prefer deterministic SMTP button (no LLM in loop); note the exposure; keep agent send restricted |
+| Orphaned contacts on job delete | Delete contacts in `_delete_job` (no SQLite FK enforcement) |
+| PII | Contacts stored locally only; no external sync |
 
 ---
 
-## 13. Open questions
+## 13. Resolved / remaining questions
 
-- Apollo plan/credit budget per run (affects default `--per-job` and reveal policy).
-- Should networking auto-trigger after a successful apply, or stay manual (button/CLI)?
-- `OUTREACH_DAILY_LIMIT` default (proposed 20) and per-company send cap.
-- Gmail auth preference: app-password (default, simplest) vs Gmail API OAuth.
+- **Resolved:** phone → out of v1; Apollo → paid + master key; sender → @utexas.edu with
+  OAuth fallback; NET-5 → kept but hardened.
+- **Remaining:** Apollo plan tier & monthly credit budget (sets default `--per-job` + reveal
+  policy); whether networking auto-triggers after a successful apply or stays manual;
+  cross-job send cooldown window (proposed 30 days).

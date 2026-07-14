@@ -1,7 +1,25 @@
 # NET-5 — LinkedIn browser-agent fallback
 
 **Phase:** 5 · **Size:** M · **Depends on:** NET-1 · **Status:** Todo
-**PRD:** §5 · **Tier gate:** Tier 3 (Claude CLI + Chrome + Node); opt-in
+**PRD:** §5 · **Gate:** Tier 3 (Claude CLI + Chrome + Node); opt-in, off by default
+**Revised** after review (B7, B12, minors). **Kept for v1 but hardened.**
+
+## Review corrections (v2 — must-fix)
+- **B12a — enforce read-only.** Don't rely on prompt wording. Pass `--allowedTools`
+  (read/navigate/snapshot only) + `--disallowedTools` for `browser_click`/`browser_fill_form`
+  (mirror the Gmail restriction at `launcher.py:333-342`). Read-only is **tool-enforced**.
+- **B12b — login is best-effort.** Nothing in the codebase logs into LinkedIn. Add a one-time
+  `applypilot network --linkedin-login` (opens the worker profile to log in) + a **login-state
+  precheck** that aborts cleanly before spawning. Isolate networking's Chrome user-data-dir +
+  CDP port from apply's.
+- **B7 — no `run_agent`.** The real fn is `run_job` (`:298`), apply-coupled. Write a **new**
+  thin spawner (copy only the Popen/stream-json pattern), a **Playwright-only** MCP config
+  (drop Gmail from `_make_mcp_config`), and a new JSON-array parser (not the `RESULT:` regex).
+- **B12c — enrich by `linkedin_url`** (Apollo's strongest key), not name+company. Expect misses
+  in low-coverage companies → surface email-less contacts with Send disabled.
+- **Global cap + consent.** `NETWORKING_LINKEDIN_DAILY_LIMIT` (default 3–5 companies/day),
+  persisted. One-time explicit consent naming the real stake: **possible permanent restriction
+  of your primary LinkedIn account.** Recommend a secondary account. Off by default.
 
 ## Summary
 When Apollo returns fewer than `--per-job` contacts, fall back to a LinkedIn browser

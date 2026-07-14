@@ -1,7 +1,26 @@
 # NET-4 — Gmail send automation + safeguards
 
 **Phase:** 4 · **Size:** M · **Depends on:** NET-2, NET-3 · **Status:** Todo
-**PRD:** §8, §7 · **Tier gate:** `GMAIL_ADDRESS` + `GMAIL_APP_PASSWORD`
+**PRD:** §8, §7 · **Gate:** `GMAIL_ADDRESS` + `GMAIL_APP_PASSWORD` (SMTP) / Gmail OAuth
+**Revised** after review (B9, B10, B11, minors). **Sender = jorgediez2408@utexas.edu (Workspace).**
+
+## Review corrections (v2 — must-fix)
+- **B9 — Workspace sender.** @utexas.edu is Google Workspace; admins can disable app-passwords
+  (SMTP fails as **535**). This ticket ships **SMTP + an OAuth fallback** (not deferred):
+  detect 535 → "admin may have disabled app passwords — use OAuth"; add `google-api-python-client`
+  + one-time OAuth. `doctor` does a live **AUTH-only** probe (connect+login+quit), not presence.
+  Surface the .edu-AUP caveat; personal gmail.com remains the safer alternative.
+- **B10 — atomic send.** `ThreadingHTTPServer` → two concurrent sends both pass cap+guard.
+  Claim atomically like `apply/launcher.py::acquire_job`:
+  `UPDATE contacts SET outreach_status='sending', submitted_at=<now> WHERE id=? AND submitted_at IS NULL`,
+  send only if `rowcount==1`, roll back on failure; enforce daily cap in the same txn.
+- **B11 — cross-job dedupe.** Dedupe on **normalized email** across ALL jobs (cooldown, default
+  30 days), not per-row. Surface "already contacted for another role."
+- **Message id:** SMTP returns none — generate `email.utils.make_msgid()` client-side.
+- **Status:** label **submitted** (SMTP acceptance ≠ delivery). Warn unverified sends bounce +
+  harm reputation; prefer verified-only.
+- **Gate semantics:** `verified`→1 confirm; `unverified`→2nd confirm; `none`(no address)→**disabled**.
+- **Origin check** on `/api/outreach/send` (fires irreversible email).
 
 ## Summary
 A dashboard **"Send email"** button that actually emails the contact from the user's

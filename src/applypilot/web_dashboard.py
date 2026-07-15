@@ -196,16 +196,16 @@ class NetworkRunner:
     def _run(self, job_url: str, per_job: int, use_linkedin: bool) -> None:
         note, error = "done", ""
         try:
-            from applypilot.config import require_apollo_key
+            from applypilot.config import require_contacts_provider
             from applypilot.database import get_connection
             from applypilot.networking import service
             from applypilot.networking.store import init_contacts
 
-            # Apollo gate (raises SystemExit if unusable) — convert to a task error.
+            # Provider gate (raises SystemExit if unusable) — convert to a task error.
             try:
-                require_apollo_key("networking")
+                require_contacts_provider("networking")
             except SystemExit:
-                raise RuntimeError("Apollo API key not configured (paid plan + master key)")
+                raise RuntimeError("No usable contact provider (set HUNTER_API_KEY or APOLLO_API_KEY)")
 
             conn = get_connection()
             init_contacts(conn)
@@ -572,7 +572,8 @@ def _serve_material(handler: BaseHTTPRequestHandler, raw_path: str) -> None:
 
 
 def _networking_available() -> bool:
-    return bool(os.environ.get("APOLLO_API_KEY"))
+    from applypilot.networking import providers
+    return providers.available()
 
 
 def _contact_payload(c: dict) -> dict:
@@ -950,7 +951,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     return
                 if not _networking_available():
                     _json_response(self, {"ok": False,
-                                          "message": "Set APOLLO_API_KEY (paid plan + master key) to find contacts"}, 409)
+                                          "message": "Set HUNTER_API_KEY or APOLLO_API_KEY to find contacts"}, 409)
                     return
                 ok, msg = _network.start(url, per_job, use_linkedin)
                 _json_response(self, {"ok": ok, "message": msg}, 200 if ok else 409)
@@ -1365,7 +1366,7 @@ function peopleCell(j) {
   const running = j.network_running;
   const label = running ? 'finding…' : (n ? `${n} contact${n>1?'s':''}` : 'Find contacts');
   const dis = (running || !NET_AVAIL) ? 'disabled' : '';
-  const title = NET_AVAIL ? '' : 'Set APOLLO_API_KEY to enable';
+  const title = NET_AVAIL ? '' : 'Set HUNTER_API_KEY or APOLLO_API_KEY to enable';
   let out = `<button ${dis} title="${title}" onclick="findContacts(decodeURIComponent('${encodeURIComponent(j.url)}'))">${label}</button>`;
   if (j.network_error) out += `<div class="neterr">${esc(j.network_error)}</div>`;
   return out;

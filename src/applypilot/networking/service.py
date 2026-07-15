@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 
-from applypilot.networking import apollo, derive, rank, store
+from applypilot.networking import derive, providers, rank, store
 
 log = logging.getLogger(__name__)
 
@@ -83,6 +83,7 @@ def _augment_with_linkedin(selected: list[dict], company: str | None,
         if not url or url in have_urls:
             continue
         p = dict(p)
+        p["key"] = url  # linkedin_url as the dedupe/enrich key
         p["match_reason"] = "same team"
         p["source"] = "linkedin"
         p.setdefault("company", company)
@@ -127,33 +128,25 @@ def find_contacts_for_job(
 
     titles = rank.role_to_person_titles(role)
 
-    # Precise org filter: prefer the domain; else resolve the company name to org ids
-    # (a keyword-only people search returns people matching the word, not employees).
-    org_ids = [] if domain else apollo.company_search(company) if company else []
-    candidates = apollo.search_people(
-        domains=[domain] if domain else None,
-        organization_ids=org_ids or None,
-        keywords=None if (domain or org_ids) else company,
-        titles=titles,
-        per_page=25,
-    )
+    # Query the active contact provider (Hunter or Apollo).
+    candidates = providers.search(company, domain, role, titles, per_page=25)
     if not candidates:
-        result["note"] = "no candidates from Apollo (coverage or plan/key)"
+        result["note"] = f"no candidates from {providers.active() or 'provider'} (coverage or plan/key)"
         return result
 
     selected = rank.select(candidates, role, n=per_job)
 
-    # LinkedIn fallback (opt-in): when Apollo under-covers this company, read the
-    # company People page and Apollo-enrich the found profiles by linkedin_url.
+    # LinkedIn fallback (opt-in): when the provider under-covers this company, read
+    # the company People page and merge the found profiles.
     if use_linkedin and len(selected) < per_job:
         selected = _augment_with_linkedin(selected, company, role, per_job, result)
 
     result["found"] = len(selected)
 
-    # Reveal contact info only for the selected few (credit discipline).
+    # Reveal contact info for the selected few (Hunter: no-op; Apollo: consumes credits).
     revealed: dict[str, dict] = {}
     if not dry_run:
-        revealed = apollo.bulk_enrich([c["apollo_id"] for c in selected if c.get("apollo_id")])
+        revealed = providers.enrich(selected)
         result["revealed"] = sum(1 for r in revealed.values() if r.get("email"))
 
     _profile_cache: dict = {}
@@ -169,7 +162,7 @@ def find_contacts_for_job(
 
     stored_contacts = []
     for c in selected:
-        rev = revealed.get(c.get("apollo_id"), {})
+        rev = revealed.get(c.get("key"), {})
         contact = {
             "job_url": job_url,
             "full_name": c.get("full_name"),
@@ -181,7 +174,7 @@ def find_contacts_for_job(
             "location": c.get("location"),
             "seniority": c.get("seniority"),
             "match_reason": c.get("match_reason"),
-            "source": c.get("source", "apollo"),
+            "source": c.get("source") or providers.active() or "apollo",
             "apollo_id": c.get("apollo_id"),
         }
         if not dry_run:

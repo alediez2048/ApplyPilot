@@ -247,29 +247,33 @@ def get_tier() -> int:
     return 2
 
 
-def require_apollo_key(feature: str = "networking") -> None:
-    """Exit with a clear message unless a working Apollo API key is configured.
+def require_contacts_provider(feature: str = "networking") -> None:
+    """Exit with a clear message unless a working contact provider is configured.
 
-    Networking is gated independently of the numeric tiers: it needs a PAID Apollo
-    plan + a MASTER API key. Runs a live probe so a present-but-unauthorized key fails
-    up front rather than mid-run.
+    Networking is gated independently of the numeric tiers. It needs a working
+    Hunter.io or Apollo.io key; a live probe runs so a present-but-unauthorized key
+    fails up front rather than mid-run.
     """
     from rich.console import Console
     _console = Console(stderr=True)
 
-    if not os.environ.get("APOLLO_API_KEY"):
+    from applypilot.networking import providers
+    if providers.active() is None:
         _console.print(
-            f"\n[red]'{feature}' requires an Apollo.io API key.[/red]\n"
-            "Set [bold]APOLLO_API_KEY[/bold] in ~/.applypilot/.env "
-            "(needs a PAID Apollo plan + a MASTER API key)."
+            f"\n[red]'{feature}' needs a contact provider.[/red]\n"
+            "Set [bold]HUNTER_API_KEY[/bold] (free tier works) or [bold]APOLLO_API_KEY[/bold] "
+            "(paid) in ~/.applypilot/.env."
         )
         raise SystemExit(1)
 
-    from applypilot.networking import apollo
-    ok, msg = apollo.probe()
+    ok, msg = providers.probe()
     if not ok:
-        _console.print(f"\n[red]Apollo API not usable:[/red] {msg}\n")
+        _console.print(f"\n[red]Contact provider not usable:[/red] {msg}\n")
         raise SystemExit(1)
+
+
+# Backwards-compatible alias.
+require_apollo_key = require_contacts_provider
 
 
 def check_tier(required: int, feature: str) -> None:

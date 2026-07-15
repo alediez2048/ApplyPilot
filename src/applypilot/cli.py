@@ -293,8 +293,8 @@ def network(
         console.print(f"[green]{msg}[/green]" if ok else f"[red]{msg}[/red]")
         raise typer.Exit(code=0 if ok else 1)
 
-    from applypilot.config import require_apollo_key
-    require_apollo_key("networking")
+    from applypilot.config import require_contacts_provider
+    require_contacts_provider("networking")
 
     from applypilot.database import get_connection
     from applypilot.networking import service
@@ -532,17 +532,18 @@ def doctor() -> None:
     except Exception:
         results.append(("Resume renderer", "[dim]optional[/dim]", "HTML/Chromium fallback"))
 
-    # Apollo (networking, optional) — live probe, not mere env presence
-    if os.environ.get("APOLLO_API_KEY"):
-        try:
-            from applypilot.networking import apollo
-            ok, msg = apollo.probe()
-            results.append(("Apollo API key", ok_mark if ok else fail_mark, msg))
-        except Exception:
-            results.append(("Apollo API key", warn_mark, "probe failed"))
-    else:
-        results.append(("Apollo API key", "[dim]optional[/dim]",
-                        "Set APOLLO_API_KEY for networking (paid plan + master key)"))
+    # Contact provider (networking, optional) — live probe of Hunter/Apollo
+    try:
+        from applypilot.networking import providers
+        prov = providers.active()
+        if prov:
+            ok, msg = providers.probe()
+            results.append(("Contact provider", ok_mark if ok else fail_mark, f"{prov}: {msg}"))
+        else:
+            results.append(("Contact provider", "[dim]optional[/dim]",
+                            "Set HUNTER_API_KEY (free) or APOLLO_API_KEY for networking"))
+    except Exception:
+        results.append(("Contact provider", warn_mark, "probe failed"))
 
     # LinkedIn fallback (networking, optional, opt-in)
     try:

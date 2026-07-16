@@ -221,12 +221,15 @@ def apply(
             console.print("[red]No matching job found for that URL.[/red]")
             raise typer.Exit(code=1)
         mcp_path = _profile_path.parent / ".mcp-apply-0.json"
+        from applypilot.apply.launcher import _ALLOWED_TOOLS, _DISALLOWED_TOOLS
         console.print(f"[green]Wrote prompt to:[/green] {prompt_file}")
-        console.print(f"\n[bold]Run manually:[/bold]")
+        console.print("\n[bold]Run manually:[/bold]")
         console.print(
             f"  claude --model {model} -p "
             f"--mcp-config {mcp_path} "
-            f"--permission-mode bypassPermissions < {prompt_file}"
+            f"--permission-mode bypassPermissions "
+            f"--allowedTools '{_ALLOWED_TOOLS}' "
+            f"--disallowedTools '{_DISALLOWED_TOOLS}' < {prompt_file}"
         )
         return
 

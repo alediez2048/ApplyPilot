@@ -84,6 +84,44 @@ def _make_mcp_config(cdp_port: int) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Agent tool policy (security)
+# ---------------------------------------------------------------------------
+#
+# The apply agent runs with --permission-mode bypassPermissions and navigates
+# arbitrary, attacker-controllable careers pages. A prompt-injection on such a
+# page must NOT be able to reach the machine or exfiltrate secrets. We therefore
+# hard-deny every built-in tool that could run code, touch the filesystem, or
+# make outbound requests — leaving the agent only the browser (Playwright) tools
+# it needs plus Gmail *send* (for email-only applications).
+#
+# Blast radius after this: a successful injection can drive the browser and send
+# an email, but cannot run shell commands, read ~/.applypilot secrets, write
+# files, or fetch attacker URLs.
+_DANGEROUS_BUILTINS = [
+    "Bash", "BashOutput", "KillBash", "KillShell",           # code execution
+    "Read", "Write", "Edit", "MultiEdit", "NotebookEdit",    # filesystem
+    "Glob", "Grep",                                          # filesystem search
+    "WebFetch", "WebSearch",                                 # network exfil
+    "Task", "Agent",                                         # spawning sub-agents
+]
+
+# Gmail management tools stay blocked (agent may only *send*, never read/modify).
+_GMAIL_DENY = [
+    "mcp__gmail__draft_email", "mcp__gmail__modify_email", "mcp__gmail__delete_email",
+    "mcp__gmail__download_attachment", "mcp__gmail__batch_modify_emails",
+    "mcp__gmail__batch_delete_emails", "mcp__gmail__create_label",
+    "mcp__gmail__update_label", "mcp__gmail__delete_label",
+    "mcp__gmail__get_or_create_label", "mcp__gmail__list_email_labels",
+    "mcp__gmail__create_filter", "mcp__gmail__list_filters",
+    "mcp__gmail__get_filter", "mcp__gmail__delete_filter",
+]
+
+# What the agent IS allowed to do: browser automation + Gmail send only.
+_ALLOWED_TOOLS = "mcp__playwright,mcp__gmail__send_email"
+_DISALLOWED_TOOLS = ",".join(_DANGEROUS_BUILTINS + _GMAIL_DENY)
+
+
+# ---------------------------------------------------------------------------
 # Database operations
 # ---------------------------------------------------------------------------
 
@@ -330,16 +368,11 @@ def run_job(job: dict, port: int, worker_id: int = 0,
         "--mcp-config", str(mcp_config_path),
         "--permission-mode", "bypassPermissions",
         "--no-session-persistence",
-        "--disallowedTools", (
-            "mcp__gmail__draft_email,mcp__gmail__modify_email,"
-            "mcp__gmail__delete_email,mcp__gmail__download_attachment,"
-            "mcp__gmail__batch_modify_emails,mcp__gmail__batch_delete_emails,"
-            "mcp__gmail__create_label,mcp__gmail__update_label,"
-            "mcp__gmail__delete_label,mcp__gmail__get_or_create_label,"
-            "mcp__gmail__list_email_labels,mcp__gmail__create_filter,"
-            "mcp__gmail__list_filters,mcp__gmail__get_filter,"
-            "mcp__gmail__delete_filter"
-        ),
+        # Security: restrict the agent to browser + Gmail-send only. The allow-list
+        # scopes capability; the deny-list is a hard backstop (takes precedence even
+        # under bypassPermissions) against code exec / filesystem / network tools.
+        "--allowedTools", _ALLOWED_TOOLS,
+        "--disallowedTools", _DISALLOWED_TOOLS,
         "--output-format", "stream-json",
         "--verbose", "-",
     ]

@@ -122,7 +122,10 @@ def find_contacts_for_job(
     company = derive.derive_company(job)
     domain = derive.derive_domain(job, company)
 
-    result = {"company": company, "found": 0, "revealed": 0, "contacts": [], "note": ""}
+    from applypilot.networking import connections
+    conns_at_company = connections.count_at_company(company)
+    result = {"company": company, "found": 0, "revealed": 0, "contacts": [],
+              "connections_at_company": conns_at_company, "note": ""}
 
     if not company and not domain:
         result["note"] = "could not determine employer/domain"

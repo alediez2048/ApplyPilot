@@ -27,15 +27,22 @@ def test_origin_ok_rejects_cross_origin():
     assert wd._origin_ok(_Handler({"Origin": "http://evil.com", "Host": "127.0.0.1:8765"})) is False
 
 
-def test_contact_payload_shape():
+def test_contact_payload_shape(tmp_path, monkeypatch):
+    import applypilot.database as database
+    db = tmp_path / "t.db"
+    monkeypatch.setattr(database, "DB_PATH", db)
+    database.close_connection(db)
+    database.init_db(db)  # connections.match() needs the DB (no connections imported -> no match)
+
     p = wd._contact_payload({
         "id": "c1", "full_name": "Jane", "title": "Eng", "email": "j@x.com",
         "email_status": "verified", "linkedin_url": "https://l/in/j", "match_reason": "same role",
         "outreach_subject": "Hi", "outreach_message": "Body", "outreach_status": "drafted",
-    })
+    }, "Acme")
     assert p["id"] == "c1" and p["full_name"] == "Jane" and p["email"] == "j@x.com"
     assert p["outreach_subject"] == "Hi" and p["outreach_message"] == "Body"
     assert p["outreach_status"] == "drafted"
+    assert p["is_connection"] is False  # none imported
     # missing fields default cleanly
     empty = wd._contact_payload({})
     assert empty["email_status"] == "none" and empty["outreach_status"] == "none"

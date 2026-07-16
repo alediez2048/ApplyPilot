@@ -582,7 +582,9 @@ def _gmail_available() -> bool:
     return gmail_send.transport() is not None
 
 
-def _contact_payload(c: dict) -> dict:
+def _contact_payload(c: dict, company: str | None = None) -> dict:
+    from applypilot.networking import connections
+    conn_rec = connections.match(c.get("full_name"), company)
     return {
         "id": c.get("id") or "",
         "full_name": c.get("full_name") or "",
@@ -595,6 +597,10 @@ def _contact_payload(c: dict) -> dict:
         "outreach_message": c.get("outreach_message") or "",
         "linkedin_message": c.get("linkedin_message") or "",
         "outreach_status": c.get("outreach_status") or "none",
+        # Live connection signal (recomputed each load so re-imports reflect instantly).
+        "is_connection": bool(conn_rec),
+        "connection_at_company": bool(conn_rec and conn_rec.get("company_match")),
+        "connection_url": (conn_rec or {}).get("url", ""),
     }
 
 
@@ -675,13 +681,17 @@ def _status_payload() -> dict:
             *_material_entries("Cover Letter", row["cover_letter_path"]),
         ]
         job_row = dict(zip(row.keys(), row))
-        contacts = [_contact_payload(c) for c in get_contacts_for_job(row["url"], conn)]
+        contact_company = _derive.derive_company(job_row) or row["site"] or ""
+        contacts = [_contact_payload(c, contact_company)
+                    for c in get_contacts_for_job(row["url"], conn)]
+        from applypilot.networking import connections as _conns
         net_task = _net_tasks.get(row["url"], {})
         jobs.append({
             "url": row["url"],
             "title": row["title"] or "Untitled",
             "company": row["site"] or "",
-            "contact_company": _derive.derive_company(job_row) or row["site"] or "",
+            "contact_company": contact_company,
+            "connections_at_company": _conns.count_at_company(contact_company),
             "salary": row["salary"] or "",
             "location": row["location"] or "",
             "description": desc[:900],
@@ -1207,6 +1217,9 @@ _INDEX_HTML = r"""<!doctype html>
   .cname .ctitle { font-weight:400; color:#55707f; }
   .cmeta { font-size:12px; color:#44576a; margin-top:1px; }
   .chip { display:inline-block; margin-left:6px; padding:0 7px; border-radius:9px; background:#e6eef6; color:#2b5478; font-size:10px; }
+  .chip.conn { background:#e6f7ef; color:#137a4b; font-weight:600; }
+  .contact.is-conn { border-left:3px solid #2fae6b; background:#f4fbf7; padding-left:6px; border-radius:0 4px 4px 0; }
+  .conn-hint { margin-left:10px; font-size:11px; color:#137a4b; font-weight:600; text-transform:none; letter-spacing:0; }
   .ebadge { display:inline-block; padding:0 6px; border-radius:8px; font-size:10px; }
   .ebadge.ok { background:#e6f7ef; color:#137a4b; }
   .ebadge.warn { background:#fff5e6; color:#9a6b00; }
@@ -1449,9 +1462,10 @@ async function sendEmail(cid, verified, btn) {
 function contactsRow(j, ncols) {
   if (!(j.contacts && j.contacts.length)) return '';
   const rows = j.contacts.map(c => `
-    <div class="contact">
+    <div class="contact ${c.is_connection ? 'is-conn' : ''}">
       <div class="cname">${esc(c.full_name)} <span class="ctitle">— ${esc(c.title)}</span>
-        ${c.match_reason ? `<span class="chip">${esc(c.match_reason)}</span>` : ''}</div>
+        ${c.match_reason ? `<span class="chip">${esc(c.match_reason)}</span>` : ''}
+        ${c.is_connection ? `<span class="chip conn" title="${c.connection_at_company ? 'A 1st-degree connection currently at this company' : 'You are already connected to this person'}">🤝 ${c.connection_at_company ? 'Connection here' : 'Connection'}</span>` : ''}</div>
       <div class="cmeta">
         ${c.email ? `✉ <a href="mailto:${esc(c.email)}">${esc(c.email)}</a>` : '✉ —'} ${emailBadge(c.email_status)}
         ${c.linkedin_url ? ` · 🔗 <a href="${esc(c.linkedin_url)}" target="_blank">LinkedIn</a>` : ''}
@@ -1460,7 +1474,7 @@ function contactsRow(j, ncols) {
       ${draftBlock(c)}
     </div>`).join('');
   return `<tr class="contacts-row"><td colspan="${ncols}"><div class="contacts-wrap">
-    <strong>People at ${esc(j.contact_company)}</strong>${rows}</div></td></tr>`;
+    <strong>People at ${esc(j.contact_company)}</strong>${j.connections_at_company ? `<span class="conn-hint">🤝 you have ${j.connections_at_company} connection${j.connections_at_company>1?'s':''} here</span>` : ''}${rows}</div></td></tr>`;
 }
 async function saveDraft(cid, btn) {
   const d = btn.closest('.draft');

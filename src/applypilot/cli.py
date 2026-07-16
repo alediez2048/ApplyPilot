@@ -267,6 +267,7 @@ def network(
     no_linkedin: bool = typer.Option(False, "--no-linkedin", help="Apollo only (skip LinkedIn fallback)."),
     linkedin_login: bool = typer.Option(False, "--linkedin-login", help="One-time: open Chrome to log into LinkedIn (for the fallback)."),
     gmail_connect: bool = typer.Option(False, "--gmail-connect", help="One-time: connect Gmail via OAuth for sending outreach."),
+    import_connections: Optional[str] = typer.Option(None, "--import-connections", help="Import your LinkedIn Connections.csv (to flag existing connections)."),
     draft: bool = typer.Option(True, "--draft/--no-draft", help="Draft outreach emails for found contacts."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Search + rank only; no Apollo reveal (no credits)."),
 ) -> None:
@@ -286,6 +287,19 @@ def network(
         console.print("[cyan]Opening Chrome — log into LinkedIn, then close the window.[/cyan]")
         linkedin_agent.open_login_browser()
         console.print("[green]Done. Set NETWORKING_LINKEDIN=1 to enable the fallback.[/green]")
+        return
+
+    # Import your LinkedIn connections export (to flag warm contacts).
+    if import_connections:
+        from pathlib import Path as _P
+        from applypilot.networking import connections
+        path = _P(import_connections).expanduser()
+        if not path.exists():
+            console.print(f"[red]File not found:[/red] {path}")
+            raise typer.Exit(code=1)
+        n = connections.import_csv(str(path))
+        console.print(f"[green]Imported {n} LinkedIn connection(s).[/green] "
+                      "Found contacts who are connections will be flagged.")
         return
 
     # One-time Gmail OAuth connect for outreach sending.
@@ -547,6 +561,20 @@ def doctor() -> None:
                             "Set HUNTER_API_KEY (free) or APOLLO_API_KEY for networking"))
     except Exception:
         results.append(("Contact provider", warn_mark, "probe failed"))
+
+    # LinkedIn connections import (networking, optional)
+    try:
+        from applypilot.database import init_db as _init
+        from applypilot.networking import connections as _conns
+        _init()
+        n = _conns.imported_count()
+        if n:
+            results.append(("LinkedIn connections", ok_mark, f"{n} imported (warm-contact flagging on)"))
+        else:
+            results.append(("LinkedIn connections", "[dim]optional[/dim]",
+                            "import with `network --import-connections Connections.csv`"))
+    except Exception:
+        results.append(("LinkedIn connections", "[dim]optional[/dim]", "not imported"))
 
     # LinkedIn fallback (networking, optional, opt-in)
     try:

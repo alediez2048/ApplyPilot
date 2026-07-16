@@ -593,6 +593,7 @@ def _contact_payload(c: dict) -> dict:
         "match_reason": c.get("match_reason") or "",
         "outreach_subject": c.get("outreach_subject") or "",
         "outreach_message": c.get("outreach_message") or "",
+        "linkedin_message": c.get("linkedin_message") or "",
         "outreach_status": c.get("outreach_status") or "none",
     }
 
@@ -861,16 +862,20 @@ def _save_or_regen_draft(data: dict) -> dict:
         from applypilot.networking import service
         draft = service.draft_for_contact(cid)
         if not draft:
-            return {"ok": False, "message": "regeneration failed (LLM/Apollo)"}
-        return {"ok": True, "subject": draft["subject"], "body": draft["body"]}
+            return {"ok": False, "message": "regeneration failed (LLM/provider)"}
+        return {"ok": True, "subject": draft["subject"], "body": draft["body"],
+                "linkedin": draft.get("linkedin_note", "")}
 
     # Save an edit
-    upsert_contact({
+    fields = {
         "id": cid, "job_url": row["job_url"],
         "outreach_subject": data.get("subject", ""),
         "outreach_message": data.get("body", ""),
         "outreach_status": "drafted",
-    })
+    }
+    if "linkedin" in data:
+        fields["linkedin_message"] = data.get("linkedin", "")
+    upsert_contact(fields)
     return {"ok": True, "message": "saved"}
 
 
@@ -1213,6 +1218,10 @@ _INDEX_HTML = r"""<!doctype html>
   .draft .dbtns button { font-size:11px; padding:2px 9px; }
   .draft .dbtns button.send { background:linear-gradient(180deg,#eef7ff,#dcefff); border-color:#a9cdf0; color:#1a5aa0; font-weight:600; }
   .draft .sent-tag { font-size:11px; color:#137a4b; font-weight:600; align-self:center; }
+  .draft .d-label { font-size:11px; font-weight:600; color:#55707f; margin:6px 0 2px; text-transform:uppercase; letter-spacing:.4px; }
+  .draft .d-count { font-weight:400; color:#8a97a2; text-transform:none; letter-spacing:0; }
+  .draft .d-count.over { color:#c0392b; font-weight:700; }
+  .draft .d-linkedin { width:100%; font-size:12px; padding:5px 6px; border:1px solid #d7e2ec; border-radius:5px; font-family:inherit; resize:vertical; }
   .badge {
     display:inline-block;
     padding:3px 8px;
@@ -1388,16 +1397,44 @@ function draftBlock(c) {
   if (sent) sendBtn = `<span class="sent-tag">✓ submitted</span>`;
   else if (!GMAIL_AVAIL) sendBtn = `<button disabled title="Set GMAIL_ADDRESS + GMAIL_APP_PASSWORD">Send email</button>`;
   else sendBtn = `<button class="send" onclick="sendEmail('${esc(c.id)}', ${c.email_status==='verified'}, this)">Send email</button>`;
+  const note = esc(c.linkedin_message);
+  const noteLen = (c.linkedin_message || '').length;
+  const overClass = noteLen > 300 ? 'over' : '';
   return `<div class="draft" data-cid="${esc(c.id)}">
+      <div class="d-label">Email</div>
       <input class="d-subj" value="${subj}" placeholder="Subject…" ${sent?'disabled':''} />
       <textarea class="d-body" rows="4" ${sent?'disabled':''} placeholder="${has ? '' : 'No draft yet — click Regenerate'}">${body}</textarea>
       <div class="dbtns">
         ${sent?'':`<button onclick="saveDraft('${esc(c.id)}', this)">Save</button>
         <button onclick="regenDraft('${esc(c.id)}', this)">Regenerate</button>`}
-        <button onclick="copyDraft(this)">Copy</button>
+        <button onclick="copyDraft(this)">Copy email</button>
         ${sendBtn}
       </div>
+      <div class="d-label">LinkedIn note <span class="d-count ${overClass}"><span class="lcount">${noteLen}</span>/300</span></div>
+      <textarea class="d-linkedin" rows="3" oninput="updCount(this)" placeholder="Short connection note (≤300 chars)">${note}</textarea>
+      <div class="dbtns">
+        <button onclick="saveLinkedin('${esc(c.id)}', this)">Save note</button>
+        <button onclick="copyLinkedin(this)">Copy note</button>
+      </div>
     </div>`;
+}
+function updCount(ta) {
+  const wrap = ta.closest('.draft');
+  const el = wrap.querySelector('.lcount');
+  const badge = wrap.querySelector('.d-count');
+  if (el) { el.textContent = ta.value.length; badge.classList.toggle('over', ta.value.length > 300); }
+}
+async function saveLinkedin(cid, btn) {
+  const d = btn.closest('.draft');
+  await post('/api/outreach', {contact_id: cid,
+    subject: d.querySelector('.d-subj').value, body: d.querySelector('.d-body').value,
+    linkedin: d.querySelector('.d-linkedin').value});
+  btn.textContent = 'Saved ✓'; setTimeout(()=>btn.textContent='Save note', 1200);
+}
+function copyLinkedin(btn) {
+  const d = btn.closest('.draft');
+  navigator.clipboard.writeText(d.querySelector('.d-linkedin').value);
+  btn.textContent = 'Copied ✓'; setTimeout(()=>btn.textContent='Copy note', 1200);
 }
 async function sendEmail(cid, verified, btn) {
   const first = verified
@@ -1427,15 +1464,21 @@ function contactsRow(j, ncols) {
 }
 async function saveDraft(cid, btn) {
   const d = btn.closest('.draft');
-  await post('/api/outreach', {contact_id: cid, subject: d.querySelector('.d-subj').value, body: d.querySelector('.d-body').value});
+  await post('/api/outreach', {contact_id: cid, subject: d.querySelector('.d-subj').value,
+    body: d.querySelector('.d-body').value, linkedin: d.querySelector('.d-linkedin').value});
   btn.textContent = 'Saved ✓'; setTimeout(()=>btn.textContent='Save', 1200);
 }
 async function regenDraft(cid, btn) {
   btn.disabled = true; btn.textContent = 'Drafting…';
   const r = await post('/api/outreach', {contact_id: cid, regenerate: true});
   btn.disabled = false; btn.textContent = 'Regenerate';
-  if (r.ok) { const d = btn.closest('.draft'); d.querySelector('.d-subj').value = r.subject; d.querySelector('.d-body').value = r.body; }
-  else alert(r.message || 'Failed');
+  if (r.ok) {
+    const d = btn.closest('.draft');
+    d.querySelector('.d-subj').value = r.subject;
+    d.querySelector('.d-body').value = r.body;
+    const ln = d.querySelector('.d-linkedin');
+    if (ln && r.linkedin != null) { ln.value = r.linkedin; updCount(ln); }
+  } else alert(r.message || 'Failed');
 }
 function copyDraft(btn) {
   const d = btn.closest('.draft');

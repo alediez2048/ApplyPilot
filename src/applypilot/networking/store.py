@@ -32,6 +32,7 @@ _CONTACT_COLUMNS: dict[str, str] = {
     "apollo_id": "TEXT",
     "outreach_subject": "TEXT",
     "outreach_message": "TEXT",
+    "linkedin_message": "TEXT",   # short LinkedIn connection note (<= 300 chars)
     "outreach_status": "TEXT DEFAULT 'none'",  # none|drafted|sending|submitted|failed
     "outreach_channel": "TEXT",
     "submitted_at": "TEXT",

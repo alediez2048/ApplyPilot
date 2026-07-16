@@ -26,6 +26,7 @@ def _draft_and_store(profile: dict, job: dict, contact: dict) -> None:
             "full_name": contact.get("full_name"),
             "outreach_subject": draft["subject"],
             "outreach_message": draft["body"],
+            "linkedin_message": draft.get("linkedin_note", ""),
             "outreach_status": "drafted",
             "outreach_channel": "email",
         })
@@ -63,6 +64,7 @@ def draft_for_contact(contact_id: str) -> dict | None:
         "id": contact_id, "job_url": contact["job_url"],
         "linkedin_url": contact.get("linkedin_url"), "full_name": contact.get("full_name"),
         "outreach_subject": draft["subject"], "outreach_message": draft["body"],
+        "linkedin_message": draft.get("linkedin_note", ""),
         "outreach_status": "drafted", "outreach_channel": "email",
     })
     return draft

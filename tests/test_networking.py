@@ -152,7 +152,8 @@ def test_draft_email_uses_llm_and_falls_back_subject(monkeypatch):
 
     class _C:
         def chat(self, msgs, **k):
-            return '{"subject": "", "body": "Hi Jane, I applied for the AI role. — Jorge"}'
+            return ('{"subject": "", "body": "Hi Jane, I applied for the AI role. Jorge",'
+                    ' "linkedin_note": "Hi Jane, saw the AI role — would love to connect. Jorge"}')
     monkeypatch.setattr(outreach, "get_client", lambda: _C())
 
     d = outreach.draft_email(
@@ -163,6 +164,17 @@ def test_draft_email_uses_llm_and_falls_back_subject(monkeypatch):
     )
     assert "Affirm" in d["subject"] or "AI Solutions Engineer" in d["subject"]  # fallback subject
     assert d["body"].startswith("Hi Jane")
+    assert d["linkedin_note"] and len(d["linkedin_note"]) <= 300
+
+
+def test_linkedin_note_capped_at_300(monkeypatch):
+    from applypilot.networking import outreach
+
+    long = "word " * 100  # 500 chars
+    monkeypatch.setattr(outreach, "get_client", lambda: type("C", (), {
+        "chat": lambda self, m, **k: '{"subject":"s","body":"b","linkedin_note":"' + long + '"}'})())
+    d = outreach.draft_email({}, {"title": "X"}, {"full_name": "Y"})
+    assert len(d["linkedin_note"]) <= 300 and d["linkedin_note"].endswith("…")
 
 
 def test_draft_email_empty_body_raises(monkeypatch):

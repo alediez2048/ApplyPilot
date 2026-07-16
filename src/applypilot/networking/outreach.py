@@ -14,19 +14,29 @@ from applypilot.scoring.validator import sanitize_text
 
 log = logging.getLogger(__name__)
 
-_SYSTEM = """You write short, genuine networking emails for a job seeker reaching out to
-someone at a company they just applied to. Goal: a brief, human message that could start a
+_LINKEDIN_LIMIT = 300
+
+_SYSTEM = """You write short, genuine networking messages for a job seeker reaching out to
+someone at a company they just applied to. Goal: brief, human messages that could start a
 conversation — NOT a hard sell.
 
-Rules:
-- 3–4 sentences max. Plain, direct voice. No buzzwords, no "I hope this finds you well".
-- Name the SPECIFIC role the sender applied to and the company.
-- One concrete, relevant point about the sender (from their profile) — never invent facts.
-- A soft ask: a brief chat, or a question about the team/role.
-- Sign with the sender's first name only. No signature block, no links.
-- Subject: specific and low-key (e.g. "Question about the <role> role").
+Produce TWO things:
 
-Return ONLY a JSON object: {"subject": "...", "body": "..."}"""
+1. An EMAIL (subject + body):
+   - 3–4 sentences max. Plain, direct voice. No buzzwords, no "I hope this finds you well".
+   - Name the SPECIFIC role the sender applied to and the company.
+   - One concrete, relevant point about the sender (from their profile) — never invent facts.
+   - A soft ask: a brief chat, or a question about the team/role.
+   - Sign with the sender's first name only. No signature block, no links.
+   - Subject: specific and low-key (e.g. "Question about the <role> role").
+
+2. A LINKEDIN connection note (linkedin_note):
+   - MUST be 300 characters or fewer (hard limit — count carefully, aim for ~250).
+   - 1–2 sentences. Warmer/shorter than the email; it's a connection request note.
+   - Mention the role + a one-phrase hook, and that you'd like to connect.
+   - Sign with the first name. No links.
+
+Return ONLY a JSON object: {"subject": "...", "body": "...", "linkedin_note": "..."}"""
 
 
 def _sender_name(profile: dict) -> str:
@@ -71,8 +81,20 @@ def draft_email(profile: dict, job: dict, contact: dict) -> dict:
     data = extract_json(raw)
     subject = sanitize_text(str(data.get("subject", ""))).strip()
     body = sanitize_text(str(data.get("body", ""))).strip()
+    note = sanitize_text(str(data.get("linkedin_note", ""))).strip()
     if not subject:
         subject = f"Question about the {role} role"
     if not body:
         raise ValueError("empty outreach body")
-    return {"subject": subject, "body": body}
+    note = _cap_linkedin(note)
+    return {"subject": subject, "body": body, "linkedin_note": note}
+
+
+def _cap_linkedin(note: str) -> str:
+    """Enforce LinkedIn's 300-char note limit (inclusive), trimming at a word boundary."""
+    if len(note) <= _LINKEDIN_LIMIT:
+        return note
+    cut = note[:_LINKEDIN_LIMIT - 1]  # leave room for the ellipsis
+    if " " in cut:
+        cut = cut[:cut.rfind(" ")]
+    return cut.rstrip(" ,;:-") + "…"

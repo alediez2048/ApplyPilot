@@ -49,8 +49,17 @@ def transport() -> str | None:
 
 
 def _from_address() -> str:
-    """The sending address — GMAIL_ADDRESS, else the OAuth account isn't known here."""
-    return os.environ.get("GMAIL_ADDRESS", "")
+    """The address recipients see in the From line.
+
+    OUTREACH_FROM_ADDRESS wins (lets you send from a different verified alias, e.g.
+    a .edu, while authenticating as another Gmail account). Falls back to
+    GMAIL_ADDRESS, then the connected OAuth account.
+
+    NOTE: Gmail only honors a From that differs from the authenticated account if
+    it is a *verified* "Send mail as" alias in that account — otherwise Gmail
+    rewrites it. Verify the alias in Gmail settings before relying on this.
+    """
+    return os.environ.get("OUTREACH_FROM_ADDRESS", "") or os.environ.get("GMAIL_ADDRESS", "")
 
 
 def configured() -> bool:

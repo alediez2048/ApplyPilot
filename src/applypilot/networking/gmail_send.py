@@ -31,7 +31,6 @@ _SMTP_PORT = 465
 _DAILY_LIMIT = int(os.environ.get("OUTREACH_DAILY_LIMIT", "20") or "20")
 _COOLDOWN_DAYS = int(os.environ.get("OUTREACH_COOLDOWN_DAYS", "30") or "30")
 
-_FOOTER = "\n\n—\nSent via ApplyPilot on my own behalf. Reply here to reach me directly."
 
 
 def _creds() -> tuple[str, str]:
@@ -79,7 +78,7 @@ def can_send(contact: dict, confirm_unverified: bool = False) -> tuple[bool, str
 
 
 def _smtp_send(to_addr: str, subject: str, body: str, message_id: str) -> None:
-    """Send one email over SMTP_SSL. `body` is final (footer already appended)."""
+    """Send one email over SMTP_SSL. `body` is sent verbatim."""
     addr, pw = _creds()
     from_name = os.environ.get("OUTREACH_FROM_NAME", "")
     msg = EmailMessage()
@@ -125,7 +124,7 @@ def send_outreach(contact_id: str, confirm_unverified: bool = False,
 
     from_name = os.environ.get("OUTREACH_FROM_NAME", "")
     mode = transport()
-    body_out = body + _FOOTER
+    body_out = body  # send exactly as drafted/edited (no appended footer)
     try:
         if mode == "oauth":
             from applypilot.networking import gmail_oauth

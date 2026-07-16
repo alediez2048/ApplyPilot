@@ -576,6 +576,12 @@ def _networking_available() -> bool:
     return providers.available()
 
 
+def _gmail_available() -> bool:
+    """True if any Gmail send transport (OAuth or SMTP app-password) is ready."""
+    from applypilot.networking import gmail_send
+    return gmail_send.transport() is not None
+
+
 def _contact_payload(c: dict) -> dict:
     return {
         "id": c.get("id") or "",
@@ -711,7 +717,7 @@ def _status_payload() -> dict:
         "claude_log": claude_log,
         "app_dir": str(config.APP_DIR),
         "networking_available": _networking_available(),
-        "gmail_available": bool(os.environ.get("GMAIL_ADDRESS") and os.environ.get("GMAIL_APP_PASSWORD")),
+        "gmail_available": _gmail_available(),
     }
 
 

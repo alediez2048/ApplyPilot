@@ -141,3 +141,102 @@ applypilot dashboard --serve    # interactive local operator dashboard
 - CI: `.github/workflows/ci.yml`, publish: `publish.yml`.
 - See `CONTRIBUTING.md`, `CHANGELOG.md`.
 ```
+
+---
+
+# Session developments (current state)
+
+Everything below was built on top of the original index above. All committed to
+`main` and pushed to `github.com/alediez2048/ApplyPilot`. **Nothing sensitive is in
+git** — all secrets/config/DB live in `~/.applypilot/` (outside the repo).
+
+## 1. Resume/cover-letter rendering — React-PDF (replaced the old HTML/Chromium path)
+
+- **`src/applypilot/resume_renderer/`** (Node, no build step): headless `@react-pdf/renderer`
+  templates — resume (`document.mjs` + `styles.mjs` theme + `onePage.mjs` density fitter) and
+  cover letter (`cover.mjs`). Driven by `render.mjs` (`node render.mjs <request.json> <out.pdf>`).
+  `node_modules` git-ignored, `npm install`ed at runtime into `~/.applypilot/resume_renderer_runtime/`.
+- **`scoring/resume_render.py`** maps tailor JSON + profile → RenderRequest and shells out to Node.
+- **`scoring/pdf.py`** prefers React-PDF; falls back to the old Chromium HTML template if Node absent.
+  The tailor stage now persists `*_DATA.json` (structured) so the renderer skips the lossy text re-parse.
+- **Theme = the user's real reference resume** (`~/Downloads/Technical SEO Manager Resume-2.pdf`):
+  Times New Roman, bold centered name, blue "–"-separated contact links, no rules, small dense fonts,
+  1" margins. Cover letter shares the résumé header exactly. Both verified 1-page on real data.
+
+## 2. Pipeline hardening
+
+- **ATS API enrichment** — `enrichment/ats.py`: Tier-0 fetch of full JD via Greenhouse/Lever/Ashby
+  public APIs before any browser scrape (fixed the Affirm greenhouse URL that returned "no data").
+- **Multi-provider LLM** — `llm.py` rewritten as round-robin + failover over OPENAI/GEMINI/
+  ANTHROPIC/LLM_URL. `LLM_PROVIDER_ORDER` overrides. Claude via Anthropic OpenAI-compat endpoint
+  (default `claude-haiku-4-5`). Fixes single-provider 429 stalls.
+
+## 3. Networking & outreach epic (NET-1..5) — LIVE
+
+New subsystem **`src/applypilot/networking/`** + a `contacts` table (own migration in `store.py`,
+NOT `_ALL_COLUMNS`). Full cycle: **find people → show in dashboard → draft email + LinkedIn note → send**.
+
+- **Contact discovery** — `providers.py` registry picks **Hunter.io** (preferred, free-tier API) or
+  Apollo. `hunter.py` Domain Search returns people + verified emails + titles + LinkedIn in one call.
+  `apollo.py` kept (needs PAID plan — free tier 403s; `probe()` is honest about it). `derive.py`
+  recovers the real employer/domain (pipeline stores job-board name in `site`, not the company).
+  `rank.py` picks 3–5 (peers + a recruiter/hiring contact). Gated by `require_contacts_provider`.
+- **Dashboard** (`web_dashboard.py`) — "People at {company}" panel; "Find contacts" button →
+  `NetworkRunner` keyed background tasks (by job_url); Origin/CSRF guard on state-changing POSTs.
+- **Outreach drafting** — `outreach.py`: one LLM call → email {subject, body} **+** a LinkedIn note
+  (≤300 chars, hard-capped). Editable in dashboard (Save/Regenerate/Copy per channel).
+- **Gmail send** — `gmail_send.py` (transport = OAuth preferred, else SMTP) with safeguards: atomic
+  claim (no double-send), verified-email gate, daily cap, cross-job dedupe, dry-run. `gmail_oauth.py`
+  = self-contained send-only OAuth (no third party). Footer removed — sends verbatim.
+  `OUTREACH_FROM_ADDRESS` can override the From (unused; defaults to connected account).
+- **LinkedIn read-only fallback** — `linkedin_agent.py` (NET-5): opt-in, off by default, tool-enforced
+  read-only, consent gate, daily cap. Augments Apollo/Hunter when coverage is thin. Does NOT send.
+- **LinkedIn connections** — `connections.py`: import LinkedIn's Connections.csv
+  (`network --import-connections`), match found contacts → green "🤝 Connection / Connection here"
+  badge + "you have N connections here" hint. Offline, no scraping. Live-computed per dashboard load.
+
+## 4. Security fix
+
+- The autonomous **apply agent is now tool-scoped** (`apply/launcher.py`): `--allowedTools
+  mcp__playwright,mcp__gmail__send_email` + a hard `--disallowedTools` deny-list (Bash/Read/Write/
+  WebFetch/etc.). Blast radius of a prompt-injection on a malicious careers page dropped from
+  "arbitrary code exec + secret exfiltration" to "drive the browser / send an email."
+
+## 5. LinkedIn DM auto-send — PRD written, **NOT built (verdict: don't build for v1)**
+
+- `docs/linkedin-dm-prd.md` + `docs/tickets/LDM-1..4`: plan to drive the external **agent-browser**
+  binary (vercel-labs, installed at `~/.local/bin/agent-browser` v0.27.0) to send drafted LinkedIn
+  DMs from a "Send DM" button. **Architecture decision: keep repos SEPARATE** — ApplyPilot would
+  drive the installed agent-browser binary as a subprocess (like it drives claude/npx/Chrome). No merge.
+- **Adversarial review verdict: NOT YET — keep manual copy-paste as v1.** Verified blockers:
+  (B1) `agent-browser mcp` doesn't exist on the installed 0.27.0 (only the local 0.32.1 build has it;
+  `chat` needs an `AI_GATEWAY_API_KEY`); (B2) the "reuse `--linkedin-login`" plan logs into the wrong
+  browser; (B3) tickets let a live DM fire before the consent gate exists. Plus: LinkedIn's composer
+  is `contenteditable` (naive fill fails), no success oracle, DM is async (not a synchronous email twin).
+- **Account-risk call:** do NOT automate on the primary account (permanent-ban risk); secondary +
+  existing-connections-only + dry-run-first if ever pursued.
+- **Recommended v1 = manual:** the dashboard already has the drafted note + Copy button; user pastes
+  into LinkedIn themselves (zero risk). A one-click "Open LinkedIn + copy note" deep-link is the safe polish.
+
+## Current environment state (the user's machine)
+
+- **Contacts: live via Hunter.io free tier.** Apollo key present but free plan (no API) — Hunter preferred.
+- **Gmail: connected via OAuth**, sends from **jorgealejandrodiezm@gmail.com** (personal, chosen over
+  @utexas.edu to avoid .edu cold-email risk). Self-test email delivered successfully.
+- **899 real LinkedIn connections imported** (none at Affirm; 2 at Visa).
+- **Real jobs in DB:** Affirm (applied, 5 contacts found + drafted) and Visa. The `~/applypilot-local`
+  dir is an older TEST copy (690 jobs) — don't confuse it with real `~/.applypilot`.
+- **Dashboard:** `.venv/bin/applypilot dashboard --serve` → http://localhost:8765. Restart it after
+  code changes (a running server won't pick up edits). Hard-refresh the browser (Cmd+Shift+R) after
+  frontend changes. Header bar shows the data dir — confirm it's `~/.applypilot` (real).
+
+## Dev workflow notes (important)
+
+- Run via **`.venv/bin/applypilot ...`** (or `PYTHONPATH=src .venv/bin/python`). The editable install
+  is flaky; after source edits run **`.venv/bin/python -m pip install ".[gmail]" --quiet`** to refresh
+  the installed console script, then restart the dashboard.
+- **Tests:** `PYTHONPATH=src .venv/bin/python -m pytest tests/ -q` (use an isolated `APPLYPILOT_DIR`).
+  ~83 passing. ruff line-length 120.
+- **Gmail optional dep:** `pip install ".[gmail]"` (google-api-python-client, google-auth-oauthlib).
+- **Big decisions get an adversarial multi-agent review first** (Workflow) — it caught 13 real issues
+  on the networking PRD and the agent-browser blocker on the DM PRD. Worth it before building risky things.

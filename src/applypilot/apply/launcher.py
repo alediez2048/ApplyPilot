@@ -25,7 +25,7 @@ from rich.live import Live
 
 from applypilot import config
 from applypilot.database import get_connection
-from applypilot.apply import chrome, dashboard, prompt as prompt_mod
+from applypilot.apply import prompt as prompt_mod
 from applypilot.apply.chrome import (
     launch_chrome, cleanup_worker, kill_all_chrome,
     reset_worker_dir, cleanup_on_exit, _kill_process_tree,
@@ -164,7 +164,7 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
                 params.extend(blocked_sites)
             url_clauses = ""
             if blocked_patterns:
-                url_clauses = " ".join(f"AND url NOT LIKE ?" for _ in blocked_patterns)
+                url_clauses = " ".join("AND url NOT LIKE ?" for _ in blocked_patterns)
                 params.extend(blocked_patterns)
             row = conn.execute(f"""
                 SELECT url, title, site, application_url, tailored_resume_path,
@@ -342,6 +342,11 @@ def run_job(job: dict, port: int, worker_id: int = 0,
         'applied', 'expired', 'captcha', 'login_issue',
         'failed:reason', or 'skipped'.
     """
+    # Reset the worker dir FIRST — build_prompt stages the resume PDF into it, and the
+    # agent runs with cwd=worker_dir (Playwright MCP only uploads files from under cwd).
+    # Resetting after staging would wipe the resume (file_access_denied on upload).
+    worker_dir = reset_worker_dir(worker_id)
+
     # Read tailored resume text
     resume_path = job.get("tailored_resume_path")
     txt_path = Path(resume_path).with_suffix(".txt") if resume_path else None
@@ -349,11 +354,12 @@ def run_job(job: dict, port: int, worker_id: int = 0,
     if txt_path and txt_path.exists():
         resume_text = txt_path.read_text(encoding="utf-8")
 
-    # Build the prompt
+    # Build the prompt (stages the resume PDF into worker_dir)
     agent_prompt = prompt_mod.build_prompt(
         job=job,
         tailored_resume=resume_text,
         dry_run=dry_run,
+        worker_id=worker_id,
     )
 
     # Write per-worker MCP config
@@ -366,6 +372,11 @@ def run_job(job: dict, port: int, worker_id: int = 0,
         "--model", model,
         "-p",
         "--mcp-config", str(mcp_config_path),
+        # Use ONLY ApplyPilot's MCP servers (Playwright→real Chrome + Gmail-send).
+        # Without this, Claude Code merges the user's GLOBAL MCP servers — e.g. a
+        # globally-registered agent-browser (bundled Chromium) — which hijacks the
+        # browser and gets fingerprint-blocked (AMD's 403). Also tightens security.
+        "--strict-mcp-config",
         "--permission-mode", "bypassPermissions",
         "--no-session-persistence",
         # Security: restrict the agent to browser + Gmail-send only. The allow-list
@@ -380,8 +391,6 @@ def run_job(job: dict, port: int, worker_id: int = 0,
     env = os.environ.copy()
     env.pop("CLAUDECODE", None)
     env.pop("CLAUDE_CODE_ENTRYPOINT", None)
-
-    worker_dir = reset_worker_dir(worker_id)
 
     update_state(worker_id, status="applying", job_title=job["title"],
                  company=job.get("site", ""), score=job.get("fit_score", 0),
@@ -498,6 +507,20 @@ def run_job(job: dict, port: int, worker_id: int = 0,
 
         def _clean_reason(s: str) -> str:
             return re.sub(r'[*`"]+$', '', s).strip()
+
+        # Dry-run accounting comes first. A dry run must NEVER be recorded as 'applied'.
+        if dry_run:
+            if re.search(r"RESULT:\s*DRYRUN\b", output, re.IGNORECASE):
+                add_event(f"[W{worker_id}] DRY-RUN OK ({elapsed}s): {job['title'][:30]}")
+                update_state(worker_id, status="dryrun", last_action=f"DRY-RUN ok ({elapsed}s)")
+                return "dryrun", duration_ms
+            if re.search(r"RESULT:\s*APPLIED\b", output, re.IGNORECASE):
+                # The agent SUBMITTED during a dry run — a safety violation. Surface it
+                # loudly and do NOT mark the job applied on our side.
+                add_event(f"[W{worker_id}] ⚠ DRY-RUN VIOLATION: agent submitted! ({elapsed}s)")
+                update_state(worker_id, status="failed",
+                             last_action=f"DRY-RUN VIOLATION: submitted ({elapsed}s)")
+                return "failed:dryrun_violation_agent_submitted", duration_ms
 
         for result_status in ["APPLIED", "EXPIRED", "CAPTCHA", "LOGIN_ISSUE"]:
             if re.search(rf"RESULT:\s*{result_status}\b", output, re.IGNORECASE):

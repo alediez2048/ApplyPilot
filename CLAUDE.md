@@ -202,21 +202,42 @@ NOT `_ALL_COLUMNS`). Full cycle: **find people → show in dashboard → draft e
   WebFetch/etc.). Blast radius of a prompt-injection on a malicious careers page dropped from
   "arbitrary code exec + secret exfiltration" to "drive the browser / send an email."
 
-## 5. LinkedIn DM auto-send — PRD written, **NOT built (verdict: don't build for v1)**
+## 5. LinkedIn DM auto-send — **BUILT (LDM-1..3), pending first live login+send verification**
 
-- `docs/linkedin-dm-prd.md` + `docs/tickets/LDM-1..4`: plan to drive the external **agent-browser**
-  binary (vercel-labs, installed at `~/.local/bin/agent-browser` v0.27.0) to send drafted LinkedIn
-  DMs from a "Send DM" button. **Architecture decision: keep repos SEPARATE** — ApplyPilot would
-  drive the installed agent-browser binary as a subprocess (like it drives claude/npx/Chrome). No merge.
-- **Adversarial review verdict: NOT YET — keep manual copy-paste as v1.** Verified blockers:
-  (B1) `agent-browser mcp` doesn't exist on the installed 0.27.0 (only the local 0.32.1 build has it;
-  `chat` needs an `AI_GATEWAY_API_KEY`); (B2) the "reuse `--linkedin-login`" plan logs into the wrong
-  browser; (B3) tickets let a live DM fire before the consent gate exists. Plus: LinkedIn's composer
-  is `contenteditable` (naive fill fails), no success oracle, DM is async (not a synchronous email twin).
-- **Account-risk call:** do NOT automate on the primary account (permanent-ban risk); secondary +
-  existing-connections-only + dry-run-first if ever pursued.
-- **Recommended v1 = manual:** the dashboard already has the drafted note + Copy button; user pastes
-  into LinkedIn themselves (zero risk). A one-click "Open LinkedIn + copy note" deep-link is the safe polish.
+New module **`src/applypilot/networking/linkedin_dm.py`** + `dm_prompt.py`. Drives the installed
+**agent-browser** binary (`~/.local/bin/agent-browser` v0.27.0) as a subprocess to send drafted
+LinkedIn notes. **Repos stay SEPARATE** — ApplyPilot shells out to the CLI (like claude/npx/Chrome).
+
+- **The MCP blocker was designed around, not fixed.** The original LDM-1 plan (`claude --mcp-config
+  <agent-browser mcp>`) is dead on 0.27.0 (no `mcp` subcommand). Instead the driver uses 0.27.0's
+  **deterministic CLI**: `open --profile <dir>` (persistent logged-in profile, fixes the wrong-browser
+  blocker), `snapshot` (a11y tree w/ refs), `keyboard inserttext` (real keystrokes into LinkedIn's
+  `contenteditable` composer), `click`, `screenshot`. **agent-browser keeps ONE persistent browser
+  session across CLI calls** (verified), so a send = a sequence of subprocess calls.
+- **Controller loop**: `snapshot → LLM picks ONE action → execute`, over a tiny fixed action set
+  (`click`/`type_message`/`send`/`abort`/`done`, see `dm_prompt.ACTIONS`). The note is inserted
+  **VERBATIM** — the model never supplies text (prompt-injection can't change what you say).
+- **Two delivery paths (the note is a ≤300-char connection-request note by design):** PATH A —
+  **Connect → Add a note → Send invitation** (the common case; works for people you're NOT connected
+  to, which is most contacts). PATH B — **Message** composer (when already connected / open-profile).
+  The controller prefers A unless a Message button is present; aborts on any InMail/Premium paywall.
+- **Safeguards** (all in `linkedin_dm.send()`): off by default (`NETWORKING_LINKEDIN_DM=0`), one-time
+  consent file (`.linkedin_dm_consent`), login precheck, dedicated isolated profile
+  (`~/.applypilot/linkedin-dm-profile`), daily cap (`LINKEDIN_DM_DAILY_LIMIT=5`), 30-day cross-contact
+  dedupe on normalized `linkedin_url`, atomic claim (`claim_dm_send`, `dm_sent_at IS NULL`), **dry-run**
+  (composes but never clicks Send). DB cols `dm_status/dm_sent_at/dm_error` (own migration in `store.py`).
+- **CLI**: `network --dm-login` (consent + headed login, polls for auth), `--dm-list`,
+  `--send-dm --dm-contact <id> [--dry-run]`. **Dashboard**: "Dry-run DM" + "Send DM" buttons per contact
+  (single-flight `DMRunner` — one browser session), Origin-guarded `POST /api/outreach/send-linkedin`,
+  `_dm_available()` gate. **doctor** shows an `agent-browser` + DM-readiness line. `.env.example` updated.
+- **Tests**: `tests/test_linkedin_dm.py` (13, subprocess+LLM mocked): bin discovery, verbatim prompt,
+  atomic claim race, url-normalized dedupe, all send() refusal paths, dry-run-composes-but-never-sends.
+  Full suite **96 passing**, ruff clean.
+- **STILL PENDING (needs the user, interactive):** the one-time `network --dm-login` (I can't type
+  LinkedIn creds), then the first dry-run + real send. **Account-risk:** user chose primary/unrestricted;
+  I kept an automatic dry-run pre-flight before the first live send. The 5 Affirm DM-eligible contacts
+  are non-connections but ARE reachable via **Connect + note** (Path A) — no InMail needed. LinkedIn also
+  rate-limits invitations (~100–200/week); the 5/day cap stays well under.
 
 ## Current environment state (the user's machine)
 

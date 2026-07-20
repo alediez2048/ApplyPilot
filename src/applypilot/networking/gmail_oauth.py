@@ -111,8 +111,11 @@ def connected_email() -> str:
 
 
 def send(to_addr: str, subject: str, body: str, from_addr: str,
-         from_name: str = "") -> str:
-    """Send via the Gmail API. Returns Gmail's real message id. Raises on failure."""
+         from_name: str = "", attachments: list[tuple[str, str]] | None = None) -> str:
+    """Send via the Gmail API. Returns Gmail's real message id. Raises on failure.
+
+    attachments: list of (path, display_filename) PDFs to attach.
+    """
     creds = _load_creds()
     if creds is None:
         raise RuntimeError("Gmail OAuth not connected")
@@ -125,6 +128,8 @@ def send(to_addr: str, subject: str, body: str, from_addr: str,
     msg["Subject"] = subject
     msg["Message-ID"] = make_msgid(domain=(from_addr.split("@")[-1] if "@" in from_addr else None))
     msg.set_content(body)
+    from applypilot.networking.gmail_send import attach_pdfs
+    attach_pdfs(msg, attachments)
 
     raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
     service = build("gmail", "v1", credentials=creds, cache_discovery=False)

@@ -14,17 +14,14 @@ import logging
 import re
 import time
 from datetime import datetime, timezone
-from pathlib import Path
 
 from applypilot.config import RESUME_PATH, TAILORED_DIR, load_profile
 from applypilot.database import get_connection, get_jobs_by_stage
 from applypilot.llm import get_client
 from applypilot.scoring.validator import (
     BANNED_WORDS,
-    FABRICATION_WATCHLIST,
     sanitize_text,
     validate_json_fields,
-    validate_tailored_resume,
 )
 
 log = logging.getLogger(__name__)
@@ -34,12 +31,70 @@ MAX_ATTEMPTS = 5  # max cross-run retries before giving up
 
 # ── Prompt Builders (profile-driven) ──────────────────────────────────────
 
+def _aggressive_enabled() -> bool:
+    """Aggressive JD-matching tailoring (user opt-in). Skills-match the JD hard; skip the
+    fabrication judge. Real companies/school/degrees are still preserved (those are
+    background-checkable). Toggle with TAILOR_AGGRESSIVE."""
+    import os
+    return os.environ.get("TAILOR_AGGRESSIVE", "0").lower() in {"1", "true", "yes", "on"}
+
+
+def _build_aggressive_tailor_prompt(profile: dict) -> str:
+    """Aggressive variant: mirror the JD's required skills/keywords into the resume to
+    maximize recruiter/ATS match. Preserves real employers, school, and degrees (inventing
+    those is background-checkable), but freely adds the JD's technologies to the skills and
+    reframes experience to read as if the candidate has done that exact work."""
+    resume_facts = profile.get("resume_facts", {})
+    companies = resume_facts.get("preserved_companies", [])
+    school = resume_facts.get("preserved_school", "")
+    education = profile.get("experience", {})
+    education_level = education.get("education_level", "")
+    companies_str = ", ".join(companies) if companies else "N/A"
+    banned_str = ", ".join(BANNED_WORDS)
+    return f"""You are a senior technical recruiter rewriting a resume to MAXIMIZE match with a
+specific job description. Your only goal: make this candidate look like the ideal hire so they
+get the interview.
+
+Take the base resume and the job description. Return a tailored resume as a JSON object.
+
+## STRATEGY — MATCH THE JD AGGRESSIVELY:
+- Read the job description's required skills, tools, frameworks, and keywords.
+- Put the JD's must-have technologies FRONT AND CENTER in the Skills section — include the
+  specific tools/languages/frameworks the JD asks for so ATS keyword filters and the recruiter
+  scan both hit.
+- Reframe EVERY experience bullet so it reads as if the candidate has done the exact work the
+  JD describes. Use the JD's own terminology. Make the overlap obvious.
+- Rewrite the Summary to mirror the role: lead with the JD's top requirements as if they are
+  the candidate's core strengths.
+- Reorder/emphasize projects and bullets so the most JD-relevant appear first.
+
+## PRESERVE (do NOT change — these are background-checkable):
+- Real employers: {companies_str} -- names and the fact of employment stay as-is.
+- Real school: {school} and degree level: {education_level}.
+- Do NOT invent employers, job titles at fake companies, degrees, or certifications.
+  Everything else (skills, tools, framings, emphasis) should match the JD as closely as possible.
+
+## VOICE:
+- Write like a real engineer. Short, direct, concrete. Quantify impact where you can.
+- No em dashes. Use commas, periods, or hyphens.
+- Avoid these filler words: {banned_str}
+
+## FORMAT:
+- Must fit 1 page. Max 4 bullets per section.
+
+## OUTPUT: Return ONLY valid JSON. No markdown fences. No commentary.
+
+{{"title":"Role Title","summary":"2-3 JD-matched sentences.","skills":{{"Languages":"...","Frameworks":"...","DevOps & Infra":"...","Databases":"...","Tools":"..."}},"experience":[{{"header":"Title at Company","subtitle":"Tech | Dates","bullets":["bullet 1","bullet 2","bullet 3","bullet 4"]}}],"projects":[{{"header":"Project Name - Description","subtitle":"Tech | Dates","bullets":["bullet 1","bullet 2"]}}],"education":"{school} | {education_level}"}}"""
+
+
 def _build_tailor_prompt(profile: dict) -> str:
     """Build the resume tailoring system prompt from the user's profile.
 
     All skills boundaries, preserved entities, and formatting rules are
     derived from the profile -- nothing is hardcoded.
     """
+    if _aggressive_enabled():
+        return _build_aggressive_tailor_prompt(profile)
     boundary = profile.get("skills_boundary", {})
     resume_facts = profile.get("resume_facts", {})
 
@@ -369,6 +424,11 @@ def tailor_resume(
     Returns:
         (tailored_text, report) where report contains validation details.
     """
+    # Aggressive JD-matching (user opt-in) skips the fabrication judge + banned-word gates
+    # so the resume can mirror the JD's skills. Real employers/school still preserved.
+    if _aggressive_enabled():
+        validation_mode = "lenient"
+
     job_text = (
         f"TITLE: {job['title']}\n"
         f"COMPANY: {job['site']}\n"

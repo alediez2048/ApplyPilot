@@ -205,7 +205,7 @@ class NetworkRunner:
             try:
                 require_contacts_provider("networking")
             except SystemExit:
-                raise RuntimeError("No usable contact provider (set HUNTER_API_KEY or APOLLO_API_KEY)")
+                raise RuntimeError("No usable contact provider (set APOLLO_API_KEY, paid plan)")
 
             conn = get_connection()
             init_contacts(conn)
@@ -227,6 +227,77 @@ class NetworkRunner:
 
 
 _network = NetworkRunner()
+
+
+
+
+class BulkEmailRunner:
+    """Background sender for 'Send all emails' (Gmail, no browser). Keyed by job_url."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._jobs: dict[str, dict] = {}  # job_url -> {running, total, sent, skipped, note}
+
+    def status(self, job_url: str) -> dict:
+        with self._lock:
+            return dict(self._jobs.get(job_url, {}))
+
+    def start(self, job_url: str, contact_ids: list[str], confirm_unverified: bool) -> tuple[bool, str]:
+        ids = [c for c in contact_ids if c]
+        if not ids:
+            return False, "no emails ready to send"
+        with self._lock:
+            if self._jobs.get(job_url, {}).get("running"):
+                return False, "a bulk email send is already running for this job"
+            self._jobs[job_url] = {"running": True, "total": len(ids), "sent": 0,
+                                   "skipped": 0, "note": "sending…"}
+        threading.Thread(target=self._run, args=(job_url, ids, confirm_unverified),
+                         daemon=True).start()
+        return True, f"sending {len(ids)} email{'s' if len(ids) != 1 else ''}"
+
+    def _run(self, job_url: str, contact_ids: list[str], confirm_unverified: bool) -> None:
+        from applypilot.networking.gmail_send import send_outreach
+        sent = skipped = 0
+        for cid in contact_ids:
+            try:
+                res = send_outreach(cid, confirm_unverified=confirm_unverified)
+                if res.get("ok"):
+                    sent += 1
+                else:
+                    skipped += 1
+            except Exception:  # noqa: BLE001
+                skipped += 1
+            with self._lock:
+                self._jobs[job_url].update(sent=sent, skipped=skipped,
+                                           note=f"{sent} sent, {skipped} skipped")
+        with self._lock:
+            self._jobs[job_url].update(running=False,
+                                       note=f"done — {sent} sent, {skipped} skipped")
+
+
+_bulk_email = BulkEmailRunner()
+
+
+
+def _eligible_contact_ids(job_url: str, channel: str, confirm_unverified: bool = False) -> list[str]:
+    """Contact ids for a job that are ready to send on the given channel ('email'|'linkedin')."""
+    from applypilot.networking.store import get_contacts_for_job
+    ids = []
+    for c in get_contacts_for_job(job_url):
+        if channel == "email":
+            if not (c.get("email") and c.get("outreach_message")):
+                continue
+            if c.get("outreach_status") == "submitted":
+                continue
+            if not confirm_unverified and (c.get("email_status") or "none") != "verified":
+                continue  # skip unverified unless the caller opts in
+        else:  # linkedin
+            if not (c.get("linkedin_url") and c.get("linkedin_message")):
+                continue
+            if c.get("dm_status") == "sent":
+                continue
+        ids.append(c.get("id"))
+    return [i for i in ids if i]
 
 
 def _origin_ok(handler: BaseHTTPRequestHandler) -> bool:
@@ -597,6 +668,12 @@ def _contact_payload(c: dict, company: str | None = None) -> dict:
         "outreach_message": c.get("outreach_message") or "",
         "linkedin_message": c.get("linkedin_message") or "",
         "outreach_status": c.get("outreach_status") or "none",
+        # LinkedIn DM channel state + per-contact readiness (has note + profile, not sent).
+        "dm_status": c.get("dm_status") or "none",
+        "dm_error": c.get("dm_error") or "",
+        "dm_ready": bool((c.get("linkedin_url") or "").strip()
+                         and (c.get("linkedin_message") or "").strip()
+                         and c.get("dm_status") != "sent"),
         # Live connection signal (recomputed each load so re-imports reflect instantly).
         "is_connection": bool(conn_rec),
         "connection_at_company": bool(conn_rec and conn_rec.get("company_match")),
@@ -972,7 +1049,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     return
                 if not _networking_available():
                     _json_response(self, {"ok": False,
-                                          "message": "Set HUNTER_API_KEY or APOLLO_API_KEY to find contacts"}, 409)
+                                          "message": "Set APOLLO_API_KEY (paid plan) to find contacts"}, 409)
                     return
                 ok, msg = _network.start(url, per_job, use_linkedin)
                 _json_response(self, {"ok": ok, "message": msg}, 200 if ok else 409)
@@ -989,6 +1066,19 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 from applypilot.networking.gmail_send import send_outreach
                 res = send_outreach(cid, confirm_unverified=confirm)
                 _json_response(self, res, 200 if res["ok"] else 409)
+                return
+            if path == "/api/outreach/send-all-emails":
+                job_url = data.get("job_url", "")
+                confirm = str(data.get("confirm_unverified", "")).lower() in {"1", "true", "yes", "on"}
+                if not job_url:
+                    _json_response(self, {"ok": False, "message": "job_url required"}, 400)
+                    return
+                if not _gmail_available():
+                    _json_response(self, {"ok": False, "message": "Gmail not connected"}, 409)
+                    return
+                ids = _eligible_contact_ids(job_url, "email", confirm)
+                ok, msg = _bulk_email.start(job_url, ids, confirm)
+                _json_response(self, {"ok": ok, "message": msg}, 200 if ok else 409)
                 return
             if path == "/api/import":
                 _json_response(self, _import_urls(data.get("urls", "")))
@@ -1220,6 +1310,9 @@ _INDEX_HTML = r"""<!doctype html>
   .chip.conn { background:#e6f7ef; color:#137a4b; font-weight:600; }
   .contact.is-conn { border-left:3px solid #2fae6b; background:#f4fbf7; padding-left:6px; border-radius:0 4px 4px 0; }
   .conn-hint { margin-left:10px; font-size:11px; color:#137a4b; font-weight:600; text-transform:none; letter-spacing:0; }
+  .bulkbar { display:flex; gap:8px; align-items:center; margin:8px 0 10px; flex-wrap:wrap; }
+  .bulkbar .bulk { font-size:12px; }
+  .bulknote { font-size:11px; color:#555; }
   .ebadge { display:inline-block; padding:0 6px; border-radius:8px; font-size:10px; }
   .ebadge.ok { background:#e6f7ef; color:#137a4b; }
   .ebadge.warn { background:#fff5e6; color:#9a6b00; }
@@ -1394,7 +1487,7 @@ function peopleCell(j) {
   const running = j.network_running;
   const label = running ? 'finding…' : (n ? `${n} contact${n>1?'s':''}` : 'Find contacts');
   const dis = (running || !NET_AVAIL) ? 'disabled' : '';
-  const title = NET_AVAIL ? '' : 'Set HUNTER_API_KEY or APOLLO_API_KEY to enable';
+  const title = NET_AVAIL ? '' : 'Set APOLLO_API_KEY (paid plan) to enable';
   let out = `<button ${dis} title="${title}" onclick="findContacts(decodeURIComponent('${encodeURIComponent(j.url)}'))">${label}</button>`;
   if (j.network_error) out += `<div class="neterr">${esc(j.network_error)}</div>`;
   return out;
@@ -1428,8 +1521,25 @@ function draftBlock(c) {
       <div class="dbtns">
         <button onclick="saveLinkedin('${esc(c.id)}', this)">Save note</button>
         <button onclick="copyLinkedin(this)">Copy note</button>
+        ${dmButton(c)}
       </div>
     </div>`;
+}
+function dmButton(c) {
+  if (!c.linkedin_url || !c.linkedin_message)
+    return `<button disabled title="Needs a LinkedIn URL and a drafted note">Copy note + open LinkedIn</button>`;
+  const url = encodeURIComponent(c.linkedin_url);
+  return `<button class="send" onclick="copyAndOpenLinkedin('${url}', this)" title="Copies your note and opens their profile — then Connect ▸ Add a note ▸ paste ▸ Send">Copy note + open LinkedIn</button>`;
+}
+function copyAndOpenLinkedin(encUrl, btn) {
+  // Reliable + zero-risk: copy the (possibly edited) note, open the profile in a new tab.
+  // You then do Connect ▸ Add a note ▸ paste (Cmd+V) ▸ Send yourself.
+  const d = btn.closest('.draft');
+  const note = d ? d.querySelector('.d-linkedin').value : '';
+  if (note) { try { navigator.clipboard.writeText(note); } catch(e) {} }
+  window.open(decodeURIComponent(encUrl), '_blank', 'noopener');
+  btn.textContent = 'Copied ✓ — Connect ▸ Add a note ▸ paste';
+  setTimeout(()=>btn.textContent='Copy note + open LinkedIn', 3500);
 }
 function updCount(ta) {
   const wrap = ta.closest('.draft');
@@ -1474,8 +1584,28 @@ function contactsRow(j, ncols) {
       ${draftBlock(c)}
     </div>`).join('');
   return `<tr class="contacts-row"><td colspan="${ncols}"><div class="contacts-wrap">
-    <strong>People at ${esc(j.contact_company)}</strong>${j.connections_at_company ? `<span class="conn-hint">🤝 you have ${j.connections_at_company} connection${j.connections_at_company>1?'s':''} here</span>` : ''}${rows}</div></td></tr>`;
+    <strong>People at ${esc(j.contact_company)}</strong>${j.connections_at_company ? `<span class="conn-hint">🤝 you have ${j.connections_at_company} connection${j.connections_at_company>1?'s':''} here</span>` : ''}
+    ${bulkBar(j)}${rows}</div></td></tr>`;
 }
+function bulkBar(j) {
+  const cs = j.contacts || [];
+  const emailN = cs.filter(c => c.email && c.outreach_message && c.outreach_status !== 'submitted' && c.email_status === 'verified').length;
+  const emailBtn = (GMAIL_AVAIL && emailN)
+    ? `<button class="bulk send" onclick="sendAllEmails(decodeURIComponent('${encodeURIComponent(j.url)}'), this)">Send all emails (${emailN})</button>`
+    : `<button class="bulk" disabled title="${GMAIL_AVAIL ? 'No verified emails ready' : 'Connect Gmail first'}">Send all emails (${emailN})</button>`;
+  // LinkedIn is per-contact "Compose" (you click Send) — no bulk, since each compose
+  // navigates the one browser away from the previous unsent invite.
+  return `<div class="bulkbar">${emailBtn}<span class="li-hint">LinkedIn: use “Compose on LinkedIn” per contact →</span><span class="bulknote" data-bulk="${esc(j.url)}"></span></div>`;
+}
+async function sendAllEmails(url, btn) {
+  if (!confirm('Send ALL verified-email drafts for this company now?')) return;
+  btn.disabled = true; btn.textContent = 'Sending…';
+  const r = await post('/api/outreach/send-all-emails', {job_url: url});
+  const note = document.querySelector(`.bulknote[data-bulk="${cssEsc(url)}"]`);
+  if (note) note.textContent = r.message || '';
+  if (r.ok) setTimeout(refresh, 2500); else { btn.disabled = false; btn.textContent = 'Send all emails'; alert(r.message||'Failed'); }
+}
+function cssEsc(s){ return (window.CSS && CSS.escape) ? CSS.escape(s) : s.replace(/["\\\]]/g,'\\$&'); }
 async function saveDraft(cid, btn) {
   const d = btn.closest('.draft');
   await post('/api/outreach', {contact_id: cid, subject: d.querySelector('.d-subj').value,

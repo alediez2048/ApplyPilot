@@ -38,6 +38,10 @@ _CONTACT_COLUMNS: dict[str, str] = {
     "submitted_at": "TEXT",
     "sent_message_id": "TEXT",
     "send_error": "TEXT",
+    # LinkedIn DM channel (independent of the email send state above).
+    "dm_status": "TEXT",          # none|sending|sent|failed
+    "dm_sent_at": "TEXT",
+    "dm_error": "TEXT",
     "discovered_at": "TEXT",
     "updated_at": "TEXT",
 }
@@ -206,6 +210,110 @@ def mark_send_failed(contact_id: str, error: str, conn: sqlite3.Connection | Non
     conn.execute(
         "UPDATE contacts SET outreach_status = 'failed', submitted_at = NULL, "
         "send_error = ?, updated_at = ? WHERE id = ?",
+        (error[:300], datetime.now(timezone.utc).isoformat(), contact_id),
+    )
+    conn.commit()
+
+
+# ── LinkedIn DM channel ──────────────────────────────────────────────────────
+# Mirrors the email send helpers above, but on the dm_* columns so the two
+# channels never clobber each other's state.
+
+def _norm_linkedin(url: str | None) -> str:
+    """Normalize a LinkedIn profile URL for dedupe (lowercase, strip query/trailing slash)."""
+    u = (url or "").strip().lower()
+    if not u:
+        return ""
+    u = u.split("?")[0].split("#")[0]
+    return u.rstrip("/")
+
+
+def dm_sent_today(conn: sqlite3.Connection | None = None) -> int:
+    """Count LinkedIn DMs sent in the last 24h (for the daily cap)."""
+    if conn is None:
+        conn = get_connection()
+    init_contacts(conn)
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    row = conn.execute(
+        "SELECT COUNT(*) FROM contacts WHERE dm_status = 'sent' AND dm_sent_at >= ?",
+        (cutoff,),
+    ).fetchone()
+    return row[0] if row else 0
+
+
+def already_dmed(
+    linkedin_url: str, cooldown_days: int = 30, exclude_id: str | None = None,
+    conn: sqlite3.Connection | None = None,
+) -> str | None:
+    """Cross-job dedupe: return the dm_sent_at if this profile was DM'd recently."""
+    norm = _norm_linkedin(linkedin_url)
+    if not norm:
+        return None
+    if conn is None:
+        conn = get_connection()
+    init_contacts(conn)
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=cooldown_days)).isoformat()
+    row = conn.execute(
+        "SELECT dm_sent_at, linkedin_url FROM contacts "
+        "WHERE dm_status = 'sent' AND dm_sent_at >= ? AND id != ?",
+        (cutoff, exclude_id or ""),
+    ).fetchall()
+    for sent_at, url in row:
+        if _norm_linkedin(url) == norm:
+            return sent_at
+    return None
+
+
+def claim_dm_send(contact_id: str, conn: sqlite3.Connection | None = None) -> bool:
+    """Atomically claim a contact for a LinkedIn DM. True only for the winning caller.
+
+    Mirrors claim_for_send but on dm_sent_at — the UPDATE succeeds for exactly one
+    racer (dm_sent_at IS NULL guard), preventing a double-DM under the threading server.
+    """
+    if conn is None:
+        conn = get_connection()
+    init_contacts(conn)
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute("BEGIN IMMEDIATE")
+    cur = conn.execute(
+        "UPDATE contacts SET dm_status = 'sending', dm_sent_at = ? "
+        "WHERE id = ? AND dm_sent_at IS NULL",
+        (now, contact_id),
+    )
+    conn.commit()
+    return cur.rowcount == 1
+
+
+def mark_dm_sent(contact_id: str, conn: sqlite3.Connection | None = None) -> None:
+    if conn is None:
+        conn = get_connection()
+    conn.execute(
+        "UPDATE contacts SET dm_status = 'sent', dm_error = NULL, updated_at = ? WHERE id = ?",
+        (datetime.now(timezone.utc).isoformat(), contact_id),
+    )
+    conn.commit()
+
+
+def mark_dm_composed(contact_id: str, conn: sqlite3.Connection | None = None) -> None:
+    """Mark that the note was composed into the invite dialog (the human sends manually).
+    Does NOT claim/dedupe — composing is idempotent and re-runnable."""
+    if conn is None:
+        conn = get_connection()
+    conn.execute(
+        "UPDATE contacts SET dm_status = 'composed', updated_at = ? WHERE id = ? "
+        "AND (dm_status IS NULL OR dm_status != 'sent')",
+        (datetime.now(timezone.utc).isoformat(), contact_id),
+    )
+    conn.commit()
+
+
+def mark_dm_failed(contact_id: str, error: str, conn: sqlite3.Connection | None = None) -> None:
+    """Roll a claimed DM back to 'failed' and clear dm_sent_at so it can be retried."""
+    if conn is None:
+        conn = get_connection()
+    conn.execute(
+        "UPDATE contacts SET dm_status = 'failed', dm_sent_at = NULL, "
+        "dm_error = ?, updated_at = ? WHERE id = ?",
         (error[:300], datetime.now(timezone.utc).isoformat(), contact_id),
     )
     conn.commit()

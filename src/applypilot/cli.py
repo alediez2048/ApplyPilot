@@ -211,7 +211,7 @@ def apply(
             raise typer.Exit(code=1)
 
     if gen:
-        from applypilot.apply.launcher import gen_prompt, BASE_CDP_PORT
+        from applypilot.apply.launcher import gen_prompt
         target = url or ""
         if not target:
             console.print("[red]--gen requires --url to specify which job.[/red]")
@@ -268,8 +268,13 @@ def network(
     linkedin_login: bool = typer.Option(False, "--linkedin-login", help="One-time: open Chrome to log into LinkedIn (for the fallback)."),
     gmail_connect: bool = typer.Option(False, "--gmail-connect", help="One-time: connect Gmail via OAuth for sending outreach."),
     import_connections: Optional[str] = typer.Option(None, "--import-connections", help="Import your LinkedIn Connections.csv (to flag existing connections)."),
+    dm_login: bool = typer.Option(False, "--dm-login", help="One-time: open a browser to log into LinkedIn for the DM sender (agent-browser)."),
+    dm_list: bool = typer.Option(False, "--dm-list", help="List contacts with a drafted LinkedIn note + profile URL (DM-eligible)."),
+    compose_dm: bool = typer.Option(False, "--compose-dm", help="Compose the LinkedIn note into the invite dialog and leave it open for YOU to click Send."),
+    send_dm: bool = typer.Option(False, "--send-dm", help="Alias of --compose-dm (auto-send is disabled — LinkedIn soft-blocks it)."),
+    dm_contact: Optional[str] = typer.Option(None, "--dm-contact", help="Contact id for --compose-dm (see --dm-list)."),
     draft: bool = typer.Option(True, "--draft/--no-draft", help="Draft outreach emails for found contacts."),
-    dry_run: bool = typer.Option(False, "--dry-run", help="Search + rank only; no Apollo reveal (no credits)."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Search + rank only (contacts); with --send-dm, compose but do NOT click Send."),
 ) -> None:
     """Find people at target companies (Apollo), store contacts, draft outreach."""
     _bootstrap()
@@ -309,6 +314,72 @@ def network(
         ok, msg = gmail_oauth.connect()
         console.print(f"[green]{msg}[/green]" if ok else f"[red]{msg}[/red]")
         raise typer.Exit(code=0 if ok else 1)
+
+    # One-time LinkedIn login for the DM sender (needs consent first).
+    if dm_login:
+        from applypilot.networking import linkedin_dm
+        if not linkedin_dm.agent_browser_bin():
+            console.print("[red]agent-browser not found.[/red] Install it, or set AGENT_BROWSER_BIN.")
+            raise typer.Exit(code=1)
+        if not linkedin_dm.has_consent():
+            console.print("\n[yellow]LinkedIn DM automation — please read:[/yellow]\n")
+            console.print(linkedin_dm.CONSENT_TEXT)
+            if not typer.confirm("Acknowledge the irreversible ban risk and enable DM login?", default=False):
+                console.print("[dim]Cancelled — DM sender not enabled.[/dim]")
+                raise typer.Exit()
+            linkedin_dm.record_consent()
+        console.print("[cyan]Opening a browser — log into LinkedIn, then wait…[/cyan]")
+        ok = linkedin_dm.open_login_browser()
+        if ok:
+            console.print("[green]Logged in.[/green] Set NETWORKING_LINKEDIN_DM=1 to allow real sends.")
+        else:
+            console.print("[red]Did not detect a LinkedIn login (timed out).[/red] Re-run `--dm-login`.")
+        raise typer.Exit(code=0 if ok else 1)
+
+    # List DM-eligible contacts (drafted note + LinkedIn URL).
+    if dm_list:
+        from applypilot.database import get_connection
+        from applypilot.networking.store import init_contacts
+        conn = get_connection()
+        init_contacts(conn)
+        rows = conn.execute(
+            "SELECT id, full_name, title, company, dm_status FROM contacts "
+            "WHERE linkedin_url IS NOT NULL AND linkedin_url != '' "
+            "AND linkedin_message IS NOT NULL AND linkedin_message != '' "
+            "ORDER BY discovered_at DESC"
+        ).fetchall()
+        if not rows:
+            console.print("[yellow]No DM-eligible contacts (need a LinkedIn URL + a drafted note).[/yellow]")
+            raise typer.Exit()
+        from rich.table import Table
+        t = Table(title="DM-eligible contacts")
+        for col in ("id", "name", "title", "company", "dm status"):
+            t.add_column(col)
+        for r in rows:
+            t.add_row(r["id"], r["full_name"] or "", (r["title"] or "")[:30],
+                      r["company"] or "", r["dm_status"] or "none")
+        console.print(t)
+        raise typer.Exit()
+
+    # Compose a LinkedIn connection note into the invite dialog and leave it open for
+    # you to click Send (the reliable, low-risk path — LinkedIn soft-blocks automated sends).
+    if compose_dm or send_dm:
+        from applypilot.networking import linkedin_dm, store
+        if not dm_contact:
+            console.print("[red]--compose-dm needs --dm-contact <id>[/red] (see `network --dm-list`).")
+            raise typer.Exit(code=1)
+        contact = store.get_contact(dm_contact)
+        if not contact:
+            console.print(f"[red]No contact with id:[/red] {dm_contact}")
+            raise typer.Exit(code=1)
+        console.print(f"Composing LinkedIn note for [cyan]{contact.get('full_name')}[/cyan] "
+                      "[dim](review + click Send in the browser)[/dim]")
+        res = linkedin_dm.compose(contact)
+        color = "green" if res.get("ok") else "red"
+        console.print(f"[{color}]{res.get('message')}[/{color}]")
+        if res.get("screenshot"):
+            console.print(f"[dim]screenshot: {res['screenshot']}[/dim]")
+        raise typer.Exit(code=0 if res.get("ok") else 1)
 
     from applypilot.config import require_contacts_provider
     require_contacts_provider("networking")
@@ -457,7 +528,7 @@ def doctor() -> None:
     import shutil
     from applypilot.config import (
         load_env, PROFILE_PATH, RESUME_PATH, RESUME_PDF_PATH,
-        SEARCH_CONFIG_PATH, ENV_PATH, get_chrome_path,
+        SEARCH_CONFIG_PATH, get_chrome_path,
     )
 
     load_env()
@@ -549,7 +620,7 @@ def doctor() -> None:
     except Exception:
         results.append(("Resume renderer", "[dim]optional[/dim]", "HTML/Chromium fallback"))
 
-    # Contact provider (networking, optional) — live probe of Hunter/Apollo
+    # Contact provider (networking, optional) — live probe of Apollo
     try:
         from applypilot.networking import providers
         prov = providers.active()
@@ -558,7 +629,7 @@ def doctor() -> None:
             results.append(("Contact provider", ok_mark if ok else fail_mark, f"{prov}: {msg}"))
         else:
             results.append(("Contact provider", "[dim]optional[/dim]",
-                            "Set HUNTER_API_KEY (free) or APOLLO_API_KEY for networking"))
+                            "Set APOLLO_API_KEY (paid plan) for networking"))
     except Exception:
         results.append(("Contact provider", warn_mark, "probe failed"))
 
@@ -590,6 +661,26 @@ def doctor() -> None:
             results.append(("LinkedIn fallback", ok_mark, f"ready ({used}/{cap} companies today)"))
     except Exception:
         results.append(("LinkedIn fallback", "[dim]optional[/dim]", "off"))
+
+    # LinkedIn DM sender (networking, optional, opt-in, agent-browser)
+    try:
+        from applypilot.networking import linkedin_dm
+        ver = linkedin_dm.version()
+        if not ver:
+            results.append(("LinkedIn DM sender", "[dim]optional[/dim]",
+                            "agent-browser not installed (set AGENT_BROWSER_BIN or install it)"))
+        elif not linkedin_dm.has_consent():
+            results.append(("LinkedIn DM sender", "[dim]optional[/dim]",
+                            f"{ver} — run `network --dm-login` (consent + log in)"))
+        elif not linkedin_dm.is_logged_in():
+            results.append(("LinkedIn DM sender", warn_mark,
+                            f"{ver} — profile not logged in; run `network --dm-login`"))
+        else:
+            state = "enabled" if linkedin_dm.enabled() else "consented, sends OFF (set NETWORKING_LINKEDIN_DM=1)"
+            used, cap = linkedin_dm.store.dm_sent_today(), linkedin_dm._daily_limit()
+            results.append(("LinkedIn DM sender", ok_mark, f"{ver} — {state} ({used}/{cap} today)"))
+    except Exception:
+        results.append(("LinkedIn DM sender", "[dim]optional[/dim]", "off"))
 
     # Gmail send (outreach, optional) — OAuth preferred, else SMTP; live probe
     try:

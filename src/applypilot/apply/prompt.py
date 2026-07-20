@@ -433,7 +433,8 @@ If CapSolver genuinely failed (errorId > 0):
 
 def build_prompt(job: dict, tailored_resume: str,
                  cover_letter: str | None = None,
-                 dry_run: bool = False) -> str:
+                 dry_run: bool = False,
+                 worker_id: int | None = None) -> str:
     """Build the full instruction prompt for the apply agent.
 
     Loads the user profile and search config internally. All personal data
@@ -462,10 +463,15 @@ def build_prompt(job: dict, tailored_resume: str,
     if not src_pdf.exists():
         raise ValueError(f"Resume PDF not found: {src_pdf}")
 
-    # Copy to a clean filename for upload (recruiters see the filename)
+    # Copy to a clean filename for upload (recruiters see the filename).
+    # Stage INTO the worker dir — the agent runs with cwd=worker dir and Playwright MCP
+    # only permits file uploads from under that cwd. Staging to a sibling "current/" dir
+    # triggers file_access_denied on the resume upload. Falls back to "current/" when no
+    # worker_id (e.g. `apply --gen` debugging).
     full_name = personal["full_name"]
     name_slug = full_name.replace(" ", "_")
-    dest_dir = config.APPLY_WORKER_DIR / "current"
+    dest_dir = (config.APPLY_WORKER_DIR / f"worker-{worker_id}") if worker_id is not None \
+        else (config.APPLY_WORKER_DIR / "current")
     dest_dir.mkdir(parents=True, exist_ok=True)
     upload_pdf = dest_dir / f"{name_slug}_Resume.pdf"
     shutil.copy(str(src_pdf), str(upload_pdf))
@@ -521,13 +527,34 @@ def build_prompt(job: dict, tailored_resume: str,
     last_name = full_name.split()[-1] if " " in full_name else ""
     display_name = f"{preferred_name} {last_name}".strip()
 
-    # Dry-run: override submit instruction
+    # Dry-run: this must DOMINATE the prompt, not be a single overridable line — the rest
+    # of the prompt repeatedly commands "submit the application", so a lone caveat gets
+    # ignored (the model submitted a real application in testing). We change the mission
+    # verb everywhere and bracket the whole prompt with a loud DRY-RUN banner.
     if dry_run:
-        submit_instruction = "IMPORTANT: Do NOT click the final Submit/Apply button. Review the form, verify all fields, then output RESULT:APPLIED with a note that this was a dry run."
+        mission_tail = ("STOP before the final Submit. This is a DRY RUN: fill every field "
+                        "accurately, upload the resume, but you must NEVER click the final "
+                        "Submit/Apply button.")
+        mission_section = ("DRY RUN — fill a complete, accurate application but DO NOT SUBMIT IT. "
+                           "Use the profile and resume as source data; adapt to each form's format. "
+                           "Fill everything, then STOP.")
+        submit_instruction = ("DRY RUN — DO NOT CLICK the final Submit/Apply button under any "
+                              "circumstances. Take a snapshot showing the completed form, then output "
+                              "RESULT:DRYRUN with a note that the form was filled but NOT submitted. "
+                              "Submitting in dry-run mode is a critical failure.")
+        dry_banner = ("\n\n################ DRY RUN MODE ################\n"
+                      "DO NOT SUBMIT THIS APPLICATION. Fill and verify every field, upload the "
+                      "resume, but NEVER click the final Submit/Apply button. Any real submission "
+                      "in dry-run mode is a critical failure. End by reporting RESULT:DRYRUN.\n"
+                      "#############################################\n")
     else:
+        mission_tail = "Submit the application."
+        mission_section = ("Submit a complete, accurate application. Use the profile and resume as "
+                           "source data -- adapt to fit each form's format.")
         submit_instruction = "BEFORE clicking Submit/Apply, take a snapshot and review EVERY field on the page. Verify all data matches the APPLICANT PROFILE and TAILORED RESUME -- name, email, phone, location, work auth, resume uploaded, cover letter if applicable. If anything is wrong or missing, fix it FIRST. Only click Submit after confirming everything is correct."
+        dry_banner = ""
 
-    prompt = f"""You are an autonomous job application agent. Your ONE mission: get this candidate an interview. You have all the information and tools. Think strategically. Act decisively. Submit the application.
+    prompt = f"""{dry_banner}You are an autonomous job application agent. Your ONE mission: get this candidate an interview. You have all the information and tools. Think strategically. Act decisively. {mission_tail}
 
 == JOB ==
 URL: {_resolve_job_url(job)}
@@ -549,9 +576,9 @@ Cover Letter PDF (upload if asked): {cl_upload_path or "N/A"}
 {profile_summary}
 
 == YOUR MISSION ==
-Submit a complete, accurate application. Use the profile and resume as source data -- adapt to fit each form's format.
+{mission_section}
 
-If something unexpected happens and these instructions don't cover it, figure it out yourself. You are autonomous. Navigate pages, read content, try buttons, explore the site. The goal is always the same: submit the application. Do whatever it takes to reach that goal.
+If something unexpected happens and these instructions don't cover it, figure it out yourself. You are autonomous. Navigate pages, read content, try buttons, explore the site. The goal is always the same: {mission_tail} Do whatever it takes to reach that goal.
 
 {hard_rules}
 
@@ -599,6 +626,7 @@ If something unexpected happens and these instructions don't cover it, figure it
 12. Output your result.
 
 == RESULT CODES (output EXACTLY one) ==
+RESULT:DRYRUN -- DRY RUN: form filled and verified but intentionally NOT submitted
 RESULT:APPLIED -- submitted successfully
 RESULT:EXPIRED -- job closed or no longer accepting applications
 RESULT:CAPTCHA -- blocked by unsolvable captcha

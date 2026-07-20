@@ -5,14 +5,13 @@ postings. All personal data (name, skills, achievements) comes from the user's
 profile at runtime. No hardcoded personal information.
 """
 
-import json
 import logging
 import re
 import time
 from datetime import datetime, timezone
 
 from applypilot.config import COVER_LETTER_DIR, RESUME_PATH, load_profile
-from applypilot.database import get_connection, get_jobs_by_stage
+from applypilot.database import get_connection
 from applypilot.llm import get_client
 from applypilot.scoring.validator import (
     BANNED_WORDS,
@@ -136,6 +135,12 @@ def generate_cover_letter(
     Returns:
         The cover letter text (best attempt even if validation failed).
     """
+    # Match the resume tailor: aggressive mode relaxes validation so the letter can
+    # mirror the JD without tripping fabrication/banned-word gates.
+    from applypilot.scoring.tailor import _aggressive_enabled
+    if _aggressive_enabled():
+        validation_mode = "lenient"
+
     job_text = (
         f"TITLE: {job['title']}\n"
         f"COMPANY: {job['site']}\n"

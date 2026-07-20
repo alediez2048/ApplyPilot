@@ -27,6 +27,12 @@ _BOARD_SITES = {
     "uploaded",
 }
 
+# Leading subdomain labels on an employer's own careers portal (careers.amd.com -> amd.com).
+_CAREERS_SUBDOMAINS = {
+    "careers", "career", "jobs", "job", "apply", "applying", "recruiting", "recruit",
+    "talent", "work", "hire", "hiring", "join", "people", "eu", "us", "www2",
+}
+
 
 def _clean_company(name: str | None) -> str | None:
     if not name:
@@ -117,5 +123,13 @@ def derive_domain(job: dict, company: str | None = None) -> str | None:
         # reject board/ATS hosts (their domain is not the employer's)
         if any(b in host for b in _BOARD_HOSTS):
             continue
-        return host
+        return _employer_domain(host)
     return None
+
+
+def _employer_domain(host: str) -> str:
+    """Strip a leading careers-portal subdomain: careers.amd.com -> amd.com."""
+    parts = host.split(".")
+    while len(parts) > 2 and parts[0] in _CAREERS_SUBDOMAINS:
+        parts = parts[1:]
+    return ".".join(parts)

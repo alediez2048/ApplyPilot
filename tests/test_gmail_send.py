@@ -92,7 +92,7 @@ def test_send_outreach_happy_path(tmp_path, monkeypatch):
     _gmail_env(monkeypatch)
     sent = {}
 
-    def fake_smtp(to, subject, body, mid):
+    def fake_smtp(to, subject, body, mid, attachments=None):
         sent.update(to=to, subject=subject, body=body, mid=mid)
     monkeypatch.setattr(gmail_send, "_smtp_send", fake_smtp)
 
@@ -114,12 +114,12 @@ def test_send_outreach_prefers_oauth_when_available(tmp_path, monkeypatch):
     monkeypatch.setattr(gmail_oauth, "connected_email", lambda: "me@utexas.edu")
     captured = {}
 
-    def fake_oauth_send(to, subject, body, from_addr, from_name=""):
+    def fake_oauth_send(to, subject, body, from_addr, from_name="", attachments=None):
         captured.update(to=to, from_addr=from_addr, body=body)
         return "gmail-real-id-123"
     monkeypatch.setattr(gmail_oauth, "send", fake_oauth_send)
     # ensure SMTP is NOT used
-    monkeypatch.setattr(gmail_send, "_smtp_send", lambda *a: (_ for _ in ()).throw(AssertionError("SMTP used")))
+    monkeypatch.setattr(gmail_send, "_smtp_send", lambda *a, **k: (_ for _ in ()).throw(AssertionError("SMTP used")))
 
     cid = store.upsert_contact(_contact())
     res = gmail_send.send_outreach(cid)
@@ -132,11 +132,57 @@ def test_send_outreach_dry_run_does_not_send(tmp_path, monkeypatch):
     _fresh_db(tmp_path, monkeypatch)
     _gmail_env(monkeypatch)
     called = {"n": 0}
-    monkeypatch.setattr(gmail_send, "_smtp_send", lambda *a: called.__setitem__("n", called["n"] + 1))
+    monkeypatch.setattr(gmail_send, "_smtp_send", lambda *a, **k: called.__setitem__("n", called["n"] + 1))
     cid = store.upsert_contact(_contact())
     res = gmail_send.send_outreach(cid, dry_run=True)
     assert res["ok"] and called["n"] == 0
     assert store.get_contact(cid)["outreach_status"] == "drafted"  # unchanged
+
+
+def test_job_attachments_resolves_resume_and_cover(tmp_path, monkeypatch):
+    _fresh_db(tmp_path, monkeypatch)
+    # Stage resume + cover PDFs and a job row pointing at their .txt paths.
+    resume_txt = tmp_path / "r.txt"
+    resume_txt.write_text("x")
+    (tmp_path / "r.pdf").write_bytes(b"%PDF-resume")
+    cover_txt = tmp_path / "c.txt"
+    cover_txt.write_text("x")
+    (tmp_path / "c.pdf").write_bytes(b"%PDF-cover")
+    conn = database.get_connection()
+    conn.execute("INSERT INTO jobs (url, tailored_resume_path, cover_letter_path) VALUES (?,?,?)",
+                 ("http://j/1", str(resume_txt), str(cover_txt)))
+    conn.commit()
+    monkeypatch.setattr("applypilot.config.load_profile",
+                        lambda: {"personal": {"full_name": "Jane Q Public"}})
+
+    att = gmail_send.job_attachments("http://j/1")
+    names = [f for _, f in att]
+    assert names == ["Jane_Q_Public_Resume.pdf", "Jane_Q_Public_Cover_Letter.pdf"]
+
+    # OUTREACH_ATTACH_DOCS=0 disables attachments entirely
+    monkeypatch.setenv("OUTREACH_ATTACH_DOCS", "0")
+    assert gmail_send.job_attachments("http://j/1") == []
+
+
+def test_send_outreach_passes_attachments(tmp_path, monkeypatch):
+    _fresh_db(tmp_path, monkeypatch)
+    _gmail_env(monkeypatch)
+    (tmp_path / "r.pdf").write_bytes(b"%PDF-resume")
+    conn = database.get_connection()
+    conn.execute("INSERT INTO jobs (url, tailored_resume_path) VALUES (?,?)",
+                 ("http://j/1", str(tmp_path / "r.txt")))
+    conn.commit()
+    monkeypatch.setattr("applypilot.config.load_profile",
+                        lambda: {"personal": {"full_name": "Jane Public"}})
+    seen = {}
+
+    def fake_smtp(to, subject, body, mid, attachments=None):
+        seen["attachments"] = attachments
+    monkeypatch.setattr(gmail_send, "_smtp_send", fake_smtp)
+
+    cid = store.upsert_contact(_contact())
+    gmail_send.send_outreach(cid)
+    assert seen["attachments"] == [(str(tmp_path / "r.pdf"), "Jane_Public_Resume.pdf")]
 
 
 def test_send_outreach_smtp_failure_marks_failed(tmp_path, monkeypatch):

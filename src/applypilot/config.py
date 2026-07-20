@@ -251,8 +251,8 @@ def require_contacts_provider(feature: str = "networking") -> None:
     """Exit with a clear message unless a working contact provider is configured.
 
     Networking is gated independently of the numeric tiers. It needs a working
-    Hunter.io or Apollo.io key; a live probe runs so a present-but-unauthorized key
-    fails up front rather than mid-run.
+    Apollo.io key on a PAID plan (API access); a live probe runs so a present-but-
+    unauthorized key (e.g. free plan) fails up front rather than mid-run.
     """
     from rich.console import Console
     _console = Console(stderr=True)
@@ -261,8 +261,8 @@ def require_contacts_provider(feature: str = "networking") -> None:
     if providers.active() is None:
         _console.print(
             f"\n[red]'{feature}' needs a contact provider.[/red]\n"
-            "Set [bold]HUNTER_API_KEY[/bold] (free tier works) or [bold]APOLLO_API_KEY[/bold] "
-            "(paid) in ~/.applypilot/.env."
+            "Set [bold]APOLLO_API_KEY[/bold] (Apollo.io, paid plan for API access) "
+            "in ~/.applypilot/.env."
         )
         raise SystemExit(1)
 

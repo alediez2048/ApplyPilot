@@ -32,7 +32,9 @@ def test_derive_company_from_careers_hostname():
 def test_derive_domain_skips_board_hosts():
     # greenhouse host is an ATS, not the employer domain
     assert derive.derive_domain({"url": "https://job-boards.greenhouse.io/affirm/jobs/1"}) is None
-    assert derive.derive_domain({"application_url": "https://careers.affirm.com/x"}) == "careers.affirm.com"
+    # careers-portal subdomain is stripped to the corporate domain (what Apollo needs)
+    assert derive.derive_domain({"application_url": "https://careers.affirm.com/x"}) == "affirm.com"
+    assert derive.derive_domain({"application_url": "https://careers.amd.com/careers-home/jobs/1"}) == "amd.com"
 
 
 # ── rank ────────────────────────────────────────────────────────────────────

@@ -133,7 +133,7 @@ def find_contacts_for_job(
 
     titles = rank.role_to_person_titles(role)
 
-    # Query the active contact provider (Hunter or Apollo).
+    # Query the active contact provider (Apollo).
     candidates = providers.search(company, domain, role, titles, per_page=25)
     if not candidates:
         result["note"] = f"no candidates from {providers.active() or 'provider'} (coverage or plan/key)"
@@ -148,7 +148,7 @@ def find_contacts_for_job(
 
     result["found"] = len(selected)
 
-    # Reveal contact info for the selected few (Hunter: no-op; Apollo: consumes credits).
+    # Reveal contact info for the selected few (Apollo bulk enrichment; consumes credits).
     revealed: dict[str, dict] = {}
     if not dry_run:
         revealed = providers.enrich(selected)

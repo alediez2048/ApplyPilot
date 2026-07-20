@@ -86,7 +86,65 @@ def can_send(contact: dict, confirm_unverified: bool = False) -> tuple[bool, str
     return True, "ok"
 
 
-def _smtp_send(to_addr: str, subject: str, body: str, message_id: str) -> None:
+def _attachments_enabled() -> bool:
+    """Attach the tailored resume + cover letter PDFs to outreach emails (default on)."""
+    return os.environ.get("OUTREACH_ATTACH_DOCS", "1").lower() in {"1", "true", "yes", "on"}
+
+
+def _applicant_slug() -> str:
+    """Recruiter-friendly filename prefix from the profile name (e.g. Jorge_Alejandro_Diez)."""
+    try:
+        from applypilot.config import load_profile
+        name = (load_profile().get("personal", {}).get("full_name") or "").strip()
+        return name.replace(" ", "_") if name else "Resume"
+    except Exception:  # noqa: BLE001
+        return "Resume"
+
+
+def job_attachments(job_url: str) -> list[tuple[str, str]]:
+    """Resolve (path, display_filename) for the job's resume + cover letter PDFs.
+
+    Looks up the job by the contact's job_url and returns whichever PDFs exist, named
+    for the applicant so recruiters see e.g. `Jorge_Alejandro_Diez_Resume.pdf`.
+    """
+    from pathlib import Path
+
+    if not job_url or not _attachments_enabled():
+        return []
+    from applypilot.database import get_connection
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT tailored_resume_path, cover_letter_path FROM jobs "
+        "WHERE url = ? OR application_url = ? LIMIT 1",
+        (job_url, job_url),
+    ).fetchone()
+    if not row:
+        return []
+    slug = _applicant_slug()
+    out: list[tuple[str, str]] = []
+    resume_pdf = Path(row[0]).with_suffix(".pdf") if row[0] else None
+    if resume_pdf and resume_pdf.exists():
+        out.append((str(resume_pdf), f"{slug}_Resume.pdf"))
+    cover_pdf = Path(row[1]).with_suffix(".pdf") if row[1] else None
+    if cover_pdf and cover_pdf.exists():
+        out.append((str(cover_pdf), f"{slug}_Cover_Letter.pdf"))
+    return out
+
+
+def attach_pdfs(msg: EmailMessage, attachments: list[tuple[str, str]] | None) -> None:
+    """Attach each (path, filename) PDF to an EmailMessage. Missing files are skipped."""
+    from pathlib import Path
+
+    for path, filename in (attachments or []):
+        p = Path(path)
+        if not p.exists():
+            continue
+        msg.add_attachment(p.read_bytes(), maintype="application",
+                           subtype="pdf", filename=filename)
+
+
+def _smtp_send(to_addr: str, subject: str, body: str, message_id: str,
+               attachments: list[tuple[str, str]] | None = None) -> None:
     """Send one email over SMTP_SSL. `body` is sent verbatim."""
     addr, pw = _creds()
     from_name = os.environ.get("OUTREACH_FROM_NAME", "")
@@ -97,6 +155,7 @@ def _smtp_send(to_addr: str, subject: str, body: str, message_id: str) -> None:
     msg["Subject"] = subject
     msg["Message-ID"] = message_id
     msg.set_content(body)
+    attach_pdfs(msg, attachments)
 
     with smtplib.SMTP_SSL(_SMTP_HOST, _SMTP_PORT, timeout=30) as smtp:
         smtp.login(addr, pw)
@@ -123,9 +182,13 @@ def send_outreach(contact_id: str, confirm_unverified: bool = False,
         return {"ok": False, "message": "no draft to send — generate one first", "status": "drafted"}
 
     to_addr = contact["email"]
+    attachments = job_attachments(contact.get("job_url", ""))
     if dry_run:
-        log.info("[dry-run] would email %s <%s>: %s", contact.get("full_name"), to_addr, subject)
-        return {"ok": True, "message": f"dry-run: not sent to {to_addr}", "status": "drafted"}
+        att = ", ".join(f for _, f in attachments) or "none"
+        log.info("[dry-run] would email %s <%s>: %s (attach: %s)",
+                 contact.get("full_name"), to_addr, subject, att)
+        return {"ok": True, "message": f"dry-run: not sent to {to_addr} (attach: {att})",
+                "status": "drafted"}
 
     # Atomic claim — only the winner proceeds to actually send.
     if not store.claim_for_send(contact_id):
@@ -138,11 +201,12 @@ def send_outreach(contact_id: str, confirm_unverified: bool = False,
         if mode == "oauth":
             from applypilot.networking import gmail_oauth
             from_addr = _from_address() or gmail_oauth.connected_email()
-            message_id = gmail_oauth.send(to_addr, subject, body_out, from_addr, from_name)
+            message_id = gmail_oauth.send(to_addr, subject, body_out, from_addr, from_name,
+                                          attachments=attachments)
         else:
             addr, _ = _creds()
             message_id = make_msgid(domain=(addr.split("@")[-1] if "@" in addr else None))
-            _smtp_send(to_addr, subject, body_out, message_id)
+            _smtp_send(to_addr, subject, body_out, message_id, attachments=attachments)
     except smtplib.SMTPAuthenticationError as e:
         store.mark_send_failed(contact_id, f"auth failed (535?): {e}")
         return {"ok": False, "status": "failed",

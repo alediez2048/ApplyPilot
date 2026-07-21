@@ -54,7 +54,9 @@
     console.warn("[ApplyPilot] selectors global missing — using empty table");
   }
   const REASON = COMPOSE_FAIL_REASON;
-  const log = (...a) => console.debug("[ApplyPilot]", ...a);
+  // console.info (not .debug) so steps are visible at the DEFAULT console level — the user
+  // shouldn't have to switch to "Verbose" to see whether the compose flow is progressing.
+  const log = (...a) => console.info("[ApplyPilot]", ...a);
   log("content loaded; selectors v" + (SELECTORS.version | 0));
 
   // ---------------------------------------------------------------------------
@@ -202,10 +204,38 @@
       await sleep(interval);
     }
   }
+  // Robust click. A bare el.click() frequently does NOT drive LinkedIn's artdeco dropdowns /
+  // React onClick handlers (the "More" overflow menu especially): those listen for the full
+  // pointer/mouse gesture, not just a synthetic `click`. So we dispatch the realistic sequence
+  // (pointerover → pointerdown → mousedown → focus → pointerup → mouseup → click), each event
+  // bubbling, then fall back to the native .click() as a belt-and-suspenders. This is intended
+  // ONLY for opening menus/dialogs (More / Connect / Add note) — NEVER the Send button.
+  function realClick(el) {
+    if (!el) return false;
+    try { el.scrollIntoView({ block: "center", inline: "center" }); } catch (_e) { /* no-op */ }
+    const r = el.getBoundingClientRect();
+    const cx = Math.floor(r.left + r.width / 2);
+    const cy = Math.floor(r.top + r.height / 2);
+    const opts = { bubbles: true, cancelable: true, composed: true, view: window, clientX: cx, clientY: cy, button: 0, buttons: 1 };
+    const fire = (type, Ctor) => {
+      try { el.dispatchEvent(new Ctor(type, type.startsWith("pointer") ? { ...opts, pointerId: 1, isPrimary: true } : opts)); } catch (_e) { /* older Ctor */ }
+    };
+    const PE = window.PointerEvent || window.MouseEvent;
+    fire("pointerover", PE);
+    fire("pointerenter", PE);
+    fire("pointerdown", PE);
+    fire("mousedown", window.MouseEvent);
+    try { el.focus({ preventScroll: true }); } catch (_e) { /* no-op */ }
+    fire("pointerup", PE);
+    fire("mouseup", window.MouseEvent);
+    fire("click", window.MouseEvent);
+    try { el.click(); } catch (_e) { /* dispatched sequence above already fired */ }
+    return true;
+  }
   function clickEl(el) {
     if (!el) return false;
-    el.click();
-    return true;
+    log("click →", (el.getAttribute && el.getAttribute("aria-label")) || visibleText(el).slice(0, 40) || el.tagName);
+    return realClick(el);
   }
   function currentDialog() {
     const d = [...document.querySelectorAll('[role="dialog"], .artdeco-modal')].filter(isVisible);
@@ -418,11 +448,15 @@
 
     // 4) Open the Connect invitation — directly, else via More -> Connect.
     let connect = resolve("connectButton");
-    if (!connect) {
+    if (connect) {
+      log("Connect button found in action bar");
+    } else {
       const more = resolve("moreButton");
+      log(more ? "no direct Connect — opening More menu" : "no Connect and no More button found");
       if (more) {
         clickEl(more);
         connect = await waitFor(() => resolve("connectMenuItem"), { timeout: 4000 });
+        log(connect ? "Connect found in More menu" : "Connect NOT found in More menu (menu may not have opened)");
       }
     }
     if (!alive()) return;

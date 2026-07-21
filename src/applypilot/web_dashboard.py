@@ -1328,11 +1328,15 @@ def serve_dashboard(host: str = "127.0.0.1", port: int = 8765, open_browser: boo
     config.load_env()
     config.ensure_dirs()
     init_db()
+    # Generate the extension token up front so the operator can read it before any request
+    # (the guard short-circuits on a missing header, so it would never be created lazily).
+    ext_token = _ext_token()
 
     server = ThreadingHTTPServer((host, port), DashboardHandler)
     url = f"http://{host}:{port}/"
     console.print(f"[green]ApplyPilot dashboard running:[/green] {url}")
     console.print(f"[dim]Data directory:[/dim] {config.APP_DIR}")
+    console.print(f"[dim]Extension token:[/dim] {ext_token}  [dim](paste into the extension popup)[/dim]")
     console.print("[dim]Press Ctrl+C to stop.[/dim]")
     if open_browser:
         webbrowser.open(url)

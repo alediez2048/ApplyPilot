@@ -311,13 +311,23 @@ async function rearmActiveTab(state) {
   try {
     await chrome.tabs.sendMessage(state[STORAGE_KEYS.ACTIVE_TAB_ID], payload);
   } catch {
+    // The content script isn't reachable — almost always because the extension was reloaded
+    // (which orphans content scripts in already-open tabs). Get a fresh one running.
     const tab = await getActiveTab(state);
-    if (tab && isLinkedInTab(tab) && isValidLinkedIn(contact.linkedin_url)) {
-      try {
+    if (!tab || !isLinkedInTab(tab)) return;
+    try {
+      const onContactUrl = normUrl(tab.url) === normUrl(contact.linkedin_url);
+      if (onContactUrl) {
+        // Same URL — chrome.tabs.update({url}) would be a no-op, so RELOAD to re-inject
+        // the (now fresh) content script, which then pulls its assignment and composes/skips.
+        await chrome.tabs.reload(state[STORAGE_KEYS.ACTIVE_TAB_ID]);
+      } else if (isValidLinkedIn(contact.linkedin_url)) {
         await chrome.tabs.update(state[STORAGE_KEYS.ACTIVE_TAB_ID], { url: contact.linkedin_url });
-      } catch {
-        /* ignore — user can Resume again */
+      } else {
+        await chrome.tabs.reload(state[STORAGE_KEYS.ACTIVE_TAB_ID]);
       }
+    } catch {
+      /* ignore — user can Resume again */
     }
   }
 }

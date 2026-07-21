@@ -9,10 +9,12 @@ Runs a small localhost-only HTTP server with:
 
 from __future__ import annotations
 
+import hmac
 import json
 import mimetypes
 import os
 import re
+import secrets
 import signal
 import subprocess
 import sys
@@ -36,6 +38,16 @@ console = Console()
 _URL_RE = re.compile(r"https?://[^\s,<>\"']+")
 _URL_QUEUE_STRATEGIES = ("dashboard_upload", "manual_url_batch")
 _URL_QUEUE_SQL = "strategy IN ('dashboard_upload', 'manual_url_batch')"
+
+# ── Extension local API (EXT-0) — frozen contract in extension/CONTRACTS.md §3.
+# Paths / header / limits mirror extension/shared/constants.js (API.*, NOTE_MAX_LEN).
+EXT_TOKEN_HEADER = "X-ApplyPilot-Token"
+EXT_QUEUE_PATH = "/api/ext/queue"
+EXT_STATUS_PATH = "/api/ext/status"
+EXT_NOTE_PATH = "/api/ext/note"
+EXT_NOTE_MAX_LEN = 300
+# The only dm_status values the extension may POST to /api/ext/status.
+_POSTABLE_DM_STATUSES = frozenset({"sent", "manual", "skipped"})
 
 
 def _titleize_slug(value: str) -> str:
@@ -300,6 +312,12 @@ def _eligible_contact_ids(job_url: str, channel: str, confirm_unverified: bool =
     return [i for i in ids if i]
 
 
+def _host_is_loopback(handler: BaseHTTPRequestHandler) -> bool:
+    """True if the request's Host header is a loopback address (DNS-rebinding guard)."""
+    hosthdr = (handler.headers.get("Host") or "").split(":")[0]
+    return hosthdr in ("127.0.0.1", "localhost", "::1", "")
+
+
 def _origin_ok(handler: BaseHTTPRequestHandler) -> bool:
     """Reject cross-origin state-changing POSTs (DNS-rebinding guard on localhost)."""
     origin = handler.headers.get("Origin")
@@ -308,8 +326,55 @@ def _origin_ok(handler: BaseHTTPRequestHandler) -> bool:
         if host not in ("127.0.0.1", "localhost", "::1"):
             return False
     # Host header must also be a loopback address:port
-    hosthdr = (handler.headers.get("Host") or "").split(":")[0]
-    return hosthdr in ("127.0.0.1", "localhost", "::1", "")
+    return _host_is_loopback(handler)
+
+
+def _ext_origin_ok(handler: BaseHTTPRequestHandler) -> bool:
+    """Origin guard for extension POSTs: loopback OR the chrome-extension scheme.
+
+    Extension identity is proven by the shared token (verified separately), not by a
+    hardcoded chrome-extension://<id> (unstable for load-unpacked). We accept the scheme
+    so the extension's own Origin passes; a browser page on a non-loopback site is still
+    rejected. A missing Origin (non-browser client) is allowed — the token still gates it.
+    """
+    origin = handler.headers.get("Origin")
+    if origin:
+        parsed = urlparse(origin)
+        if parsed.scheme == "chrome-extension":
+            return True
+        if parsed.hostname not in ("127.0.0.1", "localhost", "::1"):
+            return False
+    return True
+
+
+def _ext_token() -> str:
+    """Read (or first-run generate) the mutual shared token at ~/.applypilot/ext_token.
+
+    The extension sends it on every /api/ext/* request; the server rejects a wrong/missing
+    token. Written 0600. Referenced via config.APP_DIR at call time (respects APPLYPILOT_DIR).
+    """
+    path = config.APP_DIR / "ext_token"
+    try:
+        if path.exists():
+            tok = path.read_text(encoding="utf-8").strip()
+            if tok:
+                return tok
+    except OSError:
+        pass
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tok = secrets.token_urlsafe(32)
+    path.write_text(tok, encoding="utf-8")
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+    return tok
+
+
+def _ext_token_ok(handler: BaseHTTPRequestHandler) -> bool:
+    """Constant-time compare of the request's token header against the stored token."""
+    provided = handler.headers.get(EXT_TOKEN_HEADER, "") or ""
+    return bool(provided) and hmac.compare_digest(provided, _ext_token())
 
 
 def _rows_to_dicts(rows: list) -> list[dict]:
@@ -813,6 +878,8 @@ def _status_payload() -> dict:
         "app_dir": str(config.APP_DIR),
         "networking_available": _networking_available(),
         "gmail_available": _gmail_available(),
+        # Mutual shared token for the LinkedIn extension — operator pastes it into the popup once.
+        "ext_token": _ext_token(),
     }
 
 
@@ -997,6 +1064,95 @@ def _delete_job(url: str) -> dict:
     }
 
 
+# ── Extension local API handlers (EXT-0) ─────────────────────────────────────
+# Loopback + shared-token guarded; frozen contract in extension/CONTRACTS.md §3.
+
+def _queue_contact_payload(c: dict) -> dict:
+    """One /api/ext/queue row. `note` = contacts.linkedin_message (the verbatim invite note)."""
+    return {
+        "id": c.get("id") or "",
+        "full_name": c.get("full_name") or "",
+        "title": c.get("title") or "",
+        "company": c.get("company") or "",
+        "linkedin_url": c.get("linkedin_url") or "",
+        "note": c.get("linkedin_message") or "",
+    }
+
+
+def _ext_queue(job_url: str | None) -> dict:
+    """Ready LinkedIn contacts. Per-job (via _eligible_contact_ids) or all-jobs (deduped)."""
+    from applypilot.networking.store import _norm_linkedin, get_contact, init_contacts
+    init_db()
+    conn = get_connection()
+    init_contacts(conn)
+
+    if job_url:
+        # Per-job: reuse the shared eligibility helper (linkedin_url + note + not done-set).
+        contacts = [get_contact(cid, conn) for cid in _eligible_contact_ids(job_url, "linkedin")]
+    else:
+        # All-jobs variant: single SELECT over contacts, then dedupe by normalized profile URL
+        # so the same person surfaced under two jobs yields exactly one queue row.
+        placeholders = ", ".join("?" for _ in _DM_DONE_STATUSES)
+        rows = conn.execute(
+            "SELECT * FROM contacts "
+            "WHERE linkedin_url IS NOT NULL AND trim(linkedin_url) != '' "
+            "AND linkedin_message IS NOT NULL AND trim(linkedin_message) != '' "
+            f"AND (dm_status IS NULL OR dm_status NOT IN ({placeholders})) "
+            "ORDER BY discovered_at ASC",
+            tuple(_DM_DONE_STATUSES),
+        ).fetchall()
+        contacts = []
+        seen: set[str] = set()
+        for r in rows:
+            c = dict(zip(r.keys(), r))
+            norm = _norm_linkedin(c.get("linkedin_url"))
+            if norm in seen:
+                continue
+            seen.add(norm)
+            contacts.append(c)
+
+    return {"ok": True, "contacts": [_queue_contact_payload(c) for c in contacts if c]}
+
+
+def _ext_status(data: dict) -> tuple[dict, int]:
+    """Map a reported send status to the store's dm_* helpers (sent/manual/skipped)."""
+    from applypilot.networking import store
+    cid = (data.get("contact_id") or "").strip()
+    status = (data.get("status") or "").strip()
+    if not cid:
+        return {"ok": False, "error": "contact_id required"}, 400
+    if status not in _POSTABLE_DM_STATUSES:
+        return {"ok": False, "error": f"invalid status: {status!r}"}, 400
+    store.init_contacts()
+    if not store.get_contact(cid):
+        return {"ok": False, "error": "contact not found"}, 404
+    if status == "sent":
+        store.mark_dm_sent(cid)        # stamps dm_sent_at (COALESCE) — counts toward dedupe/cap
+    elif status == "manual":
+        store.mark_dm_manual(cid)      # real invite via fallback — stamps dm_sent_at too
+    else:
+        store.mark_dm_skipped(cid)     # no stamp; just excluded from the queue
+    return {"ok": True}, 200
+
+
+def _ext_note(data: dict) -> tuple[dict, int]:
+    """Persist an inline note edit (contacts.linkedin_message), capped server-side to 300.
+
+    Writes linkedin_message DIRECTLY via upsert_contact — NOT _save_or_regen_draft, which
+    would clobber the separate email/outreach state and has no cap.
+    """
+    from applypilot.networking import store
+    cid = (data.get("contact_id") or "").strip()
+    if not cid:
+        return {"ok": False, "error": "contact_id required"}, 400
+    note = str(data.get("note") or "")[:EXT_NOTE_MAX_LEN]
+    store.init_contacts()
+    if not store.get_contact(cid):
+        return {"ok": False, "error": "contact not found"}, 404
+    store.upsert_contact({"id": cid, "linkedin_message": note})
+    return {"ok": True, "note": note}, 200
+
+
 def _start_prepare(min_score: int) -> tuple[bool, str]:
     args = [
         sys.executable, "-c",
@@ -1037,10 +1193,61 @@ class DashboardHandler(BaseHTTPRequestHandler):
             query = parse_qs(parsed.query)
             _serve_material(self, query.get("path", [""])[0])
             return
+        if path == EXT_QUEUE_PATH:
+            # Host-loopback + shared token only. NO Origin half (the extension's
+            # chrome-extension:// Origin would fail it) and NO CORS headers.
+            if not _host_is_loopback(self):
+                _json_response(self, {"ok": False, "error": "loopback required"}, HTTPStatus.FORBIDDEN)
+                return
+            if not _ext_token_ok(self):
+                _json_response(self, {"ok": False, "error": "invalid or missing token"},
+                               HTTPStatus.UNAUTHORIZED)
+                return
+            try:
+                job_url = (parse_qs(parsed.query).get("job_url", [""])[0] or "").strip() or None
+                _json_response(self, _ext_queue(job_url))
+            except Exception as exc:  # noqa: BLE001
+                _json_response(self, {"ok": False, "error": str(exc)},
+                               HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
         _json_response(self, {"error": "not found"}, HTTPStatus.NOT_FOUND)
+
+    def _handle_ext_post(self, path: str) -> None:
+        """Auth + dispatch for /api/ext/status and /api/ext/note (EXT-0 frozen contract)."""
+        if not _host_is_loopback(self):
+            _json_response(self, {"ok": False, "error": "loopback required"}, HTTPStatus.FORBIDDEN)
+            return
+        if not _ext_origin_ok(self):
+            _json_response(self, {"ok": False, "error": "cross-origin request rejected"},
+                           HTTPStatus.FORBIDDEN)
+            return
+        if not _ext_token_ok(self):
+            _json_response(self, {"ok": False, "error": "invalid or missing token"},
+                           HTTPStatus.UNAUTHORIZED)
+            return
+        try:
+            data = _read_json(self)
+            if path == EXT_STATUS_PATH:
+                payload, code = _ext_status(data)
+                _json_response(self, payload, code)
+                return
+            if path == EXT_NOTE_PATH:
+                payload, code = _ext_note(data)
+                _json_response(self, payload, code)
+                return
+        except Exception as exc:  # noqa: BLE001
+            _json_response(self, {"ok": False, "error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+        _json_response(self, {"ok": False, "error": "not found"}, HTTPStatus.NOT_FOUND)
 
     def do_POST(self) -> None:
         path = urlparse(self.path).path
+        # Extension API POSTs have their own auth: Host-loopback + (loopback OR chrome-extension
+        # Origin) + shared token. Handled before the dashboard's Origin-only guard because the
+        # extension's chrome-extension:// Origin would fail _origin_ok.
+        if path.startswith("/api/ext/"):
+            self._handle_ext_post(path)
+            return
         # Reject cross-origin state-changing requests (guards irreversible actions).
         if not _origin_ok(self):
             _json_response(self, {"error": "cross-origin request rejected"}, HTTPStatus.FORBIDDEN)

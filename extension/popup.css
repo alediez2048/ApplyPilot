@@ -1,0 +1,627 @@
+/* ApplyPilot LinkedIn Assistant — popup styles.
+   Compact control panel (~360px). Light theme with a blue ApplyPilot accent. */
+
+:root {
+  --bg: #ffffff;
+  --bg-soft: #f5f7fa;
+  --bg-sunk: #eef1f5;
+  --border: #dfe3e8;
+  --border-strong: #c7ccd4;
+  --text: #1a2330;
+  --text-soft: #5b6472;
+  --text-mute: #8a93a1;
+  --accent: #2557d6;
+  --accent-dark: #1c46b0;
+  --accent-soft: #e8effc;
+  --ok: #1a8a4d;
+  --ok-soft: #e4f4ea;
+  --warn: #b26a00;
+  --warn-soft: #fbefda;
+  --err: #c62828;
+  --err-soft: #fdeaea;
+  --skip: #6b7280;
+  --skip-soft: #eceef1;
+  --radius: 8px;
+  --radius-sm: 6px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  width: 360px;
+  max-height: 600px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--text);
+  background: var(--bg);
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  max-height: 600px;
+}
+
+/* ---------- Header ---------- */
+.hdr {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-soft);
+}
+
+.brand {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.brand-mark {
+  color: var(--accent);
+  font-size: 15px;
+}
+
+.brand-name {
+  font-weight: 700;
+  font-size: 14px;
+  letter-spacing: 0.1px;
+}
+
+.brand-sub {
+  font-size: 10.5px;
+  color: var(--text-mute);
+  white-space: nowrap;
+}
+
+.conn {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+}
+
+.conn-text {
+  font-size: 11px;
+  color: var(--text-soft);
+}
+
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.dot--on {
+  background: var(--ok);
+  box-shadow: 0 0 0 2px var(--ok-soft);
+}
+
+.dot--off {
+  background: var(--err);
+  box-shadow: 0 0 0 2px var(--err-soft);
+}
+
+/* ---------- Banners ---------- */
+.banner {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.banner-title {
+  margin: 0 0 3px;
+  font-weight: 600;
+}
+
+.banner-body {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-soft);
+}
+
+.banner--setup {
+  background: var(--accent-soft);
+}
+
+.banner--error {
+  background: var(--err-soft);
+}
+
+.banner--error .banner-body {
+  color: var(--err);
+  font-weight: 500;
+}
+
+.banner .row {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+/* ---------- Controls ---------- */
+.controls {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.controls-row {
+  display: flex;
+  gap: 6px;
+}
+
+.progress {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-top: 8px;
+}
+
+.progress-text {
+  font-weight: 600;
+  font-size: 12.5px;
+}
+
+.phase-text {
+  font-size: 11px;
+  color: var(--text-mute);
+  text-transform: capitalize;
+}
+
+/* ---------- Buttons ---------- */
+.btn {
+  appearance: none;
+  border: 1px solid var(--border-strong);
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  padding: 6px 12px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s;
+}
+
+.btn:hover:not(:disabled) {
+  background: var(--bg-sunk);
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn--primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  flex: 1;
+}
+
+.btn--primary:hover:not(:disabled) {
+  background: var(--accent-dark);
+  border-color: var(--accent-dark);
+}
+
+.btn--ghost {
+  background: transparent;
+}
+
+.btn--sm {
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
+/* ---------- Daily-cap meter ---------- */
+.meter {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.meter-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 5px;
+}
+
+.meter-label {
+  font-size: 11px;
+  color: var(--text-soft);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+.meter-count {
+  font-weight: 600;
+  font-size: 12.5px;
+}
+
+.meter-track {
+  height: 6px;
+  border-radius: 4px;
+  background: var(--bg-sunk);
+  overflow: hidden;
+}
+
+.meter-fill {
+  height: 100%;
+  width: 0%;
+  background: var(--accent);
+  border-radius: 4px;
+  transition: width 0.2s;
+}
+
+.meter-fill--full {
+  background: var(--err);
+}
+
+.meter-reset {
+  margin-top: 4px;
+  font-size: 10.5px;
+  color: var(--text-mute);
+}
+
+/* ---------- Queue ---------- */
+.queue {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.queue-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px 4px;
+}
+
+.queue-title {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--text-soft);
+}
+
+.queue-count {
+  font-size: 11px;
+  color: #fff;
+  background: var(--text-mute);
+  border-radius: 999px;
+  padding: 0 6px;
+  min-width: 16px;
+  text-align: center;
+}
+
+.queue-count:empty {
+  display: none;
+}
+
+.queue-list {
+  list-style: none;
+  margin: 0;
+  padding: 0 8px 8px;
+  overflow-y: auto;
+}
+
+.queue-empty {
+  padding: 12px;
+  color: var(--text-mute);
+  font-size: 12px;
+  text-align: center;
+}
+
+/* ---------- Queue row ---------- */
+.row-item {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  margin-top: 6px;
+  background: var(--bg);
+}
+
+.row-item--active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+  background: var(--accent-soft);
+}
+
+.row-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.row-name {
+  font-weight: 600;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.row-sub {
+  font-size: 11.5px;
+  color: var(--text-soft);
+  margin-top: 1px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.row-note {
+  font-size: 12px;
+  color: var(--text);
+  margin-top: 6px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.row-actions {
+  display: flex;
+  gap: 12px;
+  margin-top: 7px;
+}
+
+.link-btn {
+  appearance: none;
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--accent);
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.link-btn:hover:not(:disabled) {
+  text-decoration: underline;
+}
+
+.link-btn:disabled {
+  color: var(--text-mute);
+  cursor: not-allowed;
+}
+
+/* ---------- Status chips ---------- */
+.chip {
+  flex-shrink: 0;
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: 1px 7px;
+  border-radius: 999px;
+  white-space: nowrap;
+  text-transform: lowercase;
+}
+
+.chip--ready {
+  color: var(--text-soft);
+  background: var(--bg-sunk);
+}
+
+.chip--composing {
+  color: var(--accent-dark);
+  background: var(--accent-soft);
+}
+
+.chip--composed {
+  color: var(--accent-dark);
+  background: var(--accent-soft);
+}
+
+.chip--sent {
+  color: var(--ok);
+  background: var(--ok-soft);
+}
+
+.chip--manual {
+  color: var(--warn);
+  background: var(--warn-soft);
+}
+
+.chip--skipped {
+  color: var(--skip);
+  background: var(--skip-soft);
+}
+
+.chip--error {
+  color: var(--err);
+  background: var(--err-soft);
+}
+
+/* ---------- Inline note editor ---------- */
+.row-editor {
+  margin-top: 8px;
+}
+
+.editor-warn {
+  font-size: 11px;
+  color: var(--warn);
+  background: var(--warn-soft);
+  border-radius: var(--radius-sm);
+  padding: 4px 7px;
+  margin-bottom: 6px;
+}
+
+.editor-textarea {
+  width: 100%;
+  resize: vertical;
+  min-height: 64px;
+  font: inherit;
+  font-size: 12px;
+  padding: 6px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  background: var(--bg);
+}
+
+.editor-textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+.editor-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 6px;
+}
+
+.editor-counter {
+  font-size: 11px;
+  color: var(--text-mute);
+}
+
+.editor-counter--max {
+  color: var(--err);
+  font-weight: 600;
+}
+
+.editor-btns {
+  display: flex;
+  gap: 6px;
+}
+
+/* ---------- Settings ---------- */
+.settings {
+  border-top: 1px solid var(--border);
+  background: var(--bg-soft);
+}
+
+.settings-summary {
+  padding: 10px 12px;
+  font-weight: 600;
+  font-size: 12.5px;
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+}
+
+.settings-summary::-webkit-details-marker {
+  display: none;
+}
+
+.settings-summary::before {
+  content: "▸";
+  display: inline-block;
+  margin-right: 6px;
+  color: var(--text-mute);
+  transition: transform 0.15s;
+}
+
+.settings[open] .settings-summary::before {
+  transform: rotate(90deg);
+}
+
+.settings-body {
+  padding: 0 12px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.field--row {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+
+.field-label {
+  font-size: 11.5px;
+  color: var(--text-soft);
+  font-weight: 500;
+}
+
+.input {
+  width: 100%;
+  font: inherit;
+  font-size: 12.5px;
+  padding: 6px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  background: var(--bg);
+}
+
+.input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+.input--num {
+  width: 90px;
+}
+
+.checkbox {
+  width: 15px;
+  height: 15px;
+  accent-color: var(--accent);
+  margin: 0;
+}
+
+.row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.row .input {
+  flex: 1;
+}
+
+.settings-save {
+  align-self: flex-start;
+  margin-top: 2px;
+  flex: 0 0 auto;
+}
+
+.settings-saved {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--ok);
+  font-weight: 600;
+}
+
+/* ---------- Footer ---------- */
+.ftr {
+  padding: 8px 12px;
+  border-top: 1px solid var(--border);
+  font-size: 10.5px;
+  color: var(--text-mute);
+  text-align: center;
+  background: var(--bg-soft);
+}
+
+.ftr strong {
+  color: var(--text-soft);
+}

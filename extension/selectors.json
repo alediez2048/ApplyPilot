@@ -1,0 +1,65 @@
+{
+  "version": 1,
+  "_comment": "FROZEN CONTRACT §4. Layered LinkedIn selector table for the auto-compose flow. Strict JSON (JSON.parse'd by the content script) — the underscore-prefixed keys are docs the resolver ignores; only `targets` is consumed. A LinkedIn UI change is a config edit here, not a logic change: bump `version` (the content script logs the active version on load) and the resolver picks it up.",
+  "_resolver": "For a target, the resolver reads targets[name] (a ranked Strategy[]) and tries strategies IN ARRAY ORDER, returning the FIRST match that is currently visible AND enabled (offsetParent!=null / not [disabled] / not aria-disabled). `by` layers, best/most-stable first: aria-label (name-independent substring) -> visible text -> ARIA role -> structural CSS (last-resort DOM shape). `match` is 'exact'|'contains' and applies to aria-label/text only (default 'contains'); it is ignored for role/structural. `scope` limits the search root: 'document' (default) = whole page; 'actionBar' = the profile top-card CTA cluster (.pvs-profile-actions / .pv-top-card-v2-ctas / .ph5.pb5 action region); 'dialog' = the open [role=dialog] (the 'Send invitation' modal). SPECIAL RULES: noteTextarea MUST resolve to a real <input>/<textarea> (a contenteditable match is treated as NOTE_FIELD_NOT_FOUND, EXT-6); sendButton is resolved ONLY to measure its rect for overlay collision-avoidance + to add a highlight — NO code path clicks it (the human clicks Send); a pendingBadge present BEFORE composing means the person is already invited -> SKIP_CONTACT reason=pending_already (never compose, never mark sent).",
+  "targets": {
+    "connectButton": [
+      { "by": "aria-label", "value": "to connect", "match": "contains", "scope": "actionBar" },
+      { "by": "aria-label", "value": "Connect with", "match": "contains", "scope": "actionBar" },
+      { "by": "text", "value": "Connect", "match": "exact", "scope": "actionBar" },
+      { "by": "structural", "value": "button[aria-label*=\"to connect\" i]", "scope": "actionBar" },
+      { "by": "structural", "value": ".pvs-profile-actions button[aria-label*=\"connect\" i]", "scope": "document" },
+      { "by": "structural", "value": ".pv-top-card-v2-ctas button[aria-label*=\"connect\" i]", "scope": "document" }
+    ],
+    "moreButton": [
+      { "by": "aria-label", "value": "More actions", "match": "contains", "scope": "actionBar" },
+      { "by": "aria-label", "value": "More", "match": "exact", "scope": "actionBar" },
+      { "by": "text", "value": "More", "match": "exact", "scope": "actionBar" },
+      { "by": "structural", "value": ".pvs-profile-actions button[aria-label*=\"More actions\" i]", "scope": "document" },
+      { "by": "structural", "value": ".pv-top-card-v2-ctas button[aria-label*=\"More\" i]", "scope": "document" },
+      { "by": "structural", "value": ".pvs-profile-actions__overflow-toggle", "scope": "document" }
+    ],
+    "connectMenuItem": [
+      { "by": "aria-label", "value": "to connect", "match": "contains", "scope": "actionBar" },
+      { "by": "aria-label", "value": "Connect with", "match": "contains", "scope": "actionBar" },
+      { "by": "text", "value": "Connect", "match": "exact", "scope": "actionBar" },
+      { "by": "role", "value": "button", "scope": "actionBar" },
+      { "by": "structural", "value": ".artdeco-dropdown__content-inner [aria-label*=\"to connect\" i]", "scope": "document" },
+      { "by": "structural", "value": ".artdeco-dropdown__content [role=\"button\"][aria-label*=\"connect\" i]", "scope": "document" }
+    ],
+    "addNoteButton": [
+      { "by": "aria-label", "value": "Add a note", "match": "contains", "scope": "dialog" },
+      { "by": "text", "value": "Add a note", "match": "exact", "scope": "dialog" },
+      { "by": "structural", "value": "[role=\"dialog\"] button[aria-label*=\"Add a note\" i]", "scope": "dialog" },
+      { "by": "structural", "value": ".artdeco-modal button[aria-label*=\"note\" i]", "scope": "dialog" },
+      { "by": "structural", "value": ".send-invite__actions button:first-child", "scope": "dialog" }
+    ],
+    "noteTextarea": [
+      { "by": "structural", "value": "textarea#custom-message", "scope": "dialog" },
+      { "by": "structural", "value": "[role=\"dialog\"] textarea[name=\"message\"]", "scope": "dialog" },
+      { "by": "structural", "value": "[role=\"dialog\"] textarea[id*=\"message\" i]", "scope": "dialog" },
+      { "by": "structural", "value": "[role=\"dialog\"] textarea", "scope": "dialog" },
+      { "by": "structural", "value": "[role=\"dialog\"] input[name=\"message\"]", "scope": "dialog" }
+    ],
+    "sendButton": [
+      { "by": "aria-label", "value": "Send invitation", "match": "contains", "scope": "dialog" },
+      { "by": "text", "value": "Send", "match": "exact", "scope": "dialog" },
+      { "by": "structural", "value": "[role=\"dialog\"] button[aria-label*=\"Send invitation\" i]", "scope": "dialog" },
+      { "by": "structural", "value": ".send-invite__actions button[aria-label*=\"Send\" i]", "scope": "dialog" },
+      { "by": "structural", "value": "[role=\"dialog\"] button.artdeco-button--primary", "scope": "dialog" }
+    ],
+    "pendingBadge": [
+      { "by": "aria-label", "value": "Pending", "match": "contains", "scope": "actionBar" },
+      { "by": "text", "value": "Pending", "match": "exact", "scope": "actionBar" },
+      { "by": "structural", "value": ".pvs-profile-actions [aria-label^=\"Pending\" i]", "scope": "document" },
+      { "by": "structural", "value": ".pv-top-card-v2-ctas button[aria-label*=\"Pending\" i]", "scope": "document" }
+    ],
+    "dismissModal": [
+      { "by": "aria-label", "value": "Dismiss", "match": "exact", "scope": "dialog" },
+      { "by": "aria-label", "value": "Dismiss", "match": "contains", "scope": "document" },
+      { "by": "aria-label", "value": "Close", "match": "contains", "scope": "document" },
+      { "by": "structural", "value": "[role=\"dialog\"] button.artdeco-modal__dismiss", "scope": "dialog" },
+      { "by": "structural", "value": "button[aria-label*=\"Dismiss\" i]", "scope": "document" }
+    ]
+  }
+}

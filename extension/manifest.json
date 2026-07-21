@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "ApplyPilot LinkedIn Assistant",
+  "version": "0.4.0",
+  "description": "Composes personalized LinkedIn connection notes from your ApplyPilot outreach queue and highlights them for you to send. It never clicks Send — you always do.",
+  "minimum_chrome_version": "116",
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "ApplyPilot LinkedIn Assistant"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://*.linkedin.com/in/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "permissions": ["storage", "alarms"],
+  "host_permissions": [
+    "https://*.linkedin.com/*",
+    "http://localhost:8765/*"
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["shared/constants.js", "selectors.json"],
+      "matches": ["https://*.linkedin.com/*"]
+    }
+  ]
+}

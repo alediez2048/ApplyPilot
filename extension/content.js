@@ -213,7 +213,26 @@
   // On-page profile identity (H3 safety gate).
   function onPageName() {
     const el = document.querySelector("main h1") || document.querySelector("h1");
-    return el ? visibleText(el) : "";
+    const t = el ? visibleText(el) : "";
+    // Reject placeholders/skeletons ("?", single chars, non-name junk) so waitFor keeps
+    // polling until the real SPA-loaded name renders, instead of matching a placeholder.
+    const cleaned = t.replace(/[^\p{L}\p{N}\s'.-]/gu, "").trim();
+    if (cleaned.length < 3 || !/\p{L}/u.test(cleaned)) return "";
+    return t;
+  }
+  // A dead / unavailable / walled profile — auto-skip (not a "wrong person" pause).
+  function profileUnavailable() {
+    const url = location.href.toLowerCase();
+    if (/\/(404|authwall|unavailable)|linkedin\.com\/(login|checkpoint)/.test(url)) return true;
+    const body = (document.body ? document.body.innerText : "").toLowerCase();
+    return (
+      body.includes("this page doesn't exist") ||
+      body.includes("this page doesn’t exist") ||
+      body.includes("page not found") ||
+      body.includes("profile unavailable") ||
+      body.includes("this profile is not available") ||
+      body.includes("go to your feed")   // LinkedIn's 404 CTA
+    );
   }
   function nameTokens(s) {
     return String(s || "")
@@ -322,18 +341,32 @@
   async function runCompose(contact, gen) {
     const alive = () => gen === state.gen;
 
-    // 0) Wait for the profile shell (the name) to render.
-    await waitFor(() => onPageName(), { timeout: 10000 });
+    // 0) Wait for the profile shell (the real name) to render — or a 404 to appear.
+    await waitFor(() => onPageName() || profileUnavailable(), { timeout: 10000 });
     if (!alive()) return;
 
-    // 1) IDENTITY GATE — refuse before doing anything on the wrong person.
+    // 0a) Dead/stale/walled URL (common for guessed contact URLs) => AUTO-SKIP + advance,
+    //     never stall the whole queue on a bad link. Not a "wrong person" event.
+    if (profileUnavailable() || !onPageName()) {
+      log("profile unavailable / name unreadable — skipping", contact.full_name);
+      renderOverlay({
+        mode: "skip",
+        heading: "Profile unavailable — skipping",
+        detail: `Couldn't open ${contact.full_name}'s profile (dead or private link).`,
+      });
+      sendBg(MSG.SKIP_CONTACT, { contactId: contact.id, reason: REASON.PROFILE_404 });
+      return;
+    }
+
+    // 1) IDENTITY GATE — a real, DIFFERENT name is on the page => pause for the human
+    //    (genuine safety event; do not auto-skip a real person).
     const pageName = onPageName();
     if (!identityMatches(contact.full_name, pageName)) {
       log("identity mismatch: intended", contact.full_name, "on-page", pageName);
       renderOverlay({
         mode: "mismatch",
         heading: "Wrong profile — not composing",
-        detail: `Expected ${contact.full_name}, this page is ${pageName || "unknown"}.`,
+        detail: `Expected ${contact.full_name}, this page is ${pageName}.`,
       });
       sendBg(MSG.IDENTITY_MISMATCH, { contactId: contact.id, onPageName: pageName });
       state.phase = RUN_PHASE.PAUSED;

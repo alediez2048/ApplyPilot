@@ -62,6 +62,39 @@ def test_eligible_linkedin_ready_only(tmp_path, monkeypatch):
     assert ids == [a]
 
 
+def test_eligible_linkedin_excludes_manual_and_skipped(tmp_path, monkeypatch):
+    # B3: manual/skipped are "done" and must NOT re-surface in the queue (only 'composed'
+    # stays eligible — the human hasn't sent yet).
+    _fresh_db(tmp_path, monkeypatch)
+    ready = store.upsert_contact(_c(full_name="R", linkedin_url="https://linkedin.com/in/r"))
+    manual = store.upsert_contact(_c(full_name="M", linkedin_url="https://linkedin.com/in/m"))
+    skipped = store.upsert_contact(_c(full_name="S", linkedin_url="https://linkedin.com/in/s"))
+    composed = store.upsert_contact(_c(full_name="C", linkedin_url="https://linkedin.com/in/c"))
+    store.mark_dm_manual(manual)
+    store.mark_dm_skipped(skipped)
+    store.mark_dm_composed(composed)
+    ids = set(wd._eligible_contact_ids("http://j/1", "linkedin"))
+    assert ids == {ready, composed}
+    assert manual not in ids and skipped not in ids
+
+
+def test_mark_dm_sent_stamps_dm_sent_at_for_dedupe(tmp_path, monkeypatch):
+    # B5: mark_dm_sent must stamp dm_sent_at so already_dmed()/dm_sent_today() (which
+    # filter dm_sent_at >= cutoff) actually see the send — else duplicate DMs.
+    _fresh_db(tmp_path, monkeypatch)
+    cid = store.upsert_contact(_c(linkedin_url="https://www.linkedin.com/in/dup"))
+    store.mark_dm_sent(cid)  # no prior claim_dm_send()
+    row = store.get_contact(cid)
+    assert row["dm_status"] == "sent" and row["dm_sent_at"]  # non-NULL
+    assert store.already_dmed("https://www.linkedin.com/in/dup")
+    assert store.dm_sent_today() == 1
+    # manual paste also counts toward dedupe
+    m = store.upsert_contact(_c(full_name="M", job_url="http://j/2",
+                                linkedin_url="https://www.linkedin.com/in/m2"))
+    store.mark_dm_manual(m)
+    assert store.get_contact(m)["dm_sent_at"]
+
+
 # (LinkedIn sending automation was removed — it's now a client-side "copy note + open
 #  profile" button; the user pastes and clicks Send in their own browser. Nothing to test
 #  server-side. Email bulk below still runs through the backend.)

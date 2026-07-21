@@ -294,8 +294,8 @@ def _eligible_contact_ids(job_url: str, channel: str, confirm_unverified: bool =
         else:  # linkedin
             if not (c.get("linkedin_url") and c.get("linkedin_message")):
                 continue
-            if c.get("dm_status") == "sent":
-                continue
+            if c.get("dm_status") in _DM_DONE_STATUSES:
+                continue  # sent/manual/skipped are finished — don't re-offer them
         ids.append(c.get("id"))
     return [i for i in ids if i]
 
@@ -642,6 +642,13 @@ def _serve_material(handler: BaseHTTPRequestHandler, raw_path: str) -> None:
     handler.wfile.write(body)
 
 
+# LinkedIn contacts in any of these states are "done" — a note was sent, or the user
+# handled/skipped them manually — so they must not re-surface in the outreach queue
+# (email `submitted` is handled separately in the email branch). `composed` is NOT here:
+# the note was filled but the human hasn't sent yet.
+_DM_DONE_STATUSES = frozenset({"sent", "manual", "skipped"})
+
+
 def _networking_available() -> bool:
     from applypilot.networking import providers
     return providers.available()
@@ -673,7 +680,7 @@ def _contact_payload(c: dict, company: str | None = None) -> dict:
         "dm_error": c.get("dm_error") or "",
         "dm_ready": bool((c.get("linkedin_url") or "").strip()
                          and (c.get("linkedin_message") or "").strip()
-                         and c.get("dm_status") != "sent"),
+                         and c.get("dm_status") not in _DM_DONE_STATUSES),
         # Live connection signal (recomputed each load so re-imports reflect instantly).
         "is_connection": bool(conn_rec),
         "connection_at_company": bool(conn_rec and conn_rec.get("company_match")),

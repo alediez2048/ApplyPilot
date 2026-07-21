@@ -39,7 +39,7 @@ _CONTACT_COLUMNS: dict[str, str] = {
     "sent_message_id": "TEXT",
     "send_error": "TEXT",
     # LinkedIn DM channel (independent of the email send state above).
-    "dm_status": "TEXT",          # none|sending|sent|failed
+    "dm_status": "TEXT",          # none|sending|composed|sent|manual|skipped|failed
     "dm_sent_at": "TEXT",
     "dm_error": "TEXT",
     "discovered_at": "TEXT",
@@ -285,23 +285,57 @@ def claim_dm_send(contact_id: str, conn: sqlite3.Connection | None = None) -> bo
 
 
 def mark_dm_sent(contact_id: str, conn: sqlite3.Connection | None = None) -> None:
+    """Mark a contact's LinkedIn note as sent. Stamps dm_sent_at (COALESCE preserves an
+    existing claim timestamp) so the automated `network --send-dm` dedupe/cap window
+    queries — which filter `dm_sent_at >= cutoff` — actually see extension/manual sends.
+    Without this stamp those sends are invisible and the same person can be DM'd twice."""
     if conn is None:
         conn = get_connection()
+    now = datetime.now(timezone.utc).isoformat()
     conn.execute(
-        "UPDATE contacts SET dm_status = 'sent', dm_error = NULL, updated_at = ? WHERE id = ?",
-        (datetime.now(timezone.utc).isoformat(), contact_id),
+        "UPDATE contacts SET dm_status = 'sent', dm_sent_at = COALESCE(dm_sent_at, ?), "
+        "dm_error = NULL, updated_at = ? WHERE id = ?",
+        (now, now, contact_id),
     )
     conn.commit()
 
 
 def mark_dm_composed(contact_id: str, conn: sqlite3.Connection | None = None) -> None:
     """Mark that the note was composed into the invite dialog (the human sends manually).
-    Does NOT claim/dedupe — composing is idempotent and re-runnable."""
+    Does NOT claim/dedupe or stamp dm_sent_at — composing is idempotent and re-runnable,
+    and no invite has actually gone out yet."""
     if conn is None:
         conn = get_connection()
     conn.execute(
         "UPDATE contacts SET dm_status = 'composed', updated_at = ? WHERE id = ? "
-        "AND (dm_status IS NULL OR dm_status != 'sent')",
+        "AND (dm_status IS NULL OR dm_status NOT IN ('sent', 'manual', 'skipped'))",
+        (datetime.now(timezone.utc).isoformat(), contact_id),
+    )
+    conn.commit()
+
+
+def mark_dm_manual(contact_id: str, conn: sqlite3.Connection | None = None) -> None:
+    """Mark a contact as handled via the manual/paste fallback — a real invite the human
+    sent outside our compose flow. Stamps dm_sent_at so it counts toward dedupe/cap and
+    won't re-surface in the queue."""
+    if conn is None:
+        conn = get_connection()
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        "UPDATE contacts SET dm_status = 'manual', dm_sent_at = COALESCE(dm_sent_at, ?), "
+        "updated_at = ? WHERE id = ?",
+        (now, now, contact_id),
+    )
+    conn.commit()
+
+
+def mark_dm_skipped(contact_id: str, conn: sqlite3.Connection | None = None) -> None:
+    """Mark a contact as deliberately skipped (already connected, InMail-only, user skip).
+    No dm_sent_at (no invite sent), but excluded from the queue so it doesn't re-offer."""
+    if conn is None:
+        conn = get_connection()
+    conn.execute(
+        "UPDATE contacts SET dm_status = 'skipped', updated_at = ? WHERE id = ?",
         (datetime.now(timezone.utc).isoformat(), contact_id),
     )
     conn.commit()

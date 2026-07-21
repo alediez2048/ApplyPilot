@@ -222,18 +222,20 @@
     if (cleaned.length < 3 || !/\p{L}/u.test(cleaned)) return "";
     return t;
   }
-  // A dead / unavailable / walled profile — auto-skip (not a "wrong person" pause).
+  // A dead / unavailable / walled profile — STRONG signals only (auto-skip is safe here).
+  // Deliberately conservative: a false positive silently marks a real contact done, so we do
+  // NOT match generic nav phrases ("go to your feed", "page not found") that appear site-wide.
   function profileUnavailable() {
     const url = location.href.toLowerCase();
-    if (/\/(404|authwall|unavailable)|linkedin\.com\/(login|checkpoint)/.test(url)) return true;
+    // URL bounced off the profile entirely => definitely not the person's page.
+    if (/linkedin\.com\/(404|authwall|checkpoint|uas\/login|login)\b/.test(url)) return true;
+    if (/\/in\/unavailable\b/.test(url)) return true;
     const body = (document.body ? document.body.innerText : "").toLowerCase();
     return (
       body.includes("this page doesn't exist") ||
       body.includes("this page doesn’t exist") ||
-      body.includes("page not found") ||
-      body.includes("profile unavailable") ||
       body.includes("this profile is not available") ||
-      body.includes("go to your feed")   // LinkedIn's 404 CTA
+      body.includes("profile unavailable")
     );
   }
   function nameTokens(s) {
@@ -343,14 +345,15 @@
   async function runCompose(contact, gen) {
     const alive = () => gen === state.gen;
 
-    // 0) Wait for the profile shell (the real name) to render — or a 404 to appear.
-    await waitFor(() => onPageName() || profileUnavailable(), { timeout: 10000 });
+    // 0) Wait for the profile name to render — or a clear 404 to appear (SPA lazy-loads
+    //    the name well after document_idle, so give it room).
+    await waitFor(() => onPageName() || profileUnavailable(), { timeout: 15000 });
     if (!alive()) return;
 
-    // 0a) Dead/stale/walled URL (common for guessed contact URLs) => AUTO-SKIP + advance,
-    //     never stall the whole queue on a bad link. Not a "wrong person" event.
-    if (profileUnavailable() || !onPageName()) {
-      log("profile unavailable / name unreadable — skipping", contact.full_name);
+    // 0a) STRONG dead/stale/walled signal (bad URL) => AUTO-SKIP + advance. Safe to auto-skip
+    //     because the URL bounced off the person's profile entirely.
+    if (profileUnavailable()) {
+      log("profile unavailable — skipping", contact.full_name);
       renderOverlay({
         mode: "skip",
         heading: "Profile unavailable — skipping",
@@ -360,9 +363,24 @@
       return;
     }
 
+    // 0b) AMBIGUOUS: the name never rendered but it's not a clear 404. Do NOT auto-skip
+    //     (that would silently mark a real, slow-loading profile "done" and burn the queue).
+    //     PAUSE and let the human decide (Skip / Next / reload). Never compose without identity.
+    const pageName = onPageName();
+    if (!pageName) {
+      log("could not read profile name — pausing (not auto-skipping)", contact.full_name);
+      renderOverlay({
+        mode: "mismatch",
+        heading: "Couldn't read this profile",
+        detail: `Expected ${contact.full_name} but the page hasn't shown a name. Reload the tab, or Skip.`,
+      });
+      sendBg(MSG.IDENTITY_MISMATCH, { contactId: contact.id, onPageName: "" });
+      state.phase = RUN_PHASE.PAUSED;
+      return;
+    }
+
     // 1) IDENTITY GATE — a real, DIFFERENT name is on the page => pause for the human
     //    (genuine safety event; do not auto-skip a real person).
-    const pageName = onPageName();
     if (!identityMatches(contact.full_name, pageName)) {
       log("identity mismatch: intended", contact.full_name, "on-page", pageName);
       renderOverlay({

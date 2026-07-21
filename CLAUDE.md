@@ -202,7 +202,7 @@ NOT `_ALL_COLUMNS`). Full cycle: **find people → show in dashboard → draft e
   WebFetch/etc.). Blast radius of a prompt-injection on a malicious careers page dropped from
   "arbitrary code exec + secret exfiltration" to "drive the browser / send an email."
 
-## 5. LinkedIn DM auto-send — **BUILT (LDM-1..3), pending first live login+send verification**
+## 5. LinkedIn DM auto-send (LDM) — **SUPERSEDED — see §7 (abandoned) + §8 (extension). Historical below.**
 
 New module **`src/applypilot/networking/linkedin_dm.py`** + `dm_prompt.py`. Drives the installed
 **agent-browser** binary (`~/.local/bin/agent-browser` v0.27.0) as a subprocess to send drafted
@@ -239,25 +239,97 @@ LinkedIn notes. **Repos stay SEPARATE** — ApplyPilot shells out to the CLI (li
   are non-connections but ARE reachable via **Connect + note** (Path A) — no InMail needed. LinkedIn also
   rate-limits invitations (~100–200/week); the 5/day cap stays well under.
 
+## 6. Pipeline overhaul (committed `8da452e`) — Apollo, aggressive tailoring, email attachments, apply fixes
+
+- **Apollo is the SOLE contact provider; Hunter fully removed.** `hunter.py` + its test deleted;
+  `providers.py` is Apollo-only. Apollo needs a **paid plan** (Basic $49/mo+) for API access — the
+  user upgraded (free tier 403s the people-search API). Apollo's title/department targeting surfaces
+  the *right* people (recruiters/hiring managers) vs. Hunter's "whoever has an email." `derive.py` now
+  strips careers-portal subdomains (`careers.amd.com → amd.com`). `NETWORKING_PROVIDER` no longer needed.
+- **Aggressive JD-matching tailoring** (opt-in `TAILOR_AGGRESSIVE=1`, LIVE): `tailor.py`
+  `_build_aggressive_tailor_prompt` mirrors the JD's skills/keywords into the resume + skips the
+  fabrication judge (forces `lenient`). Preserves real employers/school/degrees (background-checkable);
+  everything else matches the JD. Cover letter honors the same mode. **User explicitly chose this over
+  honest tailoring** ("I care about getting an interview").
+- **Email unified to Gmail:** profile `personal.email` → `jorgealejandrodiezm@gmail.com`; applications
+  AND outreach now both use it (was applying under `.edu`).
+- **Email attachments:** `gmail_send.py` attaches the job's tailored **résumé + cover letter PDFs**
+  (recruiter-friendly filenames) to every outreach email. `OUTREACH_ATTACH_DOCS` toggle. Wired through
+  both OAuth + SMTP.
+- **Apply fixes:** (a) **dry-run was broken** — the agent submitted real applications; now the dry-run
+  banner dominates the whole prompt + a hard launcher safety-net (a dry-run can never record "applied";
+  agent-submit-during-dry-run = flagged violation). (b) **résumé upload `file_access_denied`** — stage
+  the PDF into the worker dir (Playwright's cwd), reset-before-stage. (c) `--strict-mcp-config` so the
+  apply agent uses ONLY ApplyPilot's real-Chrome Playwright, not a globally-registered agent-browser MCP
+  (which got 403-blocked at AMD). **BetterUp applied successfully via Ashby** (real submit).
+
+## 7. LinkedIn auto-send — ABANDONED (the long saga); external browser automation does NOT work
+
+Spent heavily trying to auto-send LinkedIn connection notes via `linkedin_dm.py` (agent-browser CLI
+driving real Chrome). **Verdict: fully-automated LinkedIn sending is not reliably achievable.** Proven
+empirically: the a11y snapshot misses LinkedIn's React modals; synthetic `.click()` doesn't fire React
+handlers; sessions hang; every profile's DOM varies; and LinkedIn soft-blocks/delays automated sends
+(some invites landed — Kumar, Michael, Sage showed Pending — many silently didn't). **The dashboard
+LinkedIn auto-send/compose buttons were REMOVED.** `linkedin_dm.py`/`dm_prompt.py` remain as dormant
+CLI-only helpers. Interim UX: a **"Copy note + open LinkedIn"** button per contact (client-side, zero
+risk). Key lesson: **driving LinkedIn from OUTSIDE the browser is the wrong architecture** → led to §8.
+
+## 8. Chrome extension "LinkedIn Assistant" — BUILT (EXT-0..5), in live debugging
+
+The pivot: run INSIDE the user's real browser as an MV3 extension. It composes the note into the invite
+dialog and **the HUMAN clicks Send** (reliable + safe — LinkedIn blocks *robot* Sends, not human ones).
+Full PRD + review + build:
+- **Docs:** `docs/chrome-extension-prd.md` (v2 after review), `docs/chrome-extension-review.md`
+  (51-agent adversarial review → GO WITH CHANGES; caught the MV3-stateless-worker issue + 2 real code
+  bugs), `docs/tickets/EXT-0..6` + `EXT-README`.
+- **Code bugs the review fixed in the main app** (`web_dashboard.py`/`store.py`): **B3** — LinkedIn
+  queue eligibility now excludes `_DM_DONE_STATUSES = {sent,manual,skipped}` (was only `sent`); **B5** —
+  `mark_dm_sent` now stamps `dm_sent_at` (was invisible to the CLI dedupe/cap). Added
+  `mark_dm_manual`/`mark_dm_skipped`.
+- **`extension/`** (MV3, no build step): `manifest.json` (minimal perms: storage+alarms+host only),
+  stateless `background.js` (ALL run-state in `chrome.storage`; idempotent advance; timestamp pacing;
+  owns/validates a dedicated tab; validates linkedin_url), `content.js` (React-safe textarea fill,
+  identity cross-check, `textContent`-only overlay, positive send-detection, **NEVER clicks Send** —
+  verified), `popup.*`, `selectors.json`. `shared/constants.js` = frozen contract.
+- **Local API (EXT-0):** `GET /api/ext/queue[?job_url]`, `POST /api/ext/status`, `POST /api/ext/note` on
+  `:8765`; mutual **shared token** at `~/.applypilot/ext_token` (generated on dashboard startup, printed
+  to console; paste into the popup). 19 tests in `tests/test_ext_api.py`.
+- **Live-debug fixes so far:** (1) token chicken-and-egg → generate on startup; (2) dead Hunter URLs →
+  auto-skip; (3) content script inert on LinkedIn → **CSP blocks dynamic `import()`/`fetch()` of
+  extension resources** → inject constants+selectors as CLASSIC content scripts
+  (`shared/constants.content.js` + `shared/selectors.content.js`, before `content.js`); (4) mass
+  auto-skip (all 9 contacts) → `profileUnavailable()` false-positived on nav phrases + auto-skipped the
+  ambiguous "name didn't load" case → now STRONG 404 signals only + PAUSE on ambiguous.
+- **STILL PENDING (needs the user, interactive):** first successful live compose on a real BetterUp
+  profile. **After ANY extension reload, the user MUST also Cmd+R the LinkedIn tab** (reload orphans the
+  content script). Debug via DevTools console → Verbose → `[ApplyPilot]` logs.
+
 ## Current environment state (the user's machine)
 
-- **Contacts: live via Hunter.io free tier.** Apollo key present but free plan (no API) — Hunter preferred.
-- **Gmail: connected via OAuth**, sends from **jorgealejandrodiezm@gmail.com** (personal, chosen over
-  @utexas.edu to avoid .edu cold-email risk). Self-test email delivered successfully.
-- **899 real LinkedIn connections imported** (none at Affirm; 2 at Visa).
-- **Real jobs in DB:** Affirm (applied, 5 contacts found + drafted) and Visa. The `~/applypilot-local`
-  dir is an older TEST copy (690 jobs) — don't confuse it with real `~/.applypilot`.
-- **Dashboard:** `.venv/bin/applypilot dashboard --serve` → http://localhost:8765. Restart it after
-  code changes (a running server won't pick up edits). Hard-refresh the browser (Cmd+Shift+R) after
-  frontend changes. Header bar shows the data dir — confirm it's `~/.applypilot` (real).
+- **Contacts: Apollo.io (PAID Basic plan), sole provider.** Hunter removed. Apollo surfaces recruiters/
+  hiring managers by title. (Legacy Affirm contacts are old Hunter data with junk/dead URLs.)
+- **Gmail: connected via OAuth**, sends from **jorgealejandrodiezm@gmail.com** (both apps + outreach).
+  Outreach emails carry résumé + cover letter PDF attachments.
+- **`TAILOR_AGGRESSIVE=1`** set — resumes aggressively match the JD (fabrication guard off).
+- **899 LinkedIn connections imported.** Real jobs: Affirm, Visa, **AMD** (careers site 403-blocks
+  automation), **BetterUp** (Ashby — applied successfully). Both AMD + BetterUp scored 4/10 (reach roles;
+  the scorer reads the user as PM/SEO, not eng — recalibration may be worth it).
+- **Extension token** lives at `~/.applypilot/ext_token`; the dashboard prints it on startup.
+- **Dashboard:** `.venv/bin/applypilot dashboard --serve` → http://localhost:8765. Restart after code
+  changes; kill a stale one with `lsof -ti:8765 | xargs kill -9`. Hard-refresh the browser after
+  frontend edits.
 
 ## Dev workflow notes (important)
 
 - Run via **`.venv/bin/applypilot ...`** (or `PYTHONPATH=src .venv/bin/python`). The editable install
   is flaky; after source edits run **`.venv/bin/python -m pip install ".[gmail]" --quiet`** to refresh
   the installed console script, then restart the dashboard.
-- **Tests:** `PYTHONPATH=src .venv/bin/python -m pytest tests/ -q` (use an isolated `APPLYPILOT_DIR`).
-  ~83 passing. ruff line-length 120.
+- **Tests:** `APPLYPILOT_DIR=$(mktemp -d) PYTHONPATH=src .venv/bin/python -m pytest tests/ -q`.
+  **~110 passing**, ruff clean (line-length 120). Extension browser behavior is MANUAL (`extension/MANUAL-TEST.md`).
 - **Gmail optional dep:** `pip install ".[gmail]"` (google-api-python-client, google-auth-oauthlib).
-- **Big decisions get an adversarial multi-agent review first** (Workflow) — it caught 13 real issues
-  on the networking PRD and the agent-browser blocker on the DM PRD. Worth it before building risky things.
+- **Big decisions get an adversarial multi-agent review first** (Workflow) — caught 13 issues on the
+  networking PRD, the agent-browser blocker on the DM PRD, and 5 blockers + the MV3 issue on the
+  extension PRD. Worth it before building risky things. **Extension was built by a coordinated Workflow
+  team** (freeze contracts → parallel per-file build → integrate → verify).
+- **All work committed + pushed to `main`** (github.com/alediez2048/ApplyPilot). Nothing sensitive in git
+  (secrets/DB/token all in `~/.applypilot/`, outside the repo).

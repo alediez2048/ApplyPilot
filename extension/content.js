@@ -37,19 +37,21 @@
   // no string re-typed. selectors.json ships alongside and is the versioned §4 selector table.
   let MSG, STORAGE_KEYS, COMPOSE_FAIL_REASON, RUN_PHASE, NOTE_MAX_LEN;
   let SELECTORS = { version: 0, targets: {} };
-  try {
-    const mod = await import(chrome.runtime.getURL("shared/constants.js"));
-    ({ MSG, STORAGE_KEYS, COMPOSE_FAIL_REASON, RUN_PHASE, NOTE_MAX_LEN } = mod);
-  } catch (e) {
-    // Without the contract we cannot safely act. Stay completely inert.
-    console.warn("[ApplyPilot] could not load shared/constants.js — content script inert", e);
+  // constants.content.js (a CLASSIC content script) is injected before us by the manifest and
+  // sets this global. We do NOT dynamic-import() the module version — LinkedIn's CSP blocks
+  // dynamic import in content scripts, which would silently make this whole script inert.
+  const C = globalThis.__APPLYPILOT_CONSTANTS__;
+  if (!C) {
+    console.warn("[ApplyPilot] constants global missing — content script inert");
     return;
   }
-  try {
-    const res = await fetch(chrome.runtime.getURL("selectors.json"));
-    SELECTORS = await res.json();
-  } catch (e) {
-    console.warn("[ApplyPilot] could not load selectors.json — using empty table", e);
+  ({ MSG, STORAGE_KEYS, COMPOSE_FAIL_REASON, RUN_PHASE, NOTE_MAX_LEN } = C);
+  // selectors.content.js (classic, injected before us) sets this global — no CSP-subject
+  // fetch of an extension resource (which LinkedIn can also block).
+  if (globalThis.__APPLYPILOT_SELECTORS__ && globalThis.__APPLYPILOT_SELECTORS__.targets) {
+    SELECTORS = globalThis.__APPLYPILOT_SELECTORS__;
+  } else {
+    console.warn("[ApplyPilot] selectors global missing — using empty table");
   }
   const REASON = COMPOSE_FAIL_REASON;
   const log = (...a) => console.debug("[ApplyPilot]", ...a);

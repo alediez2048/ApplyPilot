@@ -242,15 +242,40 @@
     return d[0] || null;
   }
 
-  // On-page profile identity (H3 safety gate).
-  function onPageName() {
-    const el = document.querySelector("main h1") || document.querySelector("h1");
-    const t = el ? visibleText(el) : "";
-    // Reject placeholders/skeletons ("?", single chars, non-name junk) so waitFor keeps
-    // polling until the real SPA-loaded name renders, instead of matching a placeholder.
-    const cleaned = t.replace(/[^\p{L}\p{N}\s'.-]/gu, "").trim();
+  // On-page profile identity (H3 safety gate). LinkedIn has moved the name element around and
+  // A/B-tests the top-card, so we try a ranked list of known name locations (not just `main h1`)
+  // and also fall back to the document title ("Ali Coppinger | LinkedIn"). First VISIBLE element
+  // whose text cleans to a plausible name wins.
+  const NAME_SELECTORS = [
+    "main h1",
+    "h1.text-heading-xlarge",
+    ".pv-text-details__left-panel h1",
+    ".ph5 h1",
+    "section.artdeco-card h1",
+    ".pv-top-card h1",
+    ".pvs-profile-actions ~ * h1",
+    "h1",
+  ];
+  function cleanName(t) {
+    const cleaned = String(t || "").replace(/[^\p{L}\p{N}\s'.-]/gu, "").trim();
     if (cleaned.length < 3 || !/\p{L}/u.test(cleaned)) return "";
-    return t;
+    return String(t).trim();
+  }
+  function onPageName() {
+    for (const sel of NAME_SELECTORS) {
+      let nodes;
+      try { nodes = document.querySelectorAll(sel); } catch (_e) { continue; }
+      for (const el of nodes) {
+        if (!isVisible(el)) continue;
+        const name = cleanName(visibleText(el));
+        if (name) return name;
+      }
+    }
+    // Last resort: the tab title is "<Name> | LinkedIn" / "(N) <Name> | LinkedIn" once loaded.
+    const title = (document.title || "").replace(/^\(\d+\)\s*/, "").replace(/\s*[|·-]\s*LinkedIn.*$/i, "");
+    const fromTitle = cleanName(title);
+    if (fromTitle && !/^linkedin$/i.test(fromTitle)) return fromTitle;
+    return "";
   }
   // A dead / unavailable / walled profile — STRONG signals only (auto-skip is safe here).
   // Deliberately conservative: a false positive silently marks a real contact done, so we do
@@ -377,8 +402,10 @@
 
     // 0) Wait for the profile name to render — or a clear 404 to appear (SPA lazy-loads
     //    the name well after document_idle, so give it room).
+    log("compose start for", contact.full_name, "@", location.href);
     await waitFor(() => onPageName() || profileUnavailable(), { timeout: 15000 });
     if (!alive()) return;
+    log("name read:", JSON.stringify(onPageName()), "| doc.title:", JSON.stringify(document.title), "| h1:", JSON.stringify((document.querySelector("h1") || {}).textContent || null));
 
     // 0a) STRONG dead/stale/walled signal (bad URL) => AUTO-SKIP + advance. Safe to auto-skip
     //     because the URL bounced off the person's profile entirely.

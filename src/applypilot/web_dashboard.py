@@ -1849,7 +1849,16 @@ function advanceStagesFromLog(lines) {
   if (/STAGE:\s*enrich/i.test(txt)) pipeUp('enrich', 'active');
   if (/STAGE:\s*(tailor|score bypass)/i.test(txt)) { pipeUp('enrich', 'done'); pipeUp('tailor', 'active'); }
   if (/STAGE:\s*cover/i.test(txt)) { pipeUp('enrich', 'done'); pipeUp('tailor', 'done'); pipeUp('cover', 'active'); }
-  if (/prepare complete/i.test(txt)) { pipeUp('enrich', 'done'); pipeUp('tailor', 'done'); pipeUp('cover', 'done'); }
+  if (/prepare complete/i.test(txt)) {
+    pipeUp('enrich', 'done');
+    // Reflect the REAL outcome: the prepare exits 0 even when tailoring/cover errored, so parse
+    // the result dict and mark a stage FAILED (red) when it errored — never a false green ✓.
+    const m = txt.match(/prepare complete:\s*\{([^}]*)\}/i);
+    const num = (k) => { const mm = m && m[1].match(new RegExp("'" + k + "':\\s*(\\d+)")); return mm ? parseInt(mm[1], 10) : null; };
+    const tErr = num('tailor_errors'), cErr = num('cover_errors');
+    PIPE_STATUS.tailor = tErr > 0 ? 'failed' : 'done';
+    PIPE_STATUS.cover = cErr > 0 ? 'failed' : 'done';
+  }
 }
 
 // Poll /api/status until the background command (prepare/apply) finishes, keeping the status
@@ -1943,7 +1952,15 @@ async function runEverything() {
       ['cover','tailor','enrich'].some(k => { if (PIPE_STATUS[k] === 'active') { pipeSet(k, 'failed'); return true; } return false; });
       return;
     }
-    pipeSet('enrich', 'done'); pipeSet('tailor', 'done'); pipeSet('cover', 'done');
+    pipeSet('enrich', 'done');
+    // advanceStagesFromLog already set tailor/cover to done-or-FAILED from the prepare result;
+    // don't blindly force them green. If either genuinely failed, surface it and stop.
+    if (PIPE_STATUS.tailor === 'failed' || PIPE_STATUS.cover === 'failed') {
+      pipeRender();
+      cmdEl.textContent = 'Prepare finished but tailoring/cover failed (see log) — no materials to apply. Check your LLM keys.';
+      return;
+    }
+    pipeSet('tailor', 'done'); pipeSet('cover', 'done');
 
     // 3) Apply — only if something is actually Ready (else say so, don't launch a no-op).
     const status = await (await fetch('/api/status')).json();

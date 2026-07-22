@@ -306,8 +306,8 @@ def _eligible_contact_ids(job_url: str, channel: str, confirm_unverified: bool =
         else:  # linkedin
             if not (c.get("linkedin_url") and c.get("linkedin_message")):
                 continue
-            if c.get("dm_status") in _DM_DONE_STATUSES:
-                continue  # sent/manual/skipped are finished — don't re-offer them
+            if c.get("dm_status") in _EXT_QUEUE_EXCLUDE:
+                continue  # only sent/manual are finished — skipped keeps re-appearing
         ids.append(c.get("id"))
     return [i for i in ids if i]
 
@@ -712,6 +712,10 @@ def _serve_material(handler: BaseHTTPRequestHandler, raw_path: str) -> None:
 # (email `submitted` is handled separately in the email branch). `composed` is NOT here:
 # the note was filled but the human hasn't sent yet.
 _DM_DONE_STATUSES = frozenset({"sent", "manual", "skipped"})
+# The extension LinkedIn queue excludes ONLY contacts actually invited (sent/manual) — NOT
+# `skipped`. Auto-skip has been a false-positive trap; skipped contacts must keep re-appearing
+# so the queue never silently empties. Use "Mark sent" to retire a genuinely-invited contact.
+_EXT_QUEUE_EXCLUDE = frozenset({"sent", "manual"})
 
 
 def _networking_available() -> bool:
@@ -1106,14 +1110,14 @@ def _ext_queue(job_url: str | None, include_skipped: bool = False) -> dict:
     else:
         # All-jobs variant: single SELECT over contacts, then dedupe by normalized profile URL
         # so the same person surfaced under two jobs yields exactly one queue row.
-        placeholders = ", ".join("?" for _ in _DM_DONE_STATUSES)
+        placeholders = ", ".join("?" for _ in _EXT_QUEUE_EXCLUDE)
         rows = conn.execute(
             "SELECT * FROM contacts "
             "WHERE linkedin_url IS NOT NULL AND trim(linkedin_url) != '' "
             "AND linkedin_message IS NOT NULL AND trim(linkedin_message) != '' "
             f"AND (dm_status IS NULL OR dm_status NOT IN ({placeholders})) "
             "ORDER BY discovered_at ASC",
-            tuple(_DM_DONE_STATUSES),
+            tuple(_EXT_QUEUE_EXCLUDE),
         ).fetchall()
         contacts = []
         seen: set[str] = set()

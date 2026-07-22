@@ -60,6 +60,7 @@ export const MSG = Object.freeze({
   NEXT: "NEXT",                   // advance to next ready contact (manual)
   SKIP: "SKIP",                   // payload: { contactId }
   REFRESH_QUEUE: "REFRESH_QUEUE", // re-fetch GET /api/ext/queue and rebuild queue
+  REFRESH_ALL: "REFRESH_ALL",     // re-fetch queue with ?include_skipped=1 (resurrect auto-skipped)
   UPDATE_SETTINGS: "UPDATE_SETTINGS", // payload: { settings: Partial<Settings> }
   SAVE_NOTE: "SAVE_NOTE",         // payload: { contactId, note } -> POST /api/ext/note
   SET_TOKEN: "SET_TOKEN",         // payload: { token } persist the mutual shared token

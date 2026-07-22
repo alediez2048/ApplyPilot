@@ -92,6 +92,7 @@ const el = {
   btnPrimary: $("btn-primary"),
   btnNext: $("btn-next"),
   btnRefresh: $("btn-refresh"),
+  btnPullAll: $("btn-pull-all"),
   progressText: $("progress-text"),
   phaseText: $("phase-text"),
   meterCount: $("meter-count"),
@@ -443,6 +444,12 @@ async function onNext() {
   await send({ type: MSG.NEXT });
 }
 
+async function onPullAll() {
+  // Pull every generated contact, resurrecting any that were auto-skipped. The popup re-renders
+  // via the storage.onChanged listener once the background persists the refreshed queue.
+  await send({ type: MSG.REFRESH_ALL });
+}
+
 async function onRefresh() {
   await send({ type: MSG.REFRESH_QUEUE });
 }
@@ -520,6 +527,7 @@ function wireEvents() {
   el.btnPrimary.addEventListener("click", onPrimary);
   el.btnNext.addEventListener("click", onNext);
   el.btnRefresh.addEventListener("click", onRefresh);
+  el.btnPullAll.addEventListener("click", onPullAll);
   el.settingsSave.addEventListener("click", onSaveSettings);
 
   el.tokenSave.addEventListener("click", () => onSaveToken(el.tokenInput));

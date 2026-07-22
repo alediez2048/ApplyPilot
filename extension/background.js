@@ -191,8 +191,11 @@ function authHeaders(token, withBody) {
   return h;
 }
 
-async function fetchQueue(token, jobFilter) {
-  const q = jobFilter ? "?job_url=" + encodeURIComponent(jobFilter) : "";
+async function fetchQueue(token, jobFilter, includeSkipped = false) {
+  const params = [];
+  if (jobFilter) params.push("job_url=" + encodeURIComponent(jobFilter));
+  if (includeSkipped) params.push("include_skipped=1");
+  const q = params.length ? "?" + params.join("&") : "";
   try {
     const res = await fetch(API.BASE_URL + API.QUEUE + q, { method: "GET", headers: authHeaders(token, false) });
     if (!res.ok) return { ok: false, status: res.status, error: "HTTP " + res.status };
@@ -520,8 +523,8 @@ async function startQueue(state, jobFilterArg) {
   return { ok: true };
 }
 
-async function refreshQueue(state) {
-  const resp = await fetchQueue(state[STORAGE_KEYS.TOKEN], state[STORAGE_KEYS.SETTINGS].jobFilter);
+async function refreshQueue(state, includeSkipped = false) {
+  const resp = await fetchQueue(state[STORAGE_KEYS.TOKEN], state[STORAGE_KEYS.SETTINGS].jobFilter, includeSkipped);
   if (!resp.ok) {
     state[STORAGE_KEYS.SERVER_ONLINE] = false;
     state[STORAGE_KEYS.LAST_ERROR] =
@@ -589,6 +592,7 @@ async function handleMessage(msg, sender) {
     MSG.NEXT,
     MSG.SKIP,
     MSG.REFRESH_QUEUE,
+    MSG.REFRESH_ALL,
     MSG.UPDATE_SETTINGS,
     MSG.SAVE_NOTE,
     MSG.SET_TOKEN,
@@ -827,6 +831,10 @@ async function handleMessage(msg, sender) {
 
     case MSG.REFRESH_QUEUE:
       return await refreshQueue(state);
+
+    // Pull ALL generated contacts, resurrecting any that were auto-skipped (include_skipped=1).
+    case MSG.REFRESH_ALL:
+      return await refreshQueue(state, true);
 
     case MSG.UPDATE_SETTINGS: {
       state[STORAGE_KEYS.SETTINGS] = { ...state[STORAGE_KEYS.SETTINGS], ...(msg.settings || {}) };

@@ -1079,12 +1079,26 @@ def _queue_contact_payload(c: dict) -> dict:
     }
 
 
-def _ext_queue(job_url: str | None) -> dict:
-    """Ready LinkedIn contacts. Per-job (via _eligible_contact_ids) or all-jobs (deduped)."""
+def _ext_queue(job_url: str | None, include_skipped: bool = False) -> dict:
+    """Ready LinkedIn contacts. Per-job (via _eligible_contact_ids) or all-jobs (deduped).
+
+    include_skipped=True resurrects contacts that were previously `skipped` (almost always an
+    auto-skip false positive) by resetting them to `none` so every generated contact re-appears
+    in the queue. `sent`/`manual` (genuinely done) are left untouched.
+    """
     from applypilot.networking.store import _norm_linkedin, get_contact, init_contacts
     init_db()
     conn = get_connection()
     init_contacts(conn)
+
+    if include_skipped:
+        conn.execute(
+            "UPDATE contacts SET dm_status = 'none' "
+            "WHERE dm_status = 'skipped' "
+            "AND linkedin_url IS NOT NULL AND trim(linkedin_url) != '' "
+            "AND linkedin_message IS NOT NULL AND trim(linkedin_message) != ''"
+        )
+        conn.commit()
 
     if job_url:
         # Per-job: reuse the shared eligibility helper (linkedin_url + note + not done-set).
@@ -1204,8 +1218,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                                HTTPStatus.UNAUTHORIZED)
                 return
             try:
-                job_url = (parse_qs(parsed.query).get("job_url", [""])[0] or "").strip() or None
-                _json_response(self, _ext_queue(job_url))
+                q = parse_qs(parsed.query)
+                job_url = (q.get("job_url", [""])[0] or "").strip() or None
+                include_skipped = (q.get("include_skipped", [""])[0] or "").lower() in {"1", "true", "yes"}
+                _json_response(self, _ext_queue(job_url, include_skipped=include_skipped))
             except Exception as exc:  # noqa: BLE001
                 _json_response(self, {"ok": False, "error": str(exc)},
                                HTTPStatus.INTERNAL_SERVER_ERROR)

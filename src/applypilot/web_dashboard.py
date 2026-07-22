@@ -1510,6 +1510,32 @@ _INDEX_HTML = r"""<!doctype html>
   .people-details[open] > summary .people-caret { transform:rotate(90deg); }
   .people-count { color:var(--muted); font-size:12px; font-weight:500; }
   .people-body { padding-top:6px; }
+  /* --- Pipeline visualizer --- */
+  .pipeline { margin-top:12px; border:1px solid var(--line); border-radius:10px; padding:14px; background:#fbfdff; }
+  .pipe-steps { display:flex; align-items:flex-start; gap:0; flex-wrap:nowrap; overflow-x:auto; }
+  .pipe-step { display:flex; flex-direction:column; align-items:center; text-align:center; min-width:88px; flex:1; position:relative; }
+  .pipe-step .pnode { width:38px; height:38px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:16px; font-weight:700;
+      border:2px solid #cbd5e1; background:#fff; color:#94a3b8; transition:all .2s ease; z-index:1; }
+  .pipe-step .plabel { font-size:12px; font-weight:600; margin-top:6px; color:#475569; }
+  .pipe-step .pcount { font-size:11px; color:var(--muted); margin-top:2px; min-height:14px; }
+  /* connector line to the NEXT node */
+  .pipe-step:not(:last-child)::after { content:''; position:absolute; top:19px; left:calc(50% + 19px); right:calc(-50% + 19px); height:2px; background:#cbd5e1; z-index:0; }
+  .pipe-step.done::after { background:#22c55e; }
+  .pipe-step.idle    .pnode { border-color:#cbd5e1; color:#94a3b8; background:#fff; }
+  .pipe-step.active  .pnode { border-color:#1592ed; color:#1592ed; background:#eff8ff; box-shadow:0 0 0 4px rgba(21,146,237,.15); }
+  .pipe-step.done    .pnode { border-color:#22c55e; color:#fff; background:#22c55e; }
+  .pipe-step.failed  .pnode { border-color:#ef4444; color:#fff; background:#ef4444; }
+  .pipe-step.active  .plabel { color:#1592ed; }
+  .pipe-step.done    .plabel { color:#16a34a; }
+  .pipe-step.failed  .plabel { color:#dc2626; }
+  .pipe-spin { width:16px; height:16px; border:2px solid rgba(21,146,237,.3); border-top-color:#1592ed; border-radius:50%; animation:pipespin .7s linear infinite; }
+  @keyframes pipespin { to { transform:rotate(360deg); } }
+  .pipe-log-wrap { margin-top:12px; }
+  .pipe-log { background:#0f172a; color:#cbd5e1; border-radius:8px; padding:10px 12px; margin:0; max-height:150px; overflow-y:auto;
+      font:11.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; white-space:pre-wrap; word-break:break-word; }
+  .pipe-log .lg-stage { color:#7dd3fc; font-weight:600; }
+  .pipe-log .lg-ok { color:#4ade80; }
+  .pipe-log .lg-err { color:#f87171; }
   .table-wrap { overflow:auto; border:1px solid var(--line); border-radius:8px; background:#ffffff; max-width:100%; }
   table { width:100%; border-collapse:collapse; min-width:1320px; }
   th, td { border-bottom:1px solid var(--line); padding:10px; text-align:left; vertical-align:top; }
@@ -1636,6 +1662,10 @@ _INDEX_HTML = r"""<!doctype html>
         <label style="margin-left:12px"><input id="dryRun" type="checkbox"> Dry run (fill, don't submit)</label>
       </div>
       <p id="command" class="hint" style="margin-top:10px; font-weight:600; color:#374151"></p>
+      <div id="pipeline" class="pipeline" style="display:none">
+        <div id="pipeSteps" class="pipe-steps"></div>
+        <div class="pipe-log-wrap"><pre id="pipeLog" class="pipe-log"></pre></div>
+      </div>
       <div id="importStatus" class="hint"></div>
       <div class="hint">One click runs the whole chain: import the URLs → prepare tailored résumé + cover letter → apply via the visible Chrome flow. Advanced: <button class="linklike" onclick="toggleAdvanced()">show step controls</button></div>
       <div id="advancedControls" style="display:none; margin-top:8px" class="row">
@@ -1683,19 +1713,72 @@ async function importUrls() {
   status.textContent = `Found ${data.found || 0} URL(s). Imported ${data.inserted || 0}; existing ${data.duplicates || 0} (${existingParts}).`;
   await refresh();
 }
+// ---- Pipeline visualizer: a live stepper (Import → Enrich → Tailor → Cover → Apply) ----
+const PIPE_STAGES = [
+  { key: 'import', label: 'Import', icon: '1', stat: 'total' },
+  { key: 'enrich', label: 'Enrich', icon: '2', stat: 'enriched' },
+  { key: 'tailor', label: 'Tailor', icon: '3', stat: 'tailored' },
+  { key: 'cover',  label: 'Cover',  icon: '4', stat: 'covers' },
+  { key: 'apply',  label: 'Apply',  icon: '5', stat: 'applied' },
+];
+const _PIPE_ORDER = { idle: 0, active: 1, done: 2, failed: 3 };
+let PIPE_STATUS = {};
+let PIPE_STATS = {};
+
+function pipeShow(on) { document.getElementById('pipeline').style.display = on ? 'block' : 'none'; }
+function pipeReset() {
+  PIPE_STATUS = {}; PIPE_STAGES.forEach(s => PIPE_STATUS[s.key] = 'idle');
+  document.getElementById('pipeLog').innerHTML = ''; pipeShow(true); pipeRender();
+}
+function pipeSet(key, status) { PIPE_STATUS[key] = status; pipeRender(); }
+// Monotonic upgrade — never downgrade a stage (log for a later command won't reset earlier ones).
+function pipeUp(key, status) {
+  if ((_PIPE_ORDER[status] || 0) > (_PIPE_ORDER[PIPE_STATUS[key]] || 0)) PIPE_STATUS[key] = status;
+}
+function pipeRender() {
+  document.getElementById('pipeSteps').innerHTML = PIPE_STAGES.map(s => {
+    const st = PIPE_STATUS[s.key] || 'idle';
+    const inner = st === 'active' ? '<span class="pipe-spin"></span>' : st === 'done' ? '✓' : st === 'failed' ? '✗' : s.icon;
+    const cnt = PIPE_STATS[s.stat] != null ? `${PIPE_STATS[s.stat]}` : '';
+    return `<div class="pipe-step ${st}"><div class="pnode">${inner}</div><div class="plabel">${s.label}</div><div class="pcount">${cnt}</div></div>`;
+  }).join('');
+}
+function pipeRenderLog(lines) {
+  const box = document.getElementById('pipeLog');
+  box.innerHTML = (lines || []).map(l => {
+    const e = esc(l);
+    if (/^STAGE:/.test(l)) return `<span class="lg-stage">${e}</span>`;
+    if (/RESULT:APPLIED|complete ✓|success|✓/i.test(l)) return `<span class="lg-ok">${e}</span>`;
+    if (/error|fail|429|400|denied|not found/i.test(l)) return `<span class="lg-err">${e}</span>`;
+    return e;
+  }).join('\n');
+  box.scrollTop = box.scrollHeight;
+}
+// Derive enrich/tailor/cover sub-progress from the backend's "STAGE:" log lines (monotonic).
+function advanceStagesFromLog(lines) {
+  const txt = (lines || []).join('\n');
+  if (/STAGE:\s*enrich/i.test(txt)) pipeUp('enrich', 'active');
+  if (/STAGE:\s*(tailor|score bypass)/i.test(txt)) { pipeUp('enrich', 'done'); pipeUp('tailor', 'active'); }
+  if (/STAGE:\s*cover/i.test(txt)) { pipeUp('enrich', 'done'); pipeUp('tailor', 'done'); pipeUp('cover', 'active'); }
+  if (/prepare complete/i.test(txt)) { pipeUp('enrich', 'done'); pipeUp('tailor', 'done'); pipeUp('cover', 'done'); }
+}
+
 // Poll /api/status until the background command (prepare/apply) finishes, keeping the status
-// line live the whole time and refreshing the table so materials appear the moment they're
-// ready — no more "I clicked and nothing happened". Resolves with the final command object.
+// line + pipeline visualizer live the whole time and refreshing the table so materials appear
+// the moment they're ready. Resolves with the final command object.
 async function pollCommandUntilDone(label) {
   const cmdEl = document.getElementById('command');
   for (let i = 0; i < 600; i++) { // ~20 min ceiling (2s * 600)
     const data = await (await fetch('/api/status')).json();
     const c = data.command || {};
+    PIPE_STATS = data.stats || {};
+    pipeRenderLog(c.log || []);
+    advanceStagesFromLog(c.log || []);
+    pipeRender();
     await refresh();
     if (c.running) {
       cmdEl.textContent = `${label}… running (${i * 2}s)`;
     } else {
-      // Command slot is idle — done (or never started). Report the outcome plainly.
       const rc = c.returncode;
       cmdEl.textContent = rc === 0 || rc == null ? `${label} complete ✓` : `${label} failed (exit ${rc}) — see log below`;
       return c;
@@ -1745,22 +1828,33 @@ async function runEverything() {
   const cmdEl = document.getElementById('command');
   const urls = document.getElementById('urls').value.trim();
   btn.disabled = true;
+  pipeReset(); // show the visualizer, all stages idle
   try {
     // 1) Import any pasted URLs (skip if the box is empty — re-runs work on already-imported jobs).
     if (urls) {
+      pipeSet('import', 'active');
       cmdEl.textContent = 'Importing URLs…';
       const imp = await post('/api/import', {urls});
       document.getElementById('importStatus').textContent =
         `Imported ${imp.inserted || 0} new URL(s); ${imp.duplicates || 0} already known.`;
+      pipeSet('import', 'done');
       await refresh();
+    } else {
+      pipeSet('import', 'done'); // working on already-imported jobs
     }
 
-    // 2) Prepare materials (enrich -> tailor -> cover), poll to completion.
+    // 2) Prepare materials (enrich -> tailor -> cover), poll to completion. Sub-stages advance
+    //    from the backend's STAGE: log lines inside pollCommandUntilDone.
     const prep = await post('/api/prepare', {});
-    if (!prep.ok) { cmdEl.textContent = prep.message || 'Could not start prepare.'; return; }
+    if (!prep.ok) { cmdEl.textContent = prep.message || 'Could not start prepare.'; pipeSet('enrich', 'failed'); return; }
+    pipeSet('enrich', 'active');
     cmdEl.textContent = 'Preparing materials… (enrich → tailor → cover, ~30–60s)';
     const pc = await pollCommandUntilDone('Prepare materials');
-    if (pc && pc.returncode && pc.returncode !== 0) return; // prepare failed — status line shows it
+    if (pc && pc.returncode && pc.returncode !== 0) { // prepare failed — mark the last active stage failed
+      ['cover','tailor','enrich'].some(k => { if (PIPE_STATUS[k] === 'active') { pipeSet(k, 'failed'); return true; } return false; });
+      return;
+    }
+    pipeSet('enrich', 'done'); pipeSet('tailor', 'done'); pipeSet('cover', 'done');
 
     // 3) Apply — only if something is actually Ready (else say so, don't launch a no-op).
     const status = await (await fetch('/api/status')).json();
@@ -1773,8 +1867,10 @@ async function runEverything() {
     }
     const ap = await post('/api/apply', {limit: document.getElementById('limit').value, dry_run: dryRun});
     if (!ap.ok) { cmdEl.textContent = ap.message || 'Could not start apply.'; return; }
+    pipeSet('apply', 'active');
     cmdEl.textContent = dryRun ? 'Applying (DRY RUN — no submit)…' : 'Applying — Chrome is submitting…';
-    await pollCommandUntilDone(dryRun ? 'Dry-run apply' : 'Apply');
+    const ac = await pollCommandUntilDone(dryRun ? 'Dry-run apply' : 'Apply');
+    pipeSet('apply', ac && ac.returncode && ac.returncode !== 0 ? 'failed' : 'done');
   } finally {
     btn.disabled = false;
   }

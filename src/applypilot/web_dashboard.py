@@ -1503,6 +1503,13 @@ _INDEX_HTML = r"""<!doctype html>
   .row { display:flex; gap:9px; align-items:center; flex-wrap:wrap; }
   .hint { color:var(--muted); font-size:12px; margin-top:10px; }
   button.linklike { background:none; border:none; color:#1592ed; padding:0; font-size:12px; cursor:pointer; text-decoration:underline; }
+  .people-details > summary { list-style:none; cursor:pointer; padding:6px 4px; user-select:none; display:flex; align-items:center; gap:8px; border-radius:6px; }
+  .people-details > summary::-webkit-details-marker { display:none; }
+  .people-details > summary:hover { background:#f1f5f9; }
+  .people-caret { display:inline-block; transition:transform .15s ease; color:var(--muted); font-size:11px; }
+  .people-details[open] > summary .people-caret { transform:rotate(90deg); }
+  .people-count { color:var(--muted); font-size:12px; font-weight:500; }
+  .people-body { padding-top:6px; }
   .table-wrap { overflow:auto; border:1px solid var(--line); border-radius:8px; background:#ffffff; max-width:100%; }
   table { width:100%; border-collapse:collapse; min-width:1320px; }
   th, td { border-bottom:1px solid var(--line); padding:10px; text-align:left; vertical-align:top; }
@@ -1896,9 +1903,13 @@ function contactsRow(j, ncols) {
       </div>
       ${draftBlock(c)}
     </div>`).join('');
+  const n = j.contacts.length;
   return `<tr class="contacts-row"><td colspan="${ncols}"><div class="contacts-wrap">
-    <strong>People at ${esc(j.contact_company)}</strong>${j.connections_at_company ? `<span class="conn-hint">🤝 you have ${j.connections_at_company} connection${j.connections_at_company>1?'s':''} here</span>` : ''}
-    ${bulkBar(j)}${rows}</div></td></tr>`;
+    <details class="people-details">
+      <summary><span class="people-caret">▸</span> <strong>People at ${esc(j.contact_company)}</strong>
+        <span class="people-count">${n} contact${n>1?'s':''}</span>${j.connections_at_company ? `<span class="conn-hint">🤝 you have ${j.connections_at_company} connection${j.connections_at_company>1?'s':''} here</span>` : ''}</summary>
+      <div class="people-body">${bulkBar(j)}${rows}</div>
+    </details></div></td></tr>`;
 }
 function bulkBar(j) {
   const cs = j.contacts || [];

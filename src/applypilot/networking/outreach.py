@@ -29,6 +29,9 @@ Voice:
 - Absolutely no buzzwords, no "I hope this finds you well", no "I am writing to", no
   "leverage/synergy/circle back". If it sounds like HR wrote it, rewrite it.
 - Never invent facts about the sender, and don't flatter the recipient with made-up specifics.
+- NEVER attach a number of years to a specific tool or framework unless the profile explicitly
+  says so. A total career length is TOTAL experience — never "N years of PyTorch/LangChain/etc."
+  Prefer honest framing like "the last few years focused on AI engineering" over false tenure.
 
 Produce TWO things:
 
@@ -78,15 +81,34 @@ def draft_email(profile: dict, job: dict, contact: dict, style: str = "") -> dic
     company = contact.get("company") or job.get("company") or job.get("site") or "your company"
     personal = (profile or {}).get("personal", {})
     experience = (profile or {}).get("experience", {})
-    skills = (profile or {}).get("skills_boundary", {})
 
     sender_bits = [
         f"Sender name: {personal.get('full_name', '')}",
         f"Sender first name: {_sender_name(profile)}",
-        f"Sender target role: {experience.get('target_role', '')}",
-        f"Years of experience: {experience.get('years_of_experience_total', '')}",
-        f"Sender skills: {', '.join(skills.get('languages', []) + skills.get('frameworks', []))[:200]}",
     ]
+    # Prefer the LinkedIn-derived background (accurate, from the real profile) over loose skill
+    # lists — this is what keeps the copy TRUE (no "10 years of PyTorch" when that's the total
+    # career length). The About + recent roles give the model real, groundable facts to draw on.
+    li = (profile or {}).get("linkedin") or {}
+    if li.get("about") or li.get("roles"):
+        if li.get("headline"):
+            sender_bits.append(f"Sender headline: {li['headline']}")
+        if li.get("about"):
+            sender_bits.append(f"Sender background (LinkedIn About): {li['about']}")
+        roles = li.get("roles") or []
+        if roles:
+            recent = "; ".join(f"{r.get('title','')} at {r.get('company','')} ({r.get('dates','')})" for r in roles[:4])
+            sender_bits.append(f"Recent roles: {recent}")
+        if li.get("positioning"):
+            sender_bits.append(f"IMPORTANT framing (do not misstate): {li['positioning']}")
+    else:
+        # Fallback to the older fields only if no LinkedIn block is present.
+        skills = (profile or {}).get("skills_boundary", {})
+        sender_bits += [
+            f"Sender target role: {experience.get('target_role', '')}",
+            f"Total years of experience: {experience.get('years_of_experience_total', '')}",
+            f"Sender skills: {', '.join((skills.get('frameworks') or []))[:200]}",
+        ]
     jd = (job.get("full_description") or "")[:1200]
 
     directive = _resolve_style(profile, style)

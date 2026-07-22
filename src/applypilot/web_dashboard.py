@@ -2000,13 +2000,20 @@ function contactsRow(j, ncols) {
       ${draftBlock(c)}
     </div>`).join('');
   const n = j.contacts.length;
+  // Persist open/closed across the 2.5s auto-refresh (which re-renders this whole table and
+  // would otherwise reset every <details> to closed). PEOPLE_OPEN holds the expanded job URLs;
+  // ontoggle keeps it in sync, and we re-emit `open` from it on each render.
+  const key = encodeURIComponent(j.url);
+  const isOpen = PEOPLE_OPEN.has(j.url) ? 'open' : '';
   return `<tr class="contacts-row"><td colspan="${ncols}"><div class="contacts-wrap">
-    <details class="people-details">
+    <details class="people-details" ${isOpen} ontoggle="onPeopleToggle(this, decodeURIComponent('${key}'))">
       <summary><span class="people-caret">▸</span> <strong>People at ${esc(j.contact_company)}</strong>
         <span class="people-count">${n} contact${n>1?'s':''}</span>${j.connections_at_company ? `<span class="conn-hint">🤝 you have ${j.connections_at_company} connection${j.connections_at_company>1?'s':''} here</span>` : ''}</summary>
       <div class="people-body">${bulkBar(j)}${rows}</div>
     </details></div></td></tr>`;
 }
+const PEOPLE_OPEN = new Set(); // job URLs whose "People at" panel is expanded (survives refresh)
+function onPeopleToggle(el, url) { if (el.open) PEOPLE_OPEN.add(url); else PEOPLE_OPEN.delete(url); }
 function bulkBar(j) {
   const cs = j.contacts || [];
   const emailN = cs.filter(c => c.email && c.outreach_message && c.outreach_status !== 'submitted' && c.email_status === 'verified').length;

@@ -1071,6 +1071,28 @@ def _delete_job(url: str) -> dict:
 # ── Extension local API handlers (EXT-0) ─────────────────────────────────────
 # Loopback + shared-token guarded; frozen contract in extension/CONTRACTS.md §3.
 
+def _normalize_linkedin_url(url: str) -> str:
+    """Coerce a LinkedIn profile URL into the canonical https form the extension accepts.
+
+    Apollo (and other providers) return `http://www.linkedin.com/in/...`; the extension's
+    validator requires `https://[sub.]linkedin.com/in/...`. Without this every contact is
+    rejected as "No valid LinkedIn profile URLs in the queue". Handles: http→https, missing
+    protocol, and a bare `linkedin.com/in/...` or `www.` prefix.
+    """
+    u = (url or "").strip()
+    if not u:
+        return ""
+    if u.startswith("http://"):
+        u = "https://" + u[len("http://"):]
+    elif u.startswith("//"):
+        u = "https:" + u
+    elif not u.startswith("https://"):
+        # bare "www.linkedin.com/in/..." or "linkedin.com/in/..."
+        if u.startswith(("www.linkedin.com/", "linkedin.com/")):
+            u = "https://" + u
+    return u
+
+
 def _queue_contact_payload(c: dict) -> dict:
     """One /api/ext/queue row. `note` = contacts.linkedin_message (the verbatim invite note)."""
     return {
@@ -1078,7 +1100,7 @@ def _queue_contact_payload(c: dict) -> dict:
         "full_name": c.get("full_name") or "",
         "title": c.get("title") or "",
         "company": c.get("company") or "",
-        "linkedin_url": c.get("linkedin_url") or "",
+        "linkedin_url": _normalize_linkedin_url(c.get("linkedin_url") or ""),
         "note": c.get("linkedin_message") or "",
     }
 

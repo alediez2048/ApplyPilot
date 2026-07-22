@@ -1434,7 +1434,9 @@ _INDEX_HTML = r"""<!doctype html>
   .eyebrow { display:none; }
   h1 { font-size:20px; line-height:1.1; margin:0; font-weight:600; }
   .subtitle { color:var(--muted); max-width:720px; }
-  main { max-width:1280px; margin:0 auto; padding:20px 24px 40px; display:grid; gap:16px; min-width:0; }
+  /* Framed content area — a bordered panel inset from the window edges. */
+  main { max-width:1240px; margin:24px auto 48px; padding:26px; display:grid; gap:18px; min-width:0;
+      border:1px solid var(--line2); border-radius:16px; background:rgba(255,255,255,.45); box-shadow:0 1px 3px rgba(0,0,0,.05); }
   .stats { display:grid; grid-template-columns:repeat(8, minmax(96px,1fr)); gap:12px; }
   .stat {
     background:var(--surface);
@@ -1455,7 +1457,7 @@ _INDEX_HTML = r"""<!doctype html>
     border-radius:10px;
     padding:20px;
   }
-  .progress-head { display:flex; justify-content:space-between; align-items:center; gap:12px; }
+  .progress-head { display:flex; justify-content:space-between; align-items:center; gap:12px; padding-bottom:12px; border-bottom:1px solid var(--line); }
   .progress-title { font-weight:600; font-size:16px; color:var(--text); }
   .progress-label { color:var(--muted); font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .progress-track { height:8px; border-radius:999px; background:#e9e5df; overflow:hidden; }
@@ -1483,7 +1485,7 @@ _INDEX_HTML = r"""<!doctype html>
     padding:20px;
     min-width:0;
   }
-  h2 { margin:0 0 16px; font-size:16px; font-weight:600; color:var(--text); }
+  h2 { margin:0 0 16px; padding-bottom:10px; font-size:16px; font-weight:600; color:var(--text); border-bottom:1px solid var(--line); }
   textarea {
     width:100%;
     height:120px;

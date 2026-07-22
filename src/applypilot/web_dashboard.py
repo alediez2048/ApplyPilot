@@ -1379,7 +1379,8 @@ _INDEX_HTML = r"""<!doctype html>
 <style>
   :root {
     color-scheme: light;
-    --bg:#f4f2ee;
+    --bg:#e0ddd6;
+    --frame:#f1efea;
     --surface:#ffffff;
     --surface2:#f8f9fa;
     --surface3:#eef3f8;
@@ -1434,9 +1435,11 @@ _INDEX_HTML = r"""<!doctype html>
   .eyebrow { display:none; }
   h1 { font-size:20px; line-height:1.1; margin:0; font-weight:600; }
   .subtitle { color:var(--muted); max-width:720px; }
-  /* Framed content area — a bordered panel inset from the window edges. */
-  main { max-width:1240px; margin:24px auto 48px; padding:26px; display:grid; gap:18px; min-width:0;
-      border:1px solid var(--line2); border-radius:16px; background:rgba(255,255,255,.45); box-shadow:0 1px 3px rgba(0,0,0,.05); }
+  /* Framed content area — a distinctly lighter panel inset from a darker page, so the frame
+     clearly reads against the background; white cards then pop inside it (three visual layers). */
+  main { max-width:1240px; margin:28px auto 56px; padding:28px; display:grid; gap:18px; min-width:0;
+      border:1px solid #c9c6c0; border-radius:18px; background:var(--frame);
+      box-shadow:0 6px 24px rgba(0,0,0,.10), 0 1px 3px rgba(0,0,0,.06); }
   .stats { display:grid; grid-template-columns:repeat(8, minmax(96px,1fr)); gap:12px; }
   .stat {
     background:var(--surface);
@@ -1457,7 +1460,7 @@ _INDEX_HTML = r"""<!doctype html>
     border-radius:10px;
     padding:20px;
   }
-  .progress-head { display:flex; justify-content:space-between; align-items:center; gap:12px; padding-bottom:12px; border-bottom:1px solid var(--line); }
+  .progress-head { display:flex; justify-content:space-between; align-items:center; gap:12px; padding-bottom:12px; border-bottom:1px solid var(--line2); }
   .progress-title { font-weight:600; font-size:16px; color:var(--text); }
   .progress-label { color:var(--muted); font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .progress-track { height:8px; border-radius:999px; background:#e9e5df; overflow:hidden; }
@@ -1485,7 +1488,7 @@ _INDEX_HTML = r"""<!doctype html>
     padding:20px;
     min-width:0;
   }
-  h2 { margin:0 0 16px; padding-bottom:10px; font-size:16px; font-weight:600; color:var(--text); border-bottom:1px solid var(--line); }
+  h2 { margin:0 0 16px; padding-bottom:10px; font-size:16px; font-weight:600; color:var(--text); border-bottom:1px solid var(--line2); }
   textarea {
     width:100%;
     height:120px;

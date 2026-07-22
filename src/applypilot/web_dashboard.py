@@ -1502,6 +1502,7 @@ _INDEX_HTML = r"""<!doctype html>
   button.danger { background:linear-gradient(180deg, #fff5f4, #ffe3e0); border-color:#f0aaa5; color:#9f2e29; }
   .row { display:flex; gap:9px; align-items:center; flex-wrap:wrap; }
   .hint { color:var(--muted); font-size:12px; margin-top:10px; }
+  button.linklike { background:none; border:none; color:#1592ed; padding:0; font-size:12px; cursor:pointer; text-decoration:underline; }
   .table-wrap { overflow:auto; border:1px solid var(--line); border-radius:8px; background:#ffffff; max-width:100%; }
   table { width:100%; border-collapse:collapse; min-width:1320px; }
   th, td { border-bottom:1px solid var(--line); padding:10px; text-align:left; vertical-align:top; }
@@ -1620,25 +1621,21 @@ _INDEX_HTML = r"""<!doctype html>
 
   <div class="controls">
     <section>
-      <h2>Upload Job URLs</h2>
-      <textarea id="urls" placeholder="Paste one or more job URLs here. Direct ATS/career URLs work best."></textarea>
-      <div class="row" style="margin-top:10px">
-        <button class="primary" onclick="importUrls()">Import URLs</button>
-        <button id="prepareBtn" onclick="prepareJobs()">Prepare Materials</button>
-      </div>
-      <div id="importStatus" class="hint"></div>
-      <div class="hint">Prepare only works on URLs imported here. Fit scoring and broad job research are bypassed.</div>
-    </section>
-    <section>
-      <h2>Application Control</h2>
-      <div class="row">
-        <label>Limit <input id="limit" type="number" value="10" min="1" max="100" style="width:72px"></label>
-        <label><input id="dryRun" type="checkbox"> Dry run</label>
-        <button id="applyBtn" class="primary" onclick="applyJobs()">Apply Ready Jobs</button>
+      <h2>Apply to Jobs</h2>
+      <textarea id="urls" placeholder="Paste one or more job URLs here, then click Run. Direct ATS/career URLs work best."></textarea>
+      <div class="row" style="margin-top:10px; align-items:center">
+        <button id="runBtn" class="primary" style="font-size:15px; padding:10px 20px" onclick="runEverything()">🚀 Import, Prepare &amp; Apply</button>
         <button class="danger" onclick="stopCommand()">Stop</button>
+        <label style="margin-left:12px"><input id="dryRun" type="checkbox"> Dry run (fill, don't submit)</label>
       </div>
-      <p id="command" class="hint"></p>
-      <div class="hint">Apply launches the visible Chrome/Claude Code flow for prepared imported URLs only.</div>
+      <p id="command" class="hint" style="margin-top:10px; font-weight:600; color:#374151"></p>
+      <div id="importStatus" class="hint"></div>
+      <div class="hint">One click runs the whole chain: import the URLs → prepare tailored résumé + cover letter → apply via the visible Chrome flow. Advanced: <button class="linklike" onclick="toggleAdvanced()">show step controls</button></div>
+      <div id="advancedControls" style="display:none; margin-top:8px" class="row">
+        <label>Limit <input id="limit" type="number" value="10" min="1" max="100" style="width:72px"></label>
+        <button id="prepareBtn" onclick="prepareJobs()">Prepare only</button>
+        <button id="applyBtn" onclick="applyJobs()">Apply only</button>
+      </div>
     </section>
   </div>
 
@@ -1733,6 +1730,51 @@ async function applyJobs() {
   cmdEl.textContent = dryRun ? 'Applying (DRY RUN — no submit)…' : 'Applying — Chrome is submitting…';
   await pollCommandUntilDone(dryRun ? 'Dry-run apply' : 'Apply');
   if (btn) btn.disabled = false;
+}
+// The one button: import (if URLs pasted) -> prepare -> apply, streaming live status through
+// each phase. Stops early with a clear message if a phase fails or nothing ends up Ready.
+async function runEverything() {
+  const btn = document.getElementById('runBtn');
+  const cmdEl = document.getElementById('command');
+  const urls = document.getElementById('urls').value.trim();
+  btn.disabled = true;
+  try {
+    // 1) Import any pasted URLs (skip if the box is empty — re-runs work on already-imported jobs).
+    if (urls) {
+      cmdEl.textContent = 'Importing URLs…';
+      const imp = await post('/api/import', {urls});
+      document.getElementById('importStatus').textContent =
+        `Imported ${imp.inserted || 0} new URL(s); ${imp.duplicates || 0} already known.`;
+      await refresh();
+    }
+
+    // 2) Prepare materials (enrich -> tailor -> cover), poll to completion.
+    const prep = await post('/api/prepare', {});
+    if (!prep.ok) { cmdEl.textContent = prep.message || 'Could not start prepare.'; return; }
+    cmdEl.textContent = 'Preparing materials… (enrich → tailor → cover, ~30–60s)';
+    const pc = await pollCommandUntilDone('Prepare materials');
+    if (pc && pc.returncode && pc.returncode !== 0) return; // prepare failed — status line shows it
+
+    // 3) Apply — only if something is actually Ready (else say so, don't launch a no-op).
+    const status = await (await fetch('/api/status')).json();
+    const ready = (status.stats || {}).ready || 0;
+    if (ready < 1) { cmdEl.textContent = 'Materials prepared, but no jobs are Ready to apply.'; return; }
+    const dryRun = document.getElementById('dryRun').checked;
+    if (!dryRun && !confirm(`Submit real application(s) for ${ready} prepared job(s)?\n\nThis drives Chrome and actually submits. Check "Dry run" to fill without submitting.`)) {
+      cmdEl.textContent = `Prepared ${ready} job(s). Apply cancelled.`;
+      return;
+    }
+    const ap = await post('/api/apply', {limit: document.getElementById('limit').value, dry_run: dryRun});
+    if (!ap.ok) { cmdEl.textContent = ap.message || 'Could not start apply.'; return; }
+    cmdEl.textContent = dryRun ? 'Applying (DRY RUN — no submit)…' : 'Applying — Chrome is submitting…';
+    await pollCommandUntilDone(dryRun ? 'Dry-run apply' : 'Apply');
+  } finally {
+    btn.disabled = false;
+  }
+}
+function toggleAdvanced() {
+  const el = document.getElementById('advancedControls');
+  el.style.display = el.style.display === 'none' ? 'flex' : 'none';
 }
 async function stopCommand() { await post('/api/stop', {}); refresh(); }
 async function deleteJob(url, label) {

@@ -1624,7 +1624,7 @@ _INDEX_HTML = r"""<!doctype html>
       <textarea id="urls" placeholder="Paste one or more job URLs here. Direct ATS/career URLs work best."></textarea>
       <div class="row" style="margin-top:10px">
         <button class="primary" onclick="importUrls()">Import URLs</button>
-        <button onclick="prepareJobs()">Prepare Materials</button>
+        <button id="prepareBtn" onclick="prepareJobs()">Prepare Materials</button>
       </div>
       <div id="importStatus" class="hint"></div>
       <div class="hint">Prepare only works on URLs imported here. Fit scoring and broad job research are bypassed.</div>
@@ -1634,7 +1634,7 @@ _INDEX_HTML = r"""<!doctype html>
       <div class="row">
         <label>Limit <input id="limit" type="number" value="10" min="1" max="100" style="width:72px"></label>
         <label><input id="dryRun" type="checkbox"> Dry run</label>
-        <button class="primary" onclick="applyJobs()">Apply Ready Jobs</button>
+        <button id="applyBtn" class="primary" onclick="applyJobs()">Apply Ready Jobs</button>
         <button class="danger" onclick="stopCommand()">Stop</button>
       </div>
       <p id="command" class="hint"></p>
@@ -1679,8 +1679,61 @@ async function importUrls() {
   status.textContent = `Found ${data.found || 0} URL(s). Imported ${data.inserted || 0}; existing ${data.duplicates || 0} (${existingParts}).`;
   await refresh();
 }
-async function prepareJobs() { await post('/api/prepare', {}); refresh(); }
-async function applyJobs() { await post('/api/apply', {limit: document.getElementById('limit').value, dry_run: document.getElementById('dryRun').checked}); refresh(); }
+// Poll /api/status until the background command (prepare/apply) finishes, keeping the status
+// line live the whole time and refreshing the table so materials appear the moment they're
+// ready — no more "I clicked and nothing happened". Resolves with the final command object.
+async function pollCommandUntilDone(label) {
+  const cmdEl = document.getElementById('command');
+  for (let i = 0; i < 600; i++) { // ~20 min ceiling (2s * 600)
+    const data = await (await fetch('/api/status')).json();
+    const c = data.command || {};
+    await refresh();
+    if (c.running) {
+      cmdEl.textContent = `${label}… running (${i * 2}s)`;
+    } else {
+      // Command slot is idle — done (or never started). Report the outcome plainly.
+      const rc = c.returncode;
+      cmdEl.textContent = rc === 0 || rc == null ? `${label} complete ✓` : `${label} failed (exit ${rc}) — see log below`;
+      return c;
+    }
+    await new Promise(r => setTimeout(r, 2000));
+  }
+  cmdEl.textContent = `${label} still running — check the log below`;
+  return null;
+}
+
+async function prepareJobs() {
+  const btn = document.getElementById('prepareBtn');
+  const cmdEl = document.getElementById('command');
+  const data = await post('/api/prepare', {});
+  if (!data.ok) { cmdEl.textContent = data.message || 'Could not start prepare'; return; }
+  if (btn) btn.disabled = true;
+  cmdEl.textContent = 'Preparing materials… (enrich → tailor → cover, ~30–60s)';
+  await pollCommandUntilDone('Prepare materials');
+  if (btn) btn.disabled = false;
+}
+
+async function applyJobs() {
+  const cmdEl = document.getElementById('command');
+  // Guard: apply only works on jobs that are already prepared (tailored + cover). If none are
+  // Ready, launching apply just silently does nothing — so tell the user instead of no-op'ing.
+  const status = await (await fetch('/api/status')).json();
+  const ready = (status.stats || {}).ready || 0;
+  const dryRun = document.getElementById('dryRun').checked;
+  if (ready < 1) {
+    cmdEl.textContent = 'No prepared materials to apply with. Click "Prepare Materials" first and wait for it to finish.';
+    alert('Nothing is ready to apply yet.\n\nClick "Prepare Materials" first and wait for "Prepare materials complete ✓", then Apply.');
+    return;
+  }
+  if (!dryRun && !confirm(`Submit real application(s) for ${ready} prepared job(s)?\n\nThis drives Chrome and actually submits. Use the Dry-run checkbox to fill without submitting.`)) return;
+  const btn = document.getElementById('applyBtn');
+  const data = await post('/api/apply', {limit: document.getElementById('limit').value, dry_run: dryRun});
+  if (!data.ok) { cmdEl.textContent = data.message || 'Could not start apply'; return; }
+  if (btn) btn.disabled = true;
+  cmdEl.textContent = dryRun ? 'Applying (DRY RUN — no submit)…' : 'Applying — Chrome is submitting…';
+  await pollCommandUntilDone(dryRun ? 'Dry-run apply' : 'Apply');
+  if (btn) btn.disabled = false;
+}
 async function stopCommand() { await post('/api/stop', {}); refresh(); }
 async function deleteJob(url, label) {
   if (!confirm(`Delete this application?\n\n${label}`)) return;

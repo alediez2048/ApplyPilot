@@ -575,20 +575,38 @@
     log("limit banner", kind, reason);
   }
 
-  // Never-break fallback: gesture-backed Copy note. We do NOT auto-mark manual — marking
-  // `manual` counts as a real human-sent invite (cap + dedupe), so it only fires when the
-  // human actually uses the Copy gesture (transient activation) to paste + send by hand.
+  // Never-break fallback: the auto-compose couldn't finish, so the human drives it by hand.
+  // We do NOT advance on Copy (copy != sent — you copy, THEN paste + Send). Instead we keep
+  // watching for a POSITIVE send signal so a manual paste+Send auto-advances as SENT, and we
+  // also expose an explicit "Sent ✓ next" button as a backstop if detection misses it.
   function fallbackManual(reason, contact) {
     state.phase = RUN_PHASE.PAUSED;
-    teardownObserver();
     clearHighlight();
     renderOverlay({
       mode: "fallback",
       heading: "Couldn't auto-open the invite",
-      detail: "Copy your note and paste it manually, then Send. Or Skip.",
+      detail: "Open Connect and paste your note (Copy below), then click Send. It'll advance on its own.",
       contact,
       reason,
     });
+    // Keep listening: if the human opens Connect + pastes + Sends, the new "Pending" / sent toast
+    // is a positive signal → mark SENT + advance. Positive-only (no ambiguous-close path here).
+    armPositiveSentWatch(contact, state.gen);
+  }
+
+  // Positive-only sent watch (used in the manual fallback). Fires confirmSend ONLY on a real
+  // "invitation sent" toast or a NEW Pending badge — never on an ambiguous dialog close.
+  function armPositiveSentWatch(contact, gen) {
+    teardownObserver();
+    const check = () => {
+      if (gen !== state.gen || state.sendResolved) return true;
+      if (sentToastPresent() || newPendingPresent()) { confirmSend(contact); return true; }
+      return false;
+    };
+    if (check()) return;
+    const obs = new MutationObserver(() => { check(); });
+    obs.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ["aria-label", "class"] });
+    state.observer = obs;
   }
 
   // ===========================================================================
@@ -757,14 +775,15 @@
       return b;
     };
     const copyBtn = mkBtn("Copy note", "#4f46e5");
+    const sentBtn = mkBtn("Sent ✓ next", "#059669"); // manual advance — only after the human Sends
     const skipBtn = mkBtn("Skip", "#374151");
     const pauseBtn = mkBtn("Pause", "#374151");
 
-    btnRow.append(copyBtn, skipBtn, pauseBtn);
+    btnRow.append(copyBtn, sentBtn, skipBtn, pauseBtn);
     root.append(brand, heading, recipient, detail, progress, btnRow);
     document.body.appendChild(root);
 
-    els = { root, heading, recipient, detail, progress, btnRow, copyBtn, skipBtn, pauseBtn };
+    els = { root, heading, recipient, detail, progress, btnRow, copyBtn, sentBtn, skipBtn, pauseBtn };
     return els;
   }
 
@@ -775,22 +794,24 @@
     e.recipient.textContent = c ? `Inviting: ${c.full_name} — ${c.title || "?"} at ${c.company || "?"}` : "";
     e.detail.textContent = opts.detail || "";
 
-    // Copy note: gesture-backed. Only claim "copied" after writeText resolves. In the fallback
-    // modes, a successful copy is the human's transient-activation gesture to advance as `manual`.
-    const advanceOnCopy = opts.mode === "fallback";
+    // Copy note: copies ONLY. It never advances — copying is not sending. You copy, paste into
+    // LinkedIn's note box, click Send yourself; the queue advances on the real send (auto-detected)
+    // or when you click "Sent ✓ next".
     e.copyBtn.style.display = state.note ? "inline-block" : "none";
     e.copyBtn.textContent = "Copy note";
     e.copyBtn.onclick = () => {
-      const note = state.note;
-      navigator.clipboard.writeText(note).then(
-        () => {
-          e.copyBtn.textContent = "Copied ✓";
-          if (advanceOnCopy && c) {
-            sendBg(MSG.FALLBACK_MANUAL, { contactId: c.id, reason: opts.reason || REASON.UNKNOWN });
-          }
-        },
+      navigator.clipboard.writeText(state.note).then(
+        () => { e.copyBtn.textContent = "Copied ✓"; },
         () => { e.copyBtn.textContent = "Copy failed"; }
       );
+    };
+
+    // "Sent ✓ next": explicit manual-advance backstop for the fallback path — the human clicked
+    // Send by hand and detection didn't catch it. Marks `manual` (a real invite → cap + dedupe)
+    // and advances. Shown ONLY in the fallback mode (never where auto-detection is the primary path).
+    e.sentBtn.style.display = opts.mode === "fallback" ? "inline-block" : "none";
+    e.sentBtn.onclick = () => {
+      if (c) sendBg(MSG.FALLBACK_MANUAL, { contactId: c.id, reason: opts.reason || REASON.UNKNOWN });
     };
 
     e.skipBtn.onclick = () => { if (c) sendBg(MSG.OVERLAY_SKIP, { contactId: c.id }); };

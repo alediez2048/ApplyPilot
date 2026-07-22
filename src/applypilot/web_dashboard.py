@@ -505,12 +505,22 @@ def run_dashboard_prepare(limit: int = 0, validation_mode: str = "lenient") -> d
                 except Exception as exc:
                     print(f"  PDF warning: {exc}", flush=True)
 
-                if report.get("status") in {"approved", "approved_with_judge_warning"}:
+                # Accept the resume if it was approved OR we're in lenient/aggressive mode (the
+                # user's explicit choice). A non-blocking validation note (e.g. an old role
+                # dropped to fit one page) must NOT discard a usable, already-rendered resume —
+                # that's what left "the full app didn't go through" with no materials.
+                accepted = (
+                    report.get("status") in {"approved", "approved_with_judge_warning"}
+                    or (validation_mode == "lenient" and tailored_text.strip())
+                )
+                if accepted:
                     conn.execute(
                         "UPDATE jobs SET tailored_resume_path=?, tailored_at=?, tailor_attempts=COALESCE(tailor_attempts,0)+1 WHERE url=?",
                         (str(txt_path), now, job["url"]),
                     )
                     tailored += 1
+                    if report.get("status") not in {"approved", "approved_with_judge_warning"}:
+                        print(f"  tailor accepted with note (lenient): {report.get('status')}", flush=True)
                 else:
                     conn.execute("UPDATE jobs SET tailor_attempts=COALESCE(tailor_attempts,0)+1 WHERE url=?", (job["url"],))
                     tailor_errors += 1

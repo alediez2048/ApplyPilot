@@ -59,6 +59,7 @@ export const MSG = Object.freeze({
   RESUME_QUEUE: "RESUME_QUEUE",
   NEXT: "NEXT",                   // advance to next ready contact (manual)
   SKIP: "SKIP",                   // payload: { contactId }
+  MARK_SENT: "MARK_SENT",         // payload: { contactId } — mark already-invited (excluded from queue)
   REFRESH_QUEUE: "REFRESH_QUEUE", // re-fetch GET /api/ext/queue and rebuild queue
   REFRESH_ALL: "REFRESH_ALL",     // re-fetch queue with ?include_skipped=1 (resurrect auto-skipped)
   UPDATE_SETTINGS: "UPDATE_SETTINGS", // payload: { settings: Partial<Settings> }

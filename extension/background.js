@@ -591,6 +591,7 @@ async function handleMessage(msg, sender) {
     MSG.RESUME_QUEUE,
     MSG.NEXT,
     MSG.SKIP,
+    MSG.MARK_SENT,
     MSG.REFRESH_QUEUE,
     MSG.REFRESH_ALL,
     MSG.UPDATE_SETTINGS,
@@ -826,6 +827,27 @@ async function handleMessage(msg, sender) {
 
     case MSG.SKIP: {
       await skipContact(state, msg.contactId, "user_skip");
+      return { ok: true };
+    }
+
+    // Mark a contact as already-invited (records `manual` server-side so it's excluded from the
+    // queue and from future "Pull all"). Keeps the current view; the row just shows as done.
+    case MSG.MARK_SENT: {
+      const cid = msg.contactId;
+      const posted = await postStatus(state[STORAGE_KEYS.TOKEN], cid, DM_STATUS.MANUAL);
+      if (!posted.ok) {
+        state[STORAGE_KEYS.SERVER_ONLINE] = false;
+        state[STORAGE_KEYS.LAST_ERROR] = "Couldn't mark sent (server offline?).";
+        await persist(state);
+        return { ok: false, error: posted.error };
+      }
+      state[STORAGE_KEYS.SERVER_ONLINE] = true;
+      state[STORAGE_KEYS.STATUS_MAP][cid] = UI_STATE.MANUAL;
+      if (cid === state[STORAGE_KEYS.ACTIVE_CONTACT_ID] && state[STORAGE_KEYS.RUNNING] && !state[STORAGE_KEYS.PAUSED]) {
+        await advanceToNext(state, { bypassPacing: true }); // move off it if it was active
+      } else {
+        await persist(state);
+      }
       return { ok: true };
     }
 

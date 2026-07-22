@@ -286,6 +286,16 @@ function buildActions(contact, isActive, isDone) {
   skipBtn.addEventListener("click", () => onSkip(contact.id));
   actions.appendChild(skipBtn);
 
+  // Mark sent — for contacts you've ALREADY invited (that detection missed). Records them as
+  // done so they're excluded from the queue and from future "Pull all".
+  const sentBtn = document.createElement("button");
+  sentBtn.className = "link-btn";
+  sentBtn.textContent = "Mark sent";
+  sentBtn.title = "I already sent this LinkedIn invite — exclude from the queue";
+  sentBtn.disabled = isDone;
+  sentBtn.addEventListener("click", () => onMarkSent(contact.id));
+  actions.appendChild(sentBtn);
+
   // Open profile — only if the URL passes the LinkedIn profile guard.
   if (contact.linkedin_url && LINKEDIN_PROFILE_RE.test(contact.linkedin_url)) {
     const open = document.createElement("a");
@@ -426,6 +436,11 @@ async function onSaveNote(contactId, note) {
 
 async function onSkip(contactId) {
   await send({ type: MSG.SKIP, contactId });
+}
+
+async function onMarkSent(contactId) {
+  // Records the contact as already-invited (manual) so it drops out of the queue + future Pull all.
+  await send({ type: MSG.MARK_SENT, contactId });
 }
 
 async function onPrimary() {

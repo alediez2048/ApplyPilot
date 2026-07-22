@@ -34,8 +34,11 @@ def _draft_and_store(profile: dict, job: dict, contact: dict) -> None:
         log.debug("Outreach draft failed for %s: %s", contact.get("full_name"), e)
 
 
-def draft_for_contact(contact_id: str) -> dict | None:
-    """Regenerate the outreach draft for a stored contact. Returns the new draft or None."""
+def draft_for_contact(contact_id: str, style: str = "") -> dict | None:
+    """Regenerate the outreach draft for a stored contact. Returns the new draft or None.
+
+    `style` is an optional free-text tone directive passed through to outreach.draft_email.
+    """
     from applypilot.config import load_profile
     from applypilot.database import get_connection
     from applypilot.networking import outreach
@@ -56,7 +59,7 @@ def draft_for_contact(contact_id: str) -> dict | None:
     except Exception:  # noqa: BLE001
         profile = {}
     try:
-        draft = outreach.draft_email(profile, job, contact)
+        draft = outreach.draft_email(profile, job, contact, style=style)
     except Exception as e:  # noqa: BLE001
         log.warning("Regenerate draft failed for %s: %s", contact_id, e)
         return None

@@ -1021,7 +1021,7 @@ def _save_or_regen_draft(data: dict) -> dict:
 
     if data.get("regenerate"):
         from applypilot.networking import service
-        draft = service.draft_for_contact(cid)
+        draft = service.draft_for_contact(cid, style=(data.get("style") or "").strip())
         if not draft:
             return {"ok": False, "message": "regeneration failed (LLM/provider)"}
         return {"ok": True, "subject": draft["subject"], "body": draft["body"],
@@ -1589,7 +1589,9 @@ _INDEX_HTML = r"""<!doctype html>
   .draft { margin-top:5px; max-width:560px; }
   .draft .d-subj { width:100%; font-size:12px; padding:4px 6px; border:1px solid #d7e2ec; border-radius:5px; margin-bottom:3px; }
   .draft .d-body { width:100%; font-size:12px; padding:5px 6px; border:1px solid #d7e2ec; border-radius:5px; font-family:inherit; resize:vertical; }
-  .draft .dbtns { margin-top:3px; display:flex; gap:6px; }
+  .draft .d-style { width:100%; font-size:12px; padding:5px 8px; border:1px dashed var(--accent); border-radius:6px; margin:5px 0 3px; background:var(--accent-soft); color:var(--text); }
+  .draft .d-style::placeholder { color:var(--accent); opacity:.8; }
+  .draft .dbtns { margin-top:3px; display:flex; gap:6px; flex-wrap:wrap; }
   .draft .dbtns button { font-size:11px; padding:2px 9px; }
   .draft .dbtns button.send { background:linear-gradient(180deg,#eef7ff,#dcefff); border-color:#a9cdf0; color:#1a5aa0; font-weight:600; }
   .draft .sent-tag { font-size:11px; color:#137a4b; font-weight:600; align-self:center; }
@@ -1946,9 +1948,10 @@ function draftBlock(c) {
       <div class="d-label">Email</div>
       <input class="d-subj" value="${subj}" placeholder="Subject…" ${sent?'disabled':''} />
       <textarea class="d-body" rows="4" ${sent?'disabled':''} placeholder="${has ? '' : 'No draft yet — click Regenerate'}">${body}</textarea>
+      ${sent?'':`<input class="d-style" placeholder="✨ Tweak the vibe, then Regenerate — e.g. 'more casual', 'add a joke', 'mention I'm a Longhorn'">`}
       <div class="dbtns">
         ${sent?'':`<button onclick="saveDraft('${esc(c.id)}', this)">Save</button>
-        <button onclick="regenDraft('${esc(c.id)}', this)">Regenerate</button>`}
+        <button class="secondary" onclick="regenDraft('${esc(c.id)}', this)">Regenerate</button>`}
         <button onclick="copyDraft(this)">Copy email</button>
         ${sendBtn}
       </div>
@@ -2076,11 +2079,12 @@ async function saveDraft(cid, btn) {
   btn.textContent = 'Saved ✓'; setTimeout(()=>btn.textContent='Save', 1200);
 }
 async function regenDraft(cid, btn) {
+  const d = btn.closest('.draft');
+  const style = d && d.querySelector('.d-style') ? d.querySelector('.d-style').value.trim() : '';
   btn.disabled = true; btn.textContent = 'Drafting…';
-  const r = await post('/api/outreach', {contact_id: cid, regenerate: true});
+  const r = await post('/api/outreach', {contact_id: cid, regenerate: true, style});
   btn.disabled = false; btn.textContent = 'Regenerate';
   if (r.ok) {
-    const d = btn.closest('.draft');
     d.querySelector('.d-subj').value = r.subject;
     d.querySelector('.d-body').value = r.body;
     const ln = d.querySelector('.d-linkedin');

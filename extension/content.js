@@ -394,6 +394,17 @@
     });
   }
 
+  // Pause on the current profile with an info overlay — do NOT tell the background to skip or
+  // advance. This replaces the old auto-skip behavior: the extension stays on the open profile
+  // so the human can act (send by hand, or click Next in the popup to move on). Never empties
+  // the queue on its own. The user drives.
+  function pauseInfo(heading, detail, contact) {
+    state.phase = RUN_PHASE.PAUSED;
+    teardownObserver();
+    clearHighlight();
+    renderOverlay({ mode: "info", heading, detail, contact });
+  }
+
   // ===========================================================================
   // Compose sequence (deterministic; layered selectors). Never clicks Send.
   // ===========================================================================
@@ -410,13 +421,8 @@
     // 0a) STRONG dead/stale/walled signal (bad URL) => AUTO-SKIP + advance. Safe to auto-skip
     //     because the URL bounced off the person's profile entirely.
     if (profileUnavailable()) {
-      log("profile unavailable — skipping", contact.full_name);
-      renderOverlay({
-        mode: "skip",
-        heading: "Profile unavailable — skipping",
-        detail: `Couldn't open ${contact.full_name}'s profile (dead or private link).`,
-      });
-      sendBg(MSG.SKIP_CONTACT, { contactId: contact.id, reason: REASON.PROFILE_404 });
+      log("profile unavailable — pausing (not skipping)", contact.full_name);
+      pauseInfo("Profile didn't load", `Couldn't open ${contact.full_name}'s profile. Reload the tab, or click Next in the popup to move on.`, contact);
       return;
     }
 
@@ -426,13 +432,7 @@
     const pageName = onPageName();
     if (!pageName) {
       log("could not read profile name — pausing (not auto-skipping)", contact.full_name);
-      renderOverlay({
-        mode: "mismatch",
-        heading: "Couldn't read this profile",
-        detail: `Expected ${contact.full_name} but the page hasn't shown a name. Reload the tab, or Skip.`,
-      });
-      sendBg(MSG.IDENTITY_MISMATCH, { contactId: contact.id, onPageName: "" });
-      state.phase = RUN_PHASE.PAUSED;
+      pauseInfo("Still loading…", `The profile for ${contact.full_name} hasn't finished loading. Reload the tab (Cmd+R), or click Next in the popup.`, contact);
       return;
     }
 
@@ -450,12 +450,12 @@
       return;
     }
 
-    // 2) Pre-existing Pending => already invited => skip (never compose, never false-mark sent).
+    // 2) Pre-existing Pending => already invited. Pause (don't auto-skip) so the queue never
+    //    empties itself — the human clicks Next to move on if they agree it's already sent.
     const pendingNow = resolve("pendingBadge");
     if (pendingNow) {
       state.preExistingPending = true;
-      renderOverlay({ mode: "info", heading: "Already invited", detail: "Skipping — invitation already pending.", contact });
-      sendBg(MSG.SKIP_CONTACT, { contactId: contact.id, reason: REASON.PENDING_ALREADY });
+      pauseInfo("Already invited", "You already have a pending invitation to this person. Click Next in the popup to move to the next contact.", contact);
       return;
     }
 
@@ -488,14 +488,14 @@
     }
     if (!alive()) return;
     if (!connect) {
-      // Could not find Connect. Disambiguate the common terminal states.
+      // Could not find Connect. Disambiguate the common terminal states — but PAUSE, never
+      // auto-skip (so the queue can't empty itself). The human clicks Next to move on.
       if (resolve("pendingBadge")) {
-        sendBg(MSG.SKIP_CONTACT, { contactId: contact.id, reason: REASON.PENDING_ALREADY });
+        pauseInfo("Already invited", "Invitation already pending. Click Next in the popup for the next contact.", contact);
         return;
       }
       if (profileDegree() === "1st") {
-        renderOverlay({ mode: "info", heading: "Already connected", detail: "1st-degree — skipping the invite.", contact });
-        sendBg(MSG.SKIP_CONTACT, { contactId: contact.id, reason: REASON.ALREADY_CONNECTED });
+        pauseInfo("Already connected", "You're already connected (1st-degree). Click Next in the popup for the next contact.", contact);
         return;
       }
       // Otherwise ambiguous (InMail-only / unusual layout): never-break paste fallback.

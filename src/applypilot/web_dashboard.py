@@ -1379,8 +1379,8 @@ _INDEX_HTML = r"""<!doctype html>
 <style>
   :root {
     color-scheme: light;
-    --bg:#e0ddd6;
-    --frame:#f1efea;
+    --bg:#cfcabf;
+    --frame:#f5f3ef;
     --surface:#ffffff;
     --surface2:#f8f9fa;
     --surface3:#eef3f8;
@@ -1437,9 +1437,11 @@ _INDEX_HTML = r"""<!doctype html>
   .subtitle { color:var(--muted); max-width:720px; }
   /* Framed content area — a distinctly lighter panel inset from a darker page, so the frame
      clearly reads against the background; white cards then pop inside it (three visual layers). */
-  main { max-width:1240px; margin:28px auto 56px; padding:28px; display:grid; gap:18px; min-width:0;
-      border:1px solid #c9c6c0; border-radius:18px; background:var(--frame);
-      box-shadow:0 6px 24px rgba(0,0,0,.10), 0 1px 3px rgba(0,0,0,.06); }
+  main { max-width:1240px; margin:28px auto 56px; padding:28px; display:grid; gap:22px; min-width:0;
+      border:1.5px solid #b3b0a9; border-radius:18px; background:var(--frame);
+      box-shadow:0 10px 34px rgba(0,0,0,.16), 0 2px 6px rgba(0,0,0,.08); }
+  /* Full-width horizontal separators between the major dashboard sections. */
+  .section-sep { border:none; border-top:1px solid #c4c1ba; margin:0; height:0; }
   .stats { display:grid; grid-template-columns:repeat(8, minmax(96px,1fr)); gap:12px; }
   .stat {
     background:var(--surface);
@@ -1683,6 +1685,8 @@ _INDEX_HTML = r"""<!doctype html>
 <main>
   <div class="stats" id="stats"></div>
 
+  <hr class="section-sep">
+
   <div class="progress-panel">
     <div class="progress-head">
       <div>
@@ -1694,6 +1698,8 @@ _INDEX_HTML = r"""<!doctype html>
     <div class="progress-track"><div id="progressFill" class="progress-fill"></div></div>
     <div id="progressMeta" class="progress-meta"></div>
   </div>
+
+  <hr class="section-sep">
 
   <div class="controls">
     <section>
@@ -1719,6 +1725,8 @@ _INDEX_HTML = r"""<!doctype html>
     </section>
   </div>
 
+  <hr class="section-sep">
+
   <section>
     <h2>Applications</h2>
     <div class="table-wrap">
@@ -1728,6 +1736,8 @@ _INDEX_HTML = r"""<!doctype html>
       </table>
     </div>
   </section>
+
+  <hr class="section-sep">
 
   <div class="logs">
     <section><h2>Command Log</h2><pre id="cmdLog"></pre></section>

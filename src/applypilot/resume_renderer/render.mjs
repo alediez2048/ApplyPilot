@@ -98,22 +98,41 @@ async function main() {
 
   // Fit strategy:
   //   comfortable -> single render, no forced shrink
-  //   compact/auto -> render, and if it spills past 1 page, shrink and retry
+  //   compact/auto -> render; if it spills past 1 page, first shrink fonts, then (if still
+  //                   overflowing at the tightest readable size) TRIM the least-important
+  //                   content one unit at a time and re-render — GUARANTEEING a single page.
   const shrinkSteps = fit === 'comfortable' ? [1] : [1, 0.94, 0.88, 0.82, 0.76]
 
-  let finalBuf = null
-  for (let i = 0; i < shrinkSteps.length; i++) {
-    const theme = adjustStyling(baseTheme, resume, shrinkSteps[i])
+  const renderAt = async (r, scale) => {
+    const theme = adjustStyling(baseTheme, r, scale)
     const styles = createDynamicStyles(theme)
-    const el = h(ResumeDocument, { resume, styles, theme })
-    let buf
+    const el = h(ResumeDocument, { resume: r, styles, theme })
     try {
-      buf = await renderToBuffer(el)
+      return await renderToBuffer(el)
     } catch (e) {
       fail(`render failed: ${e.message}`)
     }
-    finalBuf = buf
-    if (countPages(buf) <= 1) break
+  }
+
+  // Phase 1 — shrink fonts. Stop at the first scale that fits on one page.
+  let finalBuf = null
+  let fitScale = shrinkSteps[shrinkSteps.length - 1]
+  for (let i = 0; i < shrinkSteps.length; i++) {
+    finalBuf = await renderAt(resume, shrinkSteps[i])
+    if (countPages(finalBuf) <= 1) { fitScale = shrinkSteps[i]; break }
+  }
+
+  // Phase 2 — still 2+ pages at the tightest font: trim content until it fits (or nothing left).
+  // Only runs for compact/auto (not 'comfortable'). Keeps recent roles; sheds projects and the
+  // oldest roles' trailing bullets first. Hard ceiling on iterations as a safety valve.
+  if (fit !== 'comfortable' && countPages(finalBuf) > 1) {
+    let working = JSON.parse(JSON.stringify(resume))
+    for (let guard = 0; guard < 60 && countPages(finalBuf) > 1; guard++) {
+      const trimmed = trimOneUnit(working)
+      if (!trimmed) break // nothing left to trim — write the smallest we achieved
+      working = trimmed
+      finalBuf = await renderAt(working, fitScale)
+    }
   }
 
   try {
@@ -121,6 +140,37 @@ async function main() {
   } catch (e) {
     fail(`cannot write output: ${e.message}`)
   }
+}
+
+/**
+ * Remove ONE unit of the least-important content, returning a new resume (or null if nothing
+ * safe is left to trim). Trim order protects a real resume's signal: projects go first, then
+ * trailing bullets from the OLDEST experience roles, then whole oldest roles (never below 3),
+ * then the summary is shortened. Recent roles + skills + education are preserved.
+ */
+function trimOneUnit(r) {
+  const R = JSON.parse(JSON.stringify(r))
+  // 1) Projects: drop trailing bullets, then the whole project (oldest/last first).
+  if (Array.isArray(R.projects) && R.projects.length) {
+    const last = R.projects[R.projects.length - 1]
+    if (Array.isArray(last.bullets) && last.bullets.length > 1) { last.bullets.pop(); return R }
+    R.projects.pop(); return R
+  }
+  // 2) Experience: trim a trailing bullet from the OLDEST role that still has more than one.
+  if (Array.isArray(R.experience) && R.experience.length) {
+    for (let i = R.experience.length - 1; i >= 0; i--) {
+      const e = R.experience[i]
+      if (Array.isArray(e.bullets) && e.bullets.length > 1) { e.bullets.pop(); return R }
+    }
+    // 3) All roles down to one bullet — drop the oldest whole role, but never below 3 roles.
+    if (R.experience.length > 3) { R.experience.pop(); return R }
+  }
+  // 4) Last resort — shorten a long summary.
+  if (R.summary && R.summary.length > 140) {
+    R.summary = R.summary.slice(0, 140).replace(/\s+\S*$/, '') + '.'
+    return R
+  }
+  return null
 }
 
 main().catch((e) => fail(e?.stack || String(e)))

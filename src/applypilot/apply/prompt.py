@@ -196,7 +196,10 @@ Skills and tools -> be confident. This candidate is a {target_role} with {years}
 
 Open-ended questions ("Why do you want this role?", "Tell us about yourself", "What interests you?") -> Write 2-3 sentences. Be specific to THIS job. Reference something from the job description. Connect it to a real achievement from the resume. No generic fluff. No "I am passionate about..." -- sound like a real person.
 
-EEO/demographics -> "Decline to self-identify" or "Prefer not to say" for everything."""
+EEO/demographics -> use the applicant's stated answers from the APPLICANT section above
+(Gender / Race / Veteran / Disability). Select the dropdown option that best matches each stated
+value. Only when a value is "Decline to self-identify" / "Prefer not to say" should you pick the
+form's decline/prefer-not-to-answer option. Never override a real stated answer with a decline."""
 
 
 def _build_hard_rules(profile: dict) -> str:

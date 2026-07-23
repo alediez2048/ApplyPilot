@@ -33,36 +33,66 @@ _RATE_LIMIT_BASE_WAIT = 10  # base backoff once ALL providers are rate-limited
 _GEMINI_COMPAT_BASE = "https://generativelanguage.googleapis.com/v1beta/openai"
 _GEMINI_NATIVE_BASE = "https://generativelanguage.googleapis.com/v1beta"
 
-_DEFAULT_ORDER = ["openai", "gemini", "anthropic", "local"]
+_DEFAULT_ORDER = ["anthropic", "openai", "gemini", "local"]
+
+# ---------------------------------------------------------------------------
+# Model tiers — route task DIFFICULTY to model capability, not one model for all.
+#   "light" : quick generation / edits (outreach draft, message edit, cover letter)
+#             -> cheap, fast models. Don't burn a big model to reword a sentence.
+#   "heavy" : structured reasoning where quality matters (résumé tailoring, fit
+#             scoring, JD extraction, fabrication judge) -> stronger models.
+# Per-provider defaults are the model IDs verified working against each API. Override any of
+# them via env (OPENAI_MODEL_HEAVY, ANTHROPIC_MODEL_LIGHT, …); a legacy OPENAI_MODEL /
+# ANTHROPIC_MODEL / GEMINI_MODEL still applies to BOTH tiers for back-compat.
+# ---------------------------------------------------------------------------
+_TIERS = ("light", "heavy")
+_TIER_DEFAULTS = {
+    "openai":    {"light": "gpt-4o-mini",      "heavy": "gpt-4o"},
+    "anthropic": {"light": "claude-haiku-4-5", "heavy": "claude-sonnet-4-5"},
+    "gemini":    {"light": "gemini-2.0-flash", "heavy": "gemini-2.0-flash"},
+    "local":     {"light": "local-model",      "heavy": "local-model"},
+}
+
+
+def _model_for(provider: str, tier: str) -> str:
+    """Resolve the model id for a provider at a difficulty tier (env override → legacy → default)."""
+    tier = tier if tier in _TIERS else "heavy"
+    up = provider.upper()
+    per_tier = os.environ.get(f"{up}_MODEL_{tier.upper()}")
+    legacy = os.environ.get(f"{up}_MODEL")  # e.g. OPENAI_MODEL / ANTHROPIC_MODEL / GEMINI_MODEL
+    if provider == "local":
+        legacy = legacy or os.environ.get("LLM_MODEL")
+    return per_tier or legacy or _TIER_DEFAULTS.get(provider, {}).get(tier, "")
 
 
 # ---------------------------------------------------------------------------
 # Provider detection
 # ---------------------------------------------------------------------------
 
-def _detect_providers() -> list[tuple[str, str, str, str]]:
-    """Return a list of (name, base_url, model, api_key) for every configured
-    provider, in failover/round-robin order. Reads env at call time.
+def _detect_providers(tier: str = "heavy") -> list[tuple[str, str, str, str]]:
+    """Return a list of (name, base_url, model, api_key) for every configured provider, in
+    failover/round-robin order, using the model appropriate for the given difficulty `tier`.
+    Reads env at call time.
     """
     builders = {
         "openai": lambda: (
             "openai", "https://api.openai.com/v1",
-            os.environ.get("OPENAI_MODEL") or os.environ.get("LLM_MODEL") or "gpt-4o-mini",
+            _model_for("openai", tier),
             os.environ.get("OPENAI_API_KEY", ""),
         ),
         "gemini": lambda: (
             "gemini", _GEMINI_COMPAT_BASE,
-            os.environ.get("GEMINI_MODEL") or "gemini-2.0-flash",
+            _model_for("gemini", tier),
             os.environ.get("GEMINI_API_KEY", ""),
         ),
         "anthropic": lambda: (
             "anthropic", "https://api.anthropic.com/v1",
-            os.environ.get("ANTHROPIC_MODEL") or os.environ.get("CLAUDE_MODEL") or "claude-haiku-4-5",
+            _model_for("anthropic", tier),
             os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("CLAUDE_API_KEY", ""),
         ),
         "local": lambda: (
             "local", os.environ.get("LLM_URL", "").rstrip("/"),
-            os.environ.get("LLM_MODEL") or "local-model",
+            _model_for("local", tier),
             os.environ.get("LLM_API_KEY", ""),
         ),
     }
@@ -247,29 +277,35 @@ class FailoverClient:
 
 
 # ---------------------------------------------------------------------------
-# Singleton
+# Singletons — one cached FailoverClient per difficulty tier.
 # ---------------------------------------------------------------------------
 
-_instance: FailoverClient | None = None
+_instances: dict[str, FailoverClient] = {}
 
 
-def get_client() -> FailoverClient:
-    """Return (or create) the module-level failover client."""
-    global _instance
-    if _instance is None:
-        specs = _detect_providers()
+def get_client(tier: str = "heavy") -> FailoverClient:
+    """Return (or create) the failover client for a difficulty tier.
+
+    tier="light" for quick generation/edits (outreach, message edits, cover letter);
+    tier="heavy" (default) for structured reasoning (résumé tailoring, scoring, extraction).
+    Each tier round-robins + fails over across the SAME configured providers, just with the
+    tier-appropriate model per provider. Defaults to "heavy" so any un-migrated caller stays safe.
+    """
+    tier = tier if tier in _TIERS else "heavy"
+    if tier not in _instances:
+        specs = _detect_providers(tier)
         clients = [LLMClient(name, base, model, key) for (name, base, model, key) in specs]
         log.info(
-            "LLM providers (round-robin + failover): %s",
-            ", ".join(f"{c.name}:{c.model}" for c in clients),
+            "LLM providers [%s tier] (round-robin + failover): %s",
+            tier, ", ".join(f"{c.name}:{c.model}" for c in clients),
         )
-        _instance = FailoverClient(clients)
-    return _instance
+        _instances[tier] = FailoverClient(clients)
+    return _instances[tier]
 
 
 def reset_client() -> None:
-    """Drop the cached client (e.g. after changing env vars)."""
-    global _instance
-    if _instance is not None:
-        _instance.close()
-    _instance = None
+    """Drop all cached clients (e.g. after changing env vars)."""
+    global _instances
+    for c in _instances.values():
+        c.close()
+    _instances = {}

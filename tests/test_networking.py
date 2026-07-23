@@ -156,7 +156,7 @@ def test_draft_email_uses_llm_and_falls_back_subject(monkeypatch):
         def chat(self, msgs, **k):
             return ('{"subject": "", "body": "Hi Jane, I applied for the AI role. Jorge",'
                     ' "linkedin_note": "Hi Jane, saw the AI role — would love to connect. Jorge"}')
-    monkeypatch.setattr(outreach, "get_client", lambda: _C())
+    monkeypatch.setattr(outreach, "get_client", lambda *a, **k: _C())
 
     d = outreach.draft_email(
         {"personal": {"full_name": "Jorge Diez", "preferred_name": "Jorge"},
@@ -173,7 +173,7 @@ def test_linkedin_note_capped_at_300(monkeypatch):
     from applypilot.networking import outreach
 
     long = "word " * 100  # 500 chars
-    monkeypatch.setattr(outreach, "get_client", lambda: type("C", (), {
+    monkeypatch.setattr(outreach, "get_client", lambda *a, **k: type("C", (), {
         "chat": lambda self, m, **k: '{"subject":"s","body":"b","linkedin_note":"' + long + '"}'})())
     d = outreach.draft_email({}, {"title": "X"}, {"full_name": "Y"})
     assert len(d["linkedin_note"]) <= 300 and d["linkedin_note"].endswith("…")
@@ -185,7 +185,7 @@ def test_draft_email_empty_body_raises(monkeypatch):
     class _C:
         def chat(self, msgs, **k):
             return '{"subject": "hi", "body": ""}'
-    monkeypatch.setattr(outreach, "get_client", lambda: _C())
+    monkeypatch.setattr(outreach, "get_client", lambda *a, **k: _C())
     import pytest
     with pytest.raises(ValueError):
         outreach.draft_email({}, {"title": "X"}, {"full_name": "Y"})

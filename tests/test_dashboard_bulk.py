@@ -62,9 +62,10 @@ def test_eligible_linkedin_ready_only(tmp_path, monkeypatch):
     assert ids == [a]
 
 
-def test_eligible_linkedin_excludes_manual_and_skipped(tmp_path, monkeypatch):
-    # B3: manual/skipped are "done" and must NOT re-surface in the queue (only 'composed'
-    # stays eligible — the human hasn't sent yet).
+def test_eligible_linkedin_excludes_manual_not_skipped(tmp_path, monkeypatch):
+    # The ext queue retires only genuinely-invited contacts (sent/manual). `skipped` is an
+    # auto-skip false-positive trap, so it MUST stay eligible and keep re-appearing. `composed`
+    # also stays eligible (the human hasn't sent yet).
     _fresh_db(tmp_path, monkeypatch)
     ready = store.upsert_contact(_c(full_name="R", linkedin_url="https://linkedin.com/in/r"))
     manual = store.upsert_contact(_c(full_name="M", linkedin_url="https://linkedin.com/in/m"))
@@ -74,8 +75,9 @@ def test_eligible_linkedin_excludes_manual_and_skipped(tmp_path, monkeypatch):
     store.mark_dm_skipped(skipped)
     store.mark_dm_composed(composed)
     ids = set(wd._eligible_contact_ids("http://j/1", "linkedin"))
-    assert ids == {ready, composed}
-    assert manual not in ids and skipped not in ids
+    assert ids == {ready, composed, skipped}
+    assert manual not in ids       # manual (real invite) retired
+    assert skipped in ids          # skipped re-appears
 
 
 def test_mark_dm_sent_stamps_dm_sent_at_for_dedupe(tmp_path, monkeypatch):

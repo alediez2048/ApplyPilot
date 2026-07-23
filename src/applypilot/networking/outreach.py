@@ -126,7 +126,7 @@ def draft_email(profile: dict, job: dict, contact: dict, style: str = "") -> dic
         "Write the outreach email. Return the JSON."
     )
 
-    client = get_client()
+    client = get_client("light")
     raw = client.chat(
         [{"role": "system", "content": _SYSTEM}, {"role": "user", "content": user}],
         max_tokens=400, temperature=0.8,  # a bit higher for warmth/variety

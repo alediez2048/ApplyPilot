@@ -27,9 +27,10 @@ def test_detect_single_provider(monkeypatch):
 
 
 def test_detect_all_three_default_order(monkeypatch):
+    # Default order is anthropic-first (the reliable primary), then openai, then gemini.
     assert _names(monkeypatch, {
         "OPENAI_API_KEY": "x", "GEMINI_API_KEY": "y", "ANTHROPIC_API_KEY": "z",
-    }) == ["openai", "gemini", "anthropic"]
+    }) == ["anthropic", "openai", "gemini"]
 
 
 def test_detect_custom_order(monkeypatch):

@@ -73,7 +73,8 @@ def test_queue_all_jobs_excludes_done_and_dedupes(tmp_path, monkeypatch):
     # A distinct ready person on another job.
     other = store.upsert_contact(_c(job_url="http://j/2", full_name="Other",
                                     linkedin_url="https://www.linkedin.com/in/other"))
-    # Done/ineligible ones that must not appear.
+    # `manual` (genuinely invited) must NOT appear. `skipped` MUST still appear — auto-skip is a
+    # false-positive trap, so the queue only retires sent/manual, never skipped.
     m = store.upsert_contact(_c(job_url="http://j/3", full_name="M",
                                 linkedin_url="https://www.linkedin.com/in/m"))
     sk = store.upsert_contact(_c(job_url="http://j/3", full_name="Sk",
@@ -84,9 +85,13 @@ def test_queue_all_jobs_excludes_done_and_dedupes(tmp_path, monkeypatch):
     res = wd._ext_queue(None)  # all-jobs
     assert res["ok"] is True
     urls = sorted(store._norm_linkedin(c["linkedin_url"]) for c in res["contacts"])
-    assert urls == ["https://www.linkedin.com/in/dup", "https://www.linkedin.com/in/other"]
-    assert len(res["contacts"]) == 2  # dup collapsed to one, done excluded
+    # dup collapsed to one; manual excluded; skipped ('sk') still present.
+    assert urls == ["https://www.linkedin.com/in/dup",
+                    "https://www.linkedin.com/in/other",
+                    "https://www.linkedin.com/in/sk"]
     assert other in {c["id"] for c in res["contacts"]}
+    assert m not in {c["id"] for c in res["contacts"]}  # manual is retired
+    assert sk in {c["id"] for c in res["contacts"]}      # skipped re-appears
 
 
 # ── /api/ext/status transitions ──────────────────────────────────────────────

@@ -600,6 +600,11 @@ def run_dashboard_apply(limit: int = 10, dry_run: bool = False) -> dict:
     config.ensure_dirs()
     init_db()
     conn = get_connection()
+    # Eligible = prepared, not yet applied, and either never-attempted OR a prior FAILURE that's
+    # still under the retry cap. Including 'failed' (under-cap) means a botched/interrupted apply
+    # (e.g. the user closed the tab, or a blocking field) can just be re-run from the dashboard —
+    # no manual DB reset. 'in_progress' and cap-exhausted jobs are left alone.
+    max_attempts = config.DEFAULTS["max_apply_attempts"]
     rows = conn.execute(
         """
         SELECT url, title, site
@@ -607,11 +612,13 @@ def run_dashboard_apply(limit: int = 10, dry_run: bool = False) -> dict:
         WHERE strategy = 'dashboard_upload'
           AND tailored_resume_path IS NOT NULL
           AND applied_at IS NULL
-          AND (apply_status IS NULL OR apply_status = '')
+          AND (apply_status IS NULL OR apply_status = '' OR apply_status = 'failed'
+               OR apply_status = 'dryrun')
+          AND COALESCE(apply_attempts, 0) < ?
         ORDER BY discovered_at DESC, rowid DESC
         LIMIT ?
         """,
-        (limit,),
+        (max_attempts, limit),
     ).fetchall()
 
     print(f"Dashboard URL apply queue: {len(rows)} job(s)", flush=True)

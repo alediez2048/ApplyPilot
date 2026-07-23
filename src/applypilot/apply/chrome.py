@@ -23,6 +23,23 @@ BASE_CDP_PORT = 9222
 # Track Chrome processes per worker for cleanup
 _chrome_procs: dict[int, subprocess.Popen] = {}
 _chrome_lock = threading.Lock()
+# CDP ports whose Chrome must SURVIVE all cleanup (co-pilot review handoff — the human is about
+# to review + submit in that open window). Every kill path skips these ports.
+_keep_alive_ports: set[int] = set()
+
+
+def keep_chrome_alive(worker_id: int) -> None:
+    """Mark a worker's Chrome to survive cleanup so the human can review + submit in it.
+
+    Stops tracking the process (so the exit/kill_all paths won't reap it) and records its CDP
+    port so the base-port sweep skips it too. The next apply run's launch-time _kill_on_port
+    still clears it (starting a fresh apply implies abandoning the pending review).
+    """
+    port = BASE_CDP_PORT + worker_id
+    with _chrome_lock:
+        _chrome_procs.pop(worker_id, None)
+        _keep_alive_ports.add(port)
+    logger.info("[worker-%d] Chrome kept alive for review on port %d", worker_id, port)
 
 
 # ---------------------------------------------------------------------------
@@ -259,6 +276,11 @@ def cleanup_worker(worker_id: int, process: subprocess.Popen | None) -> None:
         worker_id: Numeric worker identifier.
         process: The Popen handle returned by launch_chrome.
     """
+    with _chrome_lock:
+        kept = (BASE_CDP_PORT + worker_id) in _keep_alive_ports
+    if kept:
+        logger.info("[worker-%d] Chrome left open for review (skip cleanup)", worker_id)
+        return
     if process and process.poll() is None:
         _kill_process_tree(process.pid)
     with _chrome_lock:
@@ -274,14 +296,18 @@ def kill_all_chrome() -> None:
     with _chrome_lock:
         procs = dict(_chrome_procs)
         _chrome_procs.clear()
+        keep = set(_keep_alive_ports)
 
     for wid, proc in procs.items():
+        if (BASE_CDP_PORT + wid) in keep:
+            continue  # co-pilot review browser — leave it open
         if proc.poll() is None:
             _kill_process_tree(proc.pid)
         _kill_on_port(BASE_CDP_PORT + wid)
 
-    # Sweep base port in case of zombies
-    _kill_on_port(BASE_CDP_PORT)
+    # Sweep base port in case of zombies (unless it's a kept-alive review browser)
+    if BASE_CDP_PORT not in keep:
+        _kill_on_port(BASE_CDP_PORT)
 
 
 def reset_worker_dir(worker_id: int) -> Path:
@@ -311,11 +337,15 @@ def cleanup_on_exit() -> None:
     with _chrome_lock:
         procs = dict(_chrome_procs)
         _chrome_procs.clear()
+        keep = set(_keep_alive_ports)
 
     for wid, proc in procs.items():
+        if (BASE_CDP_PORT + wid) in keep:
+            continue  # co-pilot review browser — leave it open for the human
         if proc.poll() is None:
             _kill_process_tree(proc.pid)
         _kill_on_port(BASE_CDP_PORT + wid)
 
-    # Sweep base port for any orphan
-    _kill_on_port(BASE_CDP_PORT)
+    # Sweep base port for any orphan (unless it's a kept-alive review browser)
+    if BASE_CDP_PORT not in keep:
+        _kill_on_port(BASE_CDP_PORT)

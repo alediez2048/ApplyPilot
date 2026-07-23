@@ -27,7 +27,7 @@ from applypilot import config
 from applypilot.database import get_connection
 from applypilot.apply import prompt as prompt_mod
 from applypilot.apply.chrome import (
-    launch_chrome, cleanup_worker, kill_all_chrome,
+    launch_chrome, cleanup_worker, kill_all_chrome, keep_chrome_alive,
     reset_worker_dir, cleanup_on_exit, _kill_process_tree,
     BASE_CDP_PORT,
 )
@@ -224,6 +224,15 @@ def mark_result(url: str, status: str, error: str | None = None,
                            apply_duration_ms = ?, apply_task_id = ?
             WHERE url = ?
         """, (now, duration_ms, task_id, url))
+    elif status == "needs_review":
+        # Co-pilot: filled + waiting for the human to review + submit. NOT applied, NOT a failure,
+        # and it does NOT burn an attempt (the human hasn't decided yet). last_attempted_at is
+        # stamped so the UI can show when it was prepared.
+        conn.execute("""
+            UPDATE jobs SET apply_status = 'ready_to_submit', apply_error = NULL, agent_id = NULL,
+                           apply_duration_ms = ?, apply_task_id = ?, last_attempted_at = ?
+            WHERE url = ?
+        """, (duration_ms, task_id, now, url))
     else:
         attempts = 99 if permanent else "COALESCE(apply_attempts, 0) + 1"
         conn.execute(f"""
@@ -334,7 +343,8 @@ def reset_failed() -> int:
 # ---------------------------------------------------------------------------
 
 def run_job(job: dict, port: int, worker_id: int = 0,
-            model: str = "sonnet", dry_run: bool = False) -> tuple[str, int]:
+            model: str = "sonnet", dry_run: bool = False,
+            copilot: bool = False) -> tuple[str, int]:
     """Spawn a Claude Code session for one job application.
 
     Returns:
@@ -359,6 +369,7 @@ def run_job(job: dict, port: int, worker_id: int = 0,
         job=job,
         tailored_resume=resume_text,
         dry_run=dry_run,
+        copilot=copilot,
         worker_id=worker_id,
     )
 
@@ -508,6 +519,21 @@ def run_job(job: dict, port: int, worker_id: int = 0,
         def _clean_reason(s: str) -> str:
             return re.sub(r'[*`"]+$', '', s).strip()
 
+        # Co-pilot: the agent fills everything and hands off for human review — it must NEVER
+        # submit. Recognize the handoff, and treat an agent self-submit as a violation.
+        if copilot:
+            if re.search(r"RESULT:\s*NEEDS_REVIEW\b", output, re.IGNORECASE):
+                add_event(f"[W{worker_id}] READY TO REVIEW ({elapsed}s): {job['title'][:30]}")
+                update_state(worker_id, status="needs_review",
+                             last_action=f"ready to review ({elapsed}s)")
+                return "needs_review", duration_ms
+            if re.search(r"RESULT:\s*APPLIED\b", output, re.IGNORECASE):
+                # Agent submitted in co-pilot mode — a safety violation (the human should submit).
+                add_event(f"[W{worker_id}] ⚠ CO-PILOT VIOLATION: agent submitted! ({elapsed}s)")
+                update_state(worker_id, status="failed",
+                             last_action=f"CO-PILOT VIOLATION: submitted ({elapsed}s)")
+                return "failed:copilot_violation_agent_submitted", duration_ms
+
         # Dry-run accounting comes first. A dry run must NEVER be recorded as 'applied'.
         if dry_run:
             if re.search(r"RESULT:\s*DRYRUN\b", output, re.IGNORECASE):
@@ -602,7 +628,8 @@ def _is_permanent_failure(result: str) -> bool:
 def worker_loop(worker_id: int = 0, limit: int = 1,
                 target_url: str | None = None,
                 min_score: int = 7, headless: bool = False,
-                model: str = "sonnet", dry_run: bool = False) -> tuple[int, int]:
+                model: str = "sonnet", dry_run: bool = False,
+                copilot: bool = False) -> tuple[int, int]:
     """Run jobs sequentially until limit is reached or queue is empty.
 
     Args:
@@ -656,12 +683,20 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
             chrome_proc = launch_chrome(worker_id, port=port, headless=headless)
 
             result, duration_ms = run_job(job, port=port, worker_id=worker_id,
-                                            model=model, dry_run=dry_run)
+                                            model=model, dry_run=dry_run, copilot=copilot)
 
             if result == "skipped":
                 release_lock(job["url"])
                 add_event(f"[W{worker_id}] Skipped: {job['title'][:30]}")
                 continue
+            elif result == "needs_review":
+                # Co-pilot handoff: form is filled, waiting for the human to review + submit.
+                # Record the state and KEEP the browser open (skip cleanup) so they can act.
+                mark_result(job["url"], "needs_review", duration_ms=duration_ms)
+                keep_chrome_alive(worker_id)
+                chrome_proc = None  # ensure the finally's cleanup_worker doesn't reap it
+                add_event(f"[W{worker_id}] Ready to review: {job['title'][:30]} — submit in the open tab")
+                update_state(worker_id, jobs_done=applied + failed)
             elif result == "applied":
                 mark_result(job["url"], "applied", duration_ms=duration_ms)
                 applied += 1
@@ -706,7 +741,7 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
 
 def main(limit: int = 1, target_url: str | None = None,
          min_score: int = 7, headless: bool = False, model: str = "sonnet",
-         dry_run: bool = False, continuous: bool = False,
+         dry_run: bool = False, copilot: bool = False, continuous: bool = False,
          poll_interval: int = 60, workers: int = 1) -> None:
     """Launch the apply pipeline.
 
@@ -791,6 +826,7 @@ def main(limit: int = 1, target_url: str | None = None,
                     headless=headless,
                     model=model,
                     dry_run=dry_run,
+                    copilot=copilot,
                 )
             else:
                 # Multi-worker — distribute limit across workers
@@ -814,6 +850,7 @@ def main(limit: int = 1, target_url: str | None = None,
                             headless=headless,
                             model=model,
                             dry_run=dry_run,
+                            copilot=copilot,
                         ): i
                         for i in range(workers)
                     }

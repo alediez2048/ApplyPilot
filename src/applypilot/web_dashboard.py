@@ -594,8 +594,12 @@ def run_dashboard_prepare(limit: int = 0, validation_mode: str = "lenient") -> d
     return result
 
 
-def run_dashboard_apply(limit: int = 10, dry_run: bool = False) -> dict:
-    """Apply only to prepared jobs imported through the dashboard URL box."""
+def run_dashboard_apply(limit: int = 10, dry_run: bool = False, copilot: bool = True) -> dict:
+    """Apply only to prepared jobs imported through the dashboard URL box.
+
+    copilot=True (default): the agent fills each application but STOPS before submit and leaves
+    the browser open for the human to review + submit. dry_run takes precedence if both set.
+    """
     config.load_env()
     config.ensure_dirs()
     init_db()
@@ -624,23 +628,53 @@ def run_dashboard_apply(limit: int = 10, dry_run: bool = False) -> dict:
     print(f"Dashboard URL apply queue: {len(rows)} job(s)", flush=True)
     applied = 0
     failed = 0
+    needs_review = 0
     for index, row in enumerate(rows, 1):
         print(f"\n=== Applying {index}/{len(rows)}: {row['site']} / {row['title']} ===", flush=True)
         print(row["url"], flush=True)
         args = [sys.executable, "-m", "applypilot.cli", "apply", "--url", row["url"], "--min-score", "1"]
         if dry_run:
             args.append("--dry-run")
+        elif copilot:
+            args.append("--copilot")
         completed = subprocess.run(args, check=False)
         status = conn.execute("SELECT apply_status, applied_at FROM jobs WHERE url = ?", (row["url"],)).fetchone()
         if status and status["applied_at"]:
             applied += 1
+        elif status and status["apply_status"] == "ready_to_submit":
+            needs_review += 1  # co-pilot handoff: filled + waiting for the human to submit
         else:
             failed += 1
         print(f"=== Finished {index}/{len(rows)} with exit code {completed.returncode} ===", flush=True)
 
-    result = {"queued": len(rows), "applied": applied, "failed": failed}
+    result = {"queued": len(rows), "applied": applied, "failed": failed, "needs_review": needs_review}
     print(f"Dashboard URL apply complete: {result}", flush=True)
     return result
+
+
+def _mark_submitted(url: str) -> dict:
+    """Confirm a co-pilot 'ready_to_submit' job as applied after the human submitted it by hand.
+
+    Only transitions a job that's actually in the ready_to_submit state (guards against
+    marking something applied that never went through review).
+    """
+    from datetime import datetime, timezone
+    if not url:
+        return {"ok": False, "message": "url required"}
+    init_db()
+    conn = get_connection()
+    row = conn.execute("SELECT apply_status FROM jobs WHERE url = ?", (url,)).fetchone()
+    if not row:
+        return {"ok": False, "message": "job not found"}
+    if row["apply_status"] != "ready_to_submit":
+        return {"ok": False, "message": f"job is not awaiting review (status: {row['apply_status'] or 'none'})"}
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        "UPDATE jobs SET apply_status = 'applied', applied_at = ?, apply_error = NULL WHERE url = ?",
+        (now, url),
+    )
+    conn.commit()
+    return {"ok": True, "message": "Marked as submitted ✓"}
 
 
 def _json_response(handler: BaseHTTPRequestHandler, payload: dict, status: int = 200) -> None:
@@ -1218,12 +1252,12 @@ def _start_prepare(min_score: int) -> tuple[bool, str]:
     return _runner.start("prepare", args)
 
 
-def _start_apply(limit: int, min_score: int, dry_run: bool) -> tuple[bool, str]:
+def _start_apply(limit: int, min_score: int, dry_run: bool, copilot: bool = True) -> tuple[bool, str]:
     args = [
         sys.executable, "-c",
         (
             "from applypilot.web_dashboard import run_dashboard_apply; "
-            f"run_dashboard_apply(limit={limit}, dry_run={dry_run!r})"
+            f"run_dashboard_apply(limit={limit}, dry_run={dry_run!r}, copilot={copilot!r})"
         ),
     ]
     return _runner.start("apply", args)
@@ -1365,8 +1399,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 limit = int(data.get("limit") or 10)
                 min_score = int(data.get("min_score") or 1)
                 dry_run = str(data.get("dry_run", "")).lower() in {"1", "true", "yes", "on"}
-                ok, msg = _start_apply(limit, min_score, dry_run)
+                # Co-pilot (review before submit) is the default; the client can opt out for full auto.
+                copilot = str(data.get("copilot", "1")).lower() in {"1", "true", "yes", "on"}
+                ok, msg = _start_apply(limit, min_score, dry_run, copilot)
                 _json_response(self, {"ok": ok, "message": msg}, 200 if ok else 409)
+                return
+            if path == "/api/mark-submitted":
+                _json_response(self, _mark_submitted(data.get("url", "")))
                 return
             if path == "/api/delete":
                 result = _delete_job(data.get("url", ""))
@@ -1678,6 +1717,8 @@ _INDEX_HTML = r"""<!doctype html>
   .failed { background:var(--red-soft); color:var(--red); }
   .ready { background:var(--accent-soft); color:var(--accent); }
   .in_progress { background:var(--yellow-soft); color:var(--yellow); }
+  .ready_to_submit { background:#fef3e0; color:#915907; border:1px solid #f0c675; font-weight:700; }
+  .review-cta { display:inline-block; margin-top:4px; font-size:11px; color:#915907; }
   .logs { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
   pre {
     margin:0;
@@ -1749,7 +1790,7 @@ _INDEX_HTML = r"""<!doctype html>
       <h2>Apply to Jobs</h2>
       <textarea id="urls" placeholder="Paste one or more job URLs here, then click Run. Direct ATS/career URLs work best."></textarea>
       <div class="row" style="margin-top:10px; align-items:center">
-        <button id="runBtn" class="primary" style="font-size:15px; padding:10px 20px" onclick="runEverything()">🚀 Import, Prepare &amp; Apply</button>
+        <button id="runBtn" class="primary" style="font-size:15px; padding:10px 20px" onclick="runEverything()">🚀 Import, Prepare &amp; Fill</button>
         <button class="danger" onclick="stopCommand()">Stop</button>
         <label style="margin-left:12px"><input id="dryRun" type="checkbox"> Dry run (fill, don't submit)</label>
       </div>
@@ -1759,7 +1800,7 @@ _INDEX_HTML = r"""<!doctype html>
         <div class="pipe-log-wrap"><pre id="pipeLog" class="pipe-log"></pre></div>
       </div>
       <div id="importStatus" class="hint"></div>
-      <div class="hint">One click runs the whole chain: import the URLs → prepare tailored résumé + cover letter → apply via the visible Chrome flow. Advanced: <button class="linklike" onclick="toggleAdvanced()">show step controls</button></div>
+      <div class="hint">One click runs the whole chain: import → prepare tailored résumé + cover letter → <strong>fill the application in Chrome and hand it to you to review + submit</strong> (co-pilot — never auto-submits). Advanced: <button class="linklike" onclick="toggleAdvanced()">show step controls</button></div>
       <div id="advancedControls" style="display:none; margin-top:8px" class="row">
         <label>Limit <input id="limit" type="number" value="10" min="1" max="100" style="width:72px"></label>
         <button id="prepareBtn" onclick="prepareJobs()">Prepare only</button>
@@ -1917,13 +1958,16 @@ async function applyJobs() {
     alert('Nothing is ready to apply yet.\n\nClick "Prepare Materials" first and wait for "Prepare materials complete ✓", then Apply.');
     return;
   }
-  if (!dryRun && !confirm(`Submit real application(s) for ${ready} prepared job(s)?\n\nThis drives Chrome and actually submits. Use the Dry-run checkbox to fill without submitting.`)) return;
+  if (!dryRun && !confirm(`Fill ${ready} application(s) for your review?\n\nApplyPilot fills each application in Chrome, then STOPS before submitting and leaves the browser open for you to review + click Submit. It never auto-submits.`)) return;
   const btn = document.getElementById('applyBtn');
-  const data = await post('/api/apply', {limit: document.getElementById('limit').value, dry_run: dryRun});
+  const data = await post('/api/apply', {limit: document.getElementById('limit').value, dry_run: dryRun, copilot: !dryRun});
   if (!data.ok) { cmdEl.textContent = data.message || 'Could not start apply'; return; }
   if (btn) btn.disabled = true;
-  cmdEl.textContent = dryRun ? 'Applying (DRY RUN — no submit)…' : 'Applying — Chrome is submitting…';
-  await pollCommandUntilDone(dryRun ? 'Dry-run apply' : 'Apply');
+  cmdEl.textContent = dryRun ? 'Applying (DRY RUN — no submit)…' : 'Filling the application in Chrome for your review…';
+  const ac = await pollCommandUntilDone(dryRun ? 'Dry-run apply' : 'Fill for review');
+  if (!dryRun && !(ac && ac.returncode && ac.returncode !== 0)) {
+    cmdEl.textContent = '✅ Filled — review in the open Chrome window, click Submit, then "Mark submitted ✓" on the job row.';
+  }
   if (btn) btn.disabled = false;
 }
 // The one button: import (if URLs pasted) -> prepare -> apply, streaming live status through
@@ -1969,21 +2013,26 @@ async function runEverything() {
     }
     pipeSet('tailor', 'done'); pipeSet('cover', 'done');
 
-    // 3) Apply — only if something is actually Ready (else say so, don't launch a no-op).
+    // 3) Apply — co-pilot mode: fill the form in Chrome, then STOP and leave it open for you to
+    //    review + submit. Only runs if something's Ready (else say so, don't launch a no-op).
     const status = await (await fetch('/api/status')).json();
     const ready = (status.stats || {}).ready || 0;
     if (ready < 1) { cmdEl.textContent = 'Materials prepared, but no jobs are Ready to apply.'; return; }
     const dryRun = document.getElementById('dryRun').checked;
-    if (!dryRun && !confirm(`Submit real application(s) for ${ready} prepared job(s)?\n\nThis drives Chrome and actually submits. Check "Dry run" to fill without submitting.`)) {
+    if (!dryRun && !confirm(`Fill ${ready} application(s) for your review?\n\nApplyPilot opens Chrome and fills each application, then STOPS before submitting and leaves the browser open for you to review and click Submit yourself. It never auto-submits.`)) {
       cmdEl.textContent = `Prepared ${ready} job(s). Apply cancelled.`;
       return;
     }
-    const ap = await post('/api/apply', {limit: document.getElementById('limit').value, dry_run: dryRun});
+    // copilot=true (default) unless dry-run.
+    const ap = await post('/api/apply', {limit: document.getElementById('limit').value, dry_run: dryRun, copilot: !dryRun});
     if (!ap.ok) { cmdEl.textContent = ap.message || 'Could not start apply.'; return; }
     pipeSet('apply', 'active');
-    cmdEl.textContent = dryRun ? 'Applying (DRY RUN — no submit)…' : 'Applying — Chrome is submitting…';
-    const ac = await pollCommandUntilDone(dryRun ? 'Dry-run apply' : 'Apply');
+    cmdEl.textContent = dryRun ? 'Applying (DRY RUN — no submit)…' : 'Filling the application in Chrome — I\\'ll hand it to you to review + submit…';
+    const ac = await pollCommandUntilDone(dryRun ? 'Dry-run apply' : 'Fill for review');
     pipeSet('apply', ac && ac.returncode && ac.returncode !== 0 ? 'failed' : 'done');
+    if (!dryRun && !(ac && ac.returncode && ac.returncode !== 0)) {
+      cmdEl.textContent = '✅ Filled — review the application in the open Chrome window, click Submit, then hit "Mark submitted ✓" on the job row.';
+    }
   } finally {
     btn.disabled = false;
   }
@@ -1999,7 +2048,11 @@ async function deleteJob(url, label) {
   if (data.message) document.getElementById('command').textContent = data.message;
   await refresh();
 }
-function badge(status) { return `<span class="badge ${esc(status)}">${esc(status || 'new')}</span>`; }
+const STATUS_LABEL = { ready_to_submit: '⚠ review & submit', in_progress: 'applying…' };
+function badge(status) {
+  const label = STATUS_LABEL[status] || status || 'new';
+  return `<span class="badge ${esc(status)}">${esc(label)}</span>`;
+}
 let NET_AVAIL = false;
 async function findContacts(url) {
   const r = await post('/api/network', {url, per_job: 5});
@@ -2229,8 +2282,18 @@ async function refresh() {
       <td class="people">${peopleCell(j)}</td>
       <td>${esc(j.apply_error)}</td>
       <td><a href="${esc(j.url)}" target="_blank">job</a>${j.application_url ? ` · <a href="${esc(j.application_url)}" target="_blank">apply</a>` : ''}</td>
-      <td><button class="danger" onclick="deleteJob(decodeURIComponent('${encodeURIComponent(j.url)}'), decodeURIComponent('${encodeURIComponent(`${j.company} - ${j.title}`)}'))">Delete</button></td>
+      <td>
+        ${j.status === 'ready_to_submit' ? `<button class="primary" onclick="markSubmitted(decodeURIComponent('${encodeURIComponent(j.url)}'), this)">Mark submitted ✓</button> ` : ''}
+        <button class="danger" onclick="deleteJob(decodeURIComponent('${encodeURIComponent(j.url)}'), decodeURIComponent('${encodeURIComponent(`${j.company} - ${j.title}`)}'))">Delete</button>
+      </td>
     </tr>${contactsRow(j, 11)}`).join('');
+}
+async function markSubmitted(url, btn) {
+  // The user has reviewed + submitted the filled application in the open Chrome window.
+  if (!confirm('Confirm you reviewed and submitted this application in the browser?')) return;
+  btn.disabled = true; btn.textContent = 'Saving…';
+  const r = await post('/api/mark-submitted', {url});
+  if (r.ok) { refresh(); } else { btn.disabled = false; btn.textContent = 'Mark submitted ✓'; alert(r.message || 'Failed'); }
 }
 setInterval(refresh, 2500);
 refresh();

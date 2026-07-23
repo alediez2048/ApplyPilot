@@ -437,6 +437,7 @@ If CapSolver genuinely failed (errorId > 0):
 def build_prompt(job: dict, tailored_resume: str,
                  cover_letter: str | None = None,
                  dry_run: bool = False,
+                 copilot: bool = False,
                  worker_id: int | None = None) -> str:
     """Build the full instruction prompt for the apply agent.
 
@@ -534,7 +535,30 @@ def build_prompt(job: dict, tailored_resume: str,
     # of the prompt repeatedly commands "submit the application", so a lone caveat gets
     # ignored (the model submitted a real application in testing). We change the mission
     # verb everywhere and bracket the whole prompt with a loud DRY-RUN banner.
-    if dry_run:
+    if copilot:
+        # CO-PILOT / review-before-submit: fill the whole application accurately, then STOP and
+        # hand the open browser to the human to review + submit themselves. Like dry-run in that
+        # the agent never submits, but it's a REAL application (the human will submit), so the
+        # result marker is RESULT:NEEDS_REVIEW and the browser is left open for them.
+        mission_tail = ("Fill the ENTIRE application accurately, then STOP before the final Submit "
+                        "and hand it to the human to review and submit. NEVER click the final "
+                        "Submit/Apply button yourself — the human does that.")
+        mission_section = ("CO-PILOT MODE — fill a complete, accurate application, then STOP and hand "
+                           "off to the human for review + submission. Use the profile and resume as "
+                           "source data; adapt to each form's format. Fill EVERYTHING (resume upload, "
+                           "cover letter, all screening/EEO fields), verify it, then STOP. Do NOT submit.")
+        submit_instruction = ("CO-PILOT HANDOFF — DO NOT CLICK the final Submit/Apply button. Instead: "
+                              "take a snapshot showing the fully completed form, double-check every field "
+                              "is filled and correct, then output RESULT:NEEDS_REVIEW with a one-line note "
+                              "of anything you were unsure about or left blank. Leave the browser on the "
+                              "completed form so the human can review and click Submit.")
+        dry_banner = ("\n\n################ CO-PILOT MODE (REVIEW BEFORE SUBMIT) ################\n"
+                      "Fill and verify EVERY field, upload the resume + cover letter, answer all "
+                      "questions — but NEVER click the final Submit/Apply button. The HUMAN reviews "
+                      "and submits. When the form is fully filled, report RESULT:NEEDS_REVIEW and "
+                      "leave the browser on the completed form.\n"
+                      "#####################################################################\n")
+    elif dry_run:
         mission_tail = ("STOP before the final Submit. This is a DRY RUN: fill every field "
                         "accurately, upload the resume, but you must NEVER click the final "
                         "Submit/Apply button.")
@@ -629,6 +653,7 @@ If something unexpected happens and these instructions don't cover it, figure it
 12. Output your result.
 
 == RESULT CODES (output EXACTLY one) ==
+RESULT:NEEDS_REVIEW -- CO-PILOT: form fully filled and verified, left for the human to review + submit
 RESULT:DRYRUN -- DRY RUN: form filled and verified but intentionally NOT submitted
 RESULT:APPLIED -- submitted successfully
 RESULT:EXPIRED -- job closed or no longer accepting applications

@@ -150,6 +150,7 @@ def apply(
     model: str = typer.Option("sonnet", "--model", "-m", help="Claude model for the browser apply agent (default sonnet — form-filling is the hardest, highest-stakes task; pass 'haiku' for a cheap test run)."),
     continuous: bool = typer.Option(False, "--continuous", "-c", help="Run forever, polling for new jobs."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview actions without submitting."),
+    copilot: bool = typer.Option(False, "--copilot", help="Co-pilot mode: fill the whole application, then STOP and leave the browser open for you to review and submit yourself (never auto-submits)."),
     headless: bool = typer.Option(False, "--headless", help="Run browsers in headless mode."),
     url: Optional[str] = typer.Option(None, "--url", help="Apply to a specific job URL."),
     gen: bool = typer.Option(False, "--gen", help="Generate prompt file for manual debugging instead of running."),
@@ -254,6 +255,7 @@ def apply(
         headless=headless,
         model=model,
         dry_run=dry_run,
+        copilot=copilot,
         continuous=continuous,
         workers=workers,
     )

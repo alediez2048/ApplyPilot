@@ -1,33 +1,13 @@
 {
   "manifest_version": 3,
-  "name": "ApplyPilot LinkedIn Assistant",
-  "version": "0.4.0",
-  "description": "Composes personalized LinkedIn connection notes from your ApplyPilot outreach queue and highlights them for you to send. It never clicks Send — you always do.",
+  "name": "ApplyPilot Contacts",
+  "version": "0.5.0",
+  "description": "Pull your ApplyPilot outreach contacts, copy the drafted note, and open the right LinkedIn profile. Nothing else.",
   "minimum_chrome_version": "116",
-  "background": {
-    "service_worker": "background.js",
-    "type": "module"
-  },
   "action": {
     "default_popup": "popup.html",
-    "default_title": "ApplyPilot LinkedIn Assistant"
+    "default_title": "ApplyPilot Contacts"
   },
-  "content_scripts": [
-    {
-      "matches": ["https://*.linkedin.com/in/*"],
-      "js": ["shared/constants.content.js", "shared/selectors.content.js", "content.js"],
-      "run_at": "document_idle"
-    }
-  ],
-  "permissions": ["storage", "alarms"],
-  "host_permissions": [
-    "https://*.linkedin.com/*",
-    "http://localhost:8765/*"
-  ],
-  "web_accessible_resources": [
-    {
-      "resources": ["shared/constants.js", "selectors.json"],
-      "matches": ["https://*.linkedin.com/*"]
-    }
-  ]
+  "permissions": ["storage"],
+  "host_permissions": ["http://localhost:8765/*"]
 }

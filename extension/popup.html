@@ -1,120 +1,45 @@
-<!--
-  ApplyPilot LinkedIn Assistant — popup (control panel).
-  SETUP + queue management only. The running loop lives on the on-page overlay
-  (this popup closes on every Send), so nothing here is required for sending.
-  All queue strings are inserted via textContent in popup.js — never innerHTML.
--->
-<link rel="stylesheet" href="popup.css" />
-
-<div id="app" class="app">
-  <!-- Header: brand + live connection indicator (green when localhost:8765 responds) -->
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
   <header class="hdr">
     <div class="brand">
-      <span class="brand-mark" aria-hidden="true">✈</span>
+      <span class="logo">✈</span>
       <span class="brand-name">ApplyPilot</span>
-      <span class="brand-sub">LinkedIn Assistant</span>
     </div>
-    <div id="conn" class="conn" title="ApplyPilot dashboard connection">
-      <span id="conn-dot" class="dot dot--off" aria-hidden="true"></span>
-      <span id="conn-text" class="conn-text">Checking…</span>
-    </div>
+    <span id="conn" class="conn conn--off">Not connected</span>
   </header>
 
-  <!-- Token setup prompt — only shown when no token is stored -->
-  <section id="token-banner" class="banner banner--setup" hidden>
-    <p class="banner-title">Connect to ApplyPilot</p>
-    <p class="banner-body">
-      Paste the token shown in your ApplyPilot dashboard to link this extension.
-    </p>
+  <!-- Token setup (shown until a working token is saved) -->
+  <section id="setup" class="setup" hidden>
+    <p class="setup-hint">Paste the token printed by the dashboard on startup
+      (found in <code>~/.applypilot/ext_token</code>).</p>
     <div class="row">
-      <input id="token-input" class="input" type="password" autocomplete="off"
-             spellcheck="false" placeholder="X-ApplyPilot-Token" />
+      <input id="token" type="password" class="input" placeholder="ApplyPilot token" spellcheck="false" autocomplete="off" />
       <button id="token-save" class="btn btn--primary">Save</button>
     </div>
+    <p id="setup-err" class="err" hidden></p>
   </section>
 
-  <!-- Last error / limit message surfaced from background -->
-  <section id="error-banner" class="banner banner--error" hidden>
-    <span id="error-text" class="banner-body"></span>
-  </section>
-
-  <!-- Queue controls + progress -->
-  <section class="controls">
-    <div class="controls-row">
-      <button id="btn-primary" class="btn btn--primary">Start</button>
-      <button id="btn-next" class="btn">Next</button>
-      <button id="btn-refresh" class="btn btn--ghost" title="Re-fetch the queue">Refresh</button>
-      <button id="btn-pull-all" class="btn btn--ghost" title="Pull every generated contact, including ones that were auto-skipped">Pull all</button>
+  <!-- Main -->
+  <section id="main" hidden>
+    <div class="toolbar">
+      <button id="refresh" class="btn btn--primary">↻ Refresh contacts</button>
+      <button id="settings-toggle" class="btn btn--ghost" title="Change token">⚙</button>
     </div>
-    <div class="progress">
-      <span id="progress-text" class="progress-text">0 / 0 sent</span>
-      <span id="phase-text" class="phase-text"></span>
+    <div id="count" class="count"></div>
+    <div id="list" class="list"></div>
+    <div id="empty" class="empty" hidden>
+      No contacts yet. Run <strong>Find contacts</strong> in the dashboard, then Refresh.
     </div>
   </section>
 
-  <!-- Daily-cap meter -->
-  <section class="meter">
-    <div class="meter-head">
-      <span class="meter-label">Today</span>
-      <span id="meter-count" class="meter-count">0 / 20</span>
-    </div>
-    <div class="meter-track" role="progressbar" aria-label="Daily invites used">
-      <div id="meter-fill" class="meter-fill"></div>
-    </div>
-    <div id="meter-reset" class="meter-reset"></div>
-  </section>
+  <footer class="foot">Copy the note, open their LinkedIn, paste &amp; send. You stay in control.</footer>
 
-  <!-- Queue list (built entirely via textContent in popup.js) -->
-  <section class="queue">
-    <div class="queue-head">
-      <span class="queue-title">Queue</span>
-      <span id="queue-count" class="queue-count"></span>
-    </div>
-    <ul id="queue-list" class="queue-list" aria-live="polite"></ul>
-    <p id="queue-empty" class="queue-empty" hidden>
-      No contacts in the queue. Press Refresh once the dashboard has drafted notes.
-    </p>
-  </section>
-
-  <!-- Settings panel -->
-  <details class="settings" id="settings">
-    <summary class="settings-summary">Settings</summary>
-    <div class="settings-body">
-      <label class="field">
-        <span class="field-label">Daily cap</span>
-        <input id="set-dailyCap" class="input input--num" type="number" min="1" max="200" step="1" />
-      </label>
-      <label class="field">
-        <span class="field-label">Pacing (seconds between contacts)</span>
-        <input id="set-pacingSeconds" class="input input--num" type="number" min="0" max="600" step="1" />
-      </label>
-      <label class="field field--row">
-        <input id="set-confirmBeforeEach" class="checkbox" type="checkbox" />
-        <span class="field-label">Confirm before each contact</span>
-      </label>
-      <label class="field">
-        <span class="field-label">Job filter (blank = all jobs)</span>
-        <input id="set-jobFilter" class="input" type="text" spellcheck="false"
-               placeholder="https://…job URL, or blank for all" />
-      </label>
-
-      <div class="field">
-        <span class="field-label">ApplyPilot token</span>
-        <div class="row">
-          <input id="set-token" class="input" type="password" autocomplete="off"
-                 spellcheck="false" placeholder="X-ApplyPilot-Token" />
-          <button id="set-token-save" class="btn btn--ghost">Update</button>
-        </div>
-      </div>
-
-      <button id="settings-save" class="btn btn--primary settings-save">Save settings</button>
-      <p id="settings-saved" class="settings-saved" hidden>Saved.</p>
-    </div>
-  </details>
-
-  <footer class="ftr">
-    The human always clicks <strong>Send</strong>. This panel only prepares the queue.
-  </footer>
-</div>
-
-<script type="module" src="popup.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

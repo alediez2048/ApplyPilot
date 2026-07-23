@@ -2027,7 +2027,7 @@ async function runEverything() {
     const ap = await post('/api/apply', {limit: document.getElementById('limit').value, dry_run: dryRun, copilot: !dryRun});
     if (!ap.ok) { cmdEl.textContent = ap.message || 'Could not start apply.'; return; }
     pipeSet('apply', 'active');
-    cmdEl.textContent = dryRun ? 'Applying (DRY RUN — no submit)…' : 'Filling the application in Chrome — I\\'ll hand it to you to review + submit…';
+    cmdEl.textContent = dryRun ? 'Applying (DRY RUN — no submit)…' : 'Filling the application in Chrome — then handing it to you to review + submit…';
     const ac = await pollCommandUntilDone(dryRun ? 'Dry-run apply' : 'Fill for review');
     pipeSet('apply', ac && ac.returncode && ac.returncode !== 0 ? 'failed' : 'done');
     if (!dryRun && !(ac && ac.returncode && ac.returncode !== 0)) {

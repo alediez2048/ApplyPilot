@@ -652,6 +652,27 @@ def run_dashboard_apply(limit: int = 10, dry_run: bool = False, copilot: bool = 
     return result
 
 
+def run_dashboard_continue(url: str) -> dict:
+    """Resume a co-pilot job that paused on a hard blocker (captcha/login/field).
+
+    Spawns a fresh agent with --resume: it reconnects to the still-open review browser (same CDP
+    port) and continues from the current on-page state now that the human has resolved the blocker.
+    """
+    config.load_env()
+    config.ensure_dirs()
+    print(f"Dashboard continue (resume) for: {url}", flush=True)
+    args = [sys.executable, "-m", "applypilot.cli", "apply", "--url", url,
+            "--min-score", "1", "--copilot", "--resume"]
+    completed = subprocess.run(args, check=False)
+    init_db()
+    conn = get_connection()
+    status = conn.execute("SELECT apply_status FROM jobs WHERE url = ?", (url,)).fetchone()
+    result = {"url": url, "status": (status["apply_status"] if status else None),
+              "exit_code": completed.returncode}
+    print(f"Dashboard continue complete: {result}", flush=True)
+    return result
+
+
 def _mark_submitted(url: str) -> dict:
     """Confirm a co-pilot 'ready_to_submit' job as applied after the human submitted it by hand.
 
@@ -1252,6 +1273,14 @@ def _start_prepare(min_score: int) -> tuple[bool, str]:
     return _runner.start("prepare", args)
 
 
+def _start_continue(url: str) -> tuple[bool, str]:
+    args = [
+        sys.executable, "-c",
+        f"from applypilot.web_dashboard import run_dashboard_continue; run_dashboard_continue({url!r})",
+    ]
+    return _runner.start("continue", args)
+
+
 def _start_apply(limit: int, min_score: int, dry_run: bool, copilot: bool = True) -> tuple[bool, str]:
     args = [
         sys.executable, "-c",
@@ -1406,6 +1435,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/mark-submitted":
                 _json_response(self, _mark_submitted(data.get("url", "")))
+                return
+            if path == "/api/continue":
+                url = (data.get("url") or "").strip()
+                if not url:
+                    _json_response(self, {"ok": False, "message": "url required"}, 400)
+                    return
+                ok, msg = _start_continue(url)
+                _json_response(self, {"ok": ok, "message": msg}, 200 if ok else 409)
                 return
             if path == "/api/delete":
                 result = _delete_job(data.get("url", ""))
@@ -1718,6 +1755,7 @@ _INDEX_HTML = r"""<!doctype html>
   .ready { background:var(--accent-soft); color:var(--accent); }
   .in_progress { background:var(--yellow-soft); color:var(--yellow); }
   .ready_to_submit { background:#fef3e0; color:#915907; border:1px solid #f0c675; font-weight:700; }
+  .needs_human { background:#fbeae8; color:#b91c1c; border:1px solid #e6a6a0; font-weight:700; }
   .review-cta { display:inline-block; margin-top:4px; font-size:11px; color:#915907; }
   .logs { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
   pre {
@@ -2048,7 +2086,13 @@ async function deleteJob(url, label) {
   if (data.message) document.getElementById('command').textContent = data.message;
   await refresh();
 }
-const STATUS_LABEL = { ready_to_submit: '⚠ review & submit', in_progress: 'applying…' };
+const STATUS_LABEL = { ready_to_submit: '⚠ review & submit', needs_human: '⚠ needs you', in_progress: 'applying…' };
+const BLOCKER_ASK = {
+  captcha: 'Solve the captcha in the open Chrome window, then click Continue.',
+  login: 'Log in / clear the account wall in the open Chrome window, then click Continue.',
+  field: 'Fill the field it got stuck on in the open Chrome window, then click Continue.',
+  blocker: 'Resolve the blocker in the open Chrome window, then click Continue.',
+};
 function badge(status) {
   const label = STATUS_LABEL[status] || status || 'new';
   return `<span class="badge ${esc(status)}">${esc(label)}</span>`;
@@ -2284,9 +2328,20 @@ async function refresh() {
       <td><a href="${esc(j.url)}" target="_blank">job</a>${j.application_url ? ` · <a href="${esc(j.application_url)}" target="_blank">apply</a>` : ''}</td>
       <td>
         ${j.status === 'ready_to_submit' ? `<button class="primary" onclick="markSubmitted(decodeURIComponent('${encodeURIComponent(j.url)}'), this)">Mark submitted ✓</button> ` : ''}
+        ${j.status === 'needs_human' ? `<button class="primary" onclick="continueJob(decodeURIComponent('${encodeURIComponent(j.url)}'), this)">▶ Continue</button><div class="review-cta">${esc(BLOCKER_ASK[j.apply_error] || BLOCKER_ASK.blocker)}</div>` : ''}
         <button class="danger" onclick="deleteJob(decodeURIComponent('${encodeURIComponent(j.url)}'), decodeURIComponent('${encodeURIComponent(`${j.company} - ${j.title}`)}'))">Delete</button>
       </td>
     </tr>${contactsRow(j, 11)}`).join('');
+}
+async function continueJob(url, btn) {
+  // The human resolved the blocker (captcha/login/field) in the open browser; resume the agent.
+  btn.disabled = true; btn.textContent = 'Resuming…';
+  const cmdEl = document.getElementById('command');
+  const r = await post('/api/continue', {url});
+  if (!r.ok) { btn.disabled = false; btn.textContent = '▶ Continue'; cmdEl.textContent = r.message || 'Could not resume'; return; }
+  cmdEl.textContent = 'Resuming in the open browser — continuing where it left off…';
+  await pollCommandUntilDone('Continue');
+  await refresh();
 }
 async function markSubmitted(url, btn) {
   // The user has reviewed + submitted the filled application in the open Chrome window.

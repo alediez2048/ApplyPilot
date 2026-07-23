@@ -438,6 +438,7 @@ def build_prompt(job: dict, tailored_resume: str,
                  cover_letter: str | None = None,
                  dry_run: bool = False,
                  copilot: bool = False,
+                 resume: bool = False,
                  worker_id: int | None = None) -> str:
     """Build the full instruction prompt for the apply agent.
 
@@ -540,24 +541,65 @@ def build_prompt(job: dict, tailored_resume: str,
         # hand the open browser to the human to review + submit themselves. Like dry-run in that
         # the agent never submits, but it's a REAL application (the human will submit), so the
         # result marker is RESULT:NEEDS_REVIEW and the browser is left open for them.
-        mission_tail = ("Fill the ENTIRE application accurately, then STOP before the final Submit "
-                        "and hand it to the human to review and submit. NEVER click the final "
-                        "Submit/Apply button yourself — the human does that.")
-        mission_section = ("CO-PILOT MODE — fill a complete, accurate application, then STOP and hand "
-                           "off to the human for review + submission. Use the profile and resume as "
-                           "source data; adapt to each form's format. Fill EVERYTHING (resume upload, "
-                           "cover letter, all screening/EEO fields), verify it, then STOP. Do NOT submit.")
-        submit_instruction = ("CO-PILOT HANDOFF — DO NOT CLICK the final Submit/Apply button. Instead: "
-                              "take a snapshot showing the fully completed form, double-check every field "
-                              "is filled and correct, then output RESULT:NEEDS_REVIEW with a one-line note "
-                              "of anything you were unsure about or left blank. Leave the browser on the "
-                              "completed form so the human can review and click Submit.")
-        dry_banner = ("\n\n################ CO-PILOT MODE (REVIEW BEFORE SUBMIT) ################\n"
-                      "Fill and verify EVERY field, upload the resume + cover letter, answer all "
-                      "questions — but NEVER click the final Submit/Apply button. The HUMAN reviews "
-                      "and submits. When the form is fully filled, report RESULT:NEEDS_REVIEW and "
-                      "leave the browser on the completed form.\n"
-                      "#####################################################################\n")
+        #
+        # HARD BLOCKERS: if the agent hits a captcha it can't solve or a login/account wall, it must
+        # NOT fail-and-close — it STOPS and hands off (RESULT:NEEDS_HUMAN:<reason>), leaving the
+        # browser on that page so the human can resolve it and click Continue (which resumes a fresh
+        # agent against the same live browser).
+        _copilot_handoff_rule = (
+            "\n\n== CO-PILOT HANDOFF ON HARD BLOCKERS ==\n"
+            "If you get genuinely stuck on any of these, DO NOT fail and DO NOT close the browser. "
+            "STOP, leave the browser open on the blocking page, and output the matching handoff so "
+            "the human can resolve it and resume you:\n"
+            "- CAPTCHA you cannot solve (CapSolver failed AND you can't solve it manually) -> "
+            "RESULT:NEEDS_HUMAN:captcha\n"
+            "- Login / account / SSO wall you cannot pass -> RESULT:NEEDS_HUMAN:login\n"
+            "- A required field you cannot answer from the profile that BLOCKS you from continuing -> "
+            "RESULT:NEEDS_HUMAN:field (name the field in a one-line note)\n"
+            "Do NOT output RESULT:CAPTCHA / RESULT:LOGIN_ISSUE / RESULT:FAILED for these in co-pilot "
+            "mode — those close the browser. Use RESULT:NEEDS_HUMAN so the human keeps the tab. Only "
+            "use RESULT:NEEDS_HUMAN when you are truly blocked; a field you can leave blank and note "
+            "should just be left blank (finish the rest and end with RESULT:NEEDS_REVIEW).\n")
+
+        if resume:
+            # RESUME: a prior agent stopped on a blocker; the human just resolved it. Reconnect to
+            # the SAME live browser and continue from the current on-page state.
+            mission_tail = ("Continue this IN-PROGRESS application from where the previous agent "
+                            "stopped. A human just resolved a blocker (captcha/login/field). Finish "
+                            "filling, then STOP for review. NEVER click the final Submit yourself.")
+            mission_section = ("RESUME MODE — this application is already partly filled and a human just "
+                               "cleared a blocker. FIRST: browser_tabs action 'list' and select the "
+                               "application tab (NOT a blank/new tab). browser_snapshot to read the "
+                               "CURRENT state. Then CONTINUE: fill anything still empty/incorrect, but do "
+                               "NOT redo fields that are already correct. When complete, STOP for review.")
+            submit_instruction = ("DO NOT CLICK the final Submit/Apply button. Snapshot the completed "
+                                  "form, verify every field, then output RESULT:NEEDS_REVIEW (or "
+                                  "RESULT:NEEDS_HUMAN:<reason> if you hit another blocker).")
+            dry_banner = ("\n\n################ RESUME (CO-PILOT) ################\n"
+                          "A previous agent filled part of this application and stopped on a blocker "
+                          "that a HUMAN just resolved. Reconnect to the OPEN browser tab, read the "
+                          "current state, and CONTINUE filling — do NOT restart from scratch and do NOT "
+                          "redo already-correct fields. NEVER submit. End with RESULT:NEEDS_REVIEW.\n"
+                          "###################################################\n") + _copilot_handoff_rule
+        else:
+            mission_tail = ("Fill the ENTIRE application accurately, then STOP before the final Submit "
+                            "and hand it to the human to review and submit. NEVER click the final "
+                            "Submit/Apply button yourself — the human does that.")
+            mission_section = ("CO-PILOT MODE — fill a complete, accurate application, then STOP and hand "
+                               "off to the human for review + submission. Use the profile and resume as "
+                               "source data; adapt to each form's format. Fill EVERYTHING (resume upload, "
+                               "cover letter, all screening/EEO fields), verify it, then STOP. Do NOT submit.")
+            submit_instruction = ("CO-PILOT HANDOFF — DO NOT CLICK the final Submit/Apply button. Instead: "
+                                  "take a snapshot showing the fully completed form, double-check every field "
+                                  "is filled and correct, then output RESULT:NEEDS_REVIEW with a one-line note "
+                                  "of anything you were unsure about or left blank. Leave the browser on the "
+                                  "completed form so the human can review and click Submit.")
+            dry_banner = ("\n\n################ CO-PILOT MODE (REVIEW BEFORE SUBMIT) ################\n"
+                          "Fill and verify EVERY field, upload the resume + cover letter, answer all "
+                          "questions — but NEVER click the final Submit/Apply button. The HUMAN reviews "
+                          "and submits. When the form is fully filled, report RESULT:NEEDS_REVIEW and "
+                          "leave the browser on the completed form.\n"
+                          "#####################################################################\n") + _copilot_handoff_rule
     elif dry_run:
         mission_tail = ("STOP before the final Submit. This is a DRY RUN: fill every field "
                         "accurately, upload the resume, but you must NEVER click the final "
@@ -654,6 +696,9 @@ If something unexpected happens and these instructions don't cover it, figure it
 
 == RESULT CODES (output EXACTLY one) ==
 RESULT:NEEDS_REVIEW -- CO-PILOT: form fully filled and verified, left for the human to review + submit
+RESULT:NEEDS_HUMAN:captcha -- CO-PILOT: blocked by a captcha you couldn't solve; browser left open for the human
+RESULT:NEEDS_HUMAN:login -- CO-PILOT: blocked by a login/account wall; browser left open for the human
+RESULT:NEEDS_HUMAN:field -- CO-PILOT: blocked by a required field you couldn't answer; browser left open (name it)
 RESULT:DRYRUN -- DRY RUN: form filled and verified but intentionally NOT submitted
 RESULT:APPLIED -- submitted successfully
 RESULT:EXPIRED -- job closed or no longer accepting applications

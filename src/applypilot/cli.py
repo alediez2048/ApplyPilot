@@ -151,6 +151,7 @@ def apply(
     continuous: bool = typer.Option(False, "--continuous", "-c", help="Run forever, polling for new jobs."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview actions without submitting."),
     copilot: bool = typer.Option(False, "--copilot", help="Co-pilot mode: fill the whole application, then STOP and leave the browser open for you to review and submit yourself (never auto-submits)."),
+    resume: bool = typer.Option(False, "--resume", help="Resume a co-pilot job that paused on a blocker: reconnect to the still-open browser and continue from the current state (use with --url --copilot)."),
     headless: bool = typer.Option(False, "--headless", help="Run browsers in headless mode."),
     url: Optional[str] = typer.Option(None, "--url", help="Apply to a specific job URL."),
     gen: bool = typer.Option(False, "--gen", help="Generate prompt file for manual debugging instead of running."),
@@ -256,6 +257,7 @@ def apply(
         model=model,
         dry_run=dry_run,
         copilot=copilot,
+        resume=resume,
         continuous=continuous,
         workers=workers,
     )

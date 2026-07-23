@@ -28,6 +28,21 @@ _chrome_lock = threading.Lock()
 _keep_alive_ports: set[int] = set()
 
 
+def chrome_alive_on_port(port: int, timeout: float = 2.0) -> bool:
+    """True if a Chrome with remote debugging is reachable on this CDP port.
+
+    Used by resume: the co-pilot review browser is left open on a blocker; a fresh agent
+    reconnects to it via CDP. If the human closed it, this returns False and the caller falls
+    back to a fresh launch (start the application over).
+    """
+    import urllib.request
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=timeout) as r:
+            return r.status == 200
+    except Exception:
+        return False
+
+
 def keep_chrome_alive(worker_id: int) -> None:
     """Mark a worker's Chrome to survive cleanup so the human can review + submit in it.
 

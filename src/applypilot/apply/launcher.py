@@ -28,7 +28,7 @@ from applypilot.database import get_connection
 from applypilot.apply import prompt as prompt_mod
 from applypilot.apply.chrome import (
     launch_chrome, cleanup_worker, kill_all_chrome, keep_chrome_alive,
-    reset_worker_dir, cleanup_on_exit, _kill_process_tree,
+    chrome_alive_on_port, reset_worker_dir, cleanup_on_exit, _kill_process_tree,
     BASE_CDP_PORT,
 )
 from applypilot.apply.dashboard import (
@@ -233,6 +233,15 @@ def mark_result(url: str, status: str, error: str | None = None,
                            apply_duration_ms = ?, apply_task_id = ?, last_attempted_at = ?
             WHERE url = ?
         """, (duration_ms, task_id, now, url))
+    elif status == "needs_human":
+        # Co-pilot hard-blocker: paused on a captcha/login/field, browser left open. The human
+        # resolves it and clicks Continue (resume). apply_error carries the blocker reason for the
+        # UI. Does NOT burn an attempt — the human hasn't failed anything.
+        conn.execute("""
+            UPDATE jobs SET apply_status = 'needs_human', apply_error = ?, agent_id = NULL,
+                           apply_duration_ms = ?, apply_task_id = ?, last_attempted_at = ?
+            WHERE url = ?
+        """, (error or "blocker", duration_ms, task_id, now, url))
     else:
         attempts = 99 if permanent else "COALESCE(apply_attempts, 0) + 1"
         conn.execute(f"""
@@ -344,7 +353,7 @@ def reset_failed() -> int:
 
 def run_job(job: dict, port: int, worker_id: int = 0,
             model: str = "sonnet", dry_run: bool = False,
-            copilot: bool = False) -> tuple[str, int]:
+            copilot: bool = False, resume: bool = False) -> tuple[str, int]:
     """Spawn a Claude Code session for one job application.
 
     Returns:
@@ -370,6 +379,7 @@ def run_job(job: dict, port: int, worker_id: int = 0,
         tailored_resume=resume_text,
         dry_run=dry_run,
         copilot=copilot,
+        resume=resume,
         worker_id=worker_id,
     )
 
@@ -522,6 +532,15 @@ def run_job(job: dict, port: int, worker_id: int = 0,
         # Co-pilot: the agent fills everything and hands off for human review — it must NEVER
         # submit. Recognize the handoff, and treat an agent self-submit as a violation.
         if copilot:
+            # Hard-blocker handoff: agent stopped on a captcha/login/field and left the browser
+            # open for the human to resolve + Continue. Reason travels in the result string.
+            m_human = re.search(r"RESULT:\s*NEEDS_HUMAN(?::\s*(\w+))?", output, re.IGNORECASE)
+            if m_human:
+                reason = (m_human.group(1) or "blocker").lower()
+                add_event(f"[W{worker_id}] NEEDS YOU ({reason}) ({elapsed}s): {job['title'][:30]}")
+                update_state(worker_id, status="needs_human",
+                             last_action=f"needs you: {reason} ({elapsed}s)")
+                return f"needs_human:{reason}", duration_ms
             if re.search(r"RESULT:\s*NEEDS_REVIEW\b", output, re.IGNORECASE):
                 add_event(f"[W{worker_id}] READY TO REVIEW ({elapsed}s): {job['title'][:30]}")
                 update_state(worker_id, status="needs_review",
@@ -629,7 +648,7 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
                 target_url: str | None = None,
                 min_score: int = 7, headless: bool = False,
                 model: str = "sonnet", dry_run: bool = False,
-                copilot: bool = False) -> tuple[int, int]:
+                copilot: bool = False, resume: bool = False) -> tuple[int, int]:
     """Run jobs sequentially until limit is reached or queue is empty.
 
     Args:
@@ -679,11 +698,21 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
 
         chrome_proc = None
         try:
-            add_event(f"[W{worker_id}] Launching Chrome...")
-            chrome_proc = launch_chrome(worker_id, port=port, headless=headless)
+            # Resume reconnects to the STILL-OPEN review browser (same CDP port) so a fresh agent
+            # can continue from the current on-page state. If the human closed it, fall back to a
+            # fresh launch (the application starts over).
+            resume_now = resume and chrome_alive_on_port(port)
+            if resume_now:
+                add_event(f"[W{worker_id}] Resuming in the open browser (port {port})...")
+            else:
+                if resume:
+                    add_event(f"[W{worker_id}] Review browser gone — starting fresh")
+                add_event(f"[W{worker_id}] Launching Chrome...")
+                chrome_proc = launch_chrome(worker_id, port=port, headless=headless)
 
             result, duration_ms = run_job(job, port=port, worker_id=worker_id,
-                                            model=model, dry_run=dry_run, copilot=copilot)
+                                            model=model, dry_run=dry_run, copilot=copilot,
+                                            resume=resume_now)
 
             if result == "skipped":
                 release_lock(job["url"])
@@ -696,6 +725,15 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
                 keep_chrome_alive(worker_id)
                 chrome_proc = None  # ensure the finally's cleanup_worker doesn't reap it
                 add_event(f"[W{worker_id}] Ready to review: {job['title'][:30]} — submit in the open tab")
+                update_state(worker_id, jobs_done=applied + failed)
+            elif result.startswith("needs_human"):
+                # Hard-blocker handoff: agent stopped on a captcha/login/field. KEEP the browser
+                # open on the blocking page so the human resolves it and clicks Continue (resume).
+                reason = result.split(":", 1)[-1] if ":" in result else "blocker"
+                mark_result(job["url"], "needs_human", error=reason, duration_ms=duration_ms)
+                keep_chrome_alive(worker_id)
+                chrome_proc = None
+                add_event(f"[W{worker_id}] Needs you ({reason}): {job['title'][:30]} — resolve in the open tab, then Continue")
                 update_state(worker_id, jobs_done=applied + failed)
             elif result == "applied":
                 mark_result(job["url"], "applied", duration_ms=duration_ms)
@@ -741,8 +779,8 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
 
 def main(limit: int = 1, target_url: str | None = None,
          min_score: int = 7, headless: bool = False, model: str = "sonnet",
-         dry_run: bool = False, copilot: bool = False, continuous: bool = False,
-         poll_interval: int = 60, workers: int = 1) -> None:
+         dry_run: bool = False, copilot: bool = False, resume: bool = False,
+         continuous: bool = False, poll_interval: int = 60, workers: int = 1) -> None:
     """Launch the apply pipeline.
 
     Args:
@@ -827,6 +865,7 @@ def main(limit: int = 1, target_url: str | None = None,
                     model=model,
                     dry_run=dry_run,
                     copilot=copilot,
+                    resume=resume,
                 )
             else:
                 # Multi-worker — distribute limit across workers
@@ -851,6 +890,7 @@ def main(limit: int = 1, target_url: str | None = None,
                             model=model,
                             dry_run=dry_run,
                             copilot=copilot,
+                            resume=resume,
                         ): i
                         for i in range(workers)
                     }

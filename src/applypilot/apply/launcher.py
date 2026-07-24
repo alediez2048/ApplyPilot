@@ -256,12 +256,14 @@ def mark_result(url: str, status: str, error: str | None = None,
     try:
         from applypilot.database import log_event
         secs = f" ({duration_ms // 1000}s)" if duration_ms else ""
+        # NOTE: match the status VALUE passed in (not the resulting apply_status). The co-pilot
+        # review handoff comes in as "needs_review" (the DB branch maps it to 'ready_to_submit').
         if status == "applied":
             log_event(url, "apply", "ok", f"Application submitted successfully{secs}.")
         elif status == "needs_human":
             log_event(url, "apply", "info", f"Filled, then paused for you: {error or 'blocker'}{secs}. Resolve in the browser + Continue.")
-        elif status == "ready_to_submit":
-            log_event(url, "apply", "info", f"Application filled — waiting for you to review + submit{secs}.")
+        elif status in ("needs_review", "ready_to_submit"):
+            log_event(url, "apply", "ok", f"Application fully filled — waiting for you to review + submit{secs}.")
         else:
             log_event(url, "apply", "failed", f"Apply failed: {error or 'unknown'}{secs}.")
     except Exception:  # noqa: BLE001

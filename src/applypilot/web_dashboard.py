@@ -1820,6 +1820,9 @@ _INDEX_HTML = r"""<!doctype html>
   .status-cell { min-width:160px; }
   .status-cell .act { display:block; margin-top:8px; width:100%; font-size:13px; padding:7px 10px; }
   .status-cell .act-hint { font-size:11px; color:var(--muted); margin-top:4px; line-height:1.35; }
+  .del-link { display:inline-block; margin-top:8px; background:none; border:none; padding:0; min-height:0;
+      font-size:12px; font-weight:500; color:var(--red); cursor:pointer; }
+  .del-link:hover { text-decoration:underline; background:none; box-shadow:none; }
   .logs { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
   pre {
     margin:0;
@@ -1916,7 +1919,7 @@ _INDEX_HTML = r"""<!doctype html>
     <h2>Applications</h2>
     <div class="table-wrap">
       <table>
-        <thead><tr><th>Status</th><th>Company</th><th>Title</th><th>Salary</th><th>Location</th><th>Description</th><th>Materials</th><th>People</th><th>Error</th><th>Links</th><th>Actions</th></tr></thead>
+        <thead><tr><th>Status</th><th>Company</th><th>Title</th><th>Salary</th><th>Location</th><th>Description</th><th>Materials</th><th>People</th><th>Error</th><th>Links</th></tr></thead>
         <tbody id="jobs"></tbody>
       </table>
     </div>
@@ -2394,7 +2397,7 @@ async function refresh() {
   GMAIL_AVAIL = !!data.gmail_available;
   document.getElementById('jobs').innerHTML = (data.jobs || []).map(j => `
     <tr>
-      <td class="status-cell">${badge(j.status)}${primaryAction(j)}</td>
+      <td class="status-cell">${badge(j.status)}${primaryAction(j)}<button class="del-link" onclick="deleteJob(decodeURIComponent('${encodeURIComponent(j.url)}'), decodeURIComponent('${encodeURIComponent(`${j.company} - ${j.title}`)}'))">Delete job</button></td>
       <td>${esc(j.company)}</td>
       <td>${esc(j.title)}</td>
       <td>${esc(j.salary)}</td>
@@ -2404,8 +2407,7 @@ async function refresh() {
       <td class="people">${peopleCell(j)}</td>
       <td>${esc(j.apply_error)}</td>
       <td><a href="${esc(j.url)}" target="_blank">job</a>${j.application_url ? ` · <a href="${esc(j.application_url)}" target="_blank">apply</a>` : ''}</td>
-      <td><button class="danger" onclick="deleteJob(decodeURIComponent('${encodeURIComponent(j.url)}'), decodeURIComponent('${encodeURIComponent(`${j.company} - ${j.title}`)}'))">Delete</button></td>
-    </tr>${contactsRow(j, 11)}`).join('');
+    </tr>${contactsRow(j, 10)}`).join('');
 }
 // The one thing to do next for this job, rendered right under its status badge so state + action
 // are always visible together (they used to be 10 columns apart in a 1320px-wide table).

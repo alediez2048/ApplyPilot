@@ -135,10 +135,59 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
     """)
     conn.commit()
 
+    # Per-job activity log — one row per significant event in a job's lifecycle (enrich, score,
+    # tailor, cover, apply, outreach, …). This is the "what happened / why" history the jobs table
+    # itself can't show (a column only holds the latest value, not the timeline).
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS job_events (
+            id       INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_url  TEXT NOT NULL,
+            ts       TEXT NOT NULL,   -- ISO-8601 UTC
+            stage    TEXT NOT NULL,   -- discover|enrich|score|tailor|cover|pdf|apply|outreach|system
+            status   TEXT NOT NULL,   -- started|ok|skipped|failed|info
+            detail   TEXT             -- human-readable summary
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_job_events_url ON job_events(job_url, ts)")
+    conn.commit()
+
     # Run migrations for any columns added after initial schema
     ensure_columns(conn)
 
     return conn
+
+
+def log_event(job_url: str, stage: str, status: str, detail: str = "",
+              conn: sqlite3.Connection | None = None) -> None:
+    """Append one activity-log event for a job. Best-effort — never raises into the pipeline.
+
+    stage: enrich|score|tailor|cover|pdf|apply|outreach|system.  status: started|ok|skipped|failed|info.
+    """
+    if not job_url:
+        return
+    try:
+        from datetime import datetime, timezone
+        c = conn or get_connection()
+        c.execute(
+            "INSERT INTO job_events (job_url, ts, stage, status, detail) VALUES (?, ?, ?, ?, ?)",
+            (job_url, datetime.now(timezone.utc).isoformat(), stage, status, (detail or "")[:2000]),
+        )
+        c.commit()
+    except Exception:  # noqa: BLE001 — logging must never break the pipeline
+        pass
+
+
+def get_job_events(job_url: str, limit: int = 200,
+                   conn: sqlite3.Connection | None = None) -> list[dict]:
+    """Return a job's activity log, oldest → newest."""
+    if not job_url:
+        return []
+    c = conn or get_connection()
+    rows = c.execute(
+        "SELECT ts, stage, status, detail FROM job_events WHERE job_url = ? ORDER BY ts ASC, id ASC LIMIT ?",
+        (job_url, limit),
+    ).fetchall()
+    return [dict(zip(r.keys(), r)) for r in rows]
 
 
 # Complete column registry: column_name -> SQL type with optional default.

@@ -403,6 +403,7 @@ def run_dashboard_prepare(limit: int = 0, validation_mode: str = "lenient") -> d
     config.ensure_dirs()
     init_db()
     conn = get_connection()
+    from applypilot.database import log_event
 
     pending_detail = conn.execute(
         f"""
@@ -430,6 +431,13 @@ def run_dashboard_prepare(limit: int = 0, validation_mode: str = "lenient") -> d
             stats = scrape_site_batch(conn, site, jobs, delay=1.0)
             enriched += int(stats.get("ok", 0)) + int(stats.get("partial", 0))
             detail_errors += int(stats.get("error", 0))
+            # Per-job enrich outcome from the row's detail_error/full_description after the batch.
+            for (jurl, _t) in jobs:
+                r = conn.execute("SELECT detail_error, full_description FROM jobs WHERE url = ?", (jurl,)).fetchone()
+                if r and r["detail_error"]:
+                    log_event(jurl, "enrich", "failed", f"Could not read the job page: {r['detail_error']}", conn)
+                elif r and r["full_description"]:
+                    log_event(jurl, "enrich", "ok", "Read the full job description.", conn)
 
     now = datetime.now(timezone.utc).isoformat()
     scored = conn.execute(
@@ -521,16 +529,20 @@ def run_dashboard_prepare(limit: int = 0, validation_mode: str = "lenient") -> d
                         (str(txt_path), now, job["url"]),
                     )
                     tailored += 1
+                    note = "" if report.get("status") in {"approved", "approved_with_judge_warning"} else f" ({report.get('status')})"
+                    log_event(job["url"], "tailor", "ok", f"Tailored résumé generated{note}.", conn)
                     if report.get("status") not in {"approved", "approved_with_judge_warning"}:
                         print(f"  tailor accepted with note (lenient): {report.get('status')}", flush=True)
                 else:
                     conn.execute("UPDATE jobs SET tailor_attempts=COALESCE(tailor_attempts,0)+1 WHERE url=?", (job["url"],))
                     tailor_errors += 1
+                    log_event(job["url"], "tailor", "failed", f"Résumé failed validation ({report.get('status')}).", conn)
                 conn.commit()
             except Exception as exc:
                 conn.execute("UPDATE jobs SET tailor_attempts=COALESCE(tailor_attempts,0)+1 WHERE url=?", (job["url"],))
                 conn.commit()
                 tailor_errors += 1
+                log_event(job["url"], "tailor", "failed", f"Error tailoring résumé: {str(exc)[:200]}", conn)
                 print(f"  tailor error: {exc}", flush=True)
 
     cover_rows = conn.execute(
@@ -577,10 +589,12 @@ def run_dashboard_prepare(limit: int = 0, validation_mode: str = "lenient") -> d
                 )
                 conn.commit()
                 covers += 1
+                log_event(job["url"], "cover", "ok", "Cover letter generated.", conn)
             except Exception as exc:
                 conn.execute("UPDATE jobs SET cover_attempts=COALESCE(cover_attempts,0)+1 WHERE url=?", (job["url"],))
                 conn.commit()
                 cover_errors += 1
+                log_event(job["url"], "cover", "failed", f"Error generating cover letter: {str(exc)[:200]}", conn)
                 print(f"  cover error: {exc}", flush=True)
 
     result = {
@@ -967,6 +981,7 @@ def _status_payload() -> dict:
             "last_attempted_at": row["last_attempted_at"] or "",
             "materials": materials,
             "contacts": contacts,
+            "activity": _job_activity(row["url"], conn),
             "network_running": bool(net_task.get("running")),
             "network_note": net_task.get("note") or "",
             "network_error": net_task.get("error") or "",
@@ -1200,6 +1215,20 @@ def _normalize_linkedin_url(url: str) -> str:
         if u.startswith(("www.linkedin.com/", "linkedin.com/")):
             u = "https://" + u
     return u
+
+
+def _job_activity(url: str, conn) -> list[dict]:
+    """The job's activity log (most-recent-last), lightly shaped for the UI."""
+    from applypilot.database import get_job_events
+    out = []
+    for e in get_job_events(url, limit=40, conn=conn):
+        out.append({
+            "ts": e.get("ts") or "",
+            "stage": e.get("stage") or "",
+            "status": e.get("status") or "",
+            "detail": e.get("detail") or "",
+        })
+    return out
 
 
 def _queue_contact_payload(c: dict) -> dict:
@@ -1746,22 +1775,50 @@ _INDEX_HTML = r"""<!doctype html>
   .pipe-log .lg-stage { color:#7dd3fc; font-weight:600; }
   .pipe-log .lg-ok { color:#4ade80; }
   .pipe-log .lg-err { color:#f87171; }
-  .table-wrap { overflow:auto; border:1px solid var(--line); border-radius:10px; background:var(--surface); max-width:100%; }
-  table { width:100%; border-collapse:collapse; min-width:1320px; }
-  th, td { border-bottom:1px solid var(--line); padding:12px; text-align:left; vertical-align:top; }
+  /* Table fits the frame — no horizontal scroll. Fixed layout + capped columns keep it in view. */
+  .table-wrap { border:1px solid var(--line); border-radius:10px; background:var(--surface); max-width:100%; overflow:hidden; }
+  table { width:100%; border-collapse:collapse; table-layout:fixed; }
+  th, td { border-bottom:1px solid var(--line); padding:10px 12px; text-align:left; vertical-align:top; word-wrap:break-word; overflow-wrap:anywhere; }
+  /* Column widths (6 cols): Status | Job | Description | Materials | People | Links */
+  th:nth-child(1), td:nth-child(1) { width:17%; }
+  th:nth-child(2), td:nth-child(2) { width:17%; }
+  th:nth-child(3), td:nth-child(3) { width:26%; }
+  th:nth-child(4), td:nth-child(4) { width:13%; }
+  th:nth-child(5), td:nth-child(5) { width:17%; }
+  th:nth-child(6), td:nth-child(6) { width:10%; }
   th {
-    color:var(--muted);
-    font-size:12px;
-    font-weight:600;
-    background:var(--surface2);
-    position:sticky;
-    top:0;
-    z-index:1;
+    color:var(--muted); font-size:12px; font-weight:600; background:var(--surface2);
+    position:sticky; top:0; z-index:1;
   }
-  tbody tr:hover td { background:#f8f9fa; }
-  td.desc { color:var(--muted); max-width:370px; }
+  tbody tr:not(.job-foot):not(.contacts-row):hover td { background:#f8f9fa; }
+  .job-cell .job-title { font-weight:600; color:var(--text); }
+  .job-cell .job-co { font-size:12.5px; color:var(--muted); margin-top:2px; }
+  .links-cell { font-size:13px; }
+  /* Description: clamp to a few lines so it never dominates / forces width. */
+  td.desc { color:var(--muted); font-size:12.5px; display:-webkit-box; -webkit-line-clamp:5; -webkit-box-orient:vertical; overflow:hidden; }
   td.people button { white-space:nowrap; }
   td.people .neterr { color:var(--red); font-size:11px; margin-top:3px; max-width:150px; }
+  /* Per-job footer bar: Activity (left) + a very low-key greyed delete (bottom-right). */
+  tr.job-foot > td { padding:4px 12px 10px; background:transparent; border-bottom:2px solid var(--line); }
+  .foot-bar { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+  .del-link { background:none; border:none; padding:2px 4px; min-height:0; font-size:11px; font-weight:500;
+      color:var(--faint); cursor:pointer; text-transform:lowercase; }
+  .del-link:hover { color:var(--red); background:none; box-shadow:none; text-decoration:underline; }
+  .activity > summary { list-style:none; cursor:pointer; font-size:12px; color:var(--muted); font-weight:600;
+      display:inline-flex; align-items:center; gap:6px; user-select:none; padding:3px 4px; border-radius:6px; }
+  .activity > summary::-webkit-details-marker { display:none; }
+  .activity > summary:hover { background:#f1f5f9; }
+  .act-caret { display:inline-block; transition:transform .15s ease; font-size:10px; color:var(--faint); }
+  .activity[open] > summary .act-caret { transform:rotate(90deg); }
+  .act-n { background:var(--surface3); color:var(--muted); border-radius:999px; padding:0 7px; font-size:11px; }
+  .timeline { margin:6px 0 4px; padding-left:4px; }
+  .tl-row { display:flex; gap:8px; padding:4px 0; border-left:2px solid var(--line); padding-left:10px; }
+  .tl-row.tl-ok { border-color:#a9e0c2; } .tl-row.tl-fail { border-color:#e6a6a0; } .tl-row.tl-info { border-color:#bcd6f2; }
+  .tl-ico { font-size:12px; }
+  .tl-body { display:flex; flex-direction:column; }
+  .tl-detail { font-size:12.5px; color:var(--text); }
+  .tl-time { font-size:11px; color:var(--faint); }
+  .tl-empty { font-size:12px; color:var(--muted); padding:4px; }
   tr.contacts-row td { background:var(--surface2); padding:0; }
   .contacts-wrap { padding:8px 12px 12px; }
   .contact { margin-top:8px; display:flex; gap:12px; align-items:flex-start; padding:10px 12px; background:var(--surface); border:1px solid var(--line); border-radius:10px; }
@@ -1817,12 +1874,9 @@ _INDEX_HTML = r"""<!doctype html>
   @keyframes stpulse { 0%,100% { opacity:1; } 50% { opacity:.35; } }
   .review-cta { display:inline-block; margin-top:4px; font-size:11px; color:#915907; }
   /* Status cell: badge + its next-step action, stacked so they're always visible together. */
-  .status-cell { min-width:160px; }
+  .status-cell { }
   .status-cell .act { display:block; margin-top:8px; width:100%; font-size:13px; padding:7px 10px; }
   .status-cell .act-hint { font-size:11px; color:var(--muted); margin-top:4px; line-height:1.35; }
-  .del-link { display:inline-block; margin-top:8px; background:none; border:none; padding:0; min-height:0;
-      font-size:12px; font-weight:500; color:var(--red); cursor:pointer; }
-  .del-link:hover { text-decoration:underline; background:none; box-shadow:none; }
   .logs { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
   pre {
     margin:0;
@@ -1919,7 +1973,7 @@ _INDEX_HTML = r"""<!doctype html>
     <h2>Applications</h2>
     <div class="table-wrap">
       <table>
-        <thead><tr><th>Status</th><th>Company</th><th>Title</th><th>Salary</th><th>Location</th><th>Description</th><th>Materials</th><th>People</th><th>Error</th><th>Links</th></tr></thead>
+        <thead><tr><th>Status</th><th>Job</th><th>Description</th><th>Materials</th><th>People</th><th>Links</th></tr></thead>
         <tbody id="jobs"></tbody>
       </table>
     </div>
@@ -2395,19 +2449,36 @@ async function refresh() {
   document.getElementById('applyLog').textContent = [...(data.worker_log || []), '', ...(data.claude_log || [])].join('\n');
   NET_AVAIL = !!data.networking_available;
   GMAIL_AVAIL = !!data.gmail_available;
-  document.getElementById('jobs').innerHTML = (data.jobs || []).map(j => `
+  document.getElementById('jobs').innerHTML = (data.jobs || []).map(j => {
+    const key = encodeURIComponent(j.url);
+    return `
     <tr>
-      <td class="status-cell">${badge(j.status)}${primaryAction(j)}<button class="del-link" onclick="deleteJob(decodeURIComponent('${encodeURIComponent(j.url)}'), decodeURIComponent('${encodeURIComponent(`${j.company} - ${j.title}`)}'))">Delete job</button></td>
-      <td>${esc(j.company)}</td>
-      <td>${esc(j.title)}</td>
-      <td>${esc(j.salary)}</td>
-      <td>${esc(j.location)}</td>
+      <td class="status-cell">${badge(j.status)}${primaryAction(j)}</td>
+      <td class="job-cell"><div class="job-title">${esc(j.title)}</div><div class="job-co">${esc(j.company)}</div></td>
       <td class="desc">${esc(j.description)}</td>
       <td>${materialLinks(j.materials)}</td>
       <td class="people">${peopleCell(j)}</td>
-      <td>${esc(j.apply_error)}</td>
-      <td><a href="${esc(j.url)}" target="_blank">job</a>${j.application_url ? ` · <a href="${esc(j.application_url)}" target="_blank">apply</a>` : ''}</td>
-    </tr>${contactsRow(j, 10)}`).join('');
+      <td class="links-cell"><a href="${esc(j.url)}" target="_blank">job</a>${j.application_url ? `<br><a href="${esc(j.application_url)}" target="_blank">apply page</a>` : ''}</td>
+    </tr>
+    <tr class="job-foot"><td colspan="6"><div class="foot-bar">
+      <details class="activity"><summary><span class="act-caret">▸</span> Activity${j.activity && j.activity.length ? ` <span class="act-n">${j.activity.length}</span>` : ''}</summary>
+        <div class="timeline">${activityHtml(j.activity)}</div>
+      </details>
+      <button class="del-link" onclick="deleteJob(decodeURIComponent('${key}'), decodeURIComponent('${encodeURIComponent(`${j.company} - ${j.title}`)}'))">delete</button>
+    </div></td></tr>
+    ${contactsRow(j, 6)}`;
+  }).join('');
+}
+// Render a job's activity log as a compact timeline. Times shown local + short.
+const STAGE_ICON = { enrich:'🔎', score:'◆', tailor:'📝', cover:'✉', pdf:'📄', apply:'🚀', outreach:'📧', system:'•' };
+function activityHtml(events) {
+  if (!events || !events.length) return `<div class="tl-empty">No recorded activity yet.</div>`;
+  return events.map(e => {
+    let t = '';
+    try { t = new Date(e.ts).toLocaleString([], {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'}); } catch(_e) { t = e.ts; }
+    const cls = e.status === 'failed' ? 'tl-fail' : (e.status === 'ok' ? 'tl-ok' : 'tl-info');
+    return `<div class="tl-row ${cls}"><span class="tl-ico">${STAGE_ICON[e.stage]||'•'}</span><span class="tl-body"><span class="tl-detail">${esc(e.detail || (e.stage+' '+e.status))}</span><span class="tl-time">${esc(t)}</span></span></div>`;
+  }).join('');
 }
 // The one thing to do next for this job, rendered right under its status badge so state + action
 // are always visible together (they used to be 10 columns apart in a 1320px-wide table).

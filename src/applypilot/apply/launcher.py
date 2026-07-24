@@ -252,6 +252,21 @@ def mark_result(url: str, status: str, error: str | None = None,
         """, (status, error or "unknown", duration_ms, task_id, url))
     conn.commit()
 
+    # Activity log — a human-readable summary of what the apply agent did.
+    try:
+        from applypilot.database import log_event
+        secs = f" ({duration_ms // 1000}s)" if duration_ms else ""
+        if status == "applied":
+            log_event(url, "apply", "ok", f"Application submitted successfully{secs}.")
+        elif status == "needs_human":
+            log_event(url, "apply", "info", f"Filled, then paused for you: {error or 'blocker'}{secs}. Resolve in the browser + Continue.")
+        elif status == "ready_to_submit":
+            log_event(url, "apply", "info", f"Application filled — waiting for you to review + submit{secs}.")
+        else:
+            log_event(url, "apply", "failed", f"Apply failed: {error or 'unknown'}{secs}.")
+    except Exception:  # noqa: BLE001
+        pass
+
 
 def release_lock(url: str) -> None:
     """Release the in_progress lock without changing status."""

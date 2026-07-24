@@ -1816,6 +1816,10 @@ _INDEX_HTML = r"""<!doctype html>
   .st-pulse .st-icon { animation:stpulse 1.2s ease-in-out infinite; }
   @keyframes stpulse { 0%,100% { opacity:1; } 50% { opacity:.35; } }
   .review-cta { display:inline-block; margin-top:4px; font-size:11px; color:#915907; }
+  /* Status cell: badge + its next-step action, stacked so they're always visible together. */
+  .status-cell { min-width:160px; }
+  .status-cell .act { display:block; margin-top:8px; width:100%; font-size:13px; padding:7px 10px; }
+  .status-cell .act-hint { font-size:11px; color:var(--muted); margin-top:4px; line-height:1.35; }
   .logs { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
   pre {
     margin:0;
@@ -2390,7 +2394,7 @@ async function refresh() {
   GMAIL_AVAIL = !!data.gmail_available;
   document.getElementById('jobs').innerHTML = (data.jobs || []).map(j => `
     <tr>
-      <td>${badge(j.status)}</td>
+      <td class="status-cell">${badge(j.status)}${primaryAction(j)}</td>
       <td>${esc(j.company)}</td>
       <td>${esc(j.title)}</td>
       <td>${esc(j.salary)}</td>
@@ -2400,14 +2404,25 @@ async function refresh() {
       <td class="people">${peopleCell(j)}</td>
       <td>${esc(j.apply_error)}</td>
       <td><a href="${esc(j.url)}" target="_blank">job</a>${j.application_url ? ` · <a href="${esc(j.application_url)}" target="_blank">apply</a>` : ''}</td>
-      <td>
-        ${j.status === 'ready' ? `<button class="primary" onclick="fillOne(decodeURIComponent('${encodeURIComponent(j.url)}'), this)">▶ Fill application</button> ` : ''}
-        ${j.status === 'ready_to_submit' ? `<button class="primary" onclick="markSubmitted(decodeURIComponent('${encodeURIComponent(j.url)}'), this)">Mark submitted ✓</button> ` : ''}
-        ${j.status === 'needs_human' ? `<button class="primary" onclick="continueJob(decodeURIComponent('${encodeURIComponent(j.url)}'), this)">▶ Continue</button><div class="review-cta">${esc(BLOCKER_ASK[j.apply_error] || BLOCKER_ASK.blocker)}</div>` : ''}
-        ${j.status === 'failed' ? `<button class="secondary" onclick="fillOne(decodeURIComponent('${encodeURIComponent(j.url)}'), this)">↻ Retry</button> ` : ''}
-        <button class="danger" onclick="deleteJob(decodeURIComponent('${encodeURIComponent(j.url)}'), decodeURIComponent('${encodeURIComponent(`${j.company} - ${j.title}`)}'))">Delete</button>
-      </td>
+      <td><button class="danger" onclick="deleteJob(decodeURIComponent('${encodeURIComponent(j.url)}'), decodeURIComponent('${encodeURIComponent(`${j.company} - ${j.title}`)}'))">Delete</button></td>
     </tr>${contactsRow(j, 11)}`).join('');
+}
+// The one thing to do next for this job, rendered right under its status badge so state + action
+// are always visible together (they used to be 10 columns apart in a 1320px-wide table).
+function primaryAction(j) {
+  const u = `decodeURIComponent('${encodeURIComponent(j.url)}')`;
+  if (j.status === 'ready')
+    return `<button class="primary act" onclick="fillOne(${u}, this)">▶ Fill application</button>`;
+  if (j.status === 'ready_to_submit')
+    return `<button class="primary act" onclick="markSubmitted(${u}, this)">Mark submitted ✓</button>`
+         + `<div class="act-hint">Review &amp; submit in the open Chrome window, then confirm.</div>`;
+  if (j.status === 'needs_human')
+    return `<button class="primary act" onclick="continueJob(${u}, this)">▶ Continue</button>`
+         + `<div class="act-hint">${esc(BLOCKER_ASK[j.apply_error] || BLOCKER_ASK.blocker)}</div>`;
+  if (j.status === 'failed')
+    return `<button class="secondary act" onclick="fillOne(${u}, this)">↻ Try again</button>`
+         + `<div class="act-hint">${j.apply_error ? esc(j.apply_error) : 'Last attempt failed.'} Retry the co-pilot fill.</div>`;
+  return '';
 }
 async function fillOne(url, btn) {
   // Per-row co-pilot fill for ONE job: opens Chrome, fills it, hands it back to review + submit.

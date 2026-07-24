@@ -918,6 +918,7 @@ def _status_payload() -> dict:
             WHEN fit_score IS NOT NULL THEN 4
             ELSE 5
           END,
+          applied_at DESC NULLS LAST,
           discovered_at DESC,
           fit_score DESC NULLS LAST
         LIMIT 500
@@ -1778,7 +1779,7 @@ _INDEX_HTML = r"""<!doctype html>
   /* Table fits the frame — no horizontal scroll. Fixed layout + capped columns keep it in view. */
   .table-wrap { border:1px solid var(--line); border-radius:10px; background:var(--surface); max-width:100%; overflow:hidden; }
   table { width:100%; border-collapse:collapse; table-layout:fixed; }
-  th, td { border-bottom:1px solid var(--line); padding:10px 12px; text-align:left; vertical-align:top; word-wrap:break-word; overflow-wrap:anywhere; }
+  th, td { border-bottom:1px solid var(--line); padding:10px 12px; text-align:left; vertical-align:top; word-wrap:break-word; }
   /* Column widths (6 cols): Status | Job | Description | Materials | People | Links */
   th:nth-child(1), td:nth-child(1) { width:17%; }
   th:nth-child(2), td:nth-child(2) { width:17%; }
@@ -1794,8 +1795,9 @@ _INDEX_HTML = r"""<!doctype html>
   .job-cell .job-title { font-weight:600; color:var(--text); }
   .job-cell .job-co { font-size:12.5px; color:var(--muted); margin-top:2px; }
   .links-cell { font-size:13px; }
-  /* Description: clamp to a few lines so it never dominates / forces width. */
-  td.desc { color:var(--muted); font-size:12.5px; display:-webkit-box; -webkit-line-clamp:5; -webkit-box-orient:vertical; overflow:hidden; }
+  /* Description: normal table cell; clamp the INNER div (clamping the td breaks cell sizing). */
+  td.desc { color:var(--muted); font-size:12.5px; }
+  td.desc .desc-text { display:-webkit-box; -webkit-line-clamp:6; -webkit-box-orient:vertical; overflow:hidden; line-height:1.45; }
   td.people button { white-space:nowrap; }
   td.people .neterr { color:var(--red); font-size:11px; margin-top:3px; max-width:150px; }
   /* Per-job footer bar: Activity (left) + a very low-key greyed delete (bottom-right). */
@@ -1877,6 +1879,7 @@ _INDEX_HTML = r"""<!doctype html>
   .status-cell { }
   .status-cell .act { display:block; margin-top:8px; width:100%; font-size:13px; padding:7px 10px; }
   .status-cell .act-hint { font-size:11px; color:var(--muted); margin-top:4px; line-height:1.35; }
+  .status-cell .applied-on { font-size:11px; color:var(--green); font-weight:600; margin-top:5px; }
   .logs { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
   pre {
     margin:0;
@@ -2453,9 +2456,9 @@ async function refresh() {
     const key = encodeURIComponent(j.url);
     return `
     <tr>
-      <td class="status-cell">${badge(j.status)}${primaryAction(j)}</td>
+      <td class="status-cell">${badge(j.status)}${j.applied_at ? `<div class="applied-on">Applied ${fmtDate(j.applied_at)}</div>` : ''}${primaryAction(j)}</td>
       <td class="job-cell"><div class="job-title">${esc(j.title)}</div><div class="job-co">${esc(j.company)}</div></td>
-      <td class="desc">${esc(j.description)}</td>
+      <td class="desc"><div class="desc-text">${esc(j.description)}</div></td>
       <td>${materialLinks(j.materials)}</td>
       <td class="people">${peopleCell(j)}</td>
       <td class="links-cell"><a href="${esc(j.url)}" target="_blank">job</a>${j.application_url ? `<br><a href="${esc(j.application_url)}" target="_blank">apply page</a>` : ''}</td>
@@ -2468,6 +2471,16 @@ async function refresh() {
     </div></td></tr>
     ${contactsRow(j, 6)}`;
   }).join('');
+}
+function fmtDate(iso) {
+  try {
+    const d = new Date(iso);
+    const now = new Date();
+    const opts = d.getFullYear() === now.getFullYear()
+      ? { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }
+      : { year: 'numeric', month: 'short', day: 'numeric' };
+    return d.toLocaleString([], opts);
+  } catch (_e) { return iso; }
 }
 // Render a job's activity log as a compact timeline. Times shown local + short.
 const STAGE_ICON = { enrich:'🔎', score:'◆', tailor:'📝', cover:'✉', pdf:'📄', apply:'🚀', outreach:'📧', system:'•' };

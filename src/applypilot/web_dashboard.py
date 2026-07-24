@@ -299,7 +299,9 @@ def _eligible_contact_ids(job_url: str, channel: str, confirm_unverified: bool =
         if channel == "email":
             if not (c.get("email") and c.get("outreach_message")):
                 continue
-            if c.get("outreach_status") == "submitted":
+            # Already emailed = Gmail returned a message id (survives a draft regenerate that
+            # resets outreach_status), or the status is explicitly submitted.
+            if (c.get("sent_message_id") or "").strip() or c.get("outreach_status") == "submitted":
                 continue
             if not confirm_unverified and (c.get("email_status") or "none") != "verified":
                 continue  # skip unverified unless the caller opts in
@@ -816,6 +818,11 @@ def _contact_payload(c: dict, company: str | None = None) -> dict:
         "outreach_message": c.get("outreach_message") or "",
         "linkedin_message": c.get("linkedin_message") or "",
         "outreach_status": c.get("outreach_status") or "none",
+        # Ground-truth "an email actually went out": Gmail returned a message id. This survives a
+        # later draft edit/regenerate (which resets outreach_status to 'drafted') — so the UI and
+        # send-gate rely on THIS, not just outreach_status, to know a contact was already emailed.
+        "emailed": bool((c.get("sent_message_id") or "").strip())
+                   or c.get("outreach_status") == "submitted",
         # LinkedIn DM channel state + per-contact readiness (has note + profile, not sent).
         "dm_status": c.get("dm_status") or "none",
         "dm_error": c.get("dm_error") or "",
@@ -2124,9 +2131,9 @@ function draftBlock(c) {
   const has = c.outreach_message || c.outreach_subject;
   const subj = esc(c.outreach_subject);
   const body = esc(c.outreach_message);
-  const sent = c.outreach_status === 'submitted';
+  const sent = !!c.emailed;  // ground truth: an email actually went out (survives draft edits)
   let sendBtn;
-  if (sent) sendBtn = `<span class="sent-tag">✓ submitted</span>`;
+  if (sent) sendBtn = `<span class="sent-tag">✓ sent</span>`;
   else if (!GMAIL_AVAIL) sendBtn = `<button disabled title="Set GMAIL_ADDRESS + GMAIL_APP_PASSWORD">Send email</button>`;
   else sendBtn = `<button class="send" onclick="sendEmail('${esc(c.id)}', ${c.email_status==='verified'}, this)">Send email</button>`;
   const note = esc(c.linkedin_message);
@@ -2243,7 +2250,7 @@ const PEOPLE_OPEN = new Set(); // job URLs whose "People at" panel is expanded (
 function onPeopleToggle(el, url) { if (el.open) PEOPLE_OPEN.add(url); else PEOPLE_OPEN.delete(url); }
 function bulkBar(j) {
   const cs = j.contacts || [];
-  const emailN = cs.filter(c => c.email && c.outreach_message && c.outreach_status !== 'submitted' && c.email_status === 'verified').length;
+  const emailN = cs.filter(c => c.email && c.outreach_message && !c.emailed && c.email_status === 'verified').length;
   const emailBtn = (GMAIL_AVAIL && emailN)
     ? `<button class="bulk send" onclick="sendAllEmails(decodeURIComponent('${encodeURIComponent(j.url)}'), this)">Send all emails (${emailN})</button>`
     : `<button class="bulk" disabled title="${GMAIL_AVAIL ? 'No verified emails ready' : 'Connect Gmail first'}">Send all emails (${emailN})</button>`;

@@ -76,7 +76,9 @@ def can_send(contact: dict, confirm_unverified: bool = False) -> tuple[bool, str
     status = contact.get("email_status") or "none"
     if status != "verified" and not confirm_unverified:
         return False, "email is unverified — confirm to send anyway"
-    if contact.get("outreach_status") == "submitted":
+    # Already emailed: Gmail returned a message id (ground truth; survives a later draft
+    # regenerate that resets outreach_status), or the status is explicitly submitted.
+    if (contact.get("sent_message_id") or "").strip() or contact.get("outreach_status") == "submitted":
         return False, "already sent to this contact"
     if store.sent_today() >= _DAILY_LIMIT:
         return False, f"daily send limit reached ({_DAILY_LIMIT})"

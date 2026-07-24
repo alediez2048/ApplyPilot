@@ -654,6 +654,28 @@ def run_dashboard_apply(limit: int = 10, dry_run: bool = False, copilot: bool = 
     return result
 
 
+def run_dashboard_fill_one(url: str) -> dict:
+    """Co-pilot fill ONE specific job (the per-row "Fill application" action).
+
+    Runs the co-pilot apply for a single prepared job: opens Chrome, fills the whole
+    application, and stops for the human to review + submit. Same as the bulk fill but scoped
+    to one URL so a row's own button drives it.
+    """
+    config.load_env()
+    config.ensure_dirs()
+    print(f"Dashboard fill-one (co-pilot) for: {url}", flush=True)
+    args = [sys.executable, "-m", "applypilot.cli", "apply", "--url", url,
+            "--min-score", "1", "--copilot"]
+    completed = subprocess.run(args, check=False)
+    init_db()
+    conn = get_connection()
+    row = conn.execute("SELECT apply_status FROM jobs WHERE url = ?", (url,)).fetchone()
+    result = {"url": url, "status": (row["apply_status"] if row else None),
+              "exit_code": completed.returncode}
+    print(f"Dashboard fill-one complete: {result}", flush=True)
+    return result
+
+
 def run_dashboard_continue(url: str) -> dict:
     """Resume a co-pilot job that paused on a hard blocker (captcha/login/field).
 
@@ -1288,6 +1310,14 @@ def _start_continue(url: str) -> tuple[bool, str]:
     return _runner.start("continue", args)
 
 
+def _start_fill_one(url: str) -> tuple[bool, str]:
+    args = [
+        sys.executable, "-c",
+        f"from applypilot.web_dashboard import run_dashboard_fill_one; run_dashboard_fill_one({url!r})",
+    ]
+    return _runner.start("fill", args)
+
+
 def _start_apply(limit: int, min_score: int, dry_run: bool, copilot: bool = True) -> tuple[bool, str]:
     args = [
         sys.executable, "-c",
@@ -1449,6 +1479,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     _json_response(self, {"ok": False, "message": "url required"}, 400)
                     return
                 ok, msg = _start_continue(url)
+                _json_response(self, {"ok": ok, "message": msg}, 200 if ok else 409)
+                return
+            if path == "/api/fill-one":
+                url = (data.get("url") or "").strip()
+                if not url:
+                    _json_response(self, {"ok": False, "message": "url required"}, 400)
+                    return
+                ok, msg = _start_fill_one(url)
                 _json_response(self, {"ok": ok, "message": msg}, 200 if ok else 409)
                 return
             if path == "/api/delete":
@@ -2334,11 +2372,24 @@ async function refresh() {
       <td>${esc(j.apply_error)}</td>
       <td><a href="${esc(j.url)}" target="_blank">job</a>${j.application_url ? ` · <a href="${esc(j.application_url)}" target="_blank">apply</a>` : ''}</td>
       <td>
+        ${j.status === 'ready' ? `<button class="primary" onclick="fillOne(decodeURIComponent('${encodeURIComponent(j.url)}'), this)">▶ Fill application</button> ` : ''}
         ${j.status === 'ready_to_submit' ? `<button class="primary" onclick="markSubmitted(decodeURIComponent('${encodeURIComponent(j.url)}'), this)">Mark submitted ✓</button> ` : ''}
         ${j.status === 'needs_human' ? `<button class="primary" onclick="continueJob(decodeURIComponent('${encodeURIComponent(j.url)}'), this)">▶ Continue</button><div class="review-cta">${esc(BLOCKER_ASK[j.apply_error] || BLOCKER_ASK.blocker)}</div>` : ''}
+        ${j.status === 'failed' ? `<button class="secondary" onclick="fillOne(decodeURIComponent('${encodeURIComponent(j.url)}'), this)">↻ Retry</button> ` : ''}
         <button class="danger" onclick="deleteJob(decodeURIComponent('${encodeURIComponent(j.url)}'), decodeURIComponent('${encodeURIComponent(`${j.company} - ${j.title}`)}'))">Delete</button>
       </td>
     </tr>${contactsRow(j, 11)}`).join('');
+}
+async function fillOne(url, btn) {
+  // Per-row co-pilot fill for ONE job: opens Chrome, fills it, hands it back to review + submit.
+  btn.disabled = true; btn.textContent = 'Filling…';
+  const cmdEl = document.getElementById('command');
+  const r = await post('/api/fill-one', {url});
+  if (!r.ok) { btn.disabled = false; btn.textContent = '▶ Fill application'; cmdEl.textContent = r.message || 'Could not start'; return; }
+  cmdEl.textContent = 'Filling the application in Chrome — then handing it to you to review + submit…';
+  await pollCommandUntilDone('Fill for review');
+  cmdEl.textContent = '✅ Done — review in the open Chrome window, submit, then "Mark submitted ✓" (or resolve a blocker and Continue).';
+  await refresh();
 }
 async function continueJob(url, btn) {
   // The human resolved the blocker (captcha/login/field) in the open browser; resume the agent.

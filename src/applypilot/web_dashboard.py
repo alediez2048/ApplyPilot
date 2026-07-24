@@ -911,11 +911,19 @@ def _status_payload() -> dict:
 
     jobs: list[dict] = []
     for row in rows:
-        status = row["apply_status"] or ""
+        # Status precedence (each maps to a UI indicator):
+        #   applied > active apply states (needs_human / ready_to_submit / in_progress / dryrun) >
+        #   failed > ready (materials done) > scored > enrich-failed > enriched > imported.
+        # The apply states MUST take precedence over 'ready' — a co-pilot-filled job has a resume
+        # too, so checking tailored_resume_path first used to clobber 'ready_to_submit' -> 'ready'.
+        apply_status = row["apply_status"] or ""
+        _APPLY_STATES = {"needs_human", "ready_to_submit", "in_progress", "dryrun"}
         if row["applied_at"]:
             status = "applied"
-        elif row["apply_error"]:
-            status = status or "failed"
+        elif apply_status in _APPLY_STATES:
+            status = apply_status
+        elif apply_status == "failed" or row["apply_error"]:
+            status = "failed"
         elif row["tailored_resume_path"]:
             status = "ready"
         elif row["fit_score"] is not None:
@@ -1787,20 +1795,26 @@ _INDEX_HTML = r"""<!doctype html>
   .draft .d-count.over { color:#c0392b; font-weight:700; }
   .draft .d-linkedin { width:100%; font-size:12px; padding:5px 6px; border:1px solid #d7e2ec; border-radius:5px; font-family:inherit; resize:vertical; }
   .badge {
-    display:inline-block;
+    display:inline-flex; align-items:center; gap:4px; white-space:nowrap;
     padding:3px 10px;
     border-radius:999px;
     font-size:12px;
     font-weight:600;
     background:var(--surface3);
     color:var(--soft);
+    border:1px solid transparent;
   }
-  .applied { background:var(--green-soft); color:var(--green); }
-  .failed { background:var(--red-soft); color:var(--red); }
-  .ready { background:var(--accent-soft); color:var(--accent); }
-  .in_progress { background:var(--yellow-soft); color:var(--yellow); }
-  .ready_to_submit { background:#fef3e0; color:#915907; border:1px solid #f0c675; font-weight:700; }
-  .needs_human { background:#fbeae8; color:#b91c1c; border:1px solid #e6a6a0; font-weight:700; }
+  .badge .st-icon { font-size:11px; line-height:1; }
+  /* Status indicator palette — one per pipeline state. */
+  .st-muted  { background:#eef0f2; color:#68727c; }
+  .st-grey   { background:#e9edf1; color:#516172; }
+  .st-blue   { background:var(--accent-soft); color:var(--accent); border-color:#bcd6f2; }
+  .st-yellow { background:var(--yellow-soft); color:var(--yellow); border-color:#f0d28a; }
+  .st-amber  { background:#fef3e0; color:#915907; border-color:#f0c675; font-weight:700; }
+  .st-red    { background:#fbeae8; color:#b91c1c; border-color:#e6a6a0; font-weight:700; }
+  .st-green  { background:var(--green-soft); color:var(--green); border-color:#a9e0c2; }
+  .st-pulse .st-icon { animation:stpulse 1.2s ease-in-out infinite; }
+  @keyframes stpulse { 0%,100% { opacity:1; } 50% { opacity:.35; } }
   .review-cta { display:inline-block; margin-top:4px; font-size:11px; color:#915907; }
   .logs { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
   pre {
@@ -2131,7 +2145,21 @@ async function deleteJob(url, label) {
   if (data.message) document.getElementById('command').textContent = data.message;
   await refresh();
 }
-const STATUS_LABEL = { ready_to_submit: '⚠ review & submit', needs_human: '⚠ needs you', in_progress: 'applying…' };
+// Every job state → one clear indicator (icon + label + color class). Order here also documents
+// the pipeline: imported → enriched → scored → ready → (applying) → review/needs-you → applied.
+const STATUS_META = {
+  imported:        { icon: '•',  label: 'Imported',        cls: 'st-muted' },
+  enriched:        { icon: '•',  label: 'Enriched',        cls: 'st-muted' },
+  detail_failed:   { icon: '✗',  label: 'Enrich failed',   cls: 'st-red' },
+  scored:          { icon: '◆',  label: 'Scored',          cls: 'st-grey' },
+  ready:           { icon: '✓',  label: 'Ready to fill',   cls: 'st-blue' },
+  in_progress:     { icon: '⏳', label: 'Applying…',        cls: 'st-yellow st-pulse' },
+  dryrun:          { icon: '✓',  label: 'Dry-run filled',  cls: 'st-blue' },
+  ready_to_submit: { icon: '⚠',  label: 'Review & submit', cls: 'st-amber' },
+  needs_human:     { icon: '⚠',  label: 'Needs you',       cls: 'st-red' },
+  failed:          { icon: '✗',  label: 'Failed',          cls: 'st-red' },
+  applied:         { icon: '✓',  label: 'Applied',         cls: 'st-green' },
+};
 const BLOCKER_ASK = {
   captcha: 'Solve the captcha in the open Chrome window, then click Continue.',
   login: 'Log in / clear the account wall in the open Chrome window, then click Continue.',
@@ -2139,8 +2167,9 @@ const BLOCKER_ASK = {
   blocker: 'Resolve the blocker in the open Chrome window, then click Continue.',
 };
 function badge(status) {
-  const label = STATUS_LABEL[status] || status || 'new';
-  return `<span class="badge ${esc(status)}">${esc(label)}</span>`;
+  const m = STATUS_META[status];
+  if (!m) return `<span class="badge st-muted">${esc(status || 'new')}</span>`;
+  return `<span class="badge ${m.cls}"><span class="st-icon">${m.icon}</span> ${esc(m.label)}</span>`;
 }
 let NET_AVAIL = false;
 async function findContacts(url) {

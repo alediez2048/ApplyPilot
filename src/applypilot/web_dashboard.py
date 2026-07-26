@@ -709,10 +709,12 @@ def run_dashboard_restart(url: str) -> dict:
     print(f"Dashboard RESTART (end-to-end) for: {url}", flush=True)
     log_event(url, "system", "info", "Restarted end-to-end (fix materials → apply).", conn)
 
-    # 1) Clean apply slate so nothing blocks a fresh attempt.
+    # 1) Clean apply slate so nothing blocks a fresh attempt. Restart is an explicit, confirmed
+    #    user action (the UI double-confirms for already-applied jobs), so we DO clear applied_at
+    #    here — that's the whole point: re-apply something that didn't truly go through.
     conn.execute(
         "UPDATE jobs SET apply_status=NULL, apply_error=NULL, apply_attempts=0, agent_id=NULL, applied_at=NULL "
-        "WHERE url=? AND applied_at IS NULL",  # never un-apply a genuinely-applied job
+        "WHERE url=?",
         (url,),
     )
     conn.commit()
@@ -2582,7 +2584,8 @@ function activityHtml(events) {
 // are always visible together (they used to be 10 columns apart in a 1320px-wide table).
 function primaryAction(j) {
   const u = `decodeURIComponent('${encodeURIComponent(j.url)}')`;
-  const restartBtn = `<button class="ghost act restart-btn" onclick="restartJob(${u}, this)" title="Fix any missing materials, then re-run the whole application from scratch">🔄 Restart end-to-end</button>`;
+  const applied = j.status === 'applied' ? 'true' : 'false';
+  const restartBtn = `<button class="ghost act restart-btn" onclick="restartJob(${u}, this, ${applied})" title="Fix any missing materials, then re-run the whole application from scratch">🔄 Restart end-to-end</button>`;
   if (j.status === 'ready')
     return `<button class="primary act" onclick="fillOne(${u}, this)">▶ Fill application</button>` + restartBtn;
   if (j.status === 'ready_to_submit')
@@ -2592,16 +2595,22 @@ function primaryAction(j) {
     return `<button class="primary act" onclick="continueJob(${u}, this)">▶ Continue</button>`
          + `<div class="act-hint">${esc(BLOCKER_ASK[j.apply_error] || BLOCKER_ASK.blocker)}</div>` + restartBtn;
   if (j.status === 'failed')
-    return `<button class="secondary act" onclick="restartJob(${u}, this)">🔄 Restart end-to-end</button>`
+    return `<button class="secondary act" onclick="restartJob(${u}, this, false)">🔄 Restart end-to-end</button>`
          + `<div class="act-hint">${j.apply_error ? esc(j.apply_error) : 'Last attempt failed.'} Regenerates materials, then re-applies.</div>`;
-  // Applied jobs: no primary action. Everything else that isn't done gets a restart option.
-  if (j.status !== 'applied' && j.status !== 'in_progress')
+  // Applied jobs also get a restart (an app marked applied may not have truly gone through) —
+  // with a stronger confirm. Only a mid-run job (in_progress) has no restart.
+  if (j.status === 'applied')
+    return restartBtn + `<div class="act-hint">Didn't actually go through? Restart to re-apply.</div>`;
+  if (j.status !== 'in_progress')
     return restartBtn;
   return '';
 }
-async function restartJob(url, btn) {
+async function restartJob(url, btn, applied) {
   // End-to-end: fix missing materials, then co-pilot apply. For apps that didn't go through.
-  if (!confirm('Restart this application end-to-end?\n\nApplyPilot will regenerate any missing résumé/cover letter, then fill the application in Chrome and hand it to you to review + submit.')) return;
+  const msg = applied
+    ? 'This application is marked as ALREADY APPLIED.\n\nRestart anyway? ApplyPilot will regenerate materials and fill a NEW application in Chrome (it never auto-submits — you review + submit). Only do this if it did not actually go through.'
+    : 'Restart this application end-to-end?\n\nApplyPilot will regenerate any missing résumé/cover letter, then fill the application in Chrome and hand it to you to review + submit.';
+  if (!confirm(msg)) return;
   btn.disabled = true; btn.textContent = 'Restarting…';
   const cmdEl = document.getElementById('command');
   const r = await post('/api/restart', {url});

@@ -918,6 +918,10 @@ def _contact_payload(c: dict, company: str | None = None) -> dict:
         "is_connection": bool(conn_rec),
         "connection_at_company": bool(conn_rec and conn_rec.get("company_match")),
         "connection_url": (conn_rec or {}).get("url", ""),
+        # HOT layer marker: found via your connections (vs cold Apollo). Either the stored source
+        # or a live connection match makes it "hot".
+        "hot": c.get("source") == "connection" or bool(conn_rec),
+        "source": c.get("source") or "",
     }
 
 
@@ -1902,6 +1906,9 @@ _INDEX_HTML = r"""<!doctype html>
   .chip { display:inline-block; margin-left:6px; padding:1px 9px; border-radius:999px; background:var(--surface3); color:var(--accent); font-size:11px; font-weight:500; vertical-align:middle; }
   .chip.conn { background:var(--green-soft); color:var(--green); font-weight:600; }
   .contact.is-conn { border-color:#a9e0c2; background:#f3fbf6; }
+  .ppl-group { font-size:12px; font-weight:700; color:var(--soft); margin:12px 2px 6px; display:flex; align-items:center; gap:6px; }
+  .ppl-group.hot { color:#b45309; } .ppl-group.cold { color:var(--muted); }
+  .ppl-g-n { background:var(--surface3); color:var(--muted); border-radius:999px; padding:0 7px; font-size:11px; font-weight:500; }
   .conn-hint { margin-left:10px; font-size:12px; color:var(--green); font-weight:600; }
   .bulkbar { display:flex; gap:8px; align-items:center; margin:8px 0 10px; flex-wrap:wrap; }
   .bulkbar .bulk { font-size:12px; }
@@ -2407,22 +2414,30 @@ async function sendEmail(cid, verified, btn) {
   if (r.ok) { refresh(); }
   else { btn.disabled = false; btn.textContent = 'Send email'; alert(r.message || 'Send failed'); }
 }
-function contactsRow(j, ncols) {
-  if (!(j.contacts && j.contacts.length)) return '';
-  const rows = j.contacts.map(c => `
-    <div class="contact ${c.is_connection ? 'is-conn' : ''}">
+function contactCard(c) {
+  return `
+    <div class="contact ${c.hot ? 'is-conn' : ''}">
       <div class="cavatar" style="background:${avatarColor(c.full_name)}">${initials(c.full_name)}</div>
       <div class="cbody">
         <div class="cname">${esc(c.full_name)} <span class="ctitle">— ${esc(c.title)}</span>
-          ${c.match_reason ? `<span class="chip">${esc(c.match_reason)}</span>` : ''}
-          ${c.is_connection ? `<span class="chip conn" title="${c.connection_at_company ? 'A 1st-degree connection currently at this company' : 'You are already connected to this person'}">🤝 ${c.connection_at_company ? 'Connection here' : 'Connection'}</span>` : ''}</div>
+          ${c.match_reason && !c.hot ? `<span class="chip">${esc(c.match_reason)}</span>` : ''}
+          ${c.hot ? `<span class="chip conn" title="${c.connection_at_company ? 'A 1st-degree connection currently at this company' : 'You are already connected to this person'}">🤝 ${c.connection_at_company ? 'Connection here' : 'Connection'}</span>` : ''}</div>
         <div class="cmeta">
           ${c.email ? `✉ <a href="mailto:${esc(c.email)}">${esc(c.email)}</a>` : '✉ —'} ${emailBadge(c.email_status)}
           ${c.linkedin_url ? ` · 🔗 <a href="${esc(c.linkedin_url)}" target="_blank">LinkedIn</a>` : ''}
         </div>
         ${draftBlock(c)}
       </div>
-    </div>`).join('');
+    </div>`;
+}
+function contactsRow(j, ncols) {
+  if (!(j.contacts && j.contacts.length)) return '';
+  // Two layers: HOT = people you already know here (connections), COLD = new Apollo contacts.
+  const hot = j.contacts.filter(c => c.hot);
+  const cold = j.contacts.filter(c => !c.hot);
+  let rows = '';
+  if (hot.length) rows += `<div class="ppl-group hot">🔥 People you know here <span class="ppl-g-n">${hot.length}</span></div>` + hot.map(contactCard).join('');
+  if (cold.length) rows += `<div class="ppl-group cold">🧊 New contacts <span class="ppl-g-n">${cold.length}</span></div>` + cold.map(contactCard).join('');
   const n = j.contacts.length;
   // Persist open/closed across the 2.5s auto-refresh (which re-renders this whole table and
   // would otherwise reset every <details> to closed). PEOPLE_OPEN holds the expanded job URLs;

@@ -70,12 +70,16 @@ def _sender_name(profile: dict) -> str:
     return full.split()[0] if full else "there"
 
 
-def draft_email(profile: dict, job: dict, contact: dict, style: str = "") -> dict:
+def draft_email(profile: dict, job: dict, contact: dict, style: str = "", warm: bool = False) -> dict:
     """Return {"subject": str, "body": str} for one contact. Raises on LLM/parse failure.
 
     `style` is an optional free-text directive (e.g. "keep it super casual", "mention I'm a
     Longhorn", "make it a little witty") that steers the tone. Falls back to OUTREACH_STYLE env
     or profile["outreach_style"] via _resolve_style.
+
+    `warm=True` = the HOT layer: this person is an EXISTING 1st-degree LinkedIn connection at the
+    company. The copy should acknowledge the existing relationship (reconnect, not cold intro),
+    and the LinkedIn note becomes a direct MESSAGE to a connection (not a connect request).
     """
     role = job.get("title") or "the role"
     company = contact.get("company") or job.get("company") or job.get("site") or "your company"
@@ -114,15 +118,33 @@ def draft_email(profile: dict, job: dict, contact: dict, style: str = "") -> dic
     directive = _resolve_style(profile, style)
     style_block = f"STYLE DIRECTION (follow closely):\n{directive}\n\n" if directive else ""
 
+    if warm:
+        relationship = ("EXISTING 1st-degree LinkedIn connection who currently works at the company "
+                        "(you already know each other).")
+        warm_block = (
+            "WARM / HOT OUTREACH — you are ALREADY CONNECTED with this person on LinkedIn and they "
+            "work at this company. Write it as reconnecting with someone you know, NOT a cold intro:\n"
+            "- Open warmly and acknowledge you're already connected (e.g. 'Hope you're doing well!' / "
+            "'It's been a while'). Do NOT introduce yourself as a stranger.\n"
+            "- Mention you just applied for the role at their company and would love their read on it, "
+            "an internal referral, or just to reconnect.\n"
+            "- The LinkedIn note is a DIRECT MESSAGE to an existing connection (NOT a connection "
+            "request) — it can be a bit longer/warmer and does not need the 300-char connect-note "
+            "limit framing, though still keep it concise.\n\n"
+        )
+    else:
+        relationship = contact.get("match_reason", "works at the company")
+        warm_block = ""
+
     user = (
         "SENDER:\n" + "\n".join(sender_bits) + "\n\n"
         "TARGET CONTACT:\n"
         f"Name: {contact.get('full_name', '')}\n"
         f"Title: {contact.get('title', '')}\n"
-        f"Relationship: {contact.get('match_reason', 'works at the company')}\n\n"
+        f"Relationship: {relationship}\n\n"
         f"JOB APPLIED TO:\nRole: {role}\nCompany: {company}\n"
         f"Description (excerpt):\n{jd}\n\n"
-        + style_block +
+        + warm_block + style_block +
         "Write the outreach email. Return the JSON."
     )
 

@@ -168,3 +168,32 @@ def count_at_company(company: str | None, conn: sqlite3.Connection | None = None
     # substring match both ways to tolerate 'Affirm' vs 'Affirm, Inc.'
     rows = conn.execute("SELECT company_norm FROM connections WHERE company_norm != ''").fetchall()
     return sum(1 for (cn,) in rows if target in cn or cn in target)
+
+
+def at_company(company: str | None, limit: int = 25,
+               conn: sqlite3.Connection | None = None) -> list[dict]:
+    """Your 1st-degree connections who currently work at `company` (the 'hot' layer).
+
+    Returns connection records {full_name, company, position, url}, most-recently-connected first.
+    Substring match both ways so 'Affirm' matches 'Affirm, Inc.'.
+    """
+    target = _norm_company(company)
+    if not target:
+        return []
+    if conn is None:
+        conn = get_connection()
+    init_connections(conn)
+    rows = conn.execute(
+        "SELECT full_name, company, company_norm, position, url FROM connections "
+        "WHERE company_norm != '' ORDER BY connected_on DESC"
+    ).fetchall()
+    out = []
+    for r in rows:
+        rec = dict(zip(r.keys(), r))
+        cn = rec.get("company_norm") or ""
+        if target in cn or cn in target:
+            rec.pop("company_norm", None)
+            out.append(rec)
+            if len(out) >= limit:
+                break
+    return out

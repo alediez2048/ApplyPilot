@@ -195,3 +195,53 @@ def bulk_enrich(apollo_ids: list[str], *, reveal_personal_emails: bool = True) -
             "linkedin_url": m.get("linkedin_url"),
         }
     return result
+
+
+def match_by_identity(people: list[dict], *, reveal_personal_emails: bool = True) -> dict[str, dict]:
+    """Enrich email + verification for people identified by name/company/LinkedIn (no Apollo id).
+
+    Used for the 'hot' layer: your LinkedIn connections have a name + company + profile URL but no
+    Apollo id. Apollo's bulk_match accepts those fields directly. `people` items must carry a
+    stable `key`; returns key -> {email, email_status, linkedin_url}. Consumes credits.
+    """
+    items = [p for p in people if p and p.get("key")]
+    if not items or not _api_key():
+        return {}
+    details = []
+    for p in items:
+        d = {}
+        if p.get("full_name"):
+            d["name"] = p["full_name"]
+        if p.get("company"):
+            d["organization_name"] = p["company"]
+        if p.get("linkedin_url"):
+            d["linkedin_url"] = p["linkedin_url"]
+        details.append(d)
+    payload = {"details": details, "reveal_personal_emails": reveal_personal_emails}
+    try:
+        resp = httpx.post(
+            f"{BASE_URL}/people/bulk_match", headers=_headers(), json=payload, timeout=_TIMEOUT
+        )
+        _log_credits(resp)
+        if resp.status_code != 200:
+            log.warning("Apollo bulk_match (identity) HTTP %s: %s", resp.status_code, resp.text[:200])
+            return {}
+        data = resp.json()
+    except Exception as e:  # noqa: BLE001
+        log.warning("Apollo bulk_match (identity) failed: %s", e)
+        return {}
+
+    # Matches come back in the same order as `details` — pair them back to each person's key.
+    result: dict[str, dict] = {}
+    matches = data.get("matches") or []
+    for p, m in zip(items, matches):
+        if not m:
+            continue
+        email = m.get("email")
+        result[p["key"]] = {
+            "email": email,
+            "email_status": _map_email_status(m.get("email_status"), email),
+            "linkedin_url": m.get("linkedin_url") or p.get("linkedin_url"),
+            "apollo_id": m.get("id"),
+        }
+    return result

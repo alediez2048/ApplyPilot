@@ -14,11 +14,14 @@ from applypilot.networking import derive, providers, rank, store
 log = logging.getLogger(__name__)
 
 
-def _draft_and_store(profile: dict, job: dict, contact: dict) -> None:
-    """Best-effort outreach draft for one contact; failures are non-fatal."""
+def _draft_and_store(profile: dict, job: dict, contact: dict, warm: bool = False) -> None:
+    """Best-effort outreach draft for one contact; failures are non-fatal.
+
+    warm=True → the hot layer (existing connection): warmer email + a DM to a known connection.
+    """
     from applypilot.networking import outreach
     try:
-        draft = outreach.draft_email(profile, job, contact)
+        draft = outreach.draft_email(profile, job, contact, warm=warm)
         store.upsert_contact({
             "id": contact.get("id"),
             "job_url": contact["job_url"],
@@ -193,8 +196,69 @@ def find_contacts_for_job(
                 _draft_and_store(_profile_for_drafting(), job, contact)
         stored_contacts.append(contact)
 
+    # ── HOT layer: your existing 1st-degree connections at this company (the warm approach). ──
+    # Cold (Apollo, above) = strangers. Hot = people you already know there. Enrich their email
+    # via Apollo (name+company+LinkedIn → email) and draft WARM outreach (reconnect email + a DM).
+    if not dry_run:
+        try:
+            hot = _find_hot_contacts(job, company, selected, per_job=per_job,
+                                     profile_fn=_profile_for_drafting, draft=draft)
+            stored_contacts = hot + stored_contacts  # warm contacts first
+            result["hot"] = len(hot)
+        except Exception as e:  # noqa: BLE001
+            log.debug("Hot (connections) layer failed: %s", e)
+
     result["contacts"] = stored_contacts
     result["note"] = "dry-run (no reveal)" if dry_run else "ok"
-    log.info("Networking: %s → %d contacts (%d with email)%s",
-             company, result["found"], result["revealed"], " [dry-run]" if dry_run else "")
+    log.info("Networking: %s → %d cold + %d hot contacts (%d with email)%s",
+             company, result["found"], result.get("hot", 0), result["revealed"],
+             " [dry-run]" if dry_run else "")
     return result
+
+
+def _find_hot_contacts(job: dict, company: str | None, cold_selected: list[dict],
+                       per_job: int, profile_fn, draft: bool) -> list[dict]:
+    """Surface + enrich + draft outreach for your existing connections at `company`.
+
+    Skips anyone already covered by the cold Apollo layer (dedupe by normalized name). Enriches
+    email via Apollo identity match (name/company/LinkedIn), stores as source='connection', and
+    drafts WARM outreach (reconnect email + a DM to a known connection).
+    """
+    from applypilot.networking import apollo, connections
+    job_url = job.get("url")
+    conns = connections.at_company(company, limit=per_job)
+    if not conns:
+        return []
+
+    # Don't double-list someone the cold layer already found.
+    cold_names = {(c.get("full_name") or "").strip().lower() for c in cold_selected}
+    conns = [c for c in conns if (c.get("full_name") or "").strip().lower() not in cold_names][:per_job]
+    if not conns:
+        return []
+
+    # Enrich emails via Apollo (name + company + LinkedIn URL → verified email). One credit each.
+    people = [{"key": c.get("url") or c.get("full_name"), "full_name": c.get("full_name"),
+               "company": company or c.get("company"), "linkedin_url": c.get("url")} for c in conns]
+    enriched = apollo.match_by_identity(people)
+
+    out = []
+    for c, p in zip(conns, people):
+        rev = enriched.get(p["key"], {})
+        contact = {
+            "job_url": job_url,
+            "full_name": c.get("full_name"),
+            "title": c.get("position"),
+            "company": company or c.get("company"),
+            "linkedin_url": rev.get("linkedin_url") or c.get("url"),
+            "email": rev.get("email"),
+            "email_status": rev.get("email_status", "none"),
+            "match_reason": "🤝 connection — you already know them",
+            "source": "connection",  # marks the HOT layer
+            "apollo_id": rev.get("apollo_id"),
+        }
+        cid = store.upsert_contact(contact)
+        contact["id"] = cid
+        if draft:  # warm draft even without an email (the DM path works for connections)
+            _draft_and_store(profile_fn(), job, contact, warm=True)
+        out.append(contact)
+    return out

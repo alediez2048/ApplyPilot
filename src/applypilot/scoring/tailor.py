@@ -39,6 +39,20 @@ def _aggressive_enabled() -> bool:
     return os.environ.get("TAILOR_AGGRESSIVE", "0").lower() in {"1", "true", "yes", "on"}
 
 
+def _never_employer_rule(resume_facts: dict) -> str:
+    """A hard rule keeping bootcamps/programs out of the EXPERIENCE section.
+
+    Some entities (e.g. the Gauntlet AI bootcamp) are education, not jobs — LinkedIn may list them
+    under Experience, but they must never appear as an employer/work history on the resume.
+    """
+    names = resume_facts.get("never_list_as_employer") or []
+    if not names:
+        return ""
+    joined = ", ".join(names)
+    return (f"- NEVER list these as an employer or under work experience — they are EDUCATION/"
+            f"training programs (bootcamps), and must appear ONLY in the Education section: {joined}.")
+
+
 def _build_aggressive_tailor_prompt(profile: dict) -> str:
     """Aggressive variant: mirror the JD's required skills/keywords into the resume to
     maximize recruiter/ATS match. Preserves real employers, school, and degrees (inventing
@@ -73,6 +87,7 @@ Take the base resume and the job description. Return a tailored resume as a JSON
 - Real school: {school} and degree level: {education_level}.
 - Do NOT invent employers, job titles at fake companies, degrees, or certifications.
   Everything else (skills, tools, framings, emphasis) should match the JD as closely as possible.
+{_never_employer_rule(resume_facts)}
 
 ## VOICE:
 - Write like a real engineer. Short, direct, concrete. Quantify impact where you can.
@@ -165,6 +180,7 @@ BULLETS: Strong verb + what you built + quantified impact. Vary verbs (Built, De
 - Do NOT change real numbers ({metrics_str})
 - Preserved companies: {companies_str} -- names stay as-is
 - Preserved school: {school}
+{_never_employer_rule(resume_facts)}
 - Must fit 1 page.
 
 ## OUTPUT: Return ONLY valid JSON. No markdown fences. No commentary. No "here is" preamble.

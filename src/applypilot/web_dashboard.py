@@ -2338,37 +2338,55 @@ function peopleCell(j) {
 }
 let GMAIL_AVAIL = false;
 function draftBlock(c) {
-  if (!c.email) return '';  // nothing to draft/send without an address
-  const has = c.outreach_message || c.outreach_subject;
-  const subj = esc(c.outreach_subject);
-  const body = esc(c.outreach_message);
-  const sent = !!c.emailed;  // ground truth: an email actually went out (survives draft edits)
-  let sendBtn;
-  if (sent) sendBtn = `<span class="sent-tag">✓ sent</span>`;
-  else if (!GMAIL_AVAIL) sendBtn = `<button disabled title="Set GMAIL_ADDRESS + GMAIL_APP_PASSWORD">Send email</button>`;
-  else sendBtn = `<button class="send" onclick="sendEmail('${esc(c.id)}', ${c.email_status==='verified'}, this)">Send email</button>`;
-  const note = esc(c.linkedin_message);
-  const noteLen = (c.linkedin_message || '').length;
-  const overClass = noteLen > 300 ? 'over' : '';
-  return `<div class="draft" data-cid="${esc(c.id)}">
+  // Reachable by EMAIL, LINKEDIN, or both. A no-email contact still has a LinkedIn note — only
+  // a contact with neither an email nor a LinkedIn profile has nothing to draft.
+  const hasEmail = !!c.email;
+  const hasLi = !!c.linkedin_url;
+  if (!hasEmail && !hasLi) return '';
+
+  const sent = !!c.emailed;
+  // --- Email section (only when there's an address) ---
+  let emailHtml = '';
+  if (hasEmail) {
+    const has = c.outreach_message || c.outreach_subject;
+    const subj = esc(c.outreach_subject);
+    const body = esc(c.outreach_message);
+    let sendBtn;
+    if (sent) sendBtn = `<span class="sent-tag">✓ sent</span>`;
+    else if (!GMAIL_AVAIL) sendBtn = `<button disabled title="Set GMAIL_ADDRESS + GMAIL_APP_PASSWORD">Send email</button>`;
+    else sendBtn = `<button class="send" onclick="sendEmail('${esc(c.id)}', ${c.email_status==='verified'}, this)">Send email</button>`;
+    emailHtml = `
       <div class="d-label">Email</div>
       <input class="d-subj" value="${subj}" placeholder="Subject…" ${sent?'disabled':''} />
       <textarea class="d-body" rows="4" ${sent?'disabled':''} placeholder="${has ? '' : 'No draft yet — click Regenerate'}">${body}</textarea>
-      ${sent?'':`<input class="d-style" placeholder="✨ Tweak the vibe, then Regenerate — e.g. 'more casual', 'add a joke', 'mention I'm a Longhorn'">`}
+      ${sent?'':`<input class="d-style" placeholder="✨ Tweak the vibe, then Regenerate — e.g. 'more casual', 'add a joke'">`}
       <div class="dbtns">
         ${sent?'':`<button onclick="saveDraft('${esc(c.id)}', this)">Save</button>
         <button class="secondary" onclick="regenDraft('${esc(c.id)}', this)">Regenerate</button>`}
         <button onclick="copyDraft(this)">Copy email</button>
         ${sendBtn}
-      </div>
+      </div>`;
+  }
+
+  // --- LinkedIn section (only when there's a profile) ---
+  let liHtml = '';
+  if (hasLi) {
+    const note = esc(c.linkedin_message);
+    const noteLen = (c.linkedin_message || '').length;
+    const overClass = noteLen > 300 ? 'over' : '';
+    const regenNote = hasEmail ? '' : `<button class="secondary" onclick="regenDraft('${esc(c.id)}', this)">Regenerate</button>`;
+    liHtml = `
       <div class="d-label">LinkedIn note <span class="d-count ${overClass}"><span class="lcount">${noteLen}</span>/300</span></div>
       <textarea class="d-linkedin" rows="3" oninput="updCount(this)" placeholder="Short connection note (≤300 chars)">${note}</textarea>
       <div class="dbtns">
         <button onclick="saveLinkedin('${esc(c.id)}', this)">Save note</button>
         <button onclick="copyLinkedin(this)">Copy note</button>
+        ${regenNote}
         ${dmButton(c)}
-      </div>
-    </div>`;
+      </div>`;
+  }
+
+  return `<div class="draft" data-cid="${esc(c.id)}">${emailHtml}${liHtml}</div>`;
 }
 function dmButton(c) {
   if (!c.linkedin_url || !c.linkedin_message)
@@ -2500,8 +2518,9 @@ async function regenDraft(cid, btn) {
   const r = await post('/api/outreach', {contact_id: cid, regenerate: true, style});
   btn.disabled = false; btn.textContent = 'Regenerate';
   if (r.ok) {
-    d.querySelector('.d-subj').value = r.subject;
-    d.querySelector('.d-body').value = r.body;
+    // Email fields only exist for contacts with an email; null-check (LinkedIn-only contacts).
+    const subj = d.querySelector('.d-subj'); if (subj) subj.value = r.subject;
+    const body = d.querySelector('.d-body'); if (body) body.value = r.body;
     const ln = d.querySelector('.d-linkedin');
     if (ln && r.linkedin != null) { ln.value = r.linkedin; updCount(ln); }
   } else alert(r.message || 'Failed');

@@ -191,8 +191,10 @@ def find_contacts_for_job(
         if not dry_run:
             cid = store.upsert_contact(contact)
             contact["id"] = cid
-            # Draft outreach for contacts that have an email (skip no-address ones).
-            if draft and contact.get("email"):
+            # Draft outreach for anyone reachable — an EMAIL or a LINKEDIN profile. A no-email
+            # contact still has a LinkedIn note (Copy note + open LinkedIn); only truly
+            # unreachable contacts (no email AND no LinkedIn) are skipped.
+            if draft and (contact.get("email") or contact.get("linkedin_url")):
                 _draft_and_store(_profile_for_drafting(), job, contact)
         stored_contacts.append(contact)
 

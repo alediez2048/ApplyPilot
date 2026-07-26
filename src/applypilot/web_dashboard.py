@@ -1742,13 +1742,14 @@ _INDEX_HTML = r"""<!doctype html>
   .hint { color:var(--muted); font-size:13px; margin-top:10px; }
   button.linklike { background:none; border:none; color:var(--accent); padding:0; min-height:0; font-size:13px; font-weight:600; cursor:pointer; }
   button.linklike:hover { background:none; box-shadow:none; text-decoration:underline; }
-  .people-details > summary { list-style:none; cursor:pointer; padding:6px 4px; user-select:none; display:flex; align-items:center; gap:8px; border-radius:6px; }
+  .people-details > summary { list-style:none; cursor:pointer; padding:3px 4px; user-select:none; display:inline-flex; align-items:center; gap:6px; border-radius:6px; font-size:12px; color:var(--muted); }
+  .people-details > summary strong { font-weight:600; font-size:12px; }
   .people-details > summary::-webkit-details-marker { display:none; }
   .people-details > summary:hover { background:#f1f5f9; }
-  .people-caret { display:inline-block; transition:transform .15s ease; color:var(--muted); font-size:11px; }
+  .people-caret { display:inline-block; transition:transform .15s ease; color:var(--faint); font-size:10px; }
   .people-details[open] > summary .people-caret { transform:rotate(90deg); }
-  .people-count { color:var(--muted); font-size:12px; font-weight:500; }
-  .people-body { padding-top:6px; }
+  .people-count { background:var(--surface3); color:var(--muted); border-radius:999px; padding:0 7px; font-size:11px; }
+  .people-body { padding:6px 0 4px; }
   /* --- Pipeline visualizer --- */
   .pipeline { margin-top:12px; border:1px solid var(--line); border-radius:10px; padding:14px; background:#fbfdff; }
   .pipe-steps { display:flex; align-items:flex-start; gap:0; flex-wrap:nowrap; overflow-x:auto; }
@@ -1780,13 +1781,12 @@ _INDEX_HTML = r"""<!doctype html>
   .table-wrap { border:1px solid var(--line); border-radius:10px; background:var(--surface); max-width:100%; overflow:hidden; }
   table { width:100%; border-collapse:collapse; table-layout:fixed; }
   th, td { border-bottom:1px solid var(--line); padding:10px 12px; text-align:left; vertical-align:top; word-wrap:break-word; }
-  /* Column widths (6 cols): Status | Job | Description | Materials | People | Links */
-  th:nth-child(1), td:nth-child(1) { width:17%; }
-  th:nth-child(2), td:nth-child(2) { width:17%; }
-  th:nth-child(3), td:nth-child(3) { width:26%; }
-  th:nth-child(4), td:nth-child(4) { width:13%; }
-  th:nth-child(5), td:nth-child(5) { width:17%; }
-  th:nth-child(6), td:nth-child(6) { width:10%; }
+  /* Column widths (5 cols): Status | Job | Description | Materials | Links */
+  th:nth-child(1), td:nth-child(1) { width:19%; }
+  th:nth-child(2), td:nth-child(2) { width:20%; }
+  th:nth-child(3), td:nth-child(3) { width:36%; }
+  th:nth-child(4), td:nth-child(4) { width:15%; }
+  th:nth-child(5), td:nth-child(5) { width:10%; }
   th {
     color:var(--muted); font-size:12px; font-weight:600; background:var(--surface2);
     position:sticky; top:0; z-index:1;
@@ -1800,12 +1800,17 @@ _INDEX_HTML = r"""<!doctype html>
   td.desc .desc-text { display:-webkit-box; -webkit-line-clamp:6; -webkit-box-orient:vertical; overflow:hidden; line-height:1.45; }
   td.people button { white-space:nowrap; }
   td.people .neterr { color:var(--red); font-size:11px; margin-top:3px; max-width:150px; }
-  /* Per-job footer bar: Activity (left) + a very low-key greyed delete (bottom-right). */
+  /* Per-job footer: Activity + People toggles (left, stacked), low-key delete (top-right). */
   tr.job-foot > td { padding:4px 12px 10px; background:transparent; border-bottom:2px solid var(--line); }
-  .foot-bar { display:flex; align-items:center; justify-content:space-between; gap:12px; }
-  .del-link { background:none; border:none; padding:2px 4px; min-height:0; font-size:11px; font-weight:500;
-      color:var(--faint); cursor:pointer; text-transform:lowercase; }
+  .foot-tools { position:relative; }
+  .foot-toggles { display:flex; flex-direction:column; gap:2px; }
+  .del-link { position:absolute; top:2px; right:4px; background:none; border:none; padding:2px 4px; min-height:0;
+      font-size:11px; font-weight:500; color:var(--faint); cursor:pointer; text-transform:lowercase; }
   .del-link:hover { color:var(--red); background:none; box-shadow:none; text-decoration:underline; }
+  .find-link { display:inline-flex; align-items:center; gap:6px; background:none; border:none; padding:3px 4px;
+      min-height:0; font-size:12px; font-weight:600; color:var(--accent); cursor:pointer; border-radius:6px; }
+  .find-link:hover:not(:disabled) { background:var(--accent-soft); box-shadow:none; }
+  .find-link:disabled { color:var(--muted); cursor:default; }
   .activity > summary { list-style:none; cursor:pointer; font-size:12px; color:var(--muted); font-weight:600;
       display:inline-flex; align-items:center; gap:6px; user-select:none; padding:3px 4px; border-radius:6px; }
   .activity > summary::-webkit-details-marker { display:none; }
@@ -1976,7 +1981,7 @@ _INDEX_HTML = r"""<!doctype html>
     <h2>Applications</h2>
     <div class="table-wrap">
       <table>
-        <thead><tr><th>Status</th><th>Job</th><th>Description</th><th>Materials</th><th>People</th><th>Links</th></tr></thead>
+        <thead><tr><th>Status</th><th>Job</th><th>Description</th><th>Materials</th><th>Links</th></tr></thead>
         <tbody id="jobs"></tbody>
       </table>
     </div>
@@ -2356,12 +2361,11 @@ function contactsRow(j, ncols) {
   // ontoggle keeps it in sync, and we re-emit `open` from it on each render.
   const key = encodeURIComponent(j.url);
   const isOpen = PEOPLE_OPEN.has(j.url) ? 'open' : '';
-  return `<tr class="contacts-row"><td colspan="${ncols}"><div class="contacts-wrap">
-    <details class="people-details" ${isOpen} ontoggle="onPeopleToggle(this, decodeURIComponent('${key}'))">
-      <summary><span class="people-caret">▸</span> <strong>People at ${esc(j.contact_company)}</strong>
+  return `<details class="people-details" ${isOpen} ontoggle="onPeopleToggle(this, decodeURIComponent('${key}'))">
+      <summary><span class="people-caret">▸</span> <strong>👥 People at ${esc(j.contact_company)}</strong>
         <span class="people-count">${n} contact${n>1?'s':''}</span>${j.connections_at_company ? `<span class="conn-hint">🤝 you have ${j.connections_at_company} connection${j.connections_at_company>1?'s':''} here</span>` : ''}</summary>
       <div class="people-body">${bulkBar(j)}${rows}</div>
-    </details></div></td></tr>`;
+    </details>`;
 }
 // LinkedIn-style initials avatar: 1–2 initials + a stable color derived from the name.
 function initials(name) {
@@ -2460,17 +2464,30 @@ async function refresh() {
       <td class="job-cell"><div class="job-title">${esc(j.title)}</div><div class="job-co">${esc(j.company)}</div></td>
       <td class="desc"><div class="desc-text">${esc(j.description)}</div></td>
       <td>${materialLinks(j.materials)}</td>
-      <td class="people">${peopleCell(j)}</td>
       <td class="links-cell"><a href="${esc(j.url)}" target="_blank">job</a>${j.application_url ? `<br><a href="${esc(j.application_url)}" target="_blank">apply page</a>` : ''}</td>
     </tr>
-    <tr class="job-foot"><td colspan="6"><div class="foot-bar">
-      <details class="activity"><summary><span class="act-caret">▸</span> Activity${j.activity && j.activity.length ? ` <span class="act-n">${j.activity.length}</span>` : ''}</summary>
-        <div class="timeline">${activityHtml(j.activity)}</div>
-      </details>
+    <tr class="job-foot"><td colspan="5"><div class="foot-tools">
+      <div class="foot-toggles">
+        <details class="activity"><summary><span class="act-caret">▸</span> Activity${j.activity && j.activity.length ? ` <span class="act-n">${j.activity.length}</span>` : ''}</summary>
+          <div class="timeline">${activityHtml(j.activity)}</div>
+        </details>
+        ${peopleToggle(j)}
+      </div>
       <button class="del-link" onclick="deleteJob(decodeURIComponent('${key}'), decodeURIComponent('${encodeURIComponent(`${j.company} - ${j.title}`)}'))">delete</button>
-    </div></td></tr>
-    ${contactsRow(j, 6)}`;
+    </div></td></tr>`;
   }).join('');
+}
+// The People toggle in the footer: the expandable contacts panel when contacts exist, or a
+// "Find contacts" action when there are none. Sits right next to Activity so both are obvious.
+function peopleToggle(j) {
+  if (j.contacts && j.contacts.length) return contactsRow(j);
+  const running = j.network_running;
+  const dis = (running || !NET_AVAIL) ? 'disabled' : '';
+  const title = NET_AVAIL ? '' : 'Set APOLLO_API_KEY (paid plan) to enable';
+  const label = running ? '⏳ finding contacts…' : '👥 Find contacts';
+  let out = `<button class="find-link" ${dis} title="${title}" onclick="findContacts(decodeURIComponent('${encodeURIComponent(j.url)}'))">${label}</button>`;
+  if (j.network_error) out += `<div class="neterr">${esc(j.network_error)}</div>`;
+  return out;
 }
 function fmtDate(iso) {
   try {

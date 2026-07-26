@@ -2383,6 +2383,8 @@ function avatarColor(name) {
 }
 const PEOPLE_OPEN = new Set(); // job URLs whose "People at" panel is expanded (survives refresh)
 function onPeopleToggle(el, url) { if (el.open) PEOPLE_OPEN.add(url); else PEOPLE_OPEN.delete(url); }
+const ACTIVITY_OPEN = new Set(); // job URLs whose Activity timeline is expanded (survives the 2.5s refresh)
+function onActivityToggle(el, url) { if (el.open) ACTIVITY_OPEN.add(url); else ACTIVITY_OPEN.delete(url); }
 function bulkBar(j) {
   const cs = j.contacts || [];
   const emailN = cs.filter(c => c.email && c.outreach_message && !c.emailed && c.email_status === 'verified').length;
@@ -2468,7 +2470,7 @@ async function refresh() {
     </tr>
     <tr class="job-foot"><td colspan="5"><div class="foot-tools">
       <div class="foot-toggles">
-        <details class="activity"><summary><span class="act-caret">▸</span> Activity${j.activity && j.activity.length ? ` <span class="act-n">${j.activity.length}</span>` : ''}</summary>
+        <details class="activity" ${ACTIVITY_OPEN.has(j.url) ? 'open' : ''} ontoggle="onActivityToggle(this, decodeURIComponent('${key}'))"><summary><span class="act-caret">▸</span> Activity${j.activity && j.activity.length ? ` <span class="act-n">${j.activity.length}</span>` : ''}</summary>
           <div class="timeline">${activityHtml(j.activity)}</div>
         </details>
         ${peopleToggle(j)}

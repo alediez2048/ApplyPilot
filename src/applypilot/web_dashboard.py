@@ -690,6 +690,53 @@ def run_dashboard_fill_one(url: str) -> dict:
     return result
 
 
+def run_dashboard_restart(url: str) -> dict:
+    """Restart a job end-to-end: fix any missing materials, then co-pilot apply.
+
+    For applications that didn't go through (failed, stuck, or partially prepared — e.g. a résumé
+    but no cover letter). Unlike Fill-application (apply only), this first ensures the full
+    material set exists, then applies. Steps:
+      1. Clear the apply state (status/error/attempts) so it's a clean retry.
+      2. Run prepare — regenerates only what's MISSING (enrich → tailor → cover) for this job.
+      3. Co-pilot apply the job (fill in Chrome, hand off for review + submit).
+    """
+    config.load_env()
+    config.ensure_dirs()
+    init_db()
+    conn = get_connection()
+    from applypilot.database import log_event
+
+    print(f"Dashboard RESTART (end-to-end) for: {url}", flush=True)
+    log_event(url, "system", "info", "Restarted end-to-end (fix materials → apply).", conn)
+
+    # 1) Clean apply slate so nothing blocks a fresh attempt.
+    conn.execute(
+        "UPDATE jobs SET apply_status=NULL, apply_error=NULL, apply_attempts=0, agent_id=NULL, applied_at=NULL "
+        "WHERE url=? AND applied_at IS NULL",  # never un-apply a genuinely-applied job
+        (url,),
+    )
+    conn.commit()
+
+    # 2) Ensure materials — prepare regenerates only what's missing (idempotent for complete jobs).
+    row = conn.execute(
+        "SELECT (full_description IS NOT NULL) AS enr, (tailored_resume_path IS NOT NULL) AS res, "
+        "(cover_letter_path IS NOT NULL) AS cov FROM jobs WHERE url=?", (url,)
+    ).fetchone()
+    if row and not (row["enr"] and row["res"] and row["cov"]):
+        print("STAGE: restart — regenerating missing materials", flush=True)
+        run_dashboard_prepare(validation_mode="lenient")
+
+    # 3) Co-pilot apply this job.
+    args = [sys.executable, "-m", "applypilot.cli", "apply", "--url", url,
+            "--min-score", "1", "--copilot"]
+    completed = subprocess.run(args, check=False)
+    conn = get_connection()
+    st = conn.execute("SELECT apply_status FROM jobs WHERE url=?", (url,)).fetchone()
+    result = {"url": url, "status": (st["apply_status"] if st else None), "exit_code": completed.returncode}
+    print(f"Dashboard restart complete: {result}", flush=True)
+    return result
+
+
 def run_dashboard_continue(url: str) -> dict:
     """Resume a co-pilot job that paused on a hard blocker (captcha/login/field).
 
@@ -1356,6 +1403,14 @@ def _start_fill_one(url: str) -> tuple[bool, str]:
     return _runner.start("fill", args)
 
 
+def _start_restart(url: str) -> tuple[bool, str]:
+    args = [
+        sys.executable, "-c",
+        f"from applypilot.web_dashboard import run_dashboard_restart; run_dashboard_restart({url!r})",
+    ]
+    return _runner.start("restart", args)
+
+
 def _start_apply(limit: int, min_score: int, dry_run: bool, copilot: bool = True) -> tuple[bool, str]:
     args = [
         sys.executable, "-c",
@@ -1525,6 +1580,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     _json_response(self, {"ok": False, "message": "url required"}, 400)
                     return
                 ok, msg = _start_fill_one(url)
+                _json_response(self, {"ok": ok, "message": msg}, 200 if ok else 409)
+                return
+            if path == "/api/restart":
+                url = (data.get("url") or "").strip()
+                if not url:
+                    _json_response(self, {"ok": False, "message": "url required"}, 400)
+                    return
+                ok, msg = _start_restart(url)
                 _json_response(self, {"ok": ok, "message": msg}, 200 if ok else 409)
                 return
             if path == "/api/delete":
@@ -1885,6 +1948,9 @@ _INDEX_HTML = r"""<!doctype html>
   .status-cell .act { display:block; margin-top:8px; width:100%; font-size:13px; padding:7px 10px; }
   .status-cell .act-hint { font-size:11px; color:var(--muted); margin-top:4px; line-height:1.35; }
   .status-cell .applied-on { font-size:11px; color:var(--green); font-weight:600; margin-top:5px; }
+  .status-cell .restart-btn { background:transparent; border:1px solid var(--line2); color:var(--muted); font-size:11px;
+      padding:5px 8px; margin-top:6px; }
+  .status-cell .restart-btn:hover { background:rgba(0,0,0,.04); color:var(--text); border-color:var(--line2); box-shadow:none; }
   .logs { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
   pre {
     margin:0;
@@ -2516,18 +2582,34 @@ function activityHtml(events) {
 // are always visible together (they used to be 10 columns apart in a 1320px-wide table).
 function primaryAction(j) {
   const u = `decodeURIComponent('${encodeURIComponent(j.url)}')`;
+  const restartBtn = `<button class="ghost act restart-btn" onclick="restartJob(${u}, this)" title="Fix any missing materials, then re-run the whole application from scratch">🔄 Restart end-to-end</button>`;
   if (j.status === 'ready')
-    return `<button class="primary act" onclick="fillOne(${u}, this)">▶ Fill application</button>`;
+    return `<button class="primary act" onclick="fillOne(${u}, this)">▶ Fill application</button>` + restartBtn;
   if (j.status === 'ready_to_submit')
     return `<button class="primary act" onclick="markSubmitted(${u}, this)">Mark submitted ✓</button>`
-         + `<div class="act-hint">Review &amp; submit in the open Chrome window, then confirm.</div>`;
+         + `<div class="act-hint">Review &amp; submit in the open Chrome window, then confirm.</div>` + restartBtn;
   if (j.status === 'needs_human')
     return `<button class="primary act" onclick="continueJob(${u}, this)">▶ Continue</button>`
-         + `<div class="act-hint">${esc(BLOCKER_ASK[j.apply_error] || BLOCKER_ASK.blocker)}</div>`;
+         + `<div class="act-hint">${esc(BLOCKER_ASK[j.apply_error] || BLOCKER_ASK.blocker)}</div>` + restartBtn;
   if (j.status === 'failed')
-    return `<button class="secondary act" onclick="fillOne(${u}, this)">↻ Try again</button>`
-         + `<div class="act-hint">${j.apply_error ? esc(j.apply_error) : 'Last attempt failed.'} Retry the co-pilot fill.</div>`;
+    return `<button class="secondary act" onclick="restartJob(${u}, this)">🔄 Restart end-to-end</button>`
+         + `<div class="act-hint">${j.apply_error ? esc(j.apply_error) : 'Last attempt failed.'} Regenerates materials, then re-applies.</div>`;
+  // Applied jobs: no primary action. Everything else that isn't done gets a restart option.
+  if (j.status !== 'applied' && j.status !== 'in_progress')
+    return restartBtn;
   return '';
+}
+async function restartJob(url, btn) {
+  // End-to-end: fix missing materials, then co-pilot apply. For apps that didn't go through.
+  if (!confirm('Restart this application end-to-end?\n\nApplyPilot will regenerate any missing résumé/cover letter, then fill the application in Chrome and hand it to you to review + submit.')) return;
+  btn.disabled = true; btn.textContent = 'Restarting…';
+  const cmdEl = document.getElementById('command');
+  const r = await post('/api/restart', {url});
+  if (!r.ok) { btn.disabled = false; btn.textContent = '🔄 Restart end-to-end'; cmdEl.textContent = r.message || 'Could not restart'; return; }
+  cmdEl.textContent = 'Restarting end-to-end — regenerating materials, then filling in Chrome…';
+  await pollCommandUntilDone('Restart');
+  cmdEl.textContent = '✅ Restarted — review in the open Chrome window, submit, then "Mark submitted ✓" (or resolve a blocker + Continue).';
+  await refresh();
 }
 async function fillOne(url, btn) {
   // Per-row co-pilot fill for ONE job: opens Chrome, fills it, hands it back to review + submit.

@@ -231,6 +231,7 @@ _ALL_COLUMNS: dict[str, str] = {
     "apply_duration_ms": "INTEGER",
     "apply_task_id": "TEXT",
     "verification_confidence": "TEXT",
+    "rejected_at": "TEXT",     # set when the user marks a job rejected (the "rejected pile")
 }
 
 

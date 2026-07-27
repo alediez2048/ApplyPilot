@@ -785,6 +785,42 @@ def _mark_submitted(url: str) -> dict:
     return {"ok": True, "message": "Marked as submitted ✓"}
 
 
+def _mark_rejected(url: str) -> dict:
+    """Move a job to the rejected pile (apply_status='rejected' + rejected_at). Keeps applied_at
+    so the record that you DID apply survives. Logs a rejection to the activity timeline."""
+    from datetime import datetime, timezone
+    from applypilot.database import log_event
+    if not url:
+        return {"ok": False, "message": "url required"}
+    init_db()
+    conn = get_connection()
+    if not conn.execute("SELECT 1 FROM jobs WHERE url = ?", (url,)).fetchone():
+        return {"ok": False, "message": "job not found"}
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute("UPDATE jobs SET apply_status = 'rejected', rejected_at = ? WHERE url = ?", (now, url))
+    conn.commit()
+    log_event(url, "apply", "info", "Marked rejected — moved to the rejected pile.", conn)
+    return {"ok": True, "message": "Moved to rejected pile"}
+
+
+def _unmark_rejected(url: str) -> dict:
+    """Undo a rejection: restore the job to its prior state (applied if it had applied_at, else
+    cleared) and remove rejected_at."""
+    from applypilot.database import log_event
+    if not url:
+        return {"ok": False, "message": "url required"}
+    init_db()
+    conn = get_connection()
+    row = conn.execute("SELECT applied_at FROM jobs WHERE url = ?", (url,)).fetchone()
+    if not row:
+        return {"ok": False, "message": "job not found"}
+    restored = "applied" if row["applied_at"] else None
+    conn.execute("UPDATE jobs SET apply_status = ?, rejected_at = NULL WHERE url = ?", (restored, url))
+    conn.commit()
+    log_event(url, "apply", "info", "Rejection undone — restored from the rejected pile.", conn)
+    return {"ok": True, "message": "Restored from rejected pile"}
+
+
 def _json_response(handler: BaseHTTPRequestHandler, payload: dict, status: int = 200) -> None:
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     handler.send_response(status)
@@ -959,11 +995,12 @@ def _status_payload() -> dict:
         SELECT url, title, site, salary, location, full_description, application_url, detail_error,
                fit_score, score_reasoning, tailored_resume_path, cover_letter_path,
                apply_status, apply_error, apply_attempts, applied_at,
-               last_attempted_at, apply_duration_ms
+               last_attempted_at, apply_duration_ms, rejected_at
         FROM jobs
         WHERE {_URL_QUEUE_SQL}
         ORDER BY
           CASE
+            WHEN apply_status = 'rejected' THEN 6            -- rejected pile sinks to the bottom
             WHEN applied_at IS NOT NULL THEN 0
             WHEN apply_status = 'in_progress' THEN 1
             WHEN tailored_resume_path IS NOT NULL THEN 2
@@ -971,6 +1008,7 @@ def _status_payload() -> dict:
             WHEN fit_score IS NOT NULL THEN 4
             ELSE 5
           END,
+          rejected_at DESC NULLS LAST,
           applied_at DESC NULLS LAST,
           discovered_at DESC,
           fit_score DESC NULLS LAST
@@ -986,7 +1024,9 @@ def _status_payload() -> dict:
         # too, so checking tailored_resume_path first used to clobber 'ready_to_submit' -> 'ready'.
         apply_status = row["apply_status"] or ""
         _APPLY_STATES = {"needs_human", "ready_to_submit", "in_progress", "dryrun"}
-        if row["applied_at"]:
+        if apply_status == "rejected":
+            status = "rejected"          # rejected pile — top precedence (even over applied)
+        elif row["applied_at"]:
             status = "applied"
         elif apply_status in _APPLY_STATES:
             status = apply_status
@@ -1032,6 +1072,7 @@ def _status_payload() -> dict:
             "apply_error": row["apply_error"] or row["detail_error"] or "",
             "apply_attempts": row["apply_attempts"] or 0,
             "applied_at": row["applied_at"] or "",
+            "rejected_at": row["rejected_at"] or "",
             "last_attempted_at": row["last_attempted_at"] or "",
             "materials": materials,
             "contacts": contacts,
@@ -1572,6 +1613,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if path == "/api/mark-submitted":
                 _json_response(self, _mark_submitted(data.get("url", "")))
                 return
+            if path == "/api/mark-rejected":
+                _json_response(self, _mark_rejected(data.get("url", "")))
+                return
+            if path == "/api/unmark-rejected":
+                _json_response(self, _unmark_rejected(data.get("url", "")))
+                return
             if path == "/api/continue":
                 url = (data.get("url") or "").strip()
                 if not url:
@@ -1873,9 +1920,12 @@ _INDEX_HTML = r"""<!doctype html>
   tr.job-foot > td { padding:4px 12px 10px; background:transparent; border-bottom:2px solid var(--line); }
   .foot-tools { position:relative; }
   .foot-toggles { display:flex; flex-direction:column; gap:2px; }
-  .del-link { position:absolute; top:2px; right:4px; background:none; border:none; padding:2px 4px; min-height:0;
+  .foot-right { position:absolute; top:2px; right:4px; display:flex; gap:10px; align-items:center; }
+  .del-link, .reject-link { background:none; border:none; padding:2px 4px; min-height:0;
       font-size:11px; font-weight:500; color:var(--faint); cursor:pointer; text-transform:lowercase; }
   .del-link:hover { color:var(--red); background:none; box-shadow:none; text-decoration:underline; }
+  .reject-link:hover { color:var(--soft); background:none; box-shadow:none; text-decoration:underline; }
+  .reject-link.restore { color:var(--accent); }
   .find-link { display:inline-flex; align-items:center; gap:6px; background:none; border:none; padding:3px 4px;
       min-height:0; font-size:12px; font-weight:600; color:var(--accent); cursor:pointer; border-radius:6px; }
   .find-link:hover:not(:disabled) { background:var(--accent-soft); box-shadow:none; }
@@ -1949,6 +1999,7 @@ _INDEX_HTML = r"""<!doctype html>
   .st-amber  { background:#fef3e0; color:#915907; border-color:#f0c675; font-weight:700; }
   .st-red    { background:#fbeae8; color:#b91c1c; border-color:#e6a6a0; font-weight:700; }
   .st-green  { background:var(--green-soft); color:var(--green); border-color:#a9e0c2; }
+  .st-rejected { background:#eceaea; color:#7a7570; border-color:#d6d3ce; }
   .st-pulse .st-icon { animation:stpulse 1.2s ease-in-out infinite; }
   @keyframes stpulse { 0%,100% { opacity:1; } 50% { opacity:.35; } }
   .review-cta { display:inline-block; margin-top:4px; font-size:11px; color:#915907; }
@@ -1957,6 +2008,7 @@ _INDEX_HTML = r"""<!doctype html>
   .status-cell .act { display:block; margin-top:8px; width:100%; font-size:13px; padding:7px 10px; }
   .status-cell .act-hint { font-size:11px; color:var(--muted); margin-top:4px; line-height:1.35; }
   .status-cell .applied-on { font-size:11px; color:var(--green); font-weight:600; margin-top:5px; }
+  .status-cell .rejected-on { font-size:11px; color:#7a7570; font-weight:600; margin-top:5px; }
   .status-cell .restart-btn { background:transparent; border:1px solid var(--line2); color:var(--muted); font-size:11px;
       padding:5px 8px; margin-top:6px; }
   .status-cell .restart-btn:hover { background:rgba(0,0,0,.04); color:var(--text); border-color:var(--line2); box-shadow:none; }
@@ -2303,6 +2355,7 @@ const STATUS_META = {
   needs_human:     { icon: '⚠',  label: 'Needs you',       cls: 'st-red' },
   failed:          { icon: '✗',  label: 'Failed',          cls: 'st-red' },
   applied:         { icon: '✓',  label: 'Applied',         cls: 'st-green' },
+  rejected:        { icon: '✕',  label: 'Rejected',        cls: 'st-rejected' },
 };
 const BLOCKER_ASK = {
   captcha: 'Solve the captcha in the open Chrome window, then click Continue.',
@@ -2564,7 +2617,7 @@ async function refresh() {
     const key = encodeURIComponent(j.url);
     return `
     <tr>
-      <td class="status-cell">${badge(j.status)}${j.applied_at ? `<div class="applied-on">Applied ${fmtDate(j.applied_at)}</div>` : ''}${primaryAction(j)}</td>
+      <td class="status-cell">${badge(j.status)}${j.status === 'rejected' && j.rejected_at ? `<div class="rejected-on">Rejected ${fmtDate(j.rejected_at)}</div>` : (j.applied_at ? `<div class="applied-on">Applied ${fmtDate(j.applied_at)}</div>` : '')}${primaryAction(j)}</td>
       <td class="job-cell"><div class="job-title">${esc(j.title)}</div><div class="job-co">${esc(j.company)}</div></td>
       <td class="desc"><div class="desc-text">${esc(j.description)}</div></td>
       <td>${materialLinks(j.materials)}</td>
@@ -2577,9 +2630,25 @@ async function refresh() {
         </details>
         ${peopleToggle(j)}
       </div>
-      <button class="del-link" onclick="deleteJob(decodeURIComponent('${key}'), decodeURIComponent('${encodeURIComponent(`${j.company} - ${j.title}`)}'))">delete</button>
+      <div class="foot-right">
+        ${j.status === 'rejected'
+          ? `<button class="reject-link restore" onclick="unmarkRejected(decodeURIComponent('${key}'), this)">↩ restore</button>`
+          : `<button class="reject-link" onclick="markRejected(decodeURIComponent('${key}'), this)" title="Move to the rejected pile">✕ rejected</button>`}
+        <button class="del-link" onclick="deleteJob(decodeURIComponent('${key}'), decodeURIComponent('${encodeURIComponent(`${j.company} - ${j.title}`)}'))">delete</button>
+      </div>
     </div></td></tr>`;
   }).join('');
+}
+async function markRejected(url, btn) {
+  if (!confirm('Move this application to the rejected pile?')) return;
+  btn.disabled = true;
+  const r = await post('/api/mark-rejected', {url});
+  if (r.ok) refresh(); else { btn.disabled = false; alert(r.message || 'Failed'); }
+}
+async function unmarkRejected(url, btn) {
+  btn.disabled = true;
+  const r = await post('/api/unmark-rejected', {url});
+  if (r.ok) refresh(); else { btn.disabled = false; alert(r.message || 'Failed'); }
 }
 // The People toggle in the footer: the expandable contacts panel when contacts exist, or a
 // "Find contacts" action when there are none. Sits right next to Activity so both are obvious.
@@ -2617,6 +2686,7 @@ function activityHtml(events) {
 // The one thing to do next for this job, rendered right under its status badge so state + action
 // are always visible together (they used to be 10 columns apart in a 1320px-wide table).
 function primaryAction(j) {
+  if (j.status === 'rejected') return '';  // rejected pile — restore lives in the footer
   const u = `decodeURIComponent('${encodeURIComponent(j.url)}')`;
   const applied = j.status === 'applied' ? 'true' : 'false';
   const restartBtn = `<button class="ghost act restart-btn" onclick="restartJob(${u}, this, ${applied})" title="Fix any missing materials, then re-run the whole application from scratch">🔄 Restart end-to-end</button>`;

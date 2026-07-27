@@ -40,7 +40,7 @@ Detected at runtime from installed deps / env; gates commands via `check_tier()`
 | `cli.py` | **Typer CLI** — all commands: `init`, `run`, `apply`, `status`, `dashboard`, `doctor`. Bootstraps env/dirs/DB, validates args, gates tiers, dispatches. |
 | `pipeline.py` | **Orchestrator** for `run`. Defines stage order + upstream deps, sequential and streaming (thread-per-stage, DB-as-conveyor-belt) runners. |
 | `config.py` | Paths (`~/.applypilot/`), Chrome auto-detection, profile/YAML loaders, `DEFAULTS`, and the **tier system** (`get_tier`, `check_tier`). |
-| `database.py` | SQLite layer. **Single `jobs` table** = source of truth. Thread-local WAL connections, forward-only column migrations, `get_stats`, `store_jobs`, `get_jobs_by_stage`. |
+| `database.py` | SQLite layer. Owns **`jobs`** (the pipeline state machine) + **`job_events`** (activity log). Thread-local WAL connections, forward-only column migrations, `get_stats`, `store_jobs`, `get_jobs_by_stage`. `networking/store.py` owns two more tables — see the schema section. |
 | `llm.py` | Unified LLM client. Auto-detects provider from env (Gemini → OpenAI → local), retries w/ backoff for rate limits. OpenAI-compatible + native Gemini endpoints. |
 | `view.py` | Generates a self-contained static **HTML results dashboard**. |
 | `web_dashboard.py` | Localhost-only **interactive operator dashboard** HTTP server (`dashboard --serve`): application tracker + URL import. |
@@ -86,16 +86,37 @@ Resume Formatting Tool. `node_modules` is git-ignored and installed at runtime. 
 Apply drives Claude Code (`claude` CLI) with an auto-generated MCP config
 (Playwright MCP over a per-worker CDP port + Gmail MCP). No manual MCP setup.
 
+### `networking/` — contacts & outreach (`applypilot network`) — details in §3, §11
+| File | Role |
+|------|------|
+| `service.py` | Orchestrator: find → rank → draft, per job. Owns the COLD (Apollo) + HOT (your connections) layers. |
+| `store.py` | The **`contacts` table** — own migration (`_CONTACT_COLUMNS`), NOT in `database._ALL_COLUMNS`. Atomic claims for send/DM. |
+| `providers.py` / `apollo.py` | Contact discovery. Apollo is the **sole** provider (paid plan required). |
+| `derive.py` / `rank.py` | Recover the real employer domain from a job row; pick 3–5 people (peers + recruiter). |
+| `connections.py` | Offline LinkedIn `Connections.csv` import → warm/"🤝 connection" flagging. |
+| `outreach.py` / `prompt.py` | One LLM call → email {subject, body} + a ≤300-char LinkedIn note. |
+| `gmail_send.py` / `gmail_oauth.py` | Send via OAuth (preferred) or SMTP, with résumé + cover letter + intro-deck attachments and send safeguards. |
+| `linkedin_dm.py` / `dm_prompt.py` | Dormant CLI-only **compose** helpers (auto-send abandoned — §7). |
+| `linkedin_agent.py` | Opt-in, read-only LinkedIn augmentation. Never sends. |
+
 ### `wizard/`
 | File | Role |
 |------|------|
 | `init.py` | First-time `init` wizard: creates `~/.applypilot/` with `resume.txt`, `profile.json`, `searches.yaml`, `.env`. |
+
+### `extension/` (repo root, not a Python package)
+MV3 Chrome extension **"ApplyPilot Contacts"** — a popup only. Pulls the outreach queue from the local
+dashboard, copies a drafted note, opens the LinkedIn profile. Never touches a LinkedIn page. See §8.
 
 ## Data / config locations
 
 **User data → `~/.applypilot/`** (override with `APPLYPILOT_DIR`):
 `applypilot.db`, `profile.json`, `resume.txt`/`.pdf`, `searches.yaml`, `.env`,
 `tailored_resumes/`, `cover_letters/`, `logs/`, `chrome-workers/`, `apply-workers/`.
+Also present at runtime: `ext_token` (extension shared secret), `gmail_oauth_client.json` +
+`gmail_token.json` (outreach send), `intro_deck.pdf` (auto-attached), `linkedin-dm-profile/`
+(isolated browser profile), `.linkedin_dm_consent`, `resume_renderer_runtime/` (npm-installed).
+**None of this is in git** — the repo carries no secrets.
 
 **Package-shipped config → `src/applypilot/config/`:**
 - `employers.yaml` — Workday employer registry (~48 portals)
@@ -116,8 +137,23 @@ writes them — this grouping *is* the pipeline state:
 - **cover:** `cover_letter_path, cover_letter_at, cover_attempts`
 - **apply:** `applied_at, apply_status, apply_error, apply_attempts, agent_id, last_attempted_at, apply_duration_ms, apply_task_id, verification_confidence`
 
-`database._ALL_COLUMNS` is the single source of truth; adding a key there
+Plus **`rejected_at`** — set when you mark a job rejected (the "rejected pile", §10).
+
+`database._ALL_COLUMNS` is the single source of truth **for `jobs`**; adding a key there
 auto-migrates old DBs. Retry caps: tailor/cover ≤ 5 attempts, apply ≤ 3.
+
+### The other three tables (NOT in `_ALL_COLUMNS` — each migrates itself)
+
+`jobs` is still the pipeline's state machine, but the DB now holds **four** tables:
+
+| Table | Owner | Purpose |
+|-------|-------|---------|
+| `jobs` | `database.py` | The 6-stage pipeline state machine (above). |
+| `contacts` | `networking/store.py` | People found per job + drafted outreach + send/DM status. `_CONTACT_COLUMNS` is its source of truth. |
+| `connections` | `networking/connections.py` | Your imported LinkedIn `Connections.csv` (name/company normalized for matching). |
+| `job_events` | `database.py` | Per-job **activity log** — one row per lifecycle event (`stage`, `status`, `detail`, `ts`). Append is best-effort and never raises into the pipeline. |
+
+Live counts on the dev machine (2026-07-27): jobs 5, contacts 19, connections 899, job_events 20.
 
 ## Common commands
 
@@ -129,8 +165,17 @@ applypilot run -w 4 --stream    # parallel discovery/enrich + concurrent stages
 applypilot run score tailor cover
 applypilot apply -w 3           # autonomous submit, 3 Chrome workers
 applypilot apply --dry-run      # fill forms without submitting
+applypilot apply --copilot      # fill everything, then STOP — you review + submit (see §9)
+applypilot apply --url <u> --copilot --resume   # reconnect to a paused co-pilot browser
 applypilot status               # DB stats table
-applypilot dashboard --serve    # interactive local operator dashboard
+applypilot dashboard --serve    # interactive local operator dashboard → :8765
+applypilot doctor               # deps/keys/tier + contact-provider + Gmail + DM readiness
+
+# networking / outreach
+applypilot network                          # find contacts for jobs + draft outreach
+applypilot network --import-connections <csv>   # import LinkedIn Connections.csv
+applypilot network --dm-list                # contacts with a drafted LinkedIn note
+applypilot network --compose-dm --dm-contact <id>   # compose invite note; YOU click Send
 ```
 
 ## Dev
@@ -204,40 +249,24 @@ NOT `_ALL_COLUMNS`). Full cycle: **find people → show in dashboard → draft e
 
 ## 5. LinkedIn DM auto-send (LDM) — **SUPERSEDED — see §7 (abandoned) + §8 (extension). Historical below.**
 
-New module **`src/applypilot/networking/linkedin_dm.py`** + `dm_prompt.py`. Drives the installed
-**agent-browser** binary (`~/.local/bin/agent-browser` v0.27.0) as a subprocess to send drafted
-LinkedIn notes. **Repos stay SEPARATE** — ApplyPilot shells out to the CLI (like claude/npx/Chrome).
+**`networking/linkedin_dm.py`** + `dm_prompt.py` drive the installed **agent-browser** binary
+(`~/.local/bin/agent-browser`, now v0.32.1) as a subprocess. Repos stay SEPARATE — ApplyPilot shells
+out to the CLI (like claude/npx/Chrome). **Auto-send was abandoned (§7); these modules survive only as
+CLI-only helpers for the COMPOSE path** (fill the invite dialog, human clicks Send).
 
-- **The MCP blocker was designed around, not fixed.** The original LDM-1 plan (`claude --mcp-config
-  <agent-browser mcp>`) is dead on 0.27.0 (no `mcp` subcommand). Instead the driver uses 0.27.0's
-  **deterministic CLI**: `open --profile <dir>` (persistent logged-in profile, fixes the wrong-browser
-  blocker), `snapshot` (a11y tree w/ refs), `keyboard inserttext` (real keystrokes into LinkedIn's
-  `contenteditable` composer), `click`, `screenshot`. **agent-browser keeps ONE persistent browser
-  session across CLI calls** (verified), so a send = a sequence of subprocess calls.
-- **Controller loop**: `snapshot → LLM picks ONE action → execute`, over a tiny fixed action set
-  (`click`/`type_message`/`send`/`abort`/`done`, see `dm_prompt.ACTIONS`). The note is inserted
-  **VERBATIM** — the model never supplies text (prompt-injection can't change what you say).
-- **Two delivery paths (the note is a ≤300-char connection-request note by design):** PATH A —
-  **Connect → Add a note → Send invitation** (the common case; works for people you're NOT connected
-  to, which is most contacts). PATH B — **Message** composer (when already connected / open-profile).
-  The controller prefers A unless a Message button is present; aborts on any InMail/Premium paywall.
-- **Safeguards** (all in `linkedin_dm.send()`): off by default (`NETWORKING_LINKEDIN_DM=0`), one-time
-  consent file (`.linkedin_dm_consent`), login precheck, dedicated isolated profile
-  (`~/.applypilot/linkedin-dm-profile`), daily cap (`LINKEDIN_DM_DAILY_LIMIT=5`), 30-day cross-contact
-  dedupe on normalized `linkedin_url`, atomic claim (`claim_dm_send`, `dm_sent_at IS NULL`), **dry-run**
-  (composes but never clicks Send). DB cols `dm_status/dm_sent_at/dm_error` (own migration in `store.py`).
-- **CLI**: `network --dm-login` (consent + headed login, polls for auth), `--dm-list`,
-  `--send-dm --dm-contact <id> [--dry-run]`. **Dashboard**: "Dry-run DM" + "Send DM" buttons per contact
-  (single-flight `DMRunner` — one browser session), Origin-guarded `POST /api/outreach/send-linkedin`,
-  `_dm_available()` gate. **doctor** shows an `agent-browser` + DM-readiness line. `.env.example` updated.
-- **Tests**: `tests/test_linkedin_dm.py` (13, subprocess+LLM mocked): bin discovery, verbatim prompt,
-  atomic claim race, url-normalized dedupe, all send() refusal paths, dry-run-composes-but-never-sends.
-  Full suite **96 passing**, ruff clean.
-- **STILL PENDING (needs the user, interactive):** the one-time `network --dm-login` (I can't type
-  LinkedIn creds), then the first dry-run + real send. **Account-risk:** user chose primary/unrestricted;
-  I kept an automatic dry-run pre-flight before the first live send. The 5 Affirm DM-eligible contacts
-  are non-connections but ARE reachable via **Connect + note** (Path A) — no InMail needed. LinkedIn also
-  rate-limits invitations (~100–200/week); the 5/day cap stays well under.
+- **Mechanism:** agent-browser's deterministic CLI (`open --profile`, `snapshot`, `keyboard inserttext`,
+  `click`) keeps ONE persistent browser session across calls. Controller loop = `snapshot → LLM picks ONE
+  action → execute` over a fixed action set (`dm_prompt.ACTIONS`). The note is inserted **VERBATIM** —
+  the model never supplies text, so prompt-injection can't change what you say.
+- **Delivery paths:** A — Connect → Add a note → Send invitation (most contacts aren't connections);
+  B — Message composer (already connected / open profile). Aborts on any InMail/Premium paywall.
+- **Safeguards** (`linkedin_dm.send()`): off by default (`NETWORKING_LINKEDIN_DM=0`), one-time consent
+  file (`.linkedin_dm_consent`), login precheck, isolated profile (`~/.applypilot/linkedin-dm-profile`),
+  daily cap (`LINKEDIN_DM_DAILY_LIMIT=5`), 30-day dedupe on normalized `linkedin_url`, atomic claim
+  (`claim_dm_send`). DB cols `dm_status/dm_sent_at/dm_error` (own migration in `store.py`).
+- **CLI today:** `network --dm-list`, `--compose-dm --dm-contact <id>` (composes, leaves it open for YOU
+  to click Send). `--send-dm` is now just an **alias of `--compose-dm`** — auto-send is disabled.
+  `--dm-login` does the one-time consent + headed login. Tests: `tests/test_linkedin_dm.py` (13).
 
 ## 6. Pipeline overhaul (committed `8da452e`) — Apollo, aggressive tailoring, email attachments, apply fixes
 
@@ -274,35 +303,73 @@ LinkedIn auto-send/compose buttons were REMOVED.** `linkedin_dm.py`/`dm_prompt.p
 CLI-only helpers. Interim UX: a **"Copy note + open LinkedIn"** button per contact (client-side, zero
 risk). Key lesson: **driving LinkedIn from OUTSIDE the browser is the wrong architecture** → led to §8.
 
-## 8. Chrome extension "LinkedIn Assistant" — BUILT (EXT-0..5), in live debugging
+## 8. Chrome extension "ApplyPilot Contacts" — REBUILT as a dead-simple contact list (`d4288a5`)
 
-The pivot: run INSIDE the user's real browser as an MV3 extension. It composes the note into the invite
-dialog and **the HUMAN clicks Send** (reliable + safe — LinkedIn blocks *robot* Sends, not human ones).
-Full PRD + review + build:
-- **Docs:** `docs/chrome-extension-prd.md` (v2 after review), `docs/chrome-extension-review.md`
-  (51-agent adversarial review → GO WITH CHANGES; caught the MV3-stateless-worker issue + 2 real code
-  bugs), `docs/tickets/EXT-0..6` + `EXT-README`.
-- **Code bugs the review fixed in the main app** (`web_dashboard.py`/`store.py`): **B3** — LinkedIn
-  queue eligibility now excludes `_DM_DONE_STATUSES = {sent,manual,skipped}` (was only `sent`); **B5** —
-  `mark_dm_sent` now stamps `dm_sent_at` (was invisible to the CLI dedupe/cap). Added
-  `mark_dm_manual`/`mark_dm_skipped`.
-- **`extension/`** (MV3, no build step): `manifest.json` (minimal perms: storage+alarms+host only),
-  stateless `background.js` (ALL run-state in `chrome.storage`; idempotent advance; timestamp pacing;
-  owns/validates a dedicated tab; validates linkedin_url), `content.js` (React-safe textarea fill,
-  identity cross-check, `textContent`-only overlay, positive send-detection, **NEVER clicks Send** —
-  verified), `popup.*`, `selectors.json`. `shared/constants.js` = frozen contract.
-- **Local API (EXT-0):** `GET /api/ext/queue[?job_url]`, `POST /api/ext/status`, `POST /api/ext/note` on
-  `:8765`; mutual **shared token** at `~/.applypilot/ext_token` (generated on dashboard startup, printed
-  to console; paste into the popup). 19 tests in `tests/test_ext_api.py`.
-- **Live-debug fixes so far:** (1) token chicken-and-egg → generate on startup; (2) dead Hunter URLs →
-  auto-skip; (3) content script inert on LinkedIn → **CSP blocks dynamic `import()`/`fetch()` of
-  extension resources** → inject constants+selectors as CLASSIC content scripts
-  (`shared/constants.content.js` + `shared/selectors.content.js`, before `content.js`); (4) mass
-  auto-skip (all 9 contacts) → `profileUnavailable()` false-positived on nav phrases + auto-skipped the
-  ambiguous "name didn't load" case → now STRONG 404 signals only + PAUSE on ambiguous.
-- **STILL PENDING (needs the user, interactive):** first successful live compose on a real BetterUp
-  profile. **After ANY extension reload, the user MUST also Cmd+R the LinkedIn tab** (reload orphans the
-  content script). Debug via DevTools console → Verbose → `[ApplyPilot]` logs.
+The first extension (EXT-0..5) was a full MV3 auto-composer: background service worker + content script
+that drove the LinkedIn DOM to fill the invite dialog. **It was deleted.** Live debugging never got past
+LinkedIn's CSP + React DOM churn (same root cause as §7). Commit `d4288a5` removed `background.js`,
+`content.js`, `selectors.json`, and `shared/*` — ~2,900 lines gone.
+
+**What exists now** (`extension/`, MV3, no build step) is a **popup and nothing else**:
+- `manifest.json` — permissions are just `storage` + `host_permissions: http://localhost:8765/*`.
+  **No LinkedIn host permission, no content scripts, no background worker** — it is structurally
+  incapable of touching a LinkedIn page.
+- `popup.html` / `popup.css` / `popup.js` — the entire UI + logic. Fetches `GET /api/ext/queue` from the
+  local dashboard (host_permissions bypasses CORS), groups contacts by company, and gives each an
+  editable note, **Copy note**, and **Open LinkedIn ↗**. All text inserted via `textContent`, never
+  `innerHTML`. `popup.js` also reads the OLD `extToken` storage key so the token carried over.
+- The loop is manual by design: copy → open their profile → paste → **you** send.
+
+**Local API (EXT-0) survives unchanged** and is what the popup talks to: `GET /api/ext/queue[?job_url]`,
+`POST /api/ext/status`, `POST /api/ext/note` on `:8765`, guarded by a shared token at
+`~/.applypilot/ext_token` (generated on dashboard startup, printed to console; paste into the popup).
+Tests: `tests/test_ext_api.py` + `tests/test_ext_queue_urls.py`. **Verified live this session** — the
+endpoint 401s without the token and returns the contact list with it.
+
+Historical docs (describe the DELETED auto-composer, keep for rationale only):
+`docs/chrome-extension-prd.md`, `docs/chrome-extension-review.md` (51-agent adversarial review),
+`docs/tickets/EXT-0..6`. Two real bugs that review found still live in the app: `_DM_DONE_STATUSES =
+{sent,manual,skipped}` gating queue eligibility, and `mark_dm_sent` stamping `dm_sent_at`.
+
+## 9. Co-pilot apply mode — the answer to "don't let the agent submit"
+
+`applypilot apply --copilot` (`cli.py:153`): the agent fills the **entire** application, then **STOPS**
+and leaves the browser open for you to review and submit yourself. It never auto-submits — the launcher
+treats an agent submit during co-pilot as a hard violation (`failed:copilot_violation_agent_submitted`,
+`launcher.py:571`). This is the practical middle ground between `--dry-run` (throwaway) and full auto.
+
+- **Chrome keep-alive contract:** a co-pilot browser must survive ALL cleanup paths — per-worker cleanup,
+  `kill_all_chrome`, and the `atexit` handler. `chrome.py` tracks `_keep_alive_ports`; pinned by
+  `tests/test_copilot_keepalive.py`. A kept-alive worker is never reaped; normal workers still are.
+- **`--resume`** (`cli.py:154`): reconnect to a still-open co-pilot browser that paused on a blocker and
+  continue from the current state. Use with `--url --copilot`.
+- Dashboard exposes this per row as **"Fill application"** for ready jobs (`6c906b3`).
+- `bf96e7d` fixed the activity log wrongly recording a co-pilot success as "Apply failed".
+
+## 10. Operator dashboard — application-tracker features
+
+`web_dashboard.py` grew a real tracking UI (it is by far the largest churn surface in recent commits):
+- **Per-job activity log** — `database.py` logs one row per lifecycle event (enrich/score/apply/...);
+  `log_activity` is best-effort and never raises into the pipeline. Rendered as a per-row dropdown that
+  stays open across auto-refresh (`0d4813d`).
+- **Rejected pile** — `rejected_at` column (`database.py:234`); mark/restore a job as rejected.
+- **Filter pills** — status buckets across the application list.
+- **Restart end-to-end** — re-run a job from scratch when an application didn't go through; also offered
+  on already-applied jobs behind a stronger confirm.
+- **People (contacts) toggle** co-located with Activity in the job footer.
+
+## 11. Outreach upgrades
+
+- **Hot-contacts layer** (`8acad38`) — surfaces your existing 1st-degree LinkedIn connections at the
+  target company as a separate WARM layer alongside the cold Apollo results. `service._find_hot_contacts`
+  enriches them via Apollo identity match, stores them as `source='connection'`, and drafts *warmer*
+  copy (reconnect email + a DM to a known connection). Badged "🤝 connection — you already know them".
+- **No-email contacts still get materials** (`8f0fd4d`) — a LinkedIn note is drafted and shown even when
+  no verified email exists, so the manual path is never empty-handed.
+- **Schedule-a-call CTA + intro deck** (`39dcb7c`) — outreach emails can carry a call-scheduling CTA and
+  auto-attach `~/.applypilot/intro_deck.pdf` (`INTRO_DECK_PATH`, `OUTREACH_ATTACH_DECK=1`).
+- **Send dedupe by `sent_message_id`** (`e93ef92`) — regenerating a draft no longer re-sends.
+- **Tailoring rule** (`f0d5e83`) — never list Gauntlet AI (a bootcamp) as work experience.
 
 ## Current environment state (the user's machine)
 
@@ -311,9 +378,12 @@ Full PRD + review + build:
 - **Gmail: connected via OAuth**, sends from **jorgealejandrodiezm@gmail.com** (both apps + outreach).
   Outreach emails carry résumé + cover letter PDF attachments.
 - **`TAILOR_AGGRESSIVE=1`** set — resumes aggressively match the JD (fabrication guard off).
-- **899 LinkedIn connections imported.** Real jobs: Affirm, Visa, **AMD** (careers site 403-blocks
-  automation), **BetterUp** (Ashby — applied successfully). Both AMD + BetterUp scored 4/10 (reach roles;
-  the scorer reads the user as PM/SEO, not eng — recalibration may be worth it).
+- **899 LinkedIn connections imported** (`doctor` confirms warm-contact flagging is on).
+- **Current DB (verified this session):** 5 jobs, all scored/tailored/covered — **4 applied, 1 ready to
+  apply, 0 apply errors**. Sources: webAI, SpaceX, DevRev, BetterUp, Affirm. Scores: 4× 10/10, 1× 4/10
+  (the earlier "everything scores 4/10" calibration complaint appears resolved).
+- **16 contacts queued for outreach** across webAI / SpaceX / DevRev, each with a drafted LinkedIn note
+  — served live by `/api/ext/queue`.
 - **Extension token** lives at `~/.applypilot/ext_token`; the dashboard prints it on startup.
 - **Dashboard:** `.venv/bin/applypilot dashboard --serve` → http://localhost:8765. Restart after code
   changes; kill a stale one with `lsof -ti:8765 | xargs kill -9`. Hard-refresh the browser after
@@ -325,11 +395,22 @@ Full PRD + review + build:
   is flaky; after source edits run **`.venv/bin/python -m pip install ".[gmail]" --quiet`** to refresh
   the installed console script, then restart the dashboard.
 - **Tests:** `APPLYPILOT_DIR=$(mktemp -d) PYTHONPATH=src .venv/bin/python -m pytest tests/ -q`.
-  **~110 passing**, ruff clean (line-length 120). Extension browser behavior is MANUAL (`extension/MANUAL-TEST.md`).
+  **126 passing** (verified 2026-07-27). The `APPLYPILOT_DIR=$(mktemp -d)` prefix is required — without it
+  tests run against your real `~/.applypilot/`.
+- **Ruff clean** — `.venv/bin/python -m ruff check .` (line-length 120, target py311). Two long-standing
+  `F841` dead assignments (`apply/prompt.py` `auth_info`, `scoring/tailor.py` `projects_str`/`projects`)
+  were removed 2026-07-27; the generated prompts were diffed old-vs-new and are byte-identical.
+  Note `preserved_projects` is deliberately NOT fed to either tailor prompt — only companies, school,
+  and real metrics are. That's existing behavior, not an oversight of the cleanup.
+- Extension behavior is manual, but there's much less to test now — it's a popup only (`extension/README.md`).
+  `MANUAL-TEST.md` and `CONTRACTS.md` were deleted along with the auto-composer.
 - **Gmail optional dep:** `pip install ".[gmail]"` (google-api-python-client, google-auth-oauthlib).
 - **Big decisions get an adversarial multi-agent review first** (Workflow) — caught 13 issues on the
   networking PRD, the agent-browser blocker on the DM PRD, and 5 blockers + the MV3 issue on the
   extension PRD. Worth it before building risky things. **Extension was built by a coordinated Workflow
   team** (freeze contracts → parallel per-file build → integrate → verify).
-- **All work committed + pushed to `main`** (github.com/alediez2048/ApplyPilot). Nothing sensitive in git
-  (secrets/DB/token all in `~/.applypilot/`, outside the repo).
+- **Working tree is clean, but `main` is 10 commits AHEAD of `origin/main`** (as of 2026-07-27) — the
+  whole dashboard-tracker + hot-contacts + extension-rebuild run is local only. Push when ready.
+  Nothing sensitive in git (secrets/DB/token all in `~/.applypilot/`, outside the repo).
+- `.venv/bin/` has accumulated `applypilot 2`…`applypilot 9` duplicate console scripts from repeated
+  reinstalls. Harmless clutter — `applypilot` is the live one.

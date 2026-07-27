@@ -400,8 +400,17 @@ treats an agent submit during co-pilot as a hard violation (`failed:copilot_viol
 - **Ruff clean** — `.venv/bin/python -m ruff check .` (line-length 120, target py311). Two long-standing
   `F841` dead assignments (`apply/prompt.py` `auth_info`, `scoring/tailor.py` `projects_str`/`projects`)
   were removed 2026-07-27; the generated prompts were diffed old-vs-new and are byte-identical.
-  Note `preserved_projects` is deliberately NOT fed to either tailor prompt — only companies, school,
-  and real metrics are. That's existing behavior, not an oversight of the cleanup.
+- **`preserved_projects` now reaches both tailor prompts** (`_preserved_projects_rule`, added
+  2026-07-27). It previously reached neither, even though the wizard collects it, `cover_letter.py`
+  uses it, and `validator.validate_tailored_resume` warns when a project goes missing — the check
+  existed but the instruction was never given. Deliberately **softer than the companies rule**:
+  companies/school missing = error, project missing = warning, so the rule forbids *renaming or
+  inventing* project names while still allowing an irrelevant project to be dropped. Emits nothing
+  at all when the list is empty, and contains no em dash (the validator errors on those).
+  Pinned by `tests/test_tailor_prompts.py`.
+- **Still open:** `validate_json_fields` — the validator actually used by the tailor stage — does not
+  check preserved project names at all. That check lives only in the legacy text-path
+  `validate_tailored_resume`. So the rule is prompt-enforced but not output-verified.
 - Extension behavior is manual, but there's much less to test now — it's a popup only (`extension/README.md`).
   `MANUAL-TEST.md` and `CONTRACTS.md` were deleted along with the auto-composer.
 - **Gmail optional dep:** `pip install ".[gmail]"` (google-api-python-client, google-auth-oauthlib).

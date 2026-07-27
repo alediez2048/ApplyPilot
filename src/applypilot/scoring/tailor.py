@@ -53,6 +53,27 @@ def _never_employer_rule(resume_facts: dict) -> str:
             f"training programs (bootcamps), and must appear ONLY in the Education section: {joined}.")
 
 
+def _preserved_projects_rule(resume_facts: dict) -> str:
+    """A rule keeping real project NAMES intact whenever a project is included.
+
+    Deliberately softer than the preserved-companies rule. The validator treats a missing company
+    as an error but a missing project as a warning ("may have been renamed"), because dropping a
+    project that is irrelevant to the target role is legitimate tailoring. What is never allowed
+    is renaming a real project or inventing one, so that is exactly what this rule forbids.
+
+    Returns "" when the profile lists no projects — including the leading newline — so a profile
+    without projects produces a byte-identical prompt. Contains no em dash on purpose: the prompt
+    bans them and the validator treats one as a hard error, so the rule must not prime for them.
+    """
+    names = resume_facts.get("preserved_projects") or []
+    if not names:
+        return ""
+    joined = ", ".join(names)
+    return (f"\n- Real projects: {joined}. Reorder them, reword their bullets, or drop ones irrelevant "
+            f"to this role. But any project you DO include must keep its real name exactly as written. "
+            f"Never rename a real project and never invent a project name.")
+
+
 def _build_aggressive_tailor_prompt(profile: dict) -> str:
     """Aggressive variant: mirror the JD's required skills/keywords into the resume to
     maximize recruiter/ATS match. Preserves real employers, school, and degrees (inventing
@@ -86,7 +107,7 @@ Take the base resume and the job description. Return a tailored resume as a JSON
 - Real employers: {companies_str} -- names and the fact of employment stay as-is.
 - Real school: {school} and degree level: {education_level}.
 - Do NOT invent employers, job titles at fake companies, degrees, or certifications.
-  Everything else (skills, tools, framings, emphasis) should match the JD as closely as possible.
+  Everything else (skills, tools, framings, emphasis) should match the JD as closely as possible.{_preserved_projects_rule(resume_facts)}
 {_never_employer_rule(resume_facts)}
 
 ## VOICE:
@@ -177,7 +198,7 @@ BULLETS: Strong verb + what you built + quantified impact. Vary verbs (Built, De
 - Do NOT invent work, companies, degrees, or certifications
 - Do NOT change real numbers ({metrics_str})
 - Preserved companies: {companies_str} -- names stay as-is
-- Preserved school: {school}
+- Preserved school: {school}{_preserved_projects_rule(resume_facts)}
 {_never_employer_rule(resume_facts)}
 - Must fit 1 page.
 

@@ -130,7 +130,22 @@ def job_attachments(job_url: str) -> list[tuple[str, str]]:
     cover_pdf = Path(row[1]).with_suffix(".pdf") if row[1] else None
     if cover_pdf and cover_pdf.exists():
         out.append((str(cover_pdf), f"{slug}_Cover_Letter.pdf"))
+    # Intro deck / one-pager — the same static PDF on every outreach (not per-job). Drop a PDF at
+    # ~/.applypilot/intro_deck.pdf (or point INTRO_DECK_PATH at one) and it rides along.
+    deck = _intro_deck_path()
+    if deck and deck.exists():
+        out.append((str(deck), f"{slug}_Intro_Deck.pdf"))
     return out
+
+
+def _intro_deck_path():
+    """Path to the intro deck PDF to attach to outreach, or None if disabled/absent."""
+    from pathlib import Path
+    from applypilot import config
+    if os.environ.get("OUTREACH_ATTACH_DECK", "1").lower() not in {"1", "true", "yes", "on"}:
+        return None
+    override = os.environ.get("INTRO_DECK_PATH")
+    return Path(override).expanduser() if override else (config.APP_DIR / "intro_deck.pdf")
 
 
 def attach_pdfs(msg: EmailMessage, attachments: list[tuple[str, str]] | None) -> None:

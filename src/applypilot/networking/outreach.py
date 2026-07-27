@@ -39,20 +39,37 @@ Produce TWO things:
    - 3–4 short sentences. Open warm and human, not stiff.
    - Name the SPECIFIC role the sender applied to and the company, plus one real, relevant thing
      about the sender (from their profile).
-   - A light, low-pressure ask: a quick chat, or a genuine question about the team/role.
-   - Sign off casually with the sender's first name only. No signature block, no links.
+   - CALL TO ACTION: invite them to a quick call to connect. If a SCHEDULING LINK is provided
+     below, weave it in naturally so they can grab a time directly (e.g. "if you're open to a
+     quick call, grab a time that works here: <link>"). If no link is provided, just suggest a
+     short call/chat. Keep it low-pressure, not pushy.
+   - Sign off casually with the sender's first name only. No signature block. The ONLY link
+     allowed is the scheduling link (when provided).
    - Subject: short, casual, specific (e.g. "quick q about the <role> role").
 
 2. A LINKEDIN connection note (linkedin_note):
    - MUST be 300 characters or fewer (hard limit — count carefully, aim for ~230).
    - 1–2 warm sentences. Shorter and friendlier than the email; it's a connection request note.
-   - Mention the role + a quick genuine hook, and that you'd love to connect.
-   - Sign with the first name. No links.
+   - Mention the role + a quick genuine hook, and that you'd love to connect and maybe find a
+     time to chat. Do NOT paste the scheduling link here (LinkedIn connect notes strip/penalize
+     links and space is tight) — just express interest in connecting/talking.
+   - Sign with the first name.
 
 If the user provides a STYLE DIRECTION below, follow it closely while keeping the messages
 honest, casual, and concise.
 
 Return ONLY a JSON object: {"subject": "...", "body": "...", "linkedin_note": "..."}"""
+
+
+def _scheduling_link(profile: dict) -> str:
+    """The sender's calendar/scheduling link (Calendly, cal.com, Google appt schedule, …).
+
+    Priority: SCHEDULING_LINK env → profile['personal']['scheduling_link'] → ''. When present, the
+    email CTA invites a call and includes this link so recipients can book a time directly.
+    """
+    import os
+    return (os.environ.get("SCHEDULING_LINK", "").strip()
+            or ((profile or {}).get("personal", {}).get("scheduling_link") or "").strip())
 
 
 def _resolve_style(profile: dict, style: str = "") -> str:
@@ -136,6 +153,13 @@ def draft_email(profile: dict, job: dict, contact: dict, style: str = "", warm: 
         relationship = contact.get("match_reason", "works at the company")
         warm_block = ""
 
+    link = _scheduling_link(profile)
+    sched_block = (
+        f"SCHEDULING LINK (include in the EMAIL CTA so they can book a call directly): {link}\n\n"
+        if link else
+        "SCHEDULING LINK: none provided — invite a quick call/chat without a link.\n\n"
+    )
+
     user = (
         "SENDER:\n" + "\n".join(sender_bits) + "\n\n"
         "TARGET CONTACT:\n"
@@ -144,7 +168,7 @@ def draft_email(profile: dict, job: dict, contact: dict, style: str = "", warm: 
         f"Relationship: {relationship}\n\n"
         f"JOB APPLIED TO:\nRole: {role}\nCompany: {company}\n"
         f"Description (excerpt):\n{jd}\n\n"
-        + warm_block + style_block +
+        + sched_block + warm_block + style_block +
         "Write the outreach email. Return the JSON."
     )
 

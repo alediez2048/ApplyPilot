@@ -2000,6 +2000,16 @@ _INDEX_HTML = r"""<!doctype html>
   .st-red    { background:#fbeae8; color:#b91c1c; border-color:#e6a6a0; font-weight:700; }
   .st-green  { background:var(--green-soft); color:var(--green); border-color:#a9e0c2; }
   .st-rejected { background:#eceaea; color:#7a7570; border-color:#d6d3ce; }
+  /* Application filter pills. */
+  .job-filters { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:14px; }
+  .filter-pill { background:var(--surface); border:1px solid var(--line2); border-radius:999px; padding:6px 14px;
+      min-height:34px; font-size:13px; font-weight:600; color:var(--soft); cursor:pointer; display:inline-flex;
+      align-items:center; gap:6px; transition:background .15s ease, border-color .15s ease; }
+  .filter-pill:hover { background:rgba(0,0,0,.04); }
+  .filter-pill.active { background:var(--accent); border-color:var(--accent); color:#fff; }
+  .filter-pill .fp-n { background:rgba(0,0,0,.08); border-radius:999px; padding:0 7px; font-size:11px; font-weight:600; }
+  .filter-pill.active .fp-n { background:rgba(255,255,255,.25); }
+  .jobs-empty { padding:24px; text-align:center; color:var(--muted); font-size:13px; }
   .st-pulse .st-icon { animation:stpulse 1.2s ease-in-out infinite; }
   @keyframes stpulse { 0%,100% { opacity:1; } 50% { opacity:.35; } }
   .review-cta { display:inline-block; margin-top:4px; font-size:11px; color:#915907; }
@@ -2106,12 +2116,14 @@ _INDEX_HTML = r"""<!doctype html>
 
   <section>
     <h2>Applications</h2>
+    <div id="jobFilters" class="job-filters"></div>
     <div class="table-wrap">
       <table>
         <thead><tr><th>Status</th><th>Job</th><th>Description</th><th>Materials</th><th>Links</th></tr></thead>
         <tbody id="jobs"></tbody>
       </table>
     </div>
+    <div id="jobsEmpty" class="jobs-empty" hidden></div>
   </section>
 
   <hr class="section-sep">
@@ -2357,6 +2369,34 @@ const STATUS_META = {
   applied:         { icon: '✓',  label: 'Applied',         cls: 'st-green' },
   rejected:        { icon: '✕',  label: 'Rejected',        cls: 'st-rejected' },
 };
+
+// ── Job filter buckets: map the 12 granular statuses → a few meaningful stages you filter by. ──
+const JOB_BUCKETS = {
+  all:       { label: 'All',         icon: '',    statuses: null },  // null = everything
+  needs_you: { label: 'Needs you',   icon: '👉',  statuses: ['ready','ready_to_submit','needs_human','failed'] },
+  progress:  { label: 'In progress', icon: '🚀',  statuses: ['imported','enriched','scored','detail_failed','in_progress','dryrun'] },
+  applied:   { label: 'Applied',     icon: '✅',  statuses: ['applied'] },
+  rejected:  { label: 'Rejected',    icon: '✕',   statuses: ['rejected'] },
+};
+const JOB_FILTER_ORDER = ['all','needs_you','progress','applied','rejected'];
+let JOB_FILTER = 'all';  // client-side view state; persists across the 2.5s auto-refresh
+
+function jobInBucket(j, bucketKey) {
+  const b = JOB_BUCKETS[bucketKey];
+  if (!b || !b.statuses) return true;             // 'all'
+  return b.statuses.includes(j.status);
+}
+function setJobFilter(key) { JOB_FILTER = key; refresh(); }
+function renderJobFilters(jobs) {
+  const el = document.getElementById('jobFilters');
+  if (!el) return;
+  el.innerHTML = JOB_FILTER_ORDER.map(key => {
+    const b = JOB_BUCKETS[key];
+    const n = key === 'all' ? jobs.length : jobs.filter(j => jobInBucket(j, key)).length;
+    const active = key === JOB_FILTER ? ' active' : '';
+    return `<button class="filter-pill${active}" onclick="setJobFilter('${key}')">${b.icon ? b.icon + ' ' : ''}${b.label} <span class="fp-n">${n}</span></button>`;
+  }).join('');
+}
 const BLOCKER_ASK = {
   captcha: 'Solve the captcha in the open Chrome window, then click Continue.',
   login: 'Log in / clear the account wall in the open Chrome window, then click Continue.',
@@ -2613,7 +2653,15 @@ async function refresh() {
   document.getElementById('applyLog').textContent = [...(data.worker_log || []), '', ...(data.claude_log || [])].join('\n');
   NET_AVAIL = !!data.networking_available;
   GMAIL_AVAIL = !!data.gmail_available;
-  document.getElementById('jobs').innerHTML = (data.jobs || []).map(j => {
+  const allJobs = data.jobs || [];
+  renderJobFilters(allJobs);
+  const shown = allJobs.filter(j => jobInBucket(j, JOB_FILTER));
+  const emptyEl = document.getElementById('jobsEmpty');
+  if (emptyEl) {
+    emptyEl.hidden = shown.length > 0;
+    emptyEl.textContent = allJobs.length === 0 ? '' : `No applications in "${JOB_BUCKETS[JOB_FILTER].label}".`;
+  }
+  document.getElementById('jobs').innerHTML = shown.map(j => {
     const key = encodeURIComponent(j.url);
     return `
     <tr>

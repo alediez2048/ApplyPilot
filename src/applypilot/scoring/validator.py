@@ -148,8 +148,17 @@ def validate_json_fields(data: dict, profile: dict, mode: str = "normal") -> dic
             for b in entry.get("bullets", []):
                 all_text_parts.append(b)
 
-    # Projects: collect bullets
+    # Projects: preserved names are a WARNING, not an error (mirrors validate_tailored_resume).
+    # Dropping a project that is irrelevant to the target role is legitimate tailoring -- the
+    # tailor prompt explicitly allows it -- so this cannot be an error. What it does catch is a
+    # rename: the name went missing while the project itself is still on the resume.
     if isinstance(data["projects"], list):
+        project_headers = " ".join(
+            str(e.get("header", "")) for e in data["projects"]
+        ).lower()
+        for project in resume_facts.get("preserved_projects", []):
+            if project.lower() not in project_headers:
+                warnings.append(f"Project '{project}' not found -- may have been renamed")
         for entry in data["projects"]:
             for b in entry.get("bullets", []):
                 all_text_parts.append(b)

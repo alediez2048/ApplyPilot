@@ -408,9 +408,23 @@ treats an agent submit during co-pilot as a hard violation (`failed:copilot_viol
   inventing* project names while still allowing an irrelevant project to be dropped. Emits nothing
   at all when the list is empty, and contains no em dash (the validator errors on those).
   Pinned by `tests/test_tailor_prompts.py`.
-- **Still open:** `validate_json_fields` — the validator actually used by the tailor stage — does not
-  check preserved project names at all. That check lives only in the legacy text-path
-  `validate_tailored_resume`. So the rule is prompt-enforced but not output-verified.
+  `validate_json_fields` — the validator the tailor stage actually calls — now checks the project
+  names too (added 2026-07-27; previously only the legacy text path did). It matches against project
+  `header` fields, **warns and never blocks**, and cannot be escalated by `strict` mode, since
+  dropping an irrelevant project is allowed. Warnings land in `{prefix}_REPORT.json` alongside the
+  tailored resume. Pinned by `tests/test_validator_projects.py`.
+
+**Severity ladder for preserved entities** (worth knowing before adding a new one):
+
+| Entity | JSON path | Text path | Blocks a run? |
+|--------|-----------|-----------|---------------|
+| `preserved_companies` | error | error | yes — retries, then `failed_validation` |
+| `preserved_school` | error | error | yes |
+| `preserved_projects` | **warning** | warning | no — recorded in the report only |
+| banned words | mode-dependent | mode-dependent | only in `strict` |
+
+Note validator **warnings are never logged to the console** — they are only persisted in
+`{prefix}_REPORT.json`. That applies to every warning, not just projects.
 - Extension behavior is manual, but there's much less to test now — it's a popup only (`extension/README.md`).
   `MANUAL-TEST.md` and `CONTRACTS.md` were deleted along with the auto-composer.
 - **Gmail optional dep:** `pip install ".[gmail]"` (google-api-python-client, google-auth-oauthlib).

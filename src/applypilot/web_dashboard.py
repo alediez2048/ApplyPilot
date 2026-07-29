@@ -578,10 +578,28 @@ def run_dashboard_apply(limit: int = 10, dry_run: bool = False, copilot: bool = 
     # Refuse to start at all while a co-pilot review is already open. The queue below is
     # blind to it (`queue_for_apply` filters on the JOB, not on whether a browser is being
     # used), so without this a fresh apply silently closes the form you were mid-review on.
+    stale_note = ""
     if copilot and not dry_run:
         awaiting = _jobs.awaiting_human(conn)
+        # ...but only while the browser is REALLY still open. `apply_status` outlives the
+        # process that set it: an apply runs as a synchronous child of this server, so
+        # restarting the dashboard kills the browser and leaves the row saying a form is
+        # waiting. Those fossils blocked a brand-new application with three reviews that no
+        # longer existed, one of them from the previous day. Liveness — not a timeout — is the
+        # discriminator, because it IS the question the guard cares about: would starting an
+        # apply close a window someone needs?
+        if awaiting and not _review_browser_alive():
+            names = ", ".join((r["title"] or "?")[:28] for r in awaiting[:3])
+            stale_note = (f"Ignored {len(awaiting)} abandoned review(s) ({names}) — the browser "
+                          f"is gone, so nothing was waiting. Re-apply to fill them again.")
+            print(f"NOTE: {stale_note}", flush=True)
+            for r in awaiting:
+                log_event(r["url"], "apply", "info",
+                          "Review browser is gone (dashboard restarted) — this application was "
+                          "never submitted. Re-apply to fill it again.", conn)
+            awaiting = []
         if awaiting:
-            names = ", ".join(r["title"][:28] for r in awaiting[:3])
+            names = ", ".join((r["title"] or "?")[:28] for r in awaiting[:3])
             msg = (f"{len(awaiting)} application(s) are filled and waiting for you ({names}). "
                    f"Starting another would close the browser you need. Submit or dismiss "
                    f"them first.")
@@ -637,8 +655,25 @@ def run_dashboard_apply(limit: int = 10, dry_run: bool = False, copilot: bool = 
     result = {"queued": len(rows), "applied": applied, "failed": failed,
               "needs_review": needs_review,
               "held_back": max(0, len(rows) - index) if rows else 0}
+    if stale_note:
+        result["stale_reviews_note"] = stale_note
     print(f"Dashboard URL apply complete: {result}", flush=True)
     return result
+
+
+def _review_browser_alive(max_workers: int = 4) -> bool:
+    """Is a co-pilot review browser actually still open on any worker's CDP port?
+
+    `apply_status` says a form is waiting; only this says the window still exists. Probed
+    rather than remembered: `chrome._keep_alive_ports` is per-process state and is empty in
+    every new process, which is precisely why a restart turned pending reviews into fossils.
+
+    Any live port blocks — the port is not recorded per job, so a live browser could belong to
+    any pending row and closing the wrong one is the failure being prevented.
+    """
+    from applypilot.apply.chrome import BASE_CDP_PORT, chrome_alive_on_port
+    return any(chrome_alive_on_port(BASE_CDP_PORT + w, timeout=0.5)
+               for w in range(max(1, max_workers)))
 
 
 def run_dashboard_fill_one(url: str) -> dict:

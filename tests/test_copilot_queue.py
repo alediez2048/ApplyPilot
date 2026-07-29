@@ -56,7 +56,20 @@ def _never_runs(*a, **k):
     raise AssertionError("an apply subprocess was launched when it must not have been")
 
 
-def test_a_batch_will_not_start_while_a_review_is_open(wd, db, monkeypatch):
+@pytest.fixture()
+def live_review_browser(monkeypatch):
+    """Pretend the co-pilot review window is still open.
+
+    The guard blocks on a pending review only while its browser actually exists — a row alone
+    is not enough, because `apply_status` outlives the process that set it (see
+    test_copilot_stale_reviews.py). These tests are about a REAL open review, so they have to
+    say so; without this they would pass for the wrong reason on a machine with no Chrome.
+    """
+    from applypilot.apply import chrome
+    monkeypatch.setattr(chrome, "chrome_alive_on_port", lambda *a, **k: True)
+
+
+def test_a_batch_will_not_start_while_a_review_is_open(wd, db, monkeypatch, live_review_browser):
     """The exact loss: an open review browser is invisible to `queue_for_apply`, which
     filters on the JOB, not on whether a browser is in use."""
     _job(db, "http://j/zello", "Zello", apply_status="ready_to_submit")
@@ -69,7 +82,7 @@ def test_a_batch_will_not_start_while_a_review_is_open(wd, db, monkeypatch):
     assert "Zello" in res["blocked"], "the operator needs to know WHICH review is open"
 
 
-def test_a_needs_human_blocker_also_blocks(wd, db, monkeypatch):
+def test_a_needs_human_blocker_also_blocks(wd, db, monkeypatch, live_review_browser):
     """`needs_human` (captcha/login/registration wall) is also an open browser."""
     _job(db, "http://j/arm", "Arm", apply_status="needs_human", apply_error="login")
     _job(db, "http://j/next", "NextCo")
@@ -149,7 +162,7 @@ def test_applied_jobs_do_not_pause_the_queue(wd, db, monkeypatch):
     assert len(launched) == 2 and res["applied"] == 2
 
 
-def test_dry_run_is_not_gated(wd, db, monkeypatch):
+def test_dry_run_is_not_gated(wd, db, monkeypatch, live_review_browser):
     """A dry run opens no browser, so a pending review cannot be harmed by it."""
     _job(db, "http://j/zello", "Zello", apply_status="ready_to_submit")
     _job(db, "http://j/next", "NextCo")

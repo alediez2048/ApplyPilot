@@ -189,6 +189,142 @@ def draft_email(profile: dict, job: dict, contact: dict, style: str = "", warm: 
     return {"subject": subject, "body": body, "linkedin_note": note}
 
 
+_FOLLOWUP_SYSTEM = """You write short follow-up emails for a job seeker who already emailed
+someone at a company they applied to and got no reply.
+
+Hard rules — a bad follow-up costs more than no follow-up:
+- SHORT. Two or three sentences. Shorter than the first email, always.
+- Never guilt, never "just bumping this", never "per my last email", never imply they owe a reply.
+- Do NOT restate the original email. They can scroll down; it is in the same thread.
+- ALWAYS give them an easy out — an explicit line saying it's fine to say no or that you'll
+  stop. This is what separates persistent from spammy.
+- No buzzwords, no "I hope this finds you well", no corporate voice. Contractions, real person.
+- Never invent facts about the sender. Never attach years to a specific tool or framework.
+
+Return ONLY JSON: {"subject": "...", "body": "..."}
+The subject MUST be the original subject prefixed with "Re: " so it threads naturally."""
+
+# What each touch is FOR. A follow-up that doesn't change with position reads as an autoresponder.
+_TOUCH_INTENT = {
+    1: ("Second touch (~2 days later). Brief, friendly nudge. Add ONE new, concrete thing — a "
+        "detail about their work, or something the sender shipped that's relevant. Give them an out."),
+    2: ("Third touch (~4 days later). Shorter still. Offer to make it easy: ask whether it's "
+        "worth pursuing at all, or whether someone else there is the better person to talk to."),
+    3: ("Final touch (~7 days later). This is the LAST message — say so plainly and warmly. "
+        "Close the loop with no pressure, leave the door open, and do not ask a question that "
+        "demands a reply."),
+}
+
+
+def draft_followup(profile: dict, job: dict, contact: dict, touch: int = 1,
+                   style: str = "") -> dict:
+    """Draft follow-up #`touch` for a contact who was emailed and hasn't replied.
+
+    `touch` is 1-based: 1 = the first follow-up (second message overall). Returns
+    {"subject", "body"}. Raises on LLM/parse failure, like draft_email.
+    """
+    role = job.get("title") or "the role"
+    company = contact.get("company") or job.get("company") or job.get("site") or "the company"
+    original_subject = (contact.get("outreach_subject") or f"Question about the {role} role").strip()
+    intent = _TOUCH_INTENT.get(max(1, min(touch, 3)), _TOUCH_INTENT[3])
+    directive = _resolve_style(profile, style)
+    link = _scheduling_link(profile)
+
+    sent_on = (contact.get("submitted_at") or "")[:10]
+    user = (
+        f"SENDER: {_sender_name(profile)}\n"
+        f"TARGET: {contact.get('full_name', '')} — {contact.get('title', '')} at {company}\n"
+        f"ROLE APPLIED FOR: {role}\n"
+        f"ORIGINAL SUBJECT (reuse it with a 'Re: ' prefix): {original_subject}\n"
+        f"ORIGINAL EMAIL SENT: {sent_on or 'recently'} — no reply since.\n"
+        f"PREVIOUS MESSAGE BODY (do NOT repeat it):\n{(contact.get('outreach_message') or '')[:700]}\n\n"
+        f"THIS FOLLOW-UP: {intent}\n\n"
+        + (f"SCHEDULING LINK (optional, only if it fits naturally): {link}\n\n" if link else "")
+        + (f"STYLE DIRECTION (follow closely):\n{directive}\n\n" if directive else "")
+        + "Write the follow-up. Return the JSON."
+    )
+
+    client = get_client("light")
+    raw = client.chat(
+        [{"role": "system", "content": _FOLLOWUP_SYSTEM}, {"role": "user", "content": user}],
+        max_tokens=300, temperature=0.7,
+    )
+    data = extract_json(raw)
+    subject = sanitize_text(str(data.get("subject", ""))).strip()
+    body = sanitize_text(str(data.get("body", ""))).strip()
+    if not subject:
+        subject = original_subject if original_subject.lower().startswith("re:") else f"Re: {original_subject}"
+    if not body:
+        raise ValueError("empty follow-up body")
+    return {"subject": subject, "body": body}
+
+
+_LI_FOLLOWUP_SYSTEM = """You write short LinkedIn follow-up messages for a job seeker.
+
+The situation: they sent a connection request with a note, the person ACCEPTED, and then
+never replied. Accepting is a small yes — treat it as mild interest, not as being ignored.
+
+Hard rules:
+- VERY short. LinkedIn is a chat window, not email. 2-4 sentences, no salutation block,
+  no sign-off with a full name. Write like a DM to a colleague.
+- They already read your connect note. Do NOT repeat it.
+- Never say "just following up", "bumping this", "circling back", or "per my message".
+- Ask ONE easy, specific question they can answer in a sentence. A question is better than
+  a statement here, because a chat message with no question gets no reply.
+- Give them an out. One short clause is enough.
+- No buzzwords, no corporate voice. Contractions. Lowercase-casual is fine.
+- Never invent facts about the sender. Never attach years to a specific tool or framework.
+
+Return ONLY JSON: {"message": "..."}"""
+
+_LI_TOUCH_INTENT = {
+    1: ("They accepted but never replied. Thank them briefly for connecting, then ask one "
+        "specific question about the role or the team — something a recruiter can answer fast."),
+    2: ("Second nudge. Shorter. Offer an easy redirect: ask whether they're the right person "
+        "for this, or who is."),
+    3: ("Final message. Say plainly it's the last one, keep the door open, no question that "
+        "demands an answer."),
+}
+
+
+def draft_linkedin_followup(profile: dict, job: dict, contact: dict, touch: int = 1,
+                            style: str = "") -> dict:
+    """Draft LinkedIn follow-up #`touch` for a contact who connected but went quiet.
+
+    Returns {"message": str}. This is a DIRECT MESSAGE to an existing 1st-degree
+    connection, so the 300-char connection-note cap does NOT apply — but brevity still
+    matters far more than in email, because it lands in a chat window.
+    """
+    role = job.get("title") or "the role"
+    company = contact.get("company") or job.get("company") or job.get("site") or "the company"
+    intent = _LI_TOUCH_INTENT.get(max(1, min(touch, 3)), _LI_TOUCH_INTENT[3])
+    directive = _resolve_style(profile, style)
+    sent_on = (contact.get("dm_sent_at") or "")[:10]
+
+    user = (
+        f"SENDER: {_sender_name(profile)}\n"
+        f"TARGET: {contact.get('full_name', '')} — {contact.get('title', '')} at {company}\n"
+        f"ROLE APPLIED FOR: {role}\n"
+        f"CONNECTION NOTE THEY ALREADY READ (do NOT repeat it):\n"
+        f"{(contact.get('linkedin_message') or '')[:400]}\n"
+        f"They accepted the invite{f' around {sent_on}' if sent_on else ''} and have not replied.\n\n"
+        f"THIS MESSAGE: {intent}\n\n"
+        + (f"STYLE DIRECTION (follow closely):\n{directive}\n\n" if directive else "")
+        + "Write the LinkedIn follow-up. Return the JSON."
+    )
+
+    client = get_client("light")
+    raw = client.chat(
+        [{"role": "system", "content": _LI_FOLLOWUP_SYSTEM}, {"role": "user", "content": user}],
+        max_tokens=250, temperature=0.75,
+    )
+    data = extract_json(raw)
+    msg = sanitize_text(str(data.get("message", ""))).strip()
+    if not msg:
+        raise ValueError("empty LinkedIn follow-up")
+    return {"message": msg}
+
+
 def _cap_linkedin(note: str) -> str:
     """Enforce LinkedIn's 300-char note limit (inclusive), trimming at a word boundary."""
     if len(note) <= _LINKEDIN_LIMIT:

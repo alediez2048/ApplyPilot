@@ -17,7 +17,9 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import smtplib
+from datetime import datetime, timezone
 from email.message import EmailMessage
 from email.utils import formataddr, make_msgid
 
@@ -103,11 +105,69 @@ def _applicant_slug() -> str:
         return "Resume"
 
 
+_SIG_CACHE: dict[str, str] = {}
+
+
+def signature_path():
+    """Local override / fallback signature (HTML). Used when the settings scope is absent."""
+    from applypilot import config
+    return config.APP_DIR / "signature.html"
+
+
+def signature_html(from_addr: str = "") -> str:
+    """The HTML signature to append to outgoing mail, or '' to send unsigned.
+
+    Order: local ~/.applypilot/signature.html (explicit override) → the account's real
+    Gmail signature via the settings API. Cached per address for the process lifetime so
+    a bulk send doesn't hit the API once per message. OUTREACH_SIGNATURE=0 disables it.
+    """
+    if os.environ.get("OUTREACH_SIGNATURE", "1").lower() not in {"1", "true", "yes", "on"}:
+        return ""
+    key = (from_addr or "").lower()
+    if key in _SIG_CACHE:
+        return _SIG_CACHE[key]
+    sig = ""
+    try:
+        p = signature_path()
+        if p.exists():
+            sig = p.read_text(encoding="utf-8").strip()
+    except Exception:  # noqa: BLE001
+        sig = ""
+    if not sig:
+        try:
+            from applypilot.networking import gmail_oauth
+            sig = gmail_oauth.fetch_signature(from_addr)
+        except Exception:  # noqa: BLE001
+            sig = ""
+    _SIG_CACHE[key] = sig
+    return sig
+
+
+def _company_slug(job_url: str, conn) -> str:
+    """Company suffix for attachment filenames, e.g. `_Arm`. Empty if undeterminable."""
+    try:
+        row = conn.execute(
+            "SELECT * FROM jobs WHERE url = ? OR application_url = ? LIMIT 1",
+            (job_url, job_url),
+        ).fetchone()
+        if not row:
+            return ""
+        from applypilot.networking import derive
+        name = derive.derive_company(dict(zip(row.keys(), row))) or ""
+    except Exception:  # noqa: BLE001
+        return ""
+    slug = re.sub(r"[^A-Za-z0-9]+", "_", name).strip("_")
+    # A 1-char slug is derivation noise (a bare host like "http://j/1" yields "J"), and
+    # `Resume_J.pdf` looks more like a bug to a recruiter than no suffix at all.
+    return f"_{slug}" if len(slug) >= 2 else ""
+
+
 def job_attachments(job_url: str) -> list[tuple[str, str]]:
     """Resolve (path, display_filename) for the job's resume + cover letter PDFs.
 
-    Looks up the job by the contact's job_url and returns whichever PDFs exist, named
-    for the applicant so recruiters see e.g. `Jorge_Alejandro_Diez_Resume.pdf`.
+    Filenames carry the COMPANY (`Jorge_Alejandro_Diez_Resume_Arm.pdf`). Six tailored
+    résumés all named `..._Resume.pdf` are indistinguishable in a Sent folder, which
+    makes real per-job tailoring look like the same document sent everywhere.
     """
     from pathlib import Path
 
@@ -123,13 +183,14 @@ def job_attachments(job_url: str) -> list[tuple[str, str]]:
     if not row:
         return []
     slug = _applicant_slug()
+    co = _company_slug(job_url, conn)
     out: list[tuple[str, str]] = []
     resume_pdf = Path(row[0]).with_suffix(".pdf") if row[0] else None
     if resume_pdf and resume_pdf.exists():
-        out.append((str(resume_pdf), f"{slug}_Resume.pdf"))
+        out.append((str(resume_pdf), f"{slug}_Resume{co}.pdf"))
     cover_pdf = Path(row[1]).with_suffix(".pdf") if row[1] else None
     if cover_pdf and cover_pdf.exists():
-        out.append((str(cover_pdf), f"{slug}_Cover_Letter.pdf"))
+        out.append((str(cover_pdf), f"{slug}_Cover_Letter{co}.pdf"))
     # Intro deck / one-pager — the same static PDF on every outreach (not per-job). Drop a PDF at
     # ~/.applypilot/intro_deck.pdf (or point INTRO_DECK_PATH at one) and it rides along.
     deck = _intro_deck_path()
@@ -161,7 +222,8 @@ def attach_pdfs(msg: EmailMessage, attachments: list[tuple[str, str]] | None) ->
 
 
 def _smtp_send(to_addr: str, subject: str, body: str, message_id: str,
-               attachments: list[tuple[str, str]] | None = None) -> None:
+               attachments: list[tuple[str, str]] | None = None,
+               in_reply_to: str | None = None) -> None:
     """Send one email over SMTP_SSL. `body` is sent verbatim."""
     addr, pw = _creds()
     from_name = os.environ.get("OUTREACH_FROM_NAME", "")
@@ -171,7 +233,14 @@ def _smtp_send(to_addr: str, subject: str, body: str, message_id: str,
     msg["Reply-To"] = addr
     msg["Subject"] = subject
     msg["Message-ID"] = message_id
+    if in_reply_to:
+        msg["In-Reply-To"] = in_reply_to
+        msg["References"] = in_reply_to
     msg.set_content(body)
+    sig = signature_html(addr)
+    if sig:
+        from applypilot.networking.gmail_oauth import _body_to_html
+        msg.add_alternative(f"<div>{_body_to_html(body)}</div><br>{sig}", subtype="html")
     attach_pdfs(msg, attachments)
 
     with smtplib.SMTP_SSL(_SMTP_HOST, _SMTP_PORT, timeout=30) as smtp:
@@ -214,15 +283,19 @@ def send_outreach(contact_id: str, confirm_unverified: bool = False,
     from_name = os.environ.get("OUTREACH_FROM_NAME", "")
     mode = transport()
     body_out = body  # send exactly as drafted/edited (no appended footer)
+    thread_id, rfc_id = "", ""
     try:
         if mode == "oauth":
             from applypilot.networking import gmail_oauth
             from_addr = _from_address() or gmail_oauth.connected_email()
-            message_id = gmail_oauth.send(to_addr, subject, body_out, from_addr, from_name,
-                                          attachments=attachments)
+            res = gmail_oauth.send(to_addr, subject, body_out, from_addr, from_name,
+                                   attachments=attachments)
+            message_id = res["id"]
+            thread_id, rfc_id = res.get("thread_id", ""), res.get("rfc_message_id", "")
         else:
             addr, _ = _creds()
             message_id = make_msgid(domain=(addr.split("@")[-1] if "@" in addr else None))
+            rfc_id = message_id  # SMTP: the RFC id IS what we generated and sent
             _smtp_send(to_addr, subject, body_out, message_id, attachments=attachments)
     except smtplib.SMTPAuthenticationError as e:
         store.mark_send_failed(contact_id, f"auth failed (535?): {e}")
@@ -234,8 +307,103 @@ def send_outreach(contact_id: str, confirm_unverified: bool = False,
         store.mark_send_failed(contact_id, str(e))
         return {"ok": False, "message": f"send failed: {e}", "status": "failed"}
 
-    store.mark_sent(contact_id, message_id)
+    store.mark_sent(contact_id, message_id, thread_id=thread_id, rfc_message_id=rfc_id)
     return {"ok": True, "message": f"submitted to {to_addr} (via {mode})", "status": "submitted"}
+
+
+def send_followup(contact_id: str, dry_run: bool = False) -> dict:
+    """Send the drafted follow-up for a contact, threaded into the original conversation.
+
+    Separate from send_outreach because the preconditions are different: the first email
+    must ALREADY have gone out, there must be a follow-up draft, and the sequence must not
+    have been stopped. Attachments are deliberately NOT re-sent — they went with email #1.
+    """
+    contact = store.get_contact(contact_id)
+    if not contact:
+        return {"ok": False, "message": "contact not found"}
+    if not (contact.get("sent_message_id") or "").strip():
+        return {"ok": False, "message": "no first email was sent — nothing to follow up on"}
+    if (contact.get("followup_status") or "") == "sending":
+        return {"ok": False, "message": "a follow-up is already sending"}
+    if (contact.get("followup_status") or "") in ("stopped", "replied"):
+        return {"ok": False, "message": f"sequence {contact['followup_status']} — not sending"}
+
+    subject = (contact.get("followup_subject") or "").strip()
+    body = (contact.get("followup_message") or "").strip()
+    if not body:
+        return {"ok": False, "message": "no follow-up draft — generate one first"}
+    to_addr = (contact.get("email") or "").strip()
+    if not to_addr:
+        return {"ok": False, "message": "no email address"}
+    if store.sent_today() >= _DAILY_LIMIT:
+        return {"ok": False, "message": f"daily send limit reached ({_DAILY_LIMIT})"}
+
+    if dry_run:
+        return {"ok": True, "message": f"dry-run: would follow up with {to_addr}"}
+    if not store.claim_followup_send(contact_id):
+        return {"ok": False, "message": "follow-up already in progress"}
+
+    from_name = os.environ.get("OUTREACH_FROM_NAME", "")
+    mode = transport()
+    try:
+        if mode == "oauth":
+            from applypilot.networking import gmail_oauth
+            from_addr = _from_address() or gmail_oauth.connected_email()
+            res = gmail_oauth.send(to_addr, subject, body, from_addr, from_name,
+                                   thread_id=contact.get("thread_id") or None,
+                                   in_reply_to=contact.get("rfc_message_id") or None)
+            message_id = res["id"]
+        else:
+            addr, _ = _creds()
+            message_id = make_msgid(domain=(addr.split("@")[-1] if "@" in addr else None))
+            _smtp_send(to_addr, subject, body, message_id,
+                       in_reply_to=contact.get("rfc_message_id") or None)
+    except Exception as e:  # noqa: BLE001
+        store.mark_followup_failed(contact_id, str(e))
+        return {"ok": False, "message": f"follow-up failed: {e}"}
+
+    n = store.mark_followup_sent(contact_id)
+    threaded = bool(contact.get("thread_id") or contact.get("rfc_message_id"))
+    return {"ok": True, "touch": n,
+            "message": f"follow-up #{n} sent to {to_addr}"
+                       + ("" if threaded else " (as a new email — the original predates threading)")}
+
+
+def backfill_thread_ids(limit: int = 200) -> dict:
+    """Recover threadId + RFC Message-ID for emails sent before those were persisted.
+
+    Without them a follow-up starts a NEW conversation instead of replying inside the
+    original one. We stored Gmail's message id at send time, so the ids are recoverable —
+    it just needs the read scope. Idempotent: only touches rows still missing them.
+    """
+    from applypilot.networking import gmail_oauth
+    if not gmail_oauth.has_scope(gmail_oauth.READ_SCOPE):
+        return {"ok": False, "updated": 0, "missing": 0,
+                "message": "Gmail read scope not granted — run `applypilot network --gmail-connect`"}
+    from applypilot.database import get_connection
+    store.init_contacts()
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT id, full_name, sent_message_id FROM contacts "
+        "WHERE COALESCE(sent_message_id,'') != '' AND COALESCE(thread_id,'') = '' LIMIT ?",
+        (limit,),
+    ).fetchall()
+    updated, failed = 0, []
+    for r in rows:
+        info = gmail_oauth.message_thread_info(r["sent_message_id"])
+        if not info.get("thread_id"):
+            failed.append(r["full_name"] or r["id"])
+            continue
+        conn.execute(
+            "UPDATE contacts SET thread_id = ?, rfc_message_id = ?, updated_at = ? WHERE id = ?",
+            (info["thread_id"], info.get("rfc_message_id", ""),
+             datetime.now(timezone.utc).isoformat(), r["id"]),
+        )
+        updated += 1
+    conn.commit()
+    return {"ok": True, "updated": updated, "missing": len(failed), "not_found": failed,
+            "message": f"threading restored for {updated} contact(s)"
+                       + (f"; {len(failed)} message(s) no longer in the mailbox" if failed else "")}
 
 
 def auth_probe() -> tuple[bool, str]:

@@ -106,7 +106,11 @@ _DANGEROUS_BUILTINS = [
 ]
 
 # Gmail management tools stay blocked (agent may only *send*, never read/modify).
+# read_email / search_emails are the important ones: the agent browses ATTACKER-CONTROLLED
+# careers pages, so a prompt injection that could read the inbox is a mailbox-exfiltration
+# path. The allowlist already excludes them; this is the second lock on the same door.
 _GMAIL_DENY = [
+    "mcp__gmail__read_email", "mcp__gmail__search_emails",
     "mcp__gmail__draft_email", "mcp__gmail__modify_email", "mcp__gmail__delete_email",
     "mcp__gmail__download_attachment", "mcp__gmail__batch_modify_emails",
     "mcp__gmail__batch_delete_emails", "mcp__gmail__create_label",

@@ -17,14 +17,15 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+import sqlite3
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from rich.console import Console
 from rich.live import Live
 
 from applypilot import config
-from applypilot.database import get_connection
+from applypilot.database import get_connection, log_event
 from applypilot.apply import prompt as prompt_mod
 from applypilot.apply.chrome import (
     launch_chrome, cleanup_worker, kill_all_chrome, keep_chrome_alive,
@@ -282,6 +283,53 @@ def release_lock(url: str) -> None:
         (url,),
     )
     conn.commit()
+
+
+# Generous by default: an apply that is genuinely working can take a while, and stealing a
+# live lock is worse than showing a stale one for another ten minutes.
+STALE_LOCK_MINUTES = int(os.environ.get("APPLY_STALE_MINUTES", "30") or 30)
+
+
+def release_stale_locks(max_age_minutes: int | None = None,
+                        conn: sqlite3.Connection | None = None) -> list[str]:
+    """Release `in_progress` locks that no living worker can still hold.
+
+    `run_dashboard_restart` runs the apply as a SYNCHRONOUS CHILD of the dashboard
+    (`subprocess.run`), so killing or restarting the server kills the apply with it — and
+    the lock it took at acquisition is never released. The job then reads "in progress"
+    forever, and `acquire_job` skips it, so a retry silently does nothing.
+
+    That is exactly what happened on 2026-07-29: two jobs were left locked for 31 and 18
+    minutes by a dashboard restart, with no error anywhere and no way to tell from the UI.
+
+    Age-gated rather than "release everything at startup", because `applypilot apply` can
+    legitimately be running in a terminal while the dashboard restarts, and stealing that
+    job's lock mid-flight would let a second agent start on the same application.
+    """
+    cutoff_minutes = STALE_LOCK_MINUTES if max_age_minutes is None else max_age_minutes
+    if conn is None:
+        conn = get_connection()
+    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=cutoff_minutes)).isoformat()
+    rows = conn.execute(
+        "SELECT url, title, last_attempted_at FROM jobs "
+        "WHERE apply_status = 'in_progress' AND COALESCE(last_attempted_at, '') < ?",
+        (cutoff,),
+    ).fetchall()
+    if not rows:
+        return []
+    urls = [r["url"] for r in rows]
+    conn.execute(
+        f"UPDATE jobs SET apply_status = NULL, agent_id = NULL "
+        f"WHERE url IN ({','.join('?' for _ in urls)})", urls,
+    )
+    conn.commit()
+    for row in rows:
+        # Visible in the job's Activity tab — a lock that vanishes with no trace is how
+        # this went unnoticed in the first place.
+        log_event(row["url"], "apply", "info",
+                  "Released a stale in-progress lock (the apply did not finish — most likely "
+                  "the dashboard was restarted while it was running). Safe to re-apply.")
+    return urls
 
 
 # ---------------------------------------------------------------------------

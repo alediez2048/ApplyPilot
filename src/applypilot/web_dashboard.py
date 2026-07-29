@@ -1986,6 +1986,17 @@ def serve_dashboard(host: str = "127.0.0.1", port: int = 8765, open_browser: boo
     config.load_env()
     config.ensure_dirs()
     init_db()
+    # An apply launched from here is a synchronous CHILD of this process, so anything still
+    # marked in-progress from a previous run died with it and will never clear itself. Left
+    # alone, the job reads "in progress" forever and acquire_job skips it — a silent retry.
+    try:
+        from applypilot.apply.launcher import release_stale_locks
+        stale = release_stale_locks()
+        if stale:
+            console.print(f"[yellow]Released {len(stale)} stale in-progress apply lock(s)[/yellow] "
+                          "[dim](an earlier apply was interrupted — those jobs can be re-applied)[/dim]")
+    except Exception as exc:  # noqa: BLE001
+        console.log(f"[dim]stale-lock sweep skipped: {exc}[/dim]")
     # Generate the extension token up front so the operator can read it before any request
     # (the guard short-circuits on a missing header, so it would never be created lazily).
     ext_token = _ext_token()

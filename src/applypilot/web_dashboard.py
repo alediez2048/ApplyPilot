@@ -379,7 +379,7 @@ def _safe_material_prefix(job: dict) -> str:
     return f"{safe_site}_{safe_title}_{digest}"
 
 
-def run_dashboard_prepare(limit: int = 0, validation_mode: str = "lenient") -> dict:
+def run_dashboard_prepare(limit: int = 0, validation_mode: str = "normal") -> dict:
     """Prepare materials only for URLs imported through the dashboard.
 
     Imported URLs are treated as user-approved targets. We intentionally bypass
@@ -479,6 +479,13 @@ def run_dashboard_prepare(limit: int = 0, validation_mode: str = "lenient") -> d
                     tailored += 1
                     note = "" if report.get("status") in {"approved", "approved_with_judge_warning"} else f" ({report.get('status')})"
                     log_event(job["url"], "tailor", "ok", f"Tailored résumé generated{note}.", conn)
+                    # Validator warnings used to land ONLY in {prefix}_REPORT.json, which
+                    # nothing reads (CLAUDE.md §Dev workflow). A dropped tool or a banned
+                    # word is worth seeing before the résumé is submitted, not after.
+                    warnings = (report.get("validator") or {}).get("warnings") or []
+                    for w in warnings[:4]:
+                        log_event(job["url"], "tailor", "info", f"Résumé note: {w}", conn)
+                        print(f"  résumé note: {w}", flush=True)
                     if report.get("status") not in {"approved", "approved_with_judge_warning"}:
                         print(f"  tailor accepted with note (lenient): {report.get('status')}", flush=True)
                 else:
@@ -519,6 +526,18 @@ def run_dashboard_prepare(limit: int = 0, validation_mode: str = "lenient") -> d
                 _jobs.set_cover(job["url"], str(cl_path), conn)
                 covers += 1
                 log_event(job["url"], "cover", "ok", "Cover letter generated.", conn)
+                # `generate_cover_letter` returns only the text — its report never reaches
+                # here, so a banned word or an unnamed employer was invisible even though
+                # the validator had found it. Re-check the finished letter to surface notes.
+                try:
+                    from applypilot.scoring.validator import validate_cover_letter
+                    notes = validate_cover_letter(letter, mode="normal",
+                                                  company=job.get("site", ""))
+                    for w in (notes.get("warnings") or [])[:3] + (notes.get("errors") or [])[:3]:
+                        log_event(job["url"], "cover", "info", f"Cover letter note: {w}", conn)
+                        print(f"  cover letter note: {w}", flush=True)
+                except Exception:  # noqa: BLE001 - a reporting nicety must never fail prep
+                    pass
             except Exception as exc:
                 _jobs.bump_cover_attempts(job["url"], conn)
                 cover_errors += 1
@@ -631,7 +650,7 @@ def run_dashboard_restart(url: str) -> dict:
     row = _jobs.materials_present(url, conn)
     if row and not (row["enr"] and row["res"] and row["cov"]):
         print("STAGE: restart — regenerating missing materials", flush=True)
-        run_dashboard_prepare(validation_mode="lenient")
+        run_dashboard_prepare(validation_mode="normal")
 
     # 3) Co-pilot apply this job.
     args = [sys.executable, "-m", "applypilot.cli", "apply", "--url", url,
@@ -1567,7 +1586,7 @@ def _ext_note(data: dict) -> tuple[dict, int]:
 def _start_prepare(min_score: int) -> tuple[bool, str]:
     args = [
         sys.executable, "-c",
-        "from applypilot.web_dashboard import run_dashboard_prepare; run_dashboard_prepare(validation_mode='lenient')",
+        "from applypilot.web_dashboard import run_dashboard_prepare; run_dashboard_prepare(validation_mode='normal')",
     ]
     return _runner.start("prepare", args)
 

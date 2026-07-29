@@ -626,10 +626,12 @@ def tailor_resume(
     Returns:
         (tailored_text, report) where report contains validation details.
     """
-    # Aggressive JD-matching (user opt-in) skips the fabrication judge + banned-word gates
-    # so the resume can mirror the JD's skills. Real employers/school still preserved.
-    if _aggressive_enabled():
-        validation_mode = "lenient"
+    # TAILOR_AGGRESSIVE used to force lenient here, which silently disabled the fabrication
+    # judge AND every banned-word check. That was a defensible trade when the mode existed to
+    # let the résumé mirror the JD's skills — content preservation depended on the prompt.
+    # It no longer does: `assemble_structured_resume_text` enforces sections and bullet counts
+    # mechanically, so the mode now only needs to change VOICE. Skipping fabrication detection
+    # to get JD-matching vocabulary was buying something it no longer has to pay for.
 
     job_text = (
         f"TITLE: {job['title']}\n"

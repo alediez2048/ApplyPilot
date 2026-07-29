@@ -411,7 +411,7 @@ def validate_tailored_resume(text: str, profile: dict, original_text: str = "") 
 
 # ── Cover Letter Validation ──────────────────────────────────────────────
 
-def validate_cover_letter(text: str, mode: str = "normal") -> dict:
+def validate_cover_letter(text: str, mode: str = "normal", company: str = "") -> dict:
     """Programmatic validation of a cover letter.
 
     Args:
@@ -420,6 +420,9 @@ def validate_cover_letter(text: str, mode: str = "normal") -> dict:
               strict  → banned words are errors (trigger retries); word limit enforced
               normal  → banned words are warnings; word limit is soft (+25 words)
               lenient → banned words ignored; word count not checked
+        company: Employer name. If given, it MUST appear in the letter — a real run
+              produced a well-tailored body that named DevRev nowhere and opened
+              "Dear Hiring Manager,". The prompt asking is not enforcement.
 
     Returns:
         {"passed": bool, "errors": list[str], "warnings": list[str]}
@@ -427,6 +430,16 @@ def validate_cover_letter(text: str, mode: str = "normal") -> dict:
     errors: list[str] = []
     warnings: list[str] = []
     text_lower = text.lower()
+
+    # 0. The company must be named. A letter whose body is genuinely tailored but which
+    #    never says who it is addressed to reads as a template — and that is the first
+    #    thing a human notices. An ERROR (retryable) rather than a warning: it is cheap to
+    #    regenerate and expensive to send.
+    if company:
+        stem = re.split(r"[,.]| Inc| LLC| Ltd| Corp", company.strip(), maxsplit=1)[0].strip()
+        if len(stem) >= 3 and stem.lower() not in text_lower:
+            msg = f"Cover letter never names the company ({stem})."
+            (warnings if mode == "lenient" else errors).append(msg)
 
     # 1. Em dashes — always an error (sanitize_text should have caught these)
     if "\u2014" in text or "\u2013" in text:

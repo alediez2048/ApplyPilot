@@ -12,7 +12,7 @@ campaign happens to be a job search** — see `docs/crm-prd.md` for where that g
 - **Packaging:** Hatchling, `src/` layout, single package `applypilot`
 - **Entry point:** `applypilot = "applypilot.cli:app"` (Typer CLI)
 - **License:** AGPL-3.0-only · **Version:** 0.4.0 (`pyproject.toml`)
-- **Tests:** 364 passing (`tests/`, 29 files) · ruff clean (line-length 120, py311) · ESLint clean
+- **Tests:** 393 passing (`tests/`, 30 files) · ruff clean (line-length 120, py311) · ESLint clean
 
 ## Quick orientation
 
@@ -62,6 +62,13 @@ Surfaces:
 
 `resume_renderer/` is a Node/React-PDF renderer (`node render.mjs <request.json> <out.pdf>`),
 `npm install`ed at runtime into `~/.applypilot/resume_renderer_runtime/`.
+
+**The base résumé is the template** (`resume_sections.py`, 2026-07-29). Its section titles and
+order flow through tailor → `_DATA.json` → the renderer. Tailoring rewrites content *inside*
+those sections and may not rename, drop, reorder or invent one; a section the model omits falls
+back to the original, and bullets are padded to the original count from the trailing originals
+(NOT merged by similarity — a real rewrite doesn't resemble its source, so prefix-matching
+turns 3 rewrites into 6 duplicated bullets). Cover letters must name the employer.
 
 ### `apply/` — autonomous submission
 `launcher.py` (acquires jobs, spawns Chrome + Claude Code per job) · `chrome.py` ·
@@ -311,7 +318,13 @@ Ordered by leverage. Nothing here is blocking; all of it compounds.
   **Open:** the renderer still emits the old section names/order, the résumé says
   "Diez Magni" while `profile.json` says "Diez", and it uses `alediez2408@gmail.com` while
   sending happens from `jorgealejandrodiezm@gmail.com`.
-- `TAILOR_AGGRESSIVE=1` — resumes mirror the JD, fabrication judge off. Deliberate.
+- `TAILOR_AGGRESSIVE=1` — **voice only now.** It used to force `validation_mode="lenient"`,
+  which silently disabled the fabrication judge AND every banned-word check. Content
+  preservation no longer depends on it (the assembler enforces sections + bullet counts), so
+  the mode has no reason to buy JD-matching vocabulary with fabrication detection.
+  **The real lever was the dashboard**, which hardcoded `lenient` in three places — so every
+  dashboard-driven run skipped the judge regardless of the flag. Now `normal`: banned words
+  are warnings, and warnings reach the job's Activity tab instead of only `_REPORT.json`.
 - 899 LinkedIn connections imported. Secrets in `~/.applypilot/` are `chmod 600`; FileVault on.
 
 ## Dev workflow
@@ -340,7 +353,9 @@ change still needs the `pip install` above — but that copy gives the file a ne
   runs the apply as a synchronous child, so `kill -9` on the server kills the application
   mid-flight. Two were lost that way on 2026-07-29. `curl -s localhost:8765/api/status` and
   look for `in_progress` first.
-- Validator **warnings are never printed** — they only land in `{prefix}_REPORT.json`.
+- Validator warnings now reach the job's **Activity tab** (`Résumé note:` / `Cover letter
+  note:`), not just `{prefix}_REPORT.json`. They were invisible before, which is how banned
+  filler and dropped tools shipped unnoticed.
 - Severity ladder: `preserved_companies`/`preserved_school` missing = **error** (blocks);
   `preserved_projects` missing = warning; banned words = strict-mode only.
 - Working tree currently has **24 uncommitted files** — the whole of the 2026-07-28 session.

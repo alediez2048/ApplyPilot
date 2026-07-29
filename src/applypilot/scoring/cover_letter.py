@@ -96,7 +96,15 @@ Do NOT mention ANY tool not in this list. If the job asks for tools not listed, 
 Sign off: just "{sign_off_name}"
 
 Output ONLY the letter text. No subject lines. No "Here is the cover letter:" preamble. No notes after the sign-off.
-Start DIRECTLY with "Dear Hiring Manager," and end with the name."""
+SALUTATION: Address the employer by name, using the COMPANY value given with the job:
+"Dear <COMPANY> Hiring Team,". A letter that opens "Dear Hiring Manager," and never says who
+it is addressed to reads as a template no matter how good the body is, and that is the first
+thing a human notices.
+
+NAME THE EMPLOYER in the body too, at least once, doing real work in the sentence ("what
+<COMPANY> is building", not "your company"). Naming a specific product or challenge is better.
+
+Start DIRECTLY with "Dear" and end with the name."""
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────
@@ -174,7 +182,8 @@ def generate_cover_letter(
         letter = sanitize_text(letter)  # auto-fix em dashes, smart quotes
         letter = _strip_preamble(letter)  # remove any "Here is the letter:" prefix
 
-        validation = validate_cover_letter(letter, mode=validation_mode)
+        validation = validate_cover_letter(letter, mode=validation_mode,
+                                           company=job.get('site', ''))
         if validation["passed"]:
             return letter
 

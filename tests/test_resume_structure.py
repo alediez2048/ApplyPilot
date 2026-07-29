@@ -315,3 +315,72 @@ def test_no_warning_when_the_tools_survive():
         {"employer": "Verizon", "bullets": ["b"]}]})
     res = V.validate_json_fields(payload, profile, mode="normal")
     assert not any("dropped" in w for w in res["warnings"]), res["warnings"]
+
+
+# ── cover letter: name the employer ─────────────────────────────────────────
+
+LETTER = """Dear {sal},
+
+I built T-Mobile's retail platform, driving a 40% traffic increase. {body}
+
+Alejandro
+"""
+
+
+def test_a_letter_that_never_names_the_employer_is_rejected():
+    """A real run produced a well-tailored body that opened "Dear Hiring Manager," and said
+    "DevRev" nowhere. The prompt asking is not enforcement — this is."""
+    generic = LETTER.format(sal="Hiring Manager", body="Your platform unifies data sources.")
+    res = V.validate_cover_letter(generic, mode="normal", company="DevRev")
+    assert not res["passed"]
+    assert any("never names the company" in e for e in res["errors"])
+
+
+def test_a_letter_that_names_the_employer_passes():
+    named = LETTER.format(sal="DevRev Hiring Team", body="What DevRev is building matters.")
+    res = V.validate_cover_letter(named, mode="normal", company="DevRev")
+    assert res["passed"], res["errors"]
+
+
+def test_the_company_check_ignores_legal_suffixes():
+    """"Deloitte Consulting LLP" must match a letter that says "Deloitte"."""
+    named = LETTER.format(sal="Deloitte Hiring Team", body="Deloitte builds AI solutions.")
+    res = V.validate_cover_letter(named, mode="normal", company="Deloitte, Inc.")
+    assert res["passed"], res["errors"]
+
+
+def test_lenient_downgrades_the_company_check_to_a_warning():
+    generic = LETTER.format(sal="Hiring Manager", body="Your platform is interesting.")
+    res = V.validate_cover_letter(generic, mode="lenient", company="DevRev")
+    assert any("never names the company" in w for w in res["warnings"])
+    assert not any("never names the company" in e for e in res["errors"])
+
+
+def test_no_company_given_means_no_check():
+    """Not every job has a resolved employer name; absence must not fail the letter."""
+    generic = LETTER.format(sal="Hiring Manager", body="Your platform is interesting.")
+    res = V.validate_cover_letter(generic, mode="normal", company="")
+    assert not any("names the company" in e for e in res["errors"])
+
+
+def test_aggressive_mode_no_longer_disables_fabrication_detection():
+    """TAILOR_AGGRESSIVE used to force lenient, silently turning off the judge AND every
+    banned-word check. Content preservation is now enforced by the assembler, so the mode
+    only needs to change voice."""
+    import inspect
+
+    from applypilot.scoring import tailor
+    src = inspect.getsource(tailor.tailor_resume)
+    assert 'validation_mode = "lenient"' not in src, \
+        "aggressive mode is forcing lenient again — that disables the fabrication judge"
+
+
+def test_the_dashboard_does_not_hardcode_lenient():
+    """Three hardcoded `validation_mode="lenient"` calls meant every dashboard-driven run
+    skipped the judge regardless of TAILOR_AGGRESSIVE. That was the real lever."""
+    import pathlib
+
+    import applypilot
+    src = (pathlib.Path(applypilot.__file__).parent / "web_dashboard.py").read_text()
+    assert "validation_mode='lenient'" not in src and 'validation_mode="lenient"' not in src, \
+        "the dashboard is forcing lenient again"

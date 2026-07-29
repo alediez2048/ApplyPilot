@@ -139,8 +139,69 @@ def _education_to_list(education) -> list[dict]:
              "detail": " · ".join(lines[1:]), "date": ""}]
 
 
-def resume_from_llm_data(data: dict, profile: dict) -> dict:
-    """Map the LLM tailor JSON + profile into a RenderRequest ``resume`` block."""
+def _skills_from_bullets(bullets) -> list[dict]:
+    """`"Analytics: GA, Adobe, ..."` -> {category, value}, which is how the PDF bolds it."""
+    out = []
+    for b in bullets or []:
+        text = str(b).strip()
+        if not text:
+            continue
+        cat, sep, val = text.partition(":")
+        if sep and len(cat) < 48:
+            out.append({"category": cat.strip(), "value": val.strip()})
+        else:
+            out.append({"category": None, "value": text})
+    return out
+
+
+def resume_from_sections(data: dict, profile: dict, header: list[str] | None = None) -> dict:
+    """Map the structure-preserving tailor JSON into a RenderRequest.
+
+    The section TITLES travel with the data instead of being hardcoded in the renderer, so
+    the PDF says "PERSONAL STATEMENT" and "KEY STRENGTHS" when the base résumé does. Before
+    this the .txt and the PDF disagreed on every heading, and any section the fixed schema
+    had no slot for was dropped from both.
+    """
+    title = str(data.get("title") or "")
+    contact = _contact_from_profile(profile, title)
+    # The résumé's own header wins over profile.json, which disagreed with it — it drops
+    # "Magni" from the name and uses a different address than the résumé states.
+    if header:
+        contact = {**contact, "name": header[0].strip()}
+
+    blocks: list[dict] = []
+    for sec in data.get("sections", []) or []:
+        kind = str(sec.get("kind") or "text")
+        entry = {"title": str(sec.get("title") or "").strip(), "kind": kind}
+        if kind == "summary":
+            entry["text"] = str(sec.get("text") or "").strip()
+        elif kind == "experience":
+            entry["entries"] = [
+                {"header": " — ".join(x for x in [str(e.get("employer", "")).strip(),
+                                                  str(e.get("role", "")).strip()] if x),
+                 "subtitle": str(e.get("dates", "")).strip(),
+                 "bullets": [str(b) for b in (e.get("bullets") or []) if str(b).strip()]}
+                for e in (sec.get("entries") or [])
+            ]
+        elif kind == "education":
+            entry["education"] = _education_to_list(sec.get("entries"))
+        else:
+            entry["skills"] = _skills_from_bullets(sec.get("bullets"))
+            if sec.get("text"):
+                entry["text"] = str(sec["text"]).strip()
+        blocks.append(entry)
+
+    return {"contactInfo": contact, "sections": blocks}
+
+
+def resume_from_llm_data(data: dict, profile: dict, header: list[str] | None = None) -> dict:
+    """Map the LLM tailor JSON + profile into a RenderRequest ``resume`` block.
+
+    Two shapes are accepted: the structure-preserving `sections` list, and the legacy fixed
+    schema for résumés with no parseable sections.
+    """
+    if data.get("sections"):
+        return resume_from_sections(data, profile, header)
     title = str(data.get("title") or "")
     return {
         "contactInfo": _contact_from_profile(profile, title),

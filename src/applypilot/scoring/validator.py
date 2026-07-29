@@ -96,6 +96,108 @@ def sanitize_text(text: str) -> str:
 
 # ── JSON Field Validation ─────────────────────────────────────────────────
 
+def _named_tools(base_text: str, profile: dict) -> set[str]:
+    """Curated tools from `skills_boundary` that actually appear in the base résumé.
+
+    A regex over capitalised tokens was tried first and was worse than useless: it flagged
+    "KEY" and "WORK" from the section headings while MISSING Botify and Akamai, which are
+    single capitalised words indistinguishable from "Led" or "Managed". Guessing at product
+    names produces misleading warnings, and a misleading warning is worse than silence.
+
+    `skills_boundary` is a list the operator curated. Intersecting it with the base résumé
+    needs no heuristics at all.
+    """
+    low = (base_text or "").lower()
+    out: set[str] = set()
+    for items in (profile.get("skills_boundary") or {}).values():
+        for raw in (items if isinstance(items, list) else [items]):
+            tool = str(raw).strip().rstrip(".").strip()
+            if ":" in tool:                       # "Tools and Platforms: Jira" -> "Jira"
+                tool = tool.split(":")[-1].strip()
+            if tool.lower().startswith("and "):   # "and GitHub" -> "GitHub"
+                tool = tool[4:].strip()
+            # Proper nouns only. Lowercase entries ("technical SEO", "tool calling") are
+            # descriptions of ability, not names a keyword screen looks for.
+            if len(tool) >= 3 and tool[0].isupper() and tool.lower() in low:
+                out.add(tool)
+    return out
+
+
+def _split_schools(raw: str) -> list[str]:
+    """"Gauntlet AI; University of Texas" -> two schools that must each be present."""
+    return [p.strip() for p in re.split(r"[;/|]|,\s*(?=[A-Z])", raw or "") if p.strip()]
+
+
+def _validate_sections(data: dict, profile: dict, mode: str = "normal") -> dict:
+    """Validate the structure-preserving shape.
+
+    The severity ladder is unchanged (CLAUDE.md): a missing preserved company or school is
+    an ERROR and blocks; preserved projects are a warning; banned words are strict-only.
+    What is new is checking the thing this rewrite exists to protect — that no section was
+    dropped and no employer lost bullets, which is exactly how the old pipeline quietly
+    deleted KEY STRENGTHS and cut five bullets to four.
+    """
+    errors: list[str] = []
+    warnings: list[str] = []
+    sections = data.get("sections") or []
+
+    if not data.get("title"):
+        warnings.append("Missing title")
+    if not sections:
+        return {"passed": False, "errors": ["No sections returned"], "warnings": warnings}
+
+    resume_facts = profile.get("resume_facts", {})
+    text_parts: list[str] = []
+    for sec in sections:
+        text_parts.append(str(sec.get("text") or ""))
+        for b in sec.get("bullets") or []:
+            text_parts.append(str(b))
+        for e in sec.get("entries") or []:
+            if isinstance(e, dict):
+                text_parts.extend(str(e.get(k, "")) for k in ("employer", "role", "school",
+                                                              "degree", "detail"))
+                text_parts.extend(str(b) for b in (e.get("bullets") or []))
+            else:
+                text_parts.append(str(e))
+    all_text = " ".join(text_parts)
+    low = all_text.lower()
+
+    for company in resume_facts.get("preserved_companies", []):
+        if company.lower() not in low:
+            errors.append(f"Preserved company missing: {company}")
+    # `preserved_school` is often several schools in one string ("Gauntlet AI; University
+    # of Texas"). That concatenation appears nowhere in the résumé — it only ever matched
+    # because the OLD prompt instructed the model to echo `"{school} | {level}"` back, so
+    # the validator was checking for a string it had just asked for. Check each school.
+    for school in _split_schools(resume_facts.get("preserved_school", "")):
+        if school.lower() not in low:
+            errors.append(f"Preserved school missing: {school}")
+    for project in resume_facts.get("preserved_projects", []):
+        if project.lower() not in low:
+            warnings.append(f"Preserved project missing: {project}")
+
+    # Named tools are what a keyword screen matches on. "…through AEM, Botify, GA4, GSC"
+    # becoming "…improving customer experience" makes the résumé worse, not tighter — and
+    # the prompt asking nicely is not enforcement: one run kept Botify and the next dropped
+    # it. A WARNING, not an error: a tool genuinely irrelevant to the role may be cut, and
+    # blocking on that would be worse than reporting it.
+    dropped = [t for t in _named_tools(profile.get("_base_resume_text", ""), profile)
+               if t.lower() not in low]
+    if dropped:
+        warnings.append("Named tools dropped from the base résumé: " + ", ".join(sorted(dropped)[:12]))
+
+    if mode == "strict":
+        for word in BANNED_WORDS:
+            if re.search(rf"\b{re.escape(word)}\b", low):
+                errors.append(f"Banned word: '{word}'")
+    elif mode == "normal":
+        for word in BANNED_WORDS:
+            if re.search(rf"\b{re.escape(word)}\b", low):
+                warnings.append(f"Banned word: '{word}'")
+
+    return {"passed": not errors, "errors": errors, "warnings": warnings}
+
+
 def validate_json_fields(data: dict, profile: dict, mode: str = "normal") -> dict:
     """Validate individual JSON fields from an LLM-generated tailored resume.
 
@@ -112,6 +214,13 @@ def validate_json_fields(data: dict, profile: dict, mode: str = "normal") -> dic
     """
     errors: list[str] = []
     warnings: list[str] = []
+
+    # Structure-preserving output (a `sections` list mirroring the base résumé) is a
+    # different shape entirely. Checking it against the fixed five-key schema reported
+    # "Missing required field: summary/skills/experience" on every attempt — four wasted
+    # LLM calls per résumé, invisible because aggressive mode forces lenient.
+    if data.get("sections"):
+        return _validate_sections(data, profile, mode)
 
     # Required keys — always checked regardless of mode
     for key in ("title", "summary", "skills", "experience", "projects", "education"):

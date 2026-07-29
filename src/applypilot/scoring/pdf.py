@@ -477,7 +477,17 @@ def _resume_block_for(text_path: Path, text: str) -> dict | None:
                 profile = load_profile()
             except Exception:  # noqa: BLE001 - header falls back to whatever's in data
                 profile = {}
-            return resume_render.resume_from_llm_data(data, profile)
+            # The résumé's own header (name + contact) beats profile.json, which
+            # disagrees with it — profile drops "Magni" and lists a different address.
+            header = None
+            try:
+                from applypilot.config import RESUME_PATH
+                from applypilot.scoring import resume_sections as _RS
+                if RESUME_PATH.exists():
+                    header = _RS.parse(RESUME_PATH.read_text(encoding="utf-8")).header
+            except Exception:  # noqa: BLE001
+                header = None
+            return resume_render.resume_from_llm_data(data, profile, header)
         except Exception:  # noqa: BLE001
             log.debug("Failed to build resume block from %s", data_path, exc_info=True)
     try:

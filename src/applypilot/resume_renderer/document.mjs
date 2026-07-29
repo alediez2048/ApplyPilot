@@ -67,6 +67,62 @@ function Section(styles, title, children, key) {
  * @param {object} props.styles built StyleSheet (createDynamicStyles output)
  * @param {object} props.theme  the stylingSpecs used to build styles
  */
+function SkillRows(styles, marker, rows) {
+  return rows.filter((k) => k && k.value && String(k.value).trim())
+    .map((k, i) =>
+      h(View, { key: i, style: styles.bulletRow }, [
+        h(Text, { key: 'm', style: styles.bulletMarker }, marker),
+        h(Text, { key: 't', style: styles.bulletText }, [
+          k.category ? h(Text, { key: 'c', style: styles.skillCat }, `${k.category}: `) : null,
+          h(Text, { key: 'v' }, String(k.value || '')),
+        ]),
+      ]))
+}
+
+function EducationRows(styles, rows) {
+  return rows.filter(Boolean).map((ed, i) => {
+    const label = [ed.school, ed.degree, ed.detail].filter(Boolean).join(' — ')
+    return h(View, { key: i, style: styles.eduRow }, [
+      h(Text, { key: 't', style: styles.eduText }, label),
+      ed.date ? h(Text, { key: 'd', style: styles.eduDate }, String(ed.date)) : null,
+    ])
+  })
+}
+
+/**
+ * Structure-preserving path: the base résumé's own sections, in its own order, under its
+ * own headings. The fixed five-section layout below is kept for résumés with no parseable
+ * structure — it was silently dropping any section it had no slot for.
+ */
+function SectionBlocks({ resume, styles, theme }) {
+  const marker = bulletChar(theme)
+  const out = []
+  for (const sec of resume.sections || []) {
+    const title = String(sec.title || '')
+    const kind = String(sec.kind || 'text')
+    let children = []
+    if (kind === 'summary') {
+      if (!String(sec.text || '').trim()) continue
+      children = [h(Text, { key: 's', style: styles.summary }, String(sec.text))]
+    } else if (kind === 'experience') {
+      const entries = sec.entries || []
+      if (!entries.length) continue
+      children = entries.map((e, i) => Entry(styles, theme, e, i))
+    } else if (kind === 'education') {
+      const rows = sec.education || []
+      if (!rows.length) continue
+      children = EducationRows(styles, rows)
+    } else {
+      const rows = SkillRows(styles, marker, sec.skills || [])
+      const text = String(sec.text || '').trim()
+      if (!rows.length && !text) continue
+      children = text ? [h(Text, { key: 's', style: styles.summary }, text), ...rows] : rows
+    }
+    out.push(Section(styles, title, children, title))
+  }
+  return out
+}
+
 export function ResumeDocument({ resume, styles, theme }) {
   const c = resume.contactInfo || {}
   const skills = resume.skills || []
@@ -74,6 +130,16 @@ export function ResumeDocument({ resume, styles, theme }) {
   const projects = resume.projects || []
   const education = resume.education || []
   const marker = bulletChar(theme)
+
+  if (resume.sections && resume.sections.length) {
+    const header = h(View, { key: 'header', style: styles.header }, [
+      h(Text, { key: 'n', style: styles.name }, c.name || 'Your Name'),
+      ContactLine(styles, c),
+    ])
+    return h(Document, null,
+      h(Page, { size: 'LETTER', style: styles.page },
+        [header, ...SectionBlocks({ resume, styles, theme })]))
+  }
 
   const sections = []
 

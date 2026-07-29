@@ -387,6 +387,173 @@ def assemble_resume_text(data: dict, profile: dict) -> str:
     return "\n".join(lines)
 
 
+
+
+# ── Structure-preserving mode (2026-07-29) ────────────────────────────────
+# The base résumé is the template. The previous prompt imposed a fixed five-section shape
+# and the differences were not cosmetic — on a real run it deleted KEY STRENGTHS entirely
+# (no slot existed), flattened EDUCATION to "Gauntlet AI; University of Texas | Bachelors"
+# (the schema stored it as one string), invented a PROJECTS section by promoting a work
+# bullet so the same achievement appeared twice, and cut 4,341 characters to 2,571.
+#
+# Three lines of the old prompt caused most of that: "Max 4 per section", a pre-flattened
+# `"education": "{school} | {level}"` literal, and "Must fit 1 page."
+
+def _structure_block(resume_text: str) -> str:
+    """Describe the base résumé's own shape so the model reproduces it exactly."""
+    from applypilot.scoring import resume_sections as RS
+
+    r = RS.parse(resume_text)
+    if not r.sections:
+        return ""
+    out = ["## THE STRUCTURE YOU MUST REPRODUCE",
+           "",
+           "This person's résumé has the sections below. Return EXACTLY these, with EXACTLY",
+           "these titles, in EXACTLY this order. Do not rename, merge, reorder, add or drop",
+           "any section. A section you have nothing new to say about is returned unchanged.",
+           ""]
+    for i, sec in enumerate(r.sections, 1):
+        n = len(sec.bullets())
+        detail = f"{n} bullet(s)" if n else f"{len(sec.text())} chars of prose"
+        out.append(f'{i}. "{sec.title}"  (kind={sec.kind}, {detail})')
+        if sec.kind == RS.KIND_EXPERIENCE:
+            for e in RS.experience_entries(sec):
+                out.append(f'     - {e["employer"]} / {e["role"]} / {e["dates"]} '
+                           f'-> keep all {len(e["bullets"])} bullets')
+    out += ["",
+            "BULLET COUNTS ARE A FLOOR, NOT A CEILING. Returning fewer bullets than the",
+            "original is a failure. Every employer keeps every bullet; you rewrite them,",
+            "you do not select among them.",
+            ""]
+    return "\n".join(out)
+
+
+def _build_structured_tailor_prompt(profile: dict, resume_text: str) -> str:
+    """Tailoring prompt that preserves the base résumé's sections."""
+    resume_facts = profile.get("resume_facts", {})
+    companies = resume_facts.get("preserved_companies", [])
+    school = resume_facts.get("preserved_school", "")
+    real_metrics = resume_facts.get("real_metrics", [])
+    banned_str = ", ".join(BANNED_WORDS)
+    aggressive = _aggressive_enabled()
+
+    voice = ("Mirror the job description's vocabulary where it honestly applies to work "
+             "this person actually did." if aggressive else
+             "Write like a real engineer. Short, direct, concrete.")
+
+    return f"""You are a senior technical recruiter rewriting a résumé to get this person an interview.
+
+You are given their résumé and a job description. Rewrite the CONTENT for this role while
+keeping the DOCUMENT'S STRUCTURE identical.
+
+{_structure_block(resume_text)}
+## WHAT TO CHANGE
+- Rewrite prose and bullets so the most relevant work leads and the language matches the role.
+- Reorder bullets WITHIN an employer by relevance. Never delete one.
+- Keep every named tool, platform and metric that is already there. Those are what a keyword
+  screen matches on; dropping "AEM, Botify, GA4, GSC" to say "improved customer experience"
+  makes the résumé worse, not tighter.
+
+## WHAT NEVER CHANGES
+- Section titles, section order, employer names, role titles, dates, degrees, schools.
+- Real numbers: {', '.join(real_metrics) if real_metrics else 'N/A'}
+- Preserved companies: {', '.join(companies) if companies else 'N/A'}
+- Preserved school: {school}{_preserved_projects_rule(resume_facts)}
+{_never_employer_rule(resume_facts)}
+- Never invent work, employers, degrees, certifications, or a section that is not listed above.
+
+## VOICE
+- {voice}
+- BANNED WORDS (using ANY = validation failure): {banned_str}
+- No em dashes. Use commas, periods, or hyphens.
+
+## OUTPUT
+Return ONLY valid JSON, no markdown fences, no commentary:
+
+{{"title":"Role Title",
+  "sections":[
+    {{"title":"<EXACT title from above>","kind":"summary","text":"rewritten prose"}},
+    {{"title":"<EXACT title>","kind":"experience","entries":[
+        {{"employer":"...","role":"...","dates":"...","bullets":["...","..."]}}]}},
+    {{"title":"<EXACT title>","kind":"education","entries":[
+        {{"school":"...","degree":"...","detail":"...","date":"..."}}]}},
+    {{"title":"<EXACT title>","kind":"skills","bullets":["Category: items","Category: items"]}}
+  ]}}"""
+
+
+def assemble_structured_resume_text(data: dict, profile: dict, resume_text: str) -> str:
+    """Render the returned sections in the base résumé's own order and headings."""
+    from applypilot.scoring import resume_sections as RS
+
+    base = RS.parse(resume_text)
+    returned = {str(s.get("title", "")).strip().upper(): s for s in data.get("sections", [])}
+    lines: list[str] = []
+
+    # Header comes from the RÉSUMÉ, not profile.json — the résumé is the source of truth,
+    # and profile.json disagreed with it (it drops "Magni" from the name).
+    lines.extend(base.header)
+    if data.get("title"):
+        lines.insert(1, sanitize_text(str(data["title"])))
+    lines.append("")
+
+    for sec in base.sections:
+        got = returned.get(sec.title.upper())
+        lines.append(sec.title)
+        if got is None:
+            # Model omitted it -> fall back to the original. A section is never lost.
+            lines.extend(sec.lines)
+            lines.append("")
+            continue
+
+        if sec.kind == RS.KIND_EXPERIENCE:
+            originals = RS.experience_entries(sec)
+            by_employer = {e["employer"].upper(): e for e in originals}
+            for entry in got.get("entries", []) or []:
+                emp = str(entry.get("employer", "")).strip()
+                orig = by_employer.get(emp.upper(), {})
+                lines.append(emp or orig.get("employer", ""))
+                lines.append(sanitize_text(str(entry.get("role") or orig.get("role", ""))))
+                lines.append(str(entry.get("dates") or orig.get("dates", "")))
+                bullets = [b for b in (entry.get("bullets") or []) if str(b).strip()]
+                # Never emit fewer bullets than the original had. Pad to the original COUNT
+                # using the TRAILING originals — do not try to merge by text similarity. A
+                # genuinely rewritten bullet does not resemble its source, so matching on a
+                # prefix would treat every rewrite as new and duplicate the whole list
+                # (3 rewrites + 3 originals = 6). The prompt asks for most-relevant-first,
+                # so the bullets a truncating model drops are the trailing ones.
+                original = orig.get("bullets", [])
+                if len(bullets) < len(original):
+                    bullets = list(bullets) + list(original[len(bullets):])
+                for b in bullets:
+                    lines.append(f"- {sanitize_text(str(b))}")
+                lines.append("")
+        elif sec.kind == RS.KIND_EDUCATION:
+            for entry in got.get("entries", []) or []:
+                if isinstance(entry, str):
+                    lines.append(f"- {sanitize_text(entry)}")
+                    continue
+                label = " ".join(x for x in [str(entry.get("school", "")).strip(),
+                                             f"({entry['degree']})" if entry.get("degree") else "",
+                                             str(entry.get("detail", "")).strip()] if x)
+                date = str(entry.get("date", "")).strip()
+                lines.append(f"- {sanitize_text(label)}" + (f" | {date}" if date else ""))
+            if not got.get("entries"):
+                lines.extend(sec.lines)
+            lines.append("")
+        else:
+            bullets = [b for b in (got.get("bullets") or []) if str(b).strip()]
+            text = str(got.get("text") or "").strip()
+            if text:
+                lines.append(sanitize_text(text))
+            for b in bullets:
+                lines.append(f"- {sanitize_text(str(b))}")
+            if not text and not bullets:
+                lines.extend(sec.lines)
+            lines.append("")
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
 # ── LLM Judge ────────────────────────────────────────────────────────────
 
 def judge_tailored_resume(
@@ -478,7 +645,13 @@ def tailor_resume(
     avoid_notes: list[str] = []
     tailored = ""
     client = get_client("heavy")
-    tailor_prompt_base = _build_tailor_prompt(profile)
+    # Structure-preserving mode when the base résumé actually has parseable sections.
+    # Falls back to the legacy fixed schema otherwise, so an unstructured résumé (or a
+    # profile with no résumé at all) behaves exactly as before.
+    from applypilot.scoring import resume_sections as _RS
+    _structured = len(_RS.parse(resume_text).sections) >= 2
+    tailor_prompt_base = (_build_structured_tailor_prompt(profile, resume_text)
+                          if _structured else _build_tailor_prompt(profile))
 
     for attempt in range(max_retries + 1):
         report["attempts"] = attempt + 1
@@ -505,7 +678,10 @@ def tailor_resume(
             continue
 
         # Layer 1: Validate JSON fields
-        validation = validate_json_fields(data, profile, mode=validation_mode)
+        # The named-tool check needs the base résumé; pass it alongside the profile
+        # rather than changing validate_json_fields' signature for every caller.
+        validation = validate_json_fields(
+            data, {**profile, "_base_resume_text": resume_text}, mode=validation_mode)
         report["validator"] = validation
 
         if not validation["passed"]:
@@ -514,13 +690,15 @@ def tailor_resume(
             if attempt < max_retries:
                 continue
             # Last attempt — assemble whatever we got
-            tailored = assemble_resume_text(data, profile)
+            tailored = (assemble_structured_resume_text(data, profile, resume_text)
+                        if _structured else assemble_resume_text(data, profile))
             report["resume_data"] = data
             report["status"] = "failed_validation"
             return tailored, report
 
         # Assemble text (header injected by code, em dashes auto-fixed)
-        tailored = assemble_resume_text(data, profile)
+        tailored = (assemble_structured_resume_text(data, profile, resume_text)
+                    if _structured else assemble_resume_text(data, profile))
         report["resume_data"] = data
 
         # Layer 2: LLM judge (catches subtle fabrication) — skipped in lenient mode

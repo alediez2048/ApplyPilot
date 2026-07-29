@@ -19,7 +19,7 @@ import sqlite3
 from datetime import datetime, timezone
 from hashlib import sha1
 
-from applypilot.database import get_connection
+from applypilot.database import get_connection, schema_ready
 # Company matching is a shared domain rule — connections, Apollo org resolution and contact
 # verification must all agree. Lives in domain/company.py; re-exported for existing callers.
 from applypilot.domain.company import companies_match, norm_company
@@ -49,6 +49,8 @@ _norm_company = norm_company   # internal alias, kept for existing call sites
 def init_connections(conn: sqlite3.Connection | None = None) -> sqlite3.Connection:
     if conn is None:
         conn = get_connection()
+    if schema_ready(conn, "connections"):
+        return conn
     cols = ", ".join(f"{n} {t}" for n, t in _CONN_COLUMNS.items())
     conn.execute(f"CREATE TABLE IF NOT EXISTS connections ({cols})")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_conn_name ON connections(name_norm)")
@@ -135,7 +137,10 @@ def match(full_name: str | None, company: str | None = None,
         conn = get_connection()
     init_connections(conn)
     rows = conn.execute(
-        "SELECT full_name, company, company_norm, position, url FROM connections WHERE name_norm = ?",
+        # ORDER BY rowid so a duplicated name resolves the same way every call — and the
+        # same way as match_many(), which has to agree with this row for row.
+        "SELECT full_name, company, company_norm, position, url FROM connections "
+        "WHERE name_norm = ? ORDER BY rowid",
         (name_norm,),
     ).fetchall()
     if not rows:
@@ -151,16 +156,72 @@ def match(full_name: str | None, company: str | None = None,
     return best
 
 
-def count_at_company(company: str | None, conn: sqlite3.Connection | None = None) -> int:
-    """How many of your connections currently list `company` as their employer."""
-    target = _norm_company(company)
-    if not target:
-        return 0
+def match_many(full_names: list[str | None], company: str | None = None,
+               conn: sqlite3.Connection | None = None) -> dict[str, dict]:
+    """`match()` for many people in one query, keyed by the ORIGINAL name string.
+
+    Same selection rule as `match()`: a company match wins outright, otherwise the first
+    row for that name. Kept in one place so the two can't drift — `test_match_many_agrees_
+    with_match` compares them row by row.
+    """
+    wanted = {(n or ""): _norm_name(n) for n in full_names}
+    wanted = {orig: nn for orig, nn in wanted.items() if nn}
+    if not wanted:
+        return {}
     if conn is None:
         conn = get_connection()
     init_connections(conn)
-    rows = conn.execute("SELECT company_norm FROM connections WHERE company_norm != ''").fetchall()
-    return sum(1 for (cn,) in rows if companies_match(target, cn))
+    norms = sorted(set(wanted.values()))
+    rows = conn.execute(
+        f"SELECT name_norm, full_name, company, company_norm, position, url FROM connections "
+        f"WHERE name_norm IN ({','.join('?' for _ in norms)}) ORDER BY rowid", norms,
+    ).fetchall()
+
+    target = _norm_company(company)
+    by_norm: dict[str, dict] = {}
+    for r in rows:
+        # `name_norm` is an internal key, dropped so a record from here is indistinguishable
+        # from one `match()` returns — otherwise the two disagree on dict equality and any
+        # equivalence check between them is quietly meaningless.
+        rec = {k: r[k] for k in r.keys() if k != "name_norm"}
+        rec["company_match"] = companies_match(target, rec["company_norm"])
+        current = by_norm.get(r["name_norm"])
+        if current is None or (rec["company_match"] and not current["company_match"]):
+            by_norm[r["name_norm"]] = rec
+    return {orig: by_norm[nn] for orig, nn in wanted.items() if nn in by_norm}
+
+
+def count_at_company(company: str | None, conn: sqlite3.Connection | None = None) -> int:
+    """How many of your connections currently list `company` as their employer."""
+    return company_counts([company], conn).get(company or "", 0)
+
+
+def company_counts(companies: list[str | None],
+                   conn: sqlite3.Connection | None = None) -> dict[str, int]:
+    """Connection counts for MANY companies in one pass.
+
+    `companies_match` is word-aware (see CLAUDE.md §Lessons 1 — substring matching shipped
+    four bugs), so this cannot be pushed into SQL and has to compare in Python. Called once
+    per company that was fine; called once per JOB it meant re-scanning all 899 connection
+    rows every time — 7,192 comparisons per dashboard refresh, at 2.5s intervals.
+
+    One scan, all companies.
+    """
+    targets = {(c or ""): _norm_company(c) for c in companies}
+    targets = {orig: t for orig, t in targets.items() if t}
+    out: dict[str, int] = {(c or ""): 0 for c in companies}
+    if not targets:
+        return out
+    if conn is None:
+        conn = get_connection()
+    init_connections(conn)
+    for (cn,) in conn.execute(
+        "SELECT company_norm FROM connections WHERE company_norm != ''"
+    ).fetchall():
+        for orig, target in targets.items():
+            if companies_match(target, cn):
+                out[orig] += 1
+    return out
 
 
 def at_company(company: str | None, limit: int = 25,

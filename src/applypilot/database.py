@@ -17,6 +17,49 @@ from applypilot.config import DB_PATH
 _local = threading.local()
 
 
+class _Connection(sqlite3.Connection):
+    """A connection that remembers which tables it has already set up.
+
+    `sqlite3.Connection` is neither weakref-able nor attribute-settable, so a subclass is
+    the only way to hang per-connection state off it without an id()-keyed dict that can
+    alias after garbage collection.
+    """
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.schema_done: set[str] = set()
+
+
+def schema_ready(conn: sqlite3.Connection, key: str) -> bool:
+    """True if `key`'s CREATE TABLE/INDEX pass has already run on this connection.
+
+    Every `init_*()` is idempotent at the SQL level (`IF NOT EXISTS`), which made it look
+    free to call from every read path. It is not: one /api/status was running **199 schema
+    statements** — 108 of them from `init_connections`, re-invoked once per contact — plus
+    24 PRAGMA table_info calls, every 2.5 seconds. Measured, not guessed.
+
+    Idempotent-per-statement is not the same as idempotent-per-call. This makes it so.
+
+    Marks the key as done, so callers read as: `if schema_ready(conn, "jobs"): return conn`.
+    Connections passed in by tests may be plain `sqlite3.Connection`; those always report
+    False, which is the safe direction — the schema simply gets created as it always did.
+    """
+    done = getattr(conn, "schema_done", None)
+    if done is None:
+        return False
+    if key in done:
+        return True
+    done.add(key)
+    return False
+
+
+def forget_schema(conn: sqlite3.Connection) -> None:
+    """Drop the memo — for tests that recreate tables on a live connection."""
+    done = getattr(conn, "schema_done", None)
+    if done is not None:
+        done.clear()
+
+
 def get_connection(db_path: Path | str | None = None) -> sqlite3.Connection:
     """Get a thread-local cached SQLite connection with WAL mode enabled.
 
@@ -42,7 +85,7 @@ def get_connection(db_path: Path | str | None = None) -> sqlite3.Connection:
         except sqlite3.ProgrammingError:
             pass
 
-    conn = sqlite3.connect(path, timeout=30)
+    conn = sqlite3.connect(path, timeout=30, factory=_Connection)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=10000")
     conn.row_factory = sqlite3.Row
@@ -87,6 +130,8 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
     Path(path).parent.mkdir(parents=True, exist_ok=True)
 
     conn = get_connection(path)
+    if schema_ready(conn, "jobs"):
+        return conn
     conn.execute("""
         CREATE TABLE IF NOT EXISTS jobs (
             -- Discovery stage (smart_extract / job_search)

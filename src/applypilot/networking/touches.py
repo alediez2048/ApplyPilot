@@ -29,7 +29,7 @@ import sqlite3
 from datetime import datetime, timezone
 from hashlib import sha1
 
-from applypilot.database import get_connection
+from applypilot.database import get_connection, schema_ready
 
 # A touch's own delivery lifecycle. Sequence-terminal states are NOT in this list —
 # they live in `sequences.status`, which is the entire point of the split.
@@ -68,6 +68,8 @@ def init_touches(conn: sqlite3.Connection | None = None) -> sqlite3.Connection:
     """Create both tables + indexes. Idempotent; safe to call from every read path."""
     if conn is None:
         conn = get_connection()
+    if schema_ready(conn, "touches"):
+        return conn
     cols = ", ".join(f"{n} {t}" for n, t in _TOUCH_COLUMNS.items())
     conn.execute(f"CREATE TABLE IF NOT EXISTS touches ({cols})")
     seq_cols = ", ".join(f"{n} {t}" for n, t in _SEQUENCE_COLUMNS.items())

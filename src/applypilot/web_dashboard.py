@@ -1041,10 +1041,14 @@ def _legacy_followup_status(ladder: dict) -> str:
     return "sent" if ladder["count"] else ""
 
 
-def _contact_payload(c: dict, company: str | None = None, ladders: dict | None = None) -> dict:
+def _contact_payload(c: dict, company: str | None = None, ladders: dict | None = None,
+                     conn_matches: dict | None = None) -> dict:
     from applypilot.domain.followup import EMPTY_LADDER
     from applypilot.networking import connections
-    conn_rec = connections.match(c.get("full_name"), company)
+    # Prebuilt by the caller in one query when rendering a whole job; falls back to a
+    # single lookup so this stays usable on its own.
+    conn_rec = (conn_matches or {}).get(c.get("full_name") or "") if conn_matches is not None \
+        else connections.match(c.get("full_name"), company)
     ladders = ladders or {}
     cid = c.get("id") or ""
     # ARCH-3: ladder state is per (contact, channel) in `touches`, not ten columns here.
@@ -1164,6 +1168,14 @@ def _status_payload() -> dict:
     """).fetchall()
 
     jobs: list[dict] = []
+    # Connection counts for every company up front: one scan of the 899-row connections
+    # table instead of one per job. Derived here rather than inside the loop so the
+    # expensive part happens once — see connections.company_counts.
+    from applypilot.networking import connections as _conns
+    _job_companies = {r["url"]: (_derive.derive_company(dict(zip(r.keys(), r)))
+                                 or r["site"] or "") for r in rows}
+    _conn_counts = _conns.company_counts(list(set(_job_companies.values())), conn)
+
     for row in rows:
         # Status precedence (each maps to a UI indicator):
         #   applied > active apply states (needs_human / ready_to_submit / in_progress / dryrun) >
@@ -1198,21 +1210,22 @@ def _status_payload() -> dict:
             *_material_entries("Resume", row["tailored_resume_path"]),
             *_material_entries("Cover Letter", row["cover_letter_path"]),
         ]
-        job_row = dict(zip(row.keys(), row))
-        contact_company = _derive.derive_company(job_row) or row["site"] or ""
+        contact_company = _job_companies[row["url"]]
         raw_contacts = get_contacts_for_job(row["url"], conn)
         # One bulk ladder load per job, shared by the payloads and the follow-up panel —
         # not one query per contact per channel on a 2.5s refresh.
         job_ladders = _ladder_states([c.get("id") for c in raw_contacts if c.get("id")])
-        contacts = [_contact_payload(c, contact_company, job_ladders) for c in raw_contacts]
-        from applypilot.networking import connections as _conns
+        job_matches = _conns.match_many([c.get("full_name") for c in raw_contacts],
+                                        contact_company, conn)
+        contacts = [_contact_payload(c, contact_company, job_ladders, job_matches)
+                    for c in raw_contacts]
         net_task = _net_tasks.get(row["url"], {})
         jobs.append({
             "url": row["url"],
             "title": row["title"] or "Untitled",
             "company": row["site"] or "",
             "contact_company": contact_company,
-            "connections_at_company": _conns.count_at_company(contact_company),
+            "connections_at_company": _conn_counts.get(contact_company, 0),
             "salary": row["salary"] or "",
             "location": row["location"] or "",
             "description": desc[:900],

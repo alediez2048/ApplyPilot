@@ -11,7 +11,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from hashlib import sha1
 
-from applypilot.database import get_connection
+from applypilot.database import get_connection, schema_ready
 
 _DELIM = "\x1f"  # unit separator — avoids hash collisions across concatenated fields
 
@@ -73,6 +73,8 @@ def init_contacts(conn: sqlite3.Connection | None = None) -> sqlite3.Connection:
     """Create the contacts table + indexes if absent, then forward-migrate columns."""
     if conn is None:
         conn = get_connection()
+    if schema_ready(conn, "contacts"):
+        return conn
     cols = ", ".join(f"{name} {dtype}" for name, dtype in _CONTACT_COLUMNS.items())
     conn.execute(f"CREATE TABLE IF NOT EXISTS contacts ({cols})")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_contacts_job ON contacts(job_url)")

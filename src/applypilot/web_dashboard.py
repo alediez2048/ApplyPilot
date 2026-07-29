@@ -50,39 +50,26 @@ EXT_NOTE_MAX_LEN = 300
 _POSTABLE_DM_STATUSES = frozenset({"sent", "manual", "skipped"})
 
 
-def _titleize_slug(value: str) -> str:
-    value = re.sub(r"[-_]+", " ", value).strip()
-    overrides = {
-        "ai": "AI",
-        "xai": "xAI",
-        "openai": "OpenAI",
-    }
-    key = value.lower().replace(" ", "")
-    if key in overrides:
-        return overrides[key]
-    return value.title()
-
-
 def _infer_company(url: str) -> str:
+    """Employer name for a pasted job URL.
+
+    The board/ATS path-slug rules live in networking.derive so contact discovery and
+    URL import agree on who the employer is (a YC listing is the startup, not YC).
+    """
+    from applypilot.networking import derive as _derive
+
+    slug = _derive.employer_slug_from_url(url)
+    if slug:
+        return _derive.titleize_slug(slug)
+
     parsed = urlparse(url)
     host = parsed.netloc.lower().removeprefix("www.")
-    path_parts = [p for p in parsed.path.split("/") if p]
-
-    if "greenhouse.io" in host and len(path_parts) >= 1:
-        return _titleize_slug(path_parts[0])
-    if "ashbyhq.com" in host and len(path_parts) >= 1:
-        return _titleize_slug(path_parts[0])
-    if "lever.co" in host and len(path_parts) >= 1:
-        return _titleize_slug(path_parts[0])
-    if "workdayjobs.com" in host and len(path_parts) >= 1:
-        return _titleize_slug(path_parts[0].split("_")[0])
-
     domain = host.split(".")
     if len(domain) >= 2:
         company = domain[-2]
         if company in {"careers", "jobs"} and len(domain) >= 3:
             company = domain[-3]
-        return _titleize_slug(company)
+        return _derive.titleize_slug(company)
     return "Uploaded"
 
 
@@ -924,6 +911,41 @@ def _gmail_available() -> bool:
     return gmail_send.transport() is not None
 
 
+def _apollo_profile_url(apollo_id: str | None) -> str:
+    """Deep link to a person in the Apollo web app.
+
+    Apollo's API will not release a direct dial to a local tool — verified three ways:
+    people-search returns only `has_direct_phone: "Yes"`; `people/match` with
+    `reveal_phone_number` 400s without a PUBLIC webhook_url (loopback is rejected); and
+    saving the person as a contact yields only the org switchboard, even after polling.
+    The UI reveal is the only local route, so we link there and the number is pasted back.
+    """
+    aid = (apollo_id or "").strip()
+    return f"https://app.apollo.io/#/people/{aid}" if aid else ""
+
+
+def _job_checklist(job_status: str, applied_at: str, contacts: list[dict]) -> dict:
+    """Thin delegate — the rule lives in applypilot.domain.checklist."""
+    from applypilot.domain import job_checklist
+    return job_checklist(job_status, applied_at, contacts)
+
+
+def _followup_panel(contacts: list[dict]) -> dict:
+    """Thin delegate — the rule lives in applypilot.domain.followup."""
+    from applypilot.domain import followup_panel
+    return followup_panel(contacts)
+
+
+def _apollo_search_url(full_name: str | None, company: str | None) -> str:
+    """Fallback: Apollo people search prefilled with the person's name.
+
+    The per-person route above is Apollo's SPA and undocumented; if it ever changes, a
+    search page with their name already typed still gets you there in one more click.
+    """
+    q = " ".join(x for x in [(full_name or "").strip(), (company or "").strip()] if x)
+    return f"https://app.apollo.io/#/people?qKeywords={quote(q)}" if q.strip() else ""
+
+
 def _contact_payload(c: dict, company: str | None = None) -> dict:
     from applypilot.networking import connections
     conn_rec = connections.match(c.get("full_name"), company)
@@ -935,6 +957,11 @@ def _contact_payload(c: dict, company: str | None = None) -> dict:
         "email_status": c.get("email_status") or "none",
         "linkedin_url": c.get("linkedin_url") or "",
         "match_reason": c.get("match_reason") or "",
+        # Operator-entered (Apollo won't hand a direct dial to a local tool — see store.py).
+        "phone": c.get("phone") or "",
+        "notes": c.get("notes") or "",
+        "apollo_url": _apollo_profile_url(c.get("apollo_id")),
+        "apollo_search_url": _apollo_search_url(c.get("full_name"), company or c.get("company")),
         "outreach_subject": c.get("outreach_subject") or "",
         "outreach_message": c.get("outreach_message") or "",
         "linkedin_message": c.get("linkedin_message") or "",
@@ -944,6 +971,20 @@ def _contact_payload(c: dict, company: str | None = None) -> dict:
         # send-gate rely on THIS, not just outreach_status, to know a contact was already emailed.
         "emailed": bool((c.get("sent_message_id") or "").strip())
                    or c.get("outreach_status") == "submitted",
+        # Checklist + follow-up inputs.
+        "submitted_at": c.get("submitted_at") or "",
+        "followed_up_at": c.get("followed_up_at") or "",
+        "followup_count": c.get("followup_count") or 0,
+        "followup_status": c.get("followup_status") or "",
+        "followup_subject": c.get("followup_subject") or "",
+        "followup_message": c.get("followup_message") or "",
+        "followup_error": c.get("followup_error") or "",
+        "threaded": bool((c.get("thread_id") or "").strip()
+                         or (c.get("rfc_message_id") or "").strip()),
+        "li_followup_count": c.get("li_followup_count") or 0,
+        "li_followup_status": c.get("li_followup_status") or "",
+        "li_followup_message": c.get("li_followup_message") or "",
+        "dm_sent_at": c.get("dm_sent_at") or "",
         # LinkedIn DM channel state + per-contact readiness (has note + profile, not sent).
         "dm_status": c.get("dm_status") or "none",
         "dm_error": c.get("dm_error") or "",
@@ -954,6 +995,11 @@ def _contact_payload(c: dict, company: str | None = None) -> dict:
         "is_connection": bool(conn_rec),
         "connection_at_company": bool(conn_rec and conn_rec.get("company_match")),
         "connection_url": (conn_rec or {}).get("url", ""),
+        # The employer LinkedIn actually lists for them. Surfaced so a bad company match is
+        # visible instead of silent — "🤝 Connection here" once hid Armanino behind "Arm".
+        "connection_company": (conn_rec or {}).get("company", "") or "",
+        "confidence": c.get("confidence") or "",
+        "verify_note": c.get("verify_note") or "",
         # HOT layer marker: found via your connections (vs cold Apollo). Either the stored source
         # or a live connection match makes it "hot".
         "hot": c.get("source") == "connection" or bool(conn_rec),
@@ -1076,6 +1122,8 @@ def _status_payload() -> dict:
             "last_attempted_at": row["last_attempted_at"] or "",
             "materials": materials,
             "contacts": contacts,
+            "checklist": _job_checklist(status, row["applied_at"] or "", contacts),
+            "followups": _followup_panel(contacts),
             "activity": _job_activity(row["url"], conn),
             "network_running": bool(net_task.get("running")),
             "network_note": net_task.get("note") or "",
@@ -1263,6 +1311,135 @@ def _save_or_regen_draft(data: dict) -> dict:
     return {"ok": True, "message": "saved"}
 
 
+_PHONE_MAX_LEN = 40
+_NOTES_MAX_LEN = 2000
+
+
+def _save_contact_details(data: dict) -> dict:
+    """Persist the operator-entered phone / notes for one contact.
+
+    Separate from _save_or_regen_draft on purpose: that handler stamps
+    outreach_status='drafted', which would wrongly re-open an already-sent contact
+    just because a phone number got typed in.
+    """
+    init_db()
+    conn = get_connection()
+    from applypilot.networking.store import init_contacts, upsert_contact
+    init_contacts(conn)
+
+    cid = data.get("contact_id", "")
+    if not cid:
+        return {"ok": False, "message": "contact_id required"}
+    row = conn.execute("SELECT id, job_url FROM contacts WHERE id = ?", (cid,)).fetchone()
+    if not row:
+        return {"ok": False, "message": "contact not found"}
+
+    fields = {"id": cid, "job_url": row["job_url"]}
+    if "phone" in data:
+        fields["phone"] = str(data.get("phone") or "").strip()[:_PHONE_MAX_LEN]
+    if "notes" in data:
+        fields["notes"] = str(data.get("notes") or "").strip()[:_NOTES_MAX_LEN]
+    if len(fields) == 2:
+        return {"ok": False, "message": "nothing to save"}
+    before = conn.execute("SELECT full_name, phone FROM contacts WHERE id = ?", (cid,)).fetchone()
+    upsert_contact(fields)
+    # Only log a phone that actually changed — re-saving a note shouldn't spam the timeline.
+    new_phone = fields.get("phone")
+    if new_phone and new_phone != (before["phone"] or ""):
+        from applypilot.networking.store import log_contact_event
+        who = (before["full_name"] if before else None) or "contact"
+        log_contact_event(cid, "info", f"Added a phone number for {who}: {new_phone}.", conn)
+    return {"ok": True, "message": "saved"}
+
+
+def _followup_action(data: dict) -> dict:
+    """draft | save | send | stop | reopen for one contact's follow-up."""
+    init_db()
+    conn = get_connection()
+    from applypilot.networking import store
+    store.init_contacts(conn)
+
+    cid = (data.get("contact_id") or "").strip()
+    action = (data.get("action") or "").strip()
+    contact = store.get_contact(cid) if cid else None
+    if not contact:
+        return {"ok": False, "message": "contact not found"}
+
+    if action == "stop":
+        store.set_sequence_status(cid, "stopped")
+        return {"ok": True, "message": "sequence stopped"}
+    if action == "replied":
+        store.set_sequence_status(cid, "replied")
+        return {"ok": True, "message": "marked replied — sequence stopped"}
+    if action == "reopen":
+        store.set_sequence_status(cid, "")
+        return {"ok": True, "message": "sequence reopened"}
+
+    if action == "save":
+        store.set_followup_draft(cid, data.get("subject", ""), data.get("body", ""))
+        return {"ok": True, "message": "saved"}
+
+    if action == "draft":
+        row = conn.execute("SELECT * FROM jobs WHERE url = ?", (contact["job_url"],)).fetchone()
+        job = dict(zip(row.keys(), row)) if row else {"url": contact["job_url"]}
+        from applypilot.config import load_profile
+        from applypilot.networking import outreach
+        try:
+            profile = load_profile()
+        except Exception:  # noqa: BLE001
+            profile = {}
+        touch = (contact.get("followup_count") or 0) + 1
+        try:
+            d = outreach.draft_followup(profile, job, contact, touch=touch,
+                                        style=(data.get("style") or "").strip())
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "message": f"draft failed: {e}"}
+        store.set_followup_draft(cid, d["subject"], d["body"])
+        return {"ok": True, "subject": d["subject"], "body": d["body"], "touch": touch}
+
+    if action == "send":
+        from applypilot.networking.gmail_send import send_followup
+        return send_followup(cid)
+
+    # ── LinkedIn: draft / save / mark-sent / stop. We NEVER send these ourselves —
+    # driving LinkedIn from outside the browser was abandoned twice (CLAUDE.md §7, §8),
+    # so the flow is copy → open profile → you paste and send → you confirm.
+    if action == "li_stop":
+        store.set_li_sequence_status(cid, "stopped")
+        return {"ok": True, "message": "LinkedIn sequence stopped"}
+    if action == "li_replied":
+        store.set_li_sequence_status(cid, "replied")
+        return {"ok": True, "message": "marked replied — LinkedIn sequence stopped"}
+    if action == "li_connected":
+        store.mark_connected_now(cid)
+        return {"ok": True, "message": "recorded — follow-up clock started"}
+    if action == "li_save":
+        store.set_li_followup_draft(cid, data.get("message", ""))
+        return {"ok": True, "message": "saved"}
+    if action == "li_sent":
+        n = store.mark_li_followup_sent(cid)
+        return {"ok": True, "touch": n, "message": f"LinkedIn follow-up #{n} recorded"}
+    if action == "li_draft":
+        row = conn.execute("SELECT * FROM jobs WHERE url = ?", (contact["job_url"],)).fetchone()
+        job = dict(zip(row.keys(), row)) if row else {"url": contact["job_url"]}
+        from applypilot.config import load_profile
+        from applypilot.networking import outreach
+        try:
+            profile = load_profile()
+        except Exception:  # noqa: BLE001
+            profile = {}
+        touch = (contact.get("li_followup_count") or 0) + 1
+        try:
+            d = outreach.draft_linkedin_followup(profile, job, contact, touch=touch,
+                                                 style=(data.get("style") or "").strip())
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "message": f"draft failed: {e}"}
+        store.set_li_followup_draft(cid, d["message"])
+        return {"ok": True, "message_text": d["message"], "touch": touch}
+
+    return {"ok": False, "message": f"unknown action: {action!r}"}
+
+
 def _delete_job(url: str) -> dict:
     init_db()
     conn = get_connection()
@@ -1387,11 +1564,15 @@ def _ext_queue(job_url: str | None, include_skipped: bool = False) -> dict:
     return {"ok": True, "contacts": [_queue_contact_payload(c) for c in contacts if c]}
 
 
-def _ext_status(data: dict) -> tuple[dict, int]:
-    """Map a reported send status to the store's dm_* helpers (sent/manual/skipped)."""
+def _apply_dm_status(cid: str, status: str) -> tuple[dict, int]:
+    """Map a reported LinkedIn status to the store's dm_* helpers (sent/manual/skipped).
+
+    Shared by the extension API and the dashboard's own "sent the invite" confirm, so both
+    routes stamp dedupe state and append the same activity-log line.
+    """
     from applypilot.networking import store
-    cid = (data.get("contact_id") or "").strip()
-    status = (data.get("status") or "").strip()
+    cid = (cid or "").strip()
+    status = (status or "").strip()
     if not cid:
         return {"ok": False, "error": "contact_id required"}, 400
     if status not in _POSTABLE_DM_STATUSES:
@@ -1406,6 +1587,11 @@ def _ext_status(data: dict) -> tuple[dict, int]:
     else:
         store.mark_dm_skipped(cid)     # no stamp; just excluded from the queue
     return {"ok": True}, 200
+
+
+def _ext_status(data: dict) -> tuple[dict, int]:
+    """Extension-reported send status (EXT-0 contract)."""
+    return _apply_dm_status(data.get("contact_id") or "", data.get("status") or "")
 
 
 def _ext_note(data: dict) -> tuple[dict, int]:
@@ -1569,6 +1755,28 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/outreach":
                 _json_response(self, _save_or_regen_draft(data))
+                return
+            if path == "/api/contact/details":
+                _json_response(self, _save_contact_details(data))
+                return
+            if path == "/api/followup":
+                _json_response(self, _followup_action(data))
+                return
+            if path == "/api/contact/followup":
+                from applypilot.networking import store as _store
+                cid = (data.get("contact_id") or "").strip()
+                _store.init_contacts()
+                if not cid or not _store.get_contact(cid):
+                    _json_response(self, {"ok": False, "message": "contact not found"}, 404)
+                    return
+                first = _store.mark_followed_up(cid)
+                _json_response(self, {"ok": True, "message": "recorded" if first
+                                      else "already recorded"})
+                return
+            if path == "/api/contact/dm-status":
+                body, code = _apply_dm_status(data.get("contact_id") or "",
+                                              data.get("status") or "")
+                _json_response(self, body, code)
                 return
             if path == "/api/outreach/send":
                 cid = data.get("contact_id", "")
@@ -1919,13 +2127,67 @@ _INDEX_HTML = r"""<!doctype html>
   /* Per-job footer: Activity + People toggles (left, stacked), low-key delete (top-right). */
   tr.job-foot > td { padding:4px 12px 10px; background:transparent; border-bottom:2px solid var(--line); }
   .foot-tools { position:relative; }
-  .foot-toggles { display:flex; flex-direction:column; gap:2px; }
-  .foot-right { position:absolute; top:2px; right:4px; display:flex; gap:10px; align-items:center; }
-  .del-link, .reject-link { background:none; border:none; padding:2px 4px; min-height:0;
-      font-size:11px; font-weight:500; color:var(--faint); cursor:pointer; text-transform:lowercase; }
-  .del-link:hover { color:var(--red); background:none; box-shadow:none; text-decoration:underline; }
-  .reject-link:hover { color:var(--soft); background:none; box-shadow:none; text-decoration:underline; }
-  .reject-link.restore { color:var(--accent); }
+  /* ── Status strip: where you are + the one next thing, always visible ── */
+  .strip { display:flex; flex-wrap:wrap; align-items:center; gap:8px 14px;
+    padding:8px 12px; background:var(--surface2); border-radius:8px; }
+  .strip-toggle { background:none; border:none; box-shadow:none; color:var(--faint);
+    font-size:11px; padding:2px 5px; min-height:0; border-radius:5px; }
+  .strip-toggle:hover { background:#e6eaee; color:var(--text); box-shadow:none; }
+  .steps { display:flex; align-items:center; flex-wrap:wrap; gap:2px 0; }
+  .sstep { display:inline-flex; align-items:center; gap:5px; font-size:11.5px; color:var(--faint);
+    white-space:nowrap; }
+  .sstep .mk { width:14px; height:14px; border-radius:50%; display:inline-flex; align-items:center;
+    justify-content:center; font-size:9px; font-weight:700; background:#dfe4e9; color:#fff; flex-shrink:0; }
+  .sstep.done { color:var(--text); }  .sstep.done .mk { background:var(--green); }
+  .sstep.now  { color:var(--yellow); font-weight:700; }  .sstep.now .mk { background:var(--yellow); }
+  .sstep.na   { color:#b8c0c8; }      .sstep.na .mk { background:#eceff2; }
+  .sarrow { width:14px; height:1px; background:#dfe3e7; margin:0 7px; flex-shrink:0; }
+  .next { margin-left:auto; display:flex; align-items:center; gap:7px; }
+  .next-label { font-size:10px; color:var(--faint); text-transform:uppercase; letter-spacing:.07em;
+    font-weight:700; }
+  .next-done { font-size:11.5px; font-weight:600; color:var(--green); }
+  .restart-inline { background:transparent; border:1px solid var(--line2); color:var(--muted);
+    font-size:11px; padding:4px 9px; min-height:0; }
+  .restart-inline:hover { background:rgba(0,0,0,.04); color:var(--text); box-shadow:none; }
+  .strip-hint { font-size:11px; color:var(--muted); padding:5px 12px 0; line-height:1.4; }
+  button.amber { background:var(--yellow-soft); border-color:#f0d9ac; color:var(--yellow); }
+  button.amber:hover { background:#fdecd0; }
+  /* ── Tabs replace four sibling accordions ── */
+  .tabs { display:flex; flex-wrap:wrap; gap:2px; padding:0 6px; margin-top:6px;
+    border-bottom:1px solid var(--line); }
+  .tabs .tab { background:none; border:none; box-shadow:none; border-radius:0; min-height:0;
+    padding:7px 11px; font-size:12px; font-weight:500; color:var(--muted);
+    border-bottom:2px solid transparent; display:inline-flex; align-items:center; gap:6px; }
+  .tabs .tab:hover { color:var(--text); background:none; box-shadow:none; }
+  .tabs .tab.on { color:var(--accent); border-bottom-color:var(--accent); font-weight:650; }
+  .tabs .tab .n { font-size:10px; font-weight:700; padding:0 6px; border-radius:999px;
+    background:var(--surface3); color:var(--muted); }
+  .tabs .tab .n.due { background:var(--yellow-soft); color:var(--yellow); }
+  .pane { padding:10px 4px 6px; }
+  .pane-empty { font-size:12px; color:var(--muted); font-style:italic; padding:6px 2px; }
+  /* ── Contacts: one line each until opened ── */
+  .plist { display:flex; flex-direction:column; }
+  .prow { display:flex; align-items:center; gap:9px; padding:7px 6px; font-size:12.5px;
+    border-bottom:1px solid #f1f3f5; cursor:pointer; }
+  .prow:hover { background:var(--surface2); }
+  .prow.is-open { background:var(--surface2); border-bottom-color:transparent; }
+  .prow .av { width:24px; height:24px; border-radius:50%; color:#fff; flex-shrink:0;
+    display:flex; align-items:center; justify-content:center; font-size:10px; font-weight:600; }
+  .pwho { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .pname { font-weight:600; }  .prole { color:var(--muted); }
+  .prow .pills { margin-left:auto; display:flex; gap:5px; align-items:center; flex-shrink:0; }
+  .pill { font-size:10px; font-weight:600; padding:1px 7px; border-radius:999px; white-space:nowrap; }
+  .pill.on { background:var(--green-soft); color:var(--green); }
+  .pill.off { background:#f0f2f4; color:var(--faint); }
+  .pill.due { background:var(--yellow-soft); color:var(--yellow); }
+  .prow .caret { color:var(--faint); font-size:9px; width:10px; text-align:center; }
+  .pbody { background:var(--surface2); border:1px solid var(--line); border-radius:7px;
+    padding:10px 11px; margin:0 0 8px; cursor:default; }
+  .chan { display:flex; gap:4px; margin:8px 0 9px; }
+  .chan span { font-size:11px; padding:3px 9px; border-radius:6px; background:var(--surface);
+    border:1px solid var(--line); color:var(--muted); cursor:pointer; user-select:none; }
+  .chan span:hover { color:var(--text); }
+  .chan span.on { background:var(--accent-soft); border-color:#bcd6f0; color:var(--accent); font-weight:650; }
   .find-link { display:inline-flex; align-items:center; gap:6px; background:none; border:none; padding:3px 4px;
       min-height:0; font-size:12px; font-weight:600; color:var(--accent); cursor:pointer; border-radius:6px; }
   .find-link:hover:not(:disabled) { background:var(--accent-soft); box-shadow:none; }
@@ -1963,6 +2225,94 @@ _INDEX_HTML = r"""<!doctype html>
   .bulkbar { display:flex; gap:8px; align-items:center; margin:8px 0 10px; flex-wrap:wrap; }
   .bulkbar .bulk { font-size:12px; }
   .bulknote { font-size:11px; color:#555; }
+  /* ── Follow-ups: standalone panel, peer of Checklist / Activity / People ── */
+  .followups > summary { list-style:none; cursor:pointer; padding:3px 4px; border-radius:6px;
+    user-select:none; display:inline-flex; align-items:center; gap:6px; font-size:12px; color:var(--muted); }
+  .followups > summary::-webkit-details-marker { display:none; }
+  .followups > summary:hover { background:#f1f5f9; }
+  .fu-toggle { font-size:13px; color:var(--faint); }
+  .fu-toggle.has-due { color:var(--yellow); }
+  .fu-count { font-size:11px; padding:1px 7px; border-radius:999px; background:var(--surface3);
+    color:var(--muted); font-weight:600; }
+  .fu-count.due { background:var(--yellow-soft); color:var(--yellow); border:1px solid #f0d9ac; }
+  .fu-panel { padding:8px 0 4px; max-width:640px; }
+  .fu-sched { font-size:11px; color:var(--faint); margin-bottom:7px; }
+  .fu-empty { font-size:12px; color:var(--muted); font-style:italic; padding:2px 0 4px; }
+  .fu-card { background:var(--surface); border:1px solid var(--line); border-radius:8px;
+    padding:9px 10px; margin-bottom:7px; }
+  .fu-head { font-size:13px; display:flex; flex-wrap:wrap; align-items:center; gap:6px; }
+  .fu-role { color:var(--muted); font-weight:400; font-size:12px; }
+  .fu-touch { font-size:10.5px; font-weight:700; padding:1px 7px; border-radius:999px;
+    background:var(--yellow-soft); color:var(--yellow); }
+  .fu-warn { font-size:10.5px; color:var(--muted); cursor:help; }
+  .fu-meta { font-size:11px; color:var(--faint); margin-top:2px; }
+  .fu-err { font-size:11px; color:var(--red); background:var(--red-soft); padding:4px 7px;
+    border-radius:5px; margin-top:5px; }
+  .fu-card .fu-subj { width:100%; font-size:12px; padding:4px 6px; border:1px solid #d7e2ec;
+    border-radius:5px; margin-top:7px; font-weight:600; }
+  .fu-card .fu-body { width:100%; font-size:12px; padding:5px 6px; border:1px solid #d7e2ec;
+    border-radius:5px; margin-top:4px; font-family:inherit; resize:vertical; line-height:1.5; }
+  .fu-sec { font-size:11.5px; font-weight:700; color:var(--text); margin:13px 0 6px;
+    padding-top:10px; border-top:1px solid var(--line); }
+  .fu-sched-inline { font-weight:400; color:var(--faint); font-size:11px; }
+  .fu-touch.li { background:var(--accent-soft); color:var(--accent); }
+  .fu-card.li .li-body { width:100%; font-size:12px; padding:5px 6px; border:1px solid #d7e2ec;
+    border-radius:5px; margin-top:7px; font-family:inherit; resize:vertical; line-height:1.5; }
+  .link-btn { background:none; border:none; box-shadow:none; padding:0 3px; min-height:0;
+    font-size:11px; color:var(--accent); text-decoration:underline; cursor:pointer; }
+  .fu-rest { display:flex; flex-direction:column; gap:2px; margin-top:6px; padding-top:6px;
+    border-top:1px dashed var(--line); font-size:11px; color:var(--faint); }
+  /* ── Completion checklist: progress ring + row rows ── */
+  .checklist > summary { list-style:none; cursor:pointer; padding:3px 4px; border-radius:6px;
+    user-select:none; display:inline-flex; align-items:center; gap:7px; font-size:12px; color:var(--muted); }
+  .checklist > summary::-webkit-details-marker { display:none; }
+  .checklist > summary:hover { background:#f1f5f9; }
+  .cl-title { font-weight:600; }
+  /* Ring: a conic-gradient donut. --rem is the REMAINING share, swept in grey from 12 o'clock. */
+  .cl-ring { position:relative; width:26px; height:26px; border-radius:50%; flex-shrink:0;
+    background:conic-gradient(#e6eaef 0 var(--rem), #16a34a var(--rem) 100%); display:inline-flex;
+    align-items:center; justify-content:center; }
+  .cl-ring::after { content:''; position:absolute; inset:3px; border-radius:50%; background:var(--surface, #fff); }
+  .cl-pct { position:relative; z-index:1; font-size:8.5px; font-weight:700; color:var(--text); font-variant-numeric:tabular-nums; }
+  .checklist.cl-complete > summary .cl-title { color:#137a4b; }
+  .cl-badge { font-size:10px; font-weight:700; padding:1px 6px; border-radius:8px;
+    background:#fff5e6; color:#9a6b00; }
+  .checklist.cl-due > summary { background:#fffaf0; }
+  .cl-body { padding:5px 0 4px 6px; display:flex; flex-direction:column; gap:2px; }
+  .cl-row { display:flex; align-items:baseline; gap:6px; font-size:12px; color:var(--text); }
+  .cl-mark { width:13px; text-align:center; font-weight:700; flex-shrink:0; }
+  .cl-row.st-done .cl-mark { color:#16a34a; }
+  .cl-row.st-partial .cl-mark { color:#d97706; }
+  .cl-row.st-todo .cl-mark { color:#c2ccd6; }
+  .cl-row.st-na { color:var(--muted); }
+  .cl-row.st-na .cl-mark { color:#dde3ea; }
+  .cl-n { font-size:11px; color:var(--muted); font-variant-numeric:tabular-nums; }
+  .cl-na { font-size:10px; color:#a8b3bf; }
+  .cl-hint { font-size:11px; color:var(--muted); font-style:italic; }
+  .dbtns button.fu { border-color:#f0c890; color:#9a6b00; }
+  /* Apollo deep link + operator-entered phone/notes (Apollo won't API-release a direct dial). */
+  .conn-co { font-size:11px; color:var(--muted); font-weight:500; }
+  .pill.warn { background:var(--yellow-soft); color:var(--yellow); }
+  .verify-note { font-size:10.5px; margin-top:4px; color:var(--muted); }
+  .verify-note.high { color:var(--green); }
+  .apollo-link { color:#5b3df5; font-weight:600; text-decoration:none; }
+  .apollo-link:hover { text-decoration:underline; }
+  .apollo-alt { color:var(--faint); font-size:10.5px; margin-left:5px; text-decoration:none; }
+  .apollo-alt:hover { text-decoration:underline; color:#5b3df5; }
+  .c-howto { font-size:11px; line-height:1.45; color:var(--muted); background:var(--surface3);
+    border-radius:6px; padding:6px 8px; }
+  .c-howto b { color:var(--text); }
+  .cmeta a.sms { font-size:11px; padding:0 5px; margin-left:2px; border-radius:8px;
+    background:#e6f7ef; color:#137a4b; text-decoration:none; font-weight:600; }
+  .cnotes { margin-top:6px; }
+  .cnotes > summary { list-style:none; cursor:pointer; font-size:11.5px; color:var(--muted);
+    padding:2px 4px; border-radius:5px; user-select:none; display:inline-block; }
+  .cnotes > summary::-webkit-details-marker { display:none; }
+  .cnotes > summary:hover { background:#f1f5f9; }
+  .cnote-body { padding:6px 0 2px; display:flex; flex-direction:column; gap:4px; max-width:520px; }
+  .cnote-body .c-phone, .cnote-body .c-notes { width:100%; font-size:12px; padding:4px 6px;
+    border:1px solid #d7e2ec; border-radius:5px; font-family:inherit; }
+  .cnote-body .c-phone { font-variant-numeric:tabular-nums; }
   .ebadge { display:inline-block; padding:0 6px; border-radius:8px; font-size:10px; }
   .ebadge.ok { background:#e6f7ef; color:#137a4b; }
   .ebadge.warn { background:#fff5e6; color:#9a6b00; }
@@ -2014,14 +2364,29 @@ _INDEX_HTML = r"""<!doctype html>
   @keyframes stpulse { 0%,100% { opacity:1; } 50% { opacity:.35; } }
   .review-cta { display:inline-block; margin-top:4px; font-size:11px; color:#915907; }
   /* Status cell: badge + its next-step action, stacked so they're always visible together. */
-  .status-cell { }
+  .status-cell { position:relative; }
+  .status-head { display:flex; align-items:flex-start; justify-content:space-between; gap:6px; }
+  /* ⋯ overflow menu: secondary + destructive row actions, one open at a time. */
+  .rowmenu { position:relative; flex-shrink:0; }
+  .rowmenu > summary { list-style:none; cursor:pointer; width:22px; height:20px; border-radius:5px;
+    display:flex; align-items:center; justify-content:center; color:var(--muted);
+    font-size:15px; line-height:1; user-select:none; }
+  .rowmenu > summary::-webkit-details-marker { display:none; }
+  .rowmenu > summary:hover, .rowmenu[open] > summary { background:#eef1f5; color:var(--text); }
+  .rowmenu-body { position:absolute; z-index:20; top:24px; left:0; min-width:212px;
+    background:var(--surface,#fff); border:1px solid var(--line); border-radius:9px;
+    box-shadow:0 8px 26px rgba(16,24,40,.14); padding:4px; display:flex; flex-direction:column; }
+  .rowmenu-body button { background:none; border:none; box-shadow:none; text-align:left;
+    padding:6px 9px; border-radius:6px; font-size:12.5px; color:var(--text); min-height:0;
+    display:flex; flex-direction:column; gap:1px; width:100%; }
+  .rowmenu-body button span { font-size:10.5px; color:var(--muted); font-weight:400; line-height:1.3; }
+  .rowmenu-body button:hover { background:#f1f5f9; }
+  .rowmenu-body button.danger { color:var(--red); }
+  .rowmenu-body button.danger:hover { background:#fdeeee; }
   .status-cell .act { display:block; margin-top:8px; width:100%; font-size:13px; padding:7px 10px; }
   .status-cell .act-hint { font-size:11px; color:var(--muted); margin-top:4px; line-height:1.35; }
   .status-cell .applied-on { font-size:11px; color:var(--green); font-weight:600; margin-top:5px; }
   .status-cell .rejected-on { font-size:11px; color:#7a7570; font-weight:600; margin-top:5px; }
-  .status-cell .restart-btn { background:transparent; border:1px solid var(--line2); color:var(--muted); font-size:11px;
-      padding:5px 8px; margin-top:6px; }
-  .status-cell .restart-btn:hover { background:rgba(0,0,0,.04); color:var(--text); border-color:var(--line2); box-shadow:none; }
   .logs { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
   pre {
     margin:0;
@@ -2119,7 +2484,7 @@ _INDEX_HTML = r"""<!doctype html>
     <div id="jobFilters" class="job-filters"></div>
     <div class="table-wrap">
       <table>
-        <thead><tr><th>Status</th><th>Job</th><th>Description</th><th>Materials</th><th>Links</th></tr></thead>
+        <thead><tr><th>Status</th><th>Job</th><th>Description</th><th>Links</th></tr></thead>
         <tbody id="jobs"></tbody>
       </table>
     </div>
@@ -2430,11 +2795,13 @@ function peopleCell(j) {
   return out;
 }
 let GMAIL_AVAIL = false;
-function draftBlock(c) {
-  // Reachable by EMAIL, LINKEDIN, or both. A no-email contact still has a LinkedIn note — only
-  // a contact with neither an email nor a LinkedIn profile has nothing to draft.
-  const hasEmail = !!c.email;
-  const hasLi = !!c.linkedin_url;
+// `wantEmail` / `wantLi` select ONE channel — the contact panel shows them as tabs now, so
+// rendering both at once is what made every contact card ~200px tall. Omit both to get the
+// old stacked behaviour.
+function draftBlock(c, wantEmail, wantLi) {
+  const only = (wantEmail === undefined && wantLi === undefined);
+  const hasEmail = !!c.email && (only || !!wantEmail);
+  const hasLi = !!c.linkedin_url && (only || !!wantLi);
   if (!hasEmail && !hasLi) return '';
 
   const sent = !!c.emailed;
@@ -2445,7 +2812,7 @@ function draftBlock(c) {
     const subj = esc(c.outreach_subject);
     const body = esc(c.outreach_message);
     let sendBtn;
-    if (sent) sendBtn = `<span class="sent-tag">✓ sent</span>`;
+    if (sent) sendBtn = `<span class="sent-tag">✓ Gmail sent</span>`;
     else if (!GMAIL_AVAIL) sendBtn = `<button disabled title="Set GMAIL_ADDRESS + GMAIL_APP_PASSWORD">Send email</button>`;
     else sendBtn = `<button class="send" onclick="sendEmail('${esc(c.id)}', ${c.email_status==='verified'}, this)">Send email</button>`;
     emailHtml = `
@@ -2458,6 +2825,7 @@ function draftBlock(c) {
         <button class="secondary" onclick="regenDraft('${esc(c.id)}', this)">Regenerate</button>`}
         <button onclick="copyDraft(this)">Copy email</button>
         ${sendBtn}
+        ${followupButton(c)}
       </div>`;
   }
 
@@ -2481,11 +2849,35 @@ function draftBlock(c) {
 
   return `<div class="draft" data-cid="${esc(c.id)}">${emailHtml}${liHtml}</div>`;
 }
+// Only offered once a follow-up is actually owed — an email that went out an hour ago
+// shouldn't show a follow-up button, and one already logged shows its state instead.
+function followupButton(c) {
+  if (!c.emailed) return '';
+  if (c.followed_up_at) return `<span class="sent-tag">✓ followed up</span>`;
+  if (!c.followup_due) return '';
+  return `<button class="secondary fu" onclick="markFollowedUp('${esc(c.id)}', this)" title="Record that you sent a follow-up — clears this job's follow-up step">↻ Mark followed up</button>`;
+}
+async function markFollowedUp(cid, btn) {
+  btn.disabled = true;
+  const r = await post('/api/contact/followup', {contact_id: cid});
+  if (r.ok) { btn.textContent = 'Recorded ✓'; setTimeout(refresh, 700); }
+  else { btn.disabled = false; alert(r.message || 'Could not record'); }
+}
 function dmButton(c) {
   if (!c.linkedin_url || !c.linkedin_message)
     return `<button disabled title="Needs a LinkedIn URL and a drafted note">Copy note + open LinkedIn</button>`;
+  // Already recorded as connected — show the state instead of offering it again.
+  if (c.dm_status === 'sent' || c.dm_status === 'manual')
+    return `<span class="sent-tag">✓ connected on LinkedIn</span>`;
   const url = encodeURIComponent(c.linkedin_url);
-  return `<button class="send" onclick="copyAndOpenLinkedin('${url}', this)" title="Copies your note and opens their profile — then Connect ▸ Add a note ▸ paste ▸ Send">Copy note + open LinkedIn</button>`;
+  return `<button class="send" onclick="copyAndOpenLinkedin('${url}', this)" title="Copies your note and opens their profile — then Connect ▸ Add a note ▸ paste ▸ Send">Copy note + open LinkedIn</button>`
+       + `<button class="secondary" onclick="markConnected('${esc(c.id)}', this)" title="Record that you sent the invite — logs it to the job's activity and stops it re-appearing in the queue">✓ I sent it</button>`;
+}
+async function markConnected(cid, btn) {
+  btn.disabled = true;
+  const r = await post('/api/contact/dm-status', {contact_id: cid, status: 'manual'});
+  if (r.ok) { btn.textContent = 'Recorded ✓'; setTimeout(refresh, 700); }
+  else { btn.disabled = false; alert(r.error || 'Could not record'); }
 }
 function copyAndOpenLinkedin(encUrl, btn) {
   // Reliable + zero-risk: copy the (possibly edited) note, open the profile in a new tab.
@@ -2525,42 +2917,99 @@ async function sendEmail(cid, verified, btn) {
   if (r.ok) { refresh(); }
   else { btn.disabled = false; btn.textContent = 'Send email'; alert(r.message || 'Send failed'); }
 }
-function contactCard(c) {
+function contactNotes(c) {
+  // Apollo will not hand a direct dial to a local tool (reveal_phone_number is
+  // webhook-only), so the number is copied out of the Apollo UI by hand and kept here.
+  const open = (NOTES_OPEN.has(c.id) || c.phone || c.notes) ? ' open' : '';
+  const key = encodeURIComponent(c.id);
   return `
-    <div class="contact ${c.hot ? 'is-conn' : ''}">
-      <div class="cavatar" style="background:${avatarColor(c.full_name)}">${initials(c.full_name)}</div>
-      <div class="cbody">
-        <div class="cname">${esc(c.full_name)} <span class="ctitle">— ${esc(c.title)}</span>
-          ${c.match_reason && !c.hot ? `<span class="chip">${esc(c.match_reason)}</span>` : ''}
-          ${c.hot ? `<span class="chip conn" title="${c.connection_at_company ? 'A 1st-degree connection currently at this company' : 'You are already connected to this person'}">🤝 ${c.connection_at_company ? 'Connection here' : 'Connection'}</span>` : ''}</div>
-        <div class="cmeta">
-          ${c.email ? `✉ <a href="mailto:${esc(c.email)}">${esc(c.email)}</a>` : '✉ —'} ${emailBadge(c.email_status)}
-          ${c.linkedin_url ? ` · 🔗 <a href="${esc(c.linkedin_url)}" target="_blank">LinkedIn</a>` : ''}
+    <details class="cnotes"${open} ontoggle="onNotesToggle(this, decodeURIComponent('${key}'))">
+      <summary>📇 Phone &amp; notes${c.phone ? '' : (c.apollo_url ? ' — no number yet' : '')}</summary>
+      <div class="cnote-body" data-cid="${esc(c.id)}">
+        ${c.phone ? '' : `<div class="c-howto">Apollo won't release direct dials to a local tool, so this one is manual:
+          open <b>Apollo ↗</b> → click <b>Access direct dial</b> on their profile (spends a phone credit) → paste it here.
+          Only some people have one; many show just the company switchboard.</div>`}
+        <input class="c-phone" value="${esc(c.phone)}" placeholder="+1 555 123 4567 — paste from Apollo" />
+        <textarea class="c-notes" rows="2" placeholder="Notes — call outcome, best time to reach, referral…">${esc(c.notes)}</textarea>
+        <div class="dbtns">
+          <button onclick="saveContactDetails('${esc(c.id)}', this)">Save</button>
+          ${c.apollo_url ? `<button class="secondary" onclick="window.open('${esc(c.apollo_url)}','_blank','noopener')">Open Apollo ↗</button>` : ''}
         </div>
-        ${draftBlock(c)}
       </div>
-    </div>`;
-}
-function contactsRow(j, ncols) {
-  if (!(j.contacts && j.contacts.length)) return '';
-  // Two layers: HOT = people you already know here (connections), COLD = new Apollo contacts.
-  const hot = j.contacts.filter(c => c.hot);
-  const cold = j.contacts.filter(c => !c.hot);
-  let rows = '';
-  if (hot.length) rows += `<div class="ppl-group hot">🔥 People you know here <span class="ppl-g-n">${hot.length}</span></div>` + hot.map(contactCard).join('');
-  if (cold.length) rows += `<div class="ppl-group cold">🧊 New contacts <span class="ppl-g-n">${cold.length}</span></div>` + cold.map(contactCard).join('');
-  const n = j.contacts.length;
-  // Persist open/closed across the 2.5s auto-refresh (which re-renders this whole table and
-  // would otherwise reset every <details> to closed). PEOPLE_OPEN holds the expanded job URLs;
-  // ontoggle keeps it in sync, and we re-emit `open` from it on each render.
-  const key = encodeURIComponent(j.url);
-  const isOpen = PEOPLE_OPEN.has(j.url) ? 'open' : '';
-  return `<details class="people-details" ${isOpen} ontoggle="onPeopleToggle(this, decodeURIComponent('${key}'))">
-      <summary><span class="people-caret">▸</span> <strong>👥 People at ${esc(j.contact_company)}</strong>
-        <span class="people-count">${n} contact${n>1?'s':''}</span>${j.connections_at_company ? `<span class="conn-hint">🤝 you have ${j.connections_at_company} connection${j.connections_at_company>1?'s':''} here</span>` : ''}</summary>
-      <div class="people-body">${bulkBar(j)}${rows}</div>
     </details>`;
 }
+async function saveContactDetails(cid, btn) {
+  const b = btn.closest('.cnote-body');
+  const r = await post('/api/contact/details', {contact_id: cid,
+    phone: b.querySelector('.c-phone').value, notes: b.querySelector('.c-notes').value});
+  btn.textContent = r.ok ? 'Saved ✓' : 'Failed';
+  setTimeout(()=>{ btn.textContent='Save'; if (r.ok) refresh(); }, 900);
+}
+// ── People: one line each until you open one ────────────────────────────────
+const CONTACT_OPEN = new Set();
+const CHANNEL_TAB = new Map();
+function toggleContact(cid) { if (CONTACT_OPEN.has(cid)) CONTACT_OPEN.delete(cid); else CONTACT_OPEN.add(cid); refresh(); }
+function setChannel(cid, ch) { CHANNEL_TAB.set(cid, ch); CONTACT_OPEN.add(cid); refresh(); }
+function peopleList(j) {
+  const cs = j.contacts || [];
+  if (!cs.length) return `<div class="pane-empty">No contacts yet. ${findContactsPrompt(j)}</div>`;
+  const hot = cs.filter(c => c.hot), cold = cs.filter(c => !c.hot);
+  let out = bulkBar(j);
+  if (hot.length)  out += `<div class="ppl-group hot">🔥 People you know here <span class="ppl-g-n">${hot.length}</span></div>` + hot.map(c => contactRow(c)).join('');
+  if (cold.length) out += `<div class="ppl-group cold">🧊 New contacts <span class="ppl-g-n">${cold.length}</span></div>` + cold.map(c => contactRow(c)).join('');
+  return `<div class="plist">${out}</div>`;
+}
+function contactRow(c) {
+  const open = CONTACT_OPEN.has(c.id);
+  const pills = [];
+  pills.push(c.emailed ? `<span class="pill on">✉ sent</span>`
+    : (c.email ? `<span class="pill off">✉ draft</span>` : `<span class="pill off">✉ no email</span>`));
+  pills.push((c.dm_status === 'sent' || c.dm_status === 'manual') ? `<span class="pill on">🔗 connected</span>`
+    : (c.linkedin_url ? `<span class="pill off">🔗 —</span>` : ''));
+  if (c.followup_state === 'due')      pills.push(`<span class="pill due">↻ due</span>`);
+  else if (c.followup_status === 'replied') pills.push(`<span class="pill on">✓ replied</span>`);
+  else if (c.followup_state === 'waiting')  pills.push(`<span class="pill off">↻ ${fuWhen(c.followup_due_in_h)}</span>`);
+  if (c.phone) pills.push(`<span class="pill on">📱</span>`);
+  return `
+    <div class="prow ${open ? 'is-open' : ''}" onclick="toggleContact('${esc(c.id)}')">
+      <span class="av" style="background:${avatarColor(c.full_name)}">${initials(c.full_name)}</span>
+      <span class="pwho"><span class="pname">${esc(c.full_name)}</span> <span class="prole">— ${esc(c.title)}</span>
+        ${c.hot ? `<span class="chip conn">🤝</span>` : ''}</span>
+      <span class="pills">${c.confidence === 'medium' ? `<span class="pill warn" title="Nothing confirms this person works there — no company email and no employer on file">? unconfirmed</span>` : ''}${pills.filter(Boolean).join('')}<span class="caret">${open ? '▾' : '▸'}</span></span>
+    </div>
+    ${open ? contactPanel(c) : ''}`;
+}
+// Channels become tabs inside the open contact, so the email draft, the LinkedIn note and
+// the phone field stop competing for the same vertical space.
+function contactPanel(c) {
+  const ch = CHANNEL_TAB.get(c.id) || (c.email ? 'email' : (c.linkedin_url ? 'linkedin' : 'phone'));
+  const tab = (k, label, on) => `<span class="${ch === k ? 'on' : ''}" onclick="event.stopPropagation();setChannel('${esc(c.id)}','${k}')">${label}${on || ''}</span>`;
+  let body = '';
+  if (ch === 'email')    body = c.email ? emailChannel(c) : `<div class="pane-empty">No email address for ${esc(c.full_name)}.</div>`;
+  if (ch === 'linkedin') body = c.linkedin_url ? linkedinChannel(c) : `<div class="pane-empty">No LinkedIn profile.</div>`;
+  if (ch === 'phone')    body = contactNotes(c);
+  return `<div class="pbody" onclick="event.stopPropagation()">
+      <div class="cmeta">
+        ${c.email ? `✉ <a href="mailto:${esc(c.email)}">${esc(c.email)}</a> ${emailBadge(c.email_status)}` : '✉ —'}
+        ${c.linkedin_url ? ` · <a href="${esc(c.linkedin_url)}" target="_blank">LinkedIn ↗</a>` : ''}
+        ${c.apollo_url ? ` · <a class="apollo-link" href="${esc(c.apollo_url)}" target="_blank" rel="noopener">Apollo ↗</a>` : ''}
+        ${c.apollo_search_url ? `<a class="apollo-alt" href="${esc(c.apollo_search_url)}" target="_blank" rel="noopener">search ↗</a>` : ''}
+        ${c.phone ? ` · 📱 <a href="tel:${esc(c.phone)}">${esc(c.phone)}</a> <a class="sms" href="sms:${esc(c.phone)}">text</a>` : ''}
+        ${c.connection_company ? `<span class="conn-co"> · ${esc(c.connection_company)}</span>` : ''}
+        ${c.verify_note ? `<div class="verify-note ${esc(c.confidence)}">${c.confidence === 'high' ? '✓' : '?'} ${esc(c.verify_note)}</div>` : ''}
+      </div>
+      <div class="chan">${tab('email','✉ Email')}${tab('linkedin','🔗 LinkedIn')}${tab('phone','📇 Phone & notes')}</div>
+      ${body}
+    </div>`;
+}
+function emailChannel(c) {
+  // A due follow-up is the more urgent thing to write, so it takes the channel.
+  if (c.followup_state === 'due' || (c.followup_message || '').trim())
+    return followupCard(c, {touch: (c.followup_count || 0) + 1}, 3);
+  return draftBlock(c, true);
+}
+function linkedinChannel(c) { return draftBlock(c, false, true); }
+
 // LinkedIn-style initials avatar: 1–2 initials + a stable color derived from the name.
 function initials(name) {
   const parts = String(name || '').trim().split(/\s+/).filter(Boolean);
@@ -2579,6 +3028,8 @@ const PEOPLE_OPEN = new Set(); // job URLs whose "People at" panel is expanded (
 function onPeopleToggle(el, url) { if (el.open) PEOPLE_OPEN.add(url); else PEOPLE_OPEN.delete(url); }
 const ACTIVITY_OPEN = new Set(); // job URLs whose Activity timeline is expanded (survives the 2.5s refresh)
 function onActivityToggle(el, url) { if (el.open) ACTIVITY_OPEN.add(url); else ACTIVITY_OPEN.delete(url); }
+const NOTES_OPEN = new Set(); // contact ids whose phone/notes panel is expanded (survives refresh)
+function onNotesToggle(el, cid) { if (el.open) NOTES_OPEN.add(cid); else NOTES_OPEN.delete(cid); }
 function bulkBar(j) {
   const cs = j.contacts || [];
   const emailN = cs.filter(c => c.email && c.outreach_message && !c.emailed && c.email_status === 'verified').length;
@@ -2640,7 +3091,15 @@ function renderProgress(progress, stats) {
   const jobChips = jobs.map(j => `<span class="job-chip">${esc(j.company)} · ${esc(j.title)}</span>`).join('');
   document.getElementById('progressMeta').innerHTML = [active, ready, applied, jobChips].filter(Boolean).join('');
 }
+// The 2.5s refresh replaces #jobs wholesale, which would discard whatever you are
+// mid-way through typing (a phone number pasted from Apollo, an edited draft). Hold the
+// re-render while a field in that subtree has focus; it resumes as soon as you click away.
+function isEditingJobs() {
+  const el = document.activeElement;
+  return !!(el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') && el.closest('#jobs'));
+}
 async function refresh() {
+  if (isEditingJobs()) return;
   const data = await (await fetch('/api/status')).json();
   document.getElementById('appDir').textContent = data.app_dir;
   const s = data.stats || {};
@@ -2665,26 +3124,15 @@ async function refresh() {
     const key = encodeURIComponent(j.url);
     return `
     <tr>
-      <td class="status-cell">${badge(j.status)}${j.status === 'rejected' && j.rejected_at ? `<div class="rejected-on">Rejected ${fmtDate(j.rejected_at)}</div>` : (j.applied_at ? `<div class="applied-on">Applied ${fmtDate(j.applied_at)}</div>` : '')}${primaryAction(j)}</td>
+      <td class="status-cell"><div class="status-head">${badge(j.status)}</div>${j.status === 'rejected' && j.rejected_at ? `<div class="rejected-on">Rejected ${fmtDate(j.rejected_at)}</div>` : (j.applied_at ? `<div class="applied-on">Applied ${fmtDate(j.applied_at)}</div>` : '')}</td>
       <td class="job-cell"><div class="job-title">${esc(j.title)}</div><div class="job-co">${esc(j.company)}</div></td>
       <td class="desc"><div class="desc-text">${esc(j.description)}</div></td>
-      <td>${materialLinks(j.materials)}</td>
       <td class="links-cell"><a href="${esc(j.url)}" target="_blank">job</a>${j.application_url ? `<br><a href="${esc(j.application_url)}" target="_blank">apply page</a>` : ''}</td>
     </tr>
-    <tr class="job-foot"><td colspan="5"><div class="foot-tools">
-      <div class="foot-toggles">
-        <details class="activity" ${ACTIVITY_OPEN.has(j.url) ? 'open' : ''} ontoggle="onActivityToggle(this, decodeURIComponent('${key}'))"><summary><span class="act-caret">▸</span> Activity${j.activity && j.activity.length ? ` <span class="act-n">${j.activity.length}</span>` : ''}</summary>
-          <div class="timeline">${activityHtml(j.activity)}</div>
-        </details>
-        ${peopleToggle(j)}
-      </div>
-      <div class="foot-right">
-        ${j.status === 'rejected'
-          ? `<button class="reject-link restore" onclick="unmarkRejected(decodeURIComponent('${key}'), this)">↩ restore</button>`
-          : `<button class="reject-link" onclick="markRejected(decodeURIComponent('${key}'), this)" title="Move to the rejected pile">✕ rejected</button>`}
-        <button class="del-link" onclick="deleteJob(decodeURIComponent('${key}'), decodeURIComponent('${encodeURIComponent(`${j.company} - ${j.title}`)}'))">delete</button>
-      </div>
-    </div></td></tr>`;
+    <tr class="job-foot"><td colspan="4">
+      ${stepStrip(j)}
+      ${PANEL_OPEN.has(j.url) ? jobTabs(j) + `<div class="pane">${jobPane(j)}</div>` : ''}
+    </td></tr>`;
   }).join('');
 }
 async function markRejected(url, btn) {
@@ -2700,8 +3148,8 @@ async function unmarkRejected(url, btn) {
 }
 // The People toggle in the footer: the expandable contacts panel when contacts exist, or a
 // "Find contacts" action when there are none. Sits right next to Activity so both are obvious.
-function peopleToggle(j) {
-  if (j.contacts && j.contacts.length) return contactsRow(j);
+// Shown in the People tab when no contacts have been found yet.
+function findContactsPrompt(j) {
   const running = j.network_running;
   const dis = (running || !NET_AVAIL) ? 'disabled' : '';
   const title = NET_AVAIL ? '' : 'Set APOLLO_API_KEY (paid plan) to enable';
@@ -2722,6 +3170,229 @@ function fmtDate(iso) {
 }
 // Render a job's activity log as a compact timeline. Times shown local + short.
 const STAGE_ICON = { enrich:'🔎', score:'◆', tailor:'📝', cover:'✉', pdf:'📄', apply:'🚀', outreach:'📧', system:'•' };
+// ── Completion checklist ("did I actually work this job?") ──────────────────
+// ── Status strip: always visible, so you never expand anything just to learn where
+// you are. Same five steps as the checklist, laid out as a PATH — a ring gives you a
+// percentage, a path gives you the step you're standing on.
+const PANEL_OPEN = new Set();
+function onPanelToggle(url) { if (PANEL_OPEN.has(url)) PANEL_OPEN.delete(url); else PANEL_OPEN.add(url); refresh(); }
+const STEP_LABEL = { contacts:'Found', applied:'Applied', emailed:'Emailed',
+                     linkedin:'LinkedIn', followup:'Follow up' };
+function stepStrip(j) {
+  const cl = j.checklist;
+  const u = `decodeURIComponent('${encodeURIComponent(j.url)}')`;
+  const open = PANEL_OPEN.has(j.url);
+  let steps = '';
+  if (cl && cl.steps) {
+    // The first step that isn't finished is where you are; everything before it is done.
+    let currentFound = false;
+    steps = cl.steps.map((s, i) => {
+      let cls = 'sstep', mark = '·';
+      if (s.state === 'done') { cls += ' done'; mark = '✓'; }
+      else if (s.state === 'na') { cls += ' na'; mark = '–'; }
+      else if (!currentFound) { cls += ' now'; mark = s.key === 'followup' ? '↻' : '!'; currentFound = true; }
+      const count = s.total > 1 ? ` ${s.done}/${s.total}` : '';
+      const arrow = i < cl.steps.length - 1 ? '<span class="sarrow"></span>' : '';
+      return `<span class="${cls}" title="${esc(s.hint || s.label)}"><span class="mk">${mark}</span> ${esc(STEP_LABEL[s.key] || s.label)}${count}</span>${arrow}`;
+    }).join('');
+  }
+  const na = nextAction(j);
+  const hint = nextHint(j);
+  return `<div class="strip">
+      <button class="strip-toggle" onclick="onPanelToggle(${u})" title="${open ? 'Collapse' : 'Open details'}">${open ? '▾' : '▸'}</button>
+      <div class="steps">${steps}</div>
+      <div class="next">${na ? `<span class="next-label">Next</span>${na}` : `<span class="next-done">🏆 fully worked</span>`}${restartButton(j)}${rowMenu(j)}</div>
+    </div>${hint ? `<div class="strip-hint">${hint}</div>` : ''}`;
+}
+// The ONE thing to do next, in priority order. Returns '' when the job is fully worked.
+function nextAction(j) {
+  const u = `decodeURIComponent('${encodeURIComponent(j.url)}')`;
+  const cl = j.checklist || {}, f = j.followups || {};
+  const cs = j.contacts || [];
+  if (j.status === 'rejected') return '';
+  if (j.status === 'ready')
+    return `<button class="primary" onclick="fillOne(${u}, this)">▶ Fill application</button>`;
+  if (j.status === 'ready_to_submit')
+    return `<button class="primary" onclick="markSubmitted(${u}, this)">Mark submitted ✓</button>`;
+  if (j.status === 'needs_human')
+    return `<button class="primary" onclick="continueJob(${u}, this)">▶ Continue</button>`;
+  if (j.status === 'failed')
+    return `<button class="secondary" onclick="restartJob(${u}, this, false)">🔄 Restart end-to-end</button>`;
+  if (!cs.length)
+    return NET_AVAIL ? `<button onclick="findContacts(${u})">Find contacts</button>` : '';
+  const dueN = (f.due_count || 0) + (f.li_due_count || 0);
+  if (dueN)
+    return `<button class="amber" onclick="openTab(${u},'followups')">↻ ${dueN} follow-up${dueN>1?'s':''} due</button>`;
+  const step = (cl.steps || []).find(s => s.state === 'todo' || s.state === 'partial');
+  if (step && step.key === 'emailed')
+    return `<button class="primary" onclick="openTab(${u},'people')">✉ Email ${step.total - step.done} more</button>`;
+  if (step && step.key === 'linkedin')
+    return `<button onclick="openTab(${u},'people')">🔗 ${step.total - step.done} LinkedIn invite${step.total-step.done>1?'s':''} left</button>`;
+  return '';
+}
+function openTab(url, tab) { PANEL_OPEN.add(url); TAB_OPEN.set(url, tab); refresh(); }
+
+// ── One panel with tabs, replacing four sibling accordions ──────────────────
+const TAB_OPEN = new Map();
+function activeTab(j) {
+  const t = TAB_OPEN.get(j.url);
+  if (t) return t;
+  return (j.followups && j.followups.due_count) ? 'followups' : 'people';
+}
+function jobTabs(j) {
+  const u = `decodeURIComponent('${encodeURIComponent(j.url)}')`;
+  const cur = activeTab(j);
+  const f = j.followups || {};
+  const defs = [
+    ['people',    'People',     (j.contacts || []).length, false],
+    ['followups', 'Follow-ups', (f.due_count + (f.li_due_count || 0)) || 0,
+      !!(f.due_count || f.li_due_count)],
+    ['materials', 'Materials',  (j.materials || []).length, false],
+    ['activity',  'Activity',   (j.activity || []).length, false],
+  ];
+  return `<div class="tabs">` + defs.map(([k, label, n, due]) =>
+    `<button class="tab ${cur === k ? 'on' : ''}" onclick="openTab(${u},'${k}')">${label}${n ? ` <span class="n ${due?'due':''}">${n}</span>` : ''}</button>`
+  ).join('') + `</div>`;
+}
+function jobPane(j) {
+  const t = activeTab(j);
+  if (t === 'activity')  return `<div class="timeline">${activityHtml(j.activity)}</div>`;
+  if (t === 'materials') return materialLinks(j.materials) || `<div class="pane-empty">No materials generated yet.</div>`;
+  if (t === 'followups') return j.followups ? followupBody(j, j.followups)
+                                            : `<div class="pane-empty">Nobody has been emailed yet.</div>`;
+  return peopleList(j);
+}
+
+// ── Follow-ups: a standalone panel, peer of Checklist / Activity / People ────
+const FOLLOWUP_OPEN = new Set();
+function onFollowupToggle(el, url) { if (el.open) FOLLOWUP_OPEN.add(url); else FOLLOWUP_OPEN.delete(url); }
+function fuWhen(h) {
+  if (h == null) return '';
+  if (h <= 0) return 'now';
+  if (h < 24) return `in ${h}h`;
+  return `in ${Math.round(h / 24)}d`;
+}
+function followupBody(j, f) {
+  const byId = {}; (j.contacts || []).forEach(c => byId[c.id] = c);
+  let out = `<div class="fu-sched">Sequence: ${f.schedule.map((h,i)=>`touch ${i+1} at ${fuWhen(h).replace('in ','')}`).join(' · ')}</div>`;
+  if (f.due.length) {
+    out += f.due.map(d => followupCard(byId[d.id], d, f.total_touches)).join('');
+  } else {
+    out += `<div class="fu-empty">Nothing due right now.</div>`;
+  }
+  const rest = [];
+  f.waiting.forEach(w => rest.push(`${esc(w.full_name)} — touch ${w.touch} ${fuWhen(w.due_in_h)}`));
+  f.finished.forEach(w => rest.push(`${esc(w.full_name)} — sequence complete`));
+  f.stopped.forEach(w => rest.push(`${esc(w.full_name)} — ${w.state === 'replied' ? 'replied ✓' : 'stopped'}`));
+  if (rest.length) out += `<div class="fu-rest">${rest.map(r => `<span>${r}</span>`).join('')}</div>`;
+
+  // ── LinkedIn ladder, on its own clock ──
+  out += `<div class="fu-sec">🔗 LinkedIn <span class="fu-sched-inline">accepted your invite, went quiet · ${(f.li_schedule||[]).map(h=>Math.round(h/24)+'d').join(' · ')}</span></div>`;
+  if ((f.li_due || []).length) {
+    out += f.li_due.map(d => liFollowupCard(byId[d.id], d, f.li_total_touches)).join('');
+  } else {
+    out += `<div class="fu-empty">No LinkedIn follow-ups due.</div>`;
+  }
+  const liRest = [];
+  (f.li_waiting || []).forEach(w => liRest.push(`${esc(w.full_name)} — touch ${w.touch} ${fuWhen(w.due_in_h)}`));
+  // Anyone with a profile but no recorded invite can't be scheduled — offer to start the clock.
+  (j.contacts || []).filter(c => c.linkedin_url && !c.dm_sent_at).forEach(c => {
+    liRest.push(`${esc(c.full_name)} — no invite recorded `
+      + `<button class="link-btn" onclick="fuAct('${esc(c.id)}','li_connected',this)">mark connected</button>`);
+  });
+  if (liRest.length) out += `<div class="fu-rest">${liRest.map(r => `<span>${r}</span>`).join('')}</div>`;
+  return out;
+}
+function liFollowupCard(c, d, total) {
+  if (!c) return '';
+  const has = !!(c.li_followup_message || '').trim();
+  const url = encodeURIComponent(c.linkedin_url || '');
+  return `
+    <div class="fu-card li" data-cid="${esc(c.id)}">
+      <div class="fu-head">
+        <strong>${esc(c.full_name)}</strong> <span class="fu-role">— ${esc(c.title)}</span>
+        <span class="fu-touch li">LinkedIn · touch ${d.touch} of ${total || 2}</span>
+      </div>
+      <div class="fu-meta">Connected ${fmtDate(c.dm_sent_at)} · no reply recorded</div>
+      ${has ? `
+        <textarea class="li-body" rows="4">${esc(c.li_followup_message)}</textarea>
+        <div class="dbtns">
+          <button class="send" onclick="liCopyOpen('${esc(c.id)}','${url}',this)" title="Copies the message and opens their profile — paste it into the chat and send">Copy + open LinkedIn</button>
+          <button onclick="fuAct('${esc(c.id)}','li_save',this)">Save</button>
+          <button class="secondary" onclick="fuAct('${esc(c.id)}','li_draft',this)">Regenerate</button>
+          <button onclick="fuAct('${esc(c.id)}','li_sent',this)" title="Record that you sent it">✓ I sent it</button>
+          <button class="ghost" onclick="fuAct('${esc(c.id)}','li_replied',this)">They replied</button>
+          <button class="ghost" onclick="fuAct('${esc(c.id)}','li_stop',this)">Stop</button>
+        </div>`
+      : `<div class="dbtns">
+          <button class="send" onclick="fuAct('${esc(c.id)}','li_draft',this)">✍ Draft LinkedIn message</button>
+          <button class="ghost" onclick="fuAct('${esc(c.id)}','li_replied',this)">They replied</button>
+          <button class="ghost" onclick="fuAct('${esc(c.id)}','li_stop',this)">Stop</button>
+        </div>`}
+    </div>`;
+}
+// Copy the (possibly edited) message and open the profile. You paste and send — we never
+// drive LinkedIn ourselves; that architecture was abandoned twice.
+function liCopyOpen(cid, encUrl, btn) {
+  const card = btn.closest('.fu-card');
+  const msg = card ? card.querySelector('.li-body').value : '';
+  if (msg) { try { navigator.clipboard.writeText(msg); } catch (e) {} }
+  post('/api/followup', {contact_id: cid, action: 'li_save', message: msg});
+  window.open(decodeURIComponent(encUrl), '_blank', 'noopener');
+  btn.textContent = 'Copied ✓ — paste in the chat, then "I sent it"';
+  setTimeout(() => { btn.textContent = 'Copy + open LinkedIn'; }, 4000);
+}
+function followupCard(c, d, totalTouches) {
+  if (!c) return '';
+  const has = !!(c.followup_message || '').trim();
+  const warn = c.threaded ? '' : `<span class="fu-warn" title="This email predates threading, so the follow-up arrives as a new message rather than a reply">⚠ won't thread</span>`;
+  const err = c.followup_error ? `<div class="fu-err">${esc(c.followup_error)}</div>` : '';
+  return `
+    <div class="fu-card" data-cid="${esc(c.id)}">
+      <div class="fu-head">
+        <strong>${esc(c.full_name)}</strong> <span class="fu-role">— ${esc(c.title)}</span>
+        <span class="fu-touch">touch ${d.touch} of ${totalTouches || 3}</span>${warn}
+      </div>
+      <div class="fu-meta">First emailed ${fmtDate(c.submitted_at)} · no reply recorded</div>
+      ${err}
+      ${has ? `
+        <input class="fu-subj" value="${esc(c.followup_subject)}" placeholder="Subject…" />
+        <textarea class="fu-body" rows="5">${esc(c.followup_message)}</textarea>
+        <div class="dbtns">
+          <button class="send" onclick="fuAct('${esc(c.id)}','send',this)">Send follow-up</button>
+          <button onclick="fuAct('${esc(c.id)}','save',this)">Save</button>
+          <button class="secondary" onclick="fuAct('${esc(c.id)}','draft',this)">Regenerate</button>
+          <button class="ghost" onclick="fuAct('${esc(c.id)}','replied',this)" title="They already got back to you — stop the sequence">They replied</button>
+          <button class="ghost" onclick="fuAct('${esc(c.id)}','stop',this)">Stop</button>
+        </div>`
+      : `<div class="dbtns">
+          <button class="send" onclick="fuAct('${esc(c.id)}','draft',this)">✍ Draft follow-up</button>
+          <button class="ghost" onclick="fuAct('${esc(c.id)}','replied',this)">They replied</button>
+          <button class="ghost" onclick="fuAct('${esc(c.id)}','stop',this)">Stop</button>
+        </div>`}
+    </div>`;
+}
+async function fuAct(cid, action, btn) {
+  const card = btn.closest('.fu-card');   // null for row-level actions like "mark connected"
+  const body = { contact_id: cid, action };
+  if (action === 'save') {
+    body.subject = card.querySelector('.fu-subj').value;
+    body.body = card.querySelector('.fu-body').value;
+  }
+  if (action === 'li_save') body.message = card.querySelector('.li-body').value;
+  if (action === 'send') {
+    // Send what's on screen, so an un-saved edit is never silently dropped.
+    await post('/api/followup', { contact_id: cid, action: 'save',
+      subject: card.querySelector('.fu-subj').value, body: card.querySelector('.fu-body').value });
+    if (!confirm('Send this follow-up now?')) return;
+  }
+  const label = btn.textContent;
+  btn.disabled = true; btn.textContent = action === 'draft' ? 'Writing…' : 'Working…';
+  const r = await post('/api/followup', body);
+  if (!r.ok) { btn.disabled = false; btn.textContent = label; alert(r.message || 'Failed'); return; }
+  btn.textContent = 'Done ✓';
+  refresh();
+}
 function activityHtml(events) {
   if (!events || !events.length) return `<div class="tl-empty">No recorded activity yet.</div>`;
   return events.map(e => {
@@ -2733,30 +3404,52 @@ function activityHtml(events) {
 }
 // The one thing to do next for this job, rendered right under its status badge so state + action
 // are always visible together (they used to be 10 columns apart in a 1320px-wide table).
-function primaryAction(j) {
-  if (j.status === 'rejected') return '';  // rejected pile — restore lives in the footer
-  const u = `decodeURIComponent('${encodeURIComponent(j.url)}')`;
-  const applied = j.status === 'applied' ? 'true' : 'false';
-  const restartBtn = `<button class="ghost act restart-btn" onclick="restartJob(${u}, this, ${applied})" title="Fix any missing materials, then re-run the whole application from scratch">🔄 Restart end-to-end</button>`;
-  if (j.status === 'ready')
-    return `<button class="primary act" onclick="fillOne(${u}, this)">▶ Fill application</button>` + restartBtn;
+// ONE primary action per row. Restart / rejected / delete are secondary and live in the
+// ⋯ menu — they were adding two or three stacked lines to every row, including finished
+// ones whose only useful content is the badge and the date.
+// Explanatory line under the strip, for the states where the next action needs context.
+function nextHint(j) {
   if (j.status === 'ready_to_submit')
-    return `<button class="primary act" onclick="markSubmitted(${u}, this)">Mark submitted ✓</button>`
-         + `<div class="act-hint">Review &amp; submit in the open Chrome window, then confirm.</div>` + restartBtn;
+    return 'Review &amp; submit in the open Chrome window, then confirm.';
   if (j.status === 'needs_human')
-    return `<button class="primary act" onclick="continueJob(${u}, this)">▶ Continue</button>`
-         + `<div class="act-hint">${esc(BLOCKER_ASK[j.apply_error] || BLOCKER_ASK.blocker)}</div>` + restartBtn;
+    return esc(BLOCKER_ASK[j.apply_error] || BLOCKER_ASK.blocker);
   if (j.status === 'failed')
-    return `<button class="secondary act" onclick="restartJob(${u}, this, false)">🔄 Restart end-to-end</button>`
-         + `<div class="act-hint">${j.apply_error ? esc(j.apply_error) : 'Last attempt failed.'} Regenerates materials, then re-applies.</div>`;
-  // Applied jobs also get a restart (an app marked applied may not have truly gone through) —
-  // with a stronger confirm. Only a mid-run job (in_progress) has no restart.
-  if (j.status === 'applied')
-    return restartBtn + `<div class="act-hint">Didn't actually go through? Restart to re-apply.</div>`;
-  if (j.status !== 'in_progress')
-    return restartBtn;
+    return `${j.apply_error ? esc(j.apply_error) : 'Last attempt failed.'} Regenerates materials, then re-applies.`;
   return '';
 }
+// Re-apply stays visible on the row rather than living only in the ⋯ menu: on an applied
+// job it is the main thing you might still want, and burying it made it unfindable.
+function restartButton(j) {
+  if (j.status === 'in_progress' || j.status === 'rejected' || j.status === 'failed') return '';
+  const u = `decodeURIComponent('${encodeURIComponent(j.url)}')`;
+  const applied = j.status === 'applied';
+  return `<button class="restart-inline" onclick="restartJob(${u}, this, ${applied})" title="Regenerate materials, then run the whole application again from scratch">🔄 Re-apply</button>`;
+}
+// Overflow menu. Only one is open at a time, and the open row survives the 2.5s refresh.
+const ROWMENU_OPEN = new Set();
+function onRowMenuToggle(el, url) {
+  if (el.open) { ROWMENU_OPEN.clear(); ROWMENU_OPEN.add(url); } else { ROWMENU_OPEN.delete(url); }
+}
+function rowMenu(j) {
+  const u = `decodeURIComponent('${encodeURIComponent(j.url)}')`;
+  const label = `decodeURIComponent('${encodeURIComponent(`${j.company} - ${j.title}`)}')`;
+  // Restart lives on the strip as "🔄 Re-apply" (restartButton) — not duplicated here.
+  const items = [];
+  items.push(j.status === 'rejected'
+    ? `<button onclick="unmarkRejected(${u}, this)">↩ Restore<span>Move back out of the rejected pile</span></button>`
+    : `<button onclick="markRejected(${u}, this)">✕ Mark rejected<span>Move to the rejected pile</span></button>`);
+  items.push(`<button class="danger" onclick="deleteJob(${u}, ${label})">🗑 Delete<span>Remove this job and its contacts</span></button>`);
+  return `<details class="rowmenu" ${ROWMENU_OPEN.has(j.url) ? 'open' : ''} ontoggle="onRowMenuToggle(this, ${u})">
+    <summary title="More actions">⋯</summary>
+    <div class="rowmenu-body">${items.join('')}</div>
+  </details>`;
+}
+// Click anywhere outside an open row menu closes it (a <details> won't do this itself).
+document.addEventListener('click', (e) => {
+  document.querySelectorAll('details.rowmenu[open]').forEach(d => {
+    if (!d.contains(e.target)) { d.open = false; ROWMENU_OPEN.delete(d.dataset.url || ''); ROWMENU_OPEN.clear(); }
+  });
+});
 async function restartJob(url, btn, applied) {
   // End-to-end: fix missing materials, then co-pilot apply. For apps that didn't go through.
   const msg = applied

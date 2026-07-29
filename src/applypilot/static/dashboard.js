@@ -604,6 +604,9 @@ async function refresh() {
       ${PANEL_OPEN.has(j.url) ? jobTabs(j) + `<div class="pane">${jobPane(j)}</div>` : ''}
     </td></tr>`;
   }).join('');
+  // A <details> restored with the `open` attribute does NOT fire `toggle` on parse, so the
+  // 2.5s refresh would leave an already-open menu unpositioned. Re-measure them here.
+  document.querySelectorAll('details.rowmenu[open]').forEach(positionRowMenu);
 }
 async function markRejected(url, btn) {
   if (!confirm('Move this application to the rejected pile?')) return;
@@ -902,6 +905,22 @@ function restartButton(j) {
 const ROWMENU_OPEN = new Set();
 function onRowMenuToggle(el, url) {
   if (el.open) { ROWMENU_OPEN.clear(); ROWMENU_OPEN.add(url); } else { ROWMENU_OPEN.delete(url); }
+  positionRowMenu(el);
+}
+// `.table-wrap` clips with overflow:hidden (it rounds the table's corners), so an absolutely
+// positioned menu is CUT rather than scrolled to. CSS handles the horizontal side by anchoring
+// right; the bottom edge needs measuring, because whether a row is the last one is not
+// expressible in CSS. Flip above the ⋯ when the panel would spill past the wrapper.
+function positionRowMenu(el) {
+  const body = el && el.querySelector && el.querySelector('.rowmenu-body');
+  if (!body || !body.classList) return;
+  body.classList.remove('flip-up');
+  if (!el.open) return;
+  const clip = el.closest && el.closest('.table-wrap');
+  if (!clip || !clip.getBoundingClientRect || !body.getBoundingClientRect) return;
+  if (body.getBoundingClientRect().bottom > clip.getBoundingClientRect().bottom) {
+    body.classList.add('flip-up');
+  }
 }
 function rowMenu(j) {
   const u = `decodeURIComponent('${encodeURIComponent(j.url)}')`;

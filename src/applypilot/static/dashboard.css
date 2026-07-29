@@ -473,9 +473,16 @@
     font-size:15px; line-height:1; user-select:none; }
   .rowmenu > summary::-webkit-details-marker { display:none; }
   .rowmenu > summary:hover, .rowmenu[open] > summary { background:#eef1f5; color:var(--text); }
-  .rowmenu-body { position:absolute; z-index:20; top:24px; left:0; min-width:212px;
+  /* Anchored to the RIGHT edge so it opens INWARD. With `left:0` it opened rightward from a
+     ⋯ button that already sits at the end of the row, so the 212px panel ran straight past
+     `.table-wrap`, which clips with overflow:hidden to round the table's corners — the labels
+     came out cut in half ("✕ Ma", "🗑 De"). */
+  .rowmenu-body { position:absolute; z-index:20; top:24px; right:0; min-width:212px; max-width:min(240px, 88vw);
     background:var(--surface,#fff); border:1px solid var(--line); border-radius:9px;
     box-shadow:0 8px 26px rgba(16,24,40,.14); padding:4px; display:flex; flex-direction:column; }
+  /* Same clipping applies vertically: on the last row the menu would be cut off at the bottom
+     of the wrapper rather than scrolled to. positionRowMenu() flips it above the ⋯ instead. */
+  .rowmenu-body.flip-up { top:auto; bottom:24px; }
   .rowmenu-body button { background:none; border:none; box-shadow:none; text-align:left;
     padding:6px 9px; border-radius:6px; font-size:12.5px; color:var(--text); min-height:0;
     display:flex; flex-direction:column; gap:1px; width:100%; }

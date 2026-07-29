@@ -202,3 +202,73 @@ def test_a_finished_empty_search_shows_its_outcome(tmp_path):
     assert "netnote" not in out["running"], out["running"]
     # A hard error already has its own red line; showing both says the same thing twice.
     assert "neterr" in out["errored"] and "netnote" not in out["errored"], out["errored"]
+
+
+_MENU_DRIVER = """
+const F = (new Function(SRC + `; return { positionRowMenu };`))();
+
+// Minimal geometry model: a wrapper that CLIPS (overflow:hidden, like .table-wrap) and a menu
+// whose rect we control, so the flip decision is exercised for real rather than assumed.
+function harness(menuBottom, clipBottom, open) {
+  const cls = new Set();
+  const body = {
+    classList: { add: (c) => cls.add(c), remove: (c) => cls.delete(c),
+                 contains: (c) => cls.has(c) },
+    getBoundingClientRect: () => ({ bottom: menuBottom }),
+  };
+  const wrap = { getBoundingClientRect: () => ({ bottom: clipBottom }) };
+  const el = { open, querySelector: () => body, closest: (s) => s === '.table-wrap' ? wrap : null };
+  F.positionRowMenu(el);
+  return cls;
+}
+const out = {
+  spills:      [...harness(900, 700, true)],   // menu bottom past the wrapper -> flip
+  fits:        [...harness(500, 700, true)],   // room below -> stay
+  exactly:     [...harness(700, 700, true)],   // flush -> stay
+  closed:      [...harness(900, 700, false)],  // closed menus are never positioned
+  noWrapper:   (() => { const cls = new Set();
+      const body = { classList: { add: c => cls.add(c), remove: c => cls.delete(c) },
+                     getBoundingClientRect: () => ({ bottom: 9999 }) };
+      F.positionRowMenu({ open: true, querySelector: () => body, closest: () => null });
+      return [...cls]; })(),
+};
+console.log(JSON.stringify(out));
+"""
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node not available")
+def test_the_row_menu_flips_up_when_it_would_be_clipped(tmp_path):
+    """The ⋯ menu was rendered cut in half ("✕ Ma", "🗑 De").
+
+    `.table-wrap` uses overflow:hidden to round the table's corners, so an absolutely
+    positioned menu inside it is CLIPPED, never scrolled to. CSS fixes the horizontal side by
+    anchoring the panel right instead of left; the bottom edge cannot be expressed in CSS
+    (whether a row is the last one is runtime geometry), so it is measured. This drives that
+    measurement with a real clipping wrapper.
+    """
+    script = tmp_path / "menu.mjs"
+    script.write_text(_STUBS + f"const SRC = {json.dumps(_page_js())};\n" + _MENU_DRIVER)
+    proc = subprocess.run(["node", str(script)], capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, f"node failed:\n{proc.stderr[:2000]}"
+    out = json.loads(proc.stdout.strip().splitlines()[-1])
+
+    assert out["spills"] == ["flip-up"], "a menu past the clip edge was left cut off"
+    assert out["fits"] == [], "flipped a menu that had room below"
+    assert out["exactly"] == [], "flipped on an exact fit"
+    assert out["closed"] == [], "positioned a closed menu"
+    assert out["noWrapper"] == [], "flipped with no clipping ancestor to flip inside"
+
+
+def test_the_row_menu_opens_inward_not_off_the_edge():
+    """Pins the CSS half of the fix: `left:0` is what pushed the panel past the clip edge.
+
+    A geometry test cannot catch this — the browser clips it silently — so the anchor itself is
+    the assertion.
+    """
+    css = (web_dashboard._STATIC_DIR / "dashboard.css").read_text(encoding="utf-8")
+    body = [ln for ln in css.splitlines() if ".rowmenu-body {" in ln]
+    assert body, ".rowmenu-body rule not found"
+    assert "right:0" in body[0].replace(" ", ""), f"menu is not right-anchored: {body[0]}"
+    assert "left:0" not in body[0].replace(" ", ""), f"still opens rightward: {body[0]}"
+    assert any("flip-up" in ln and "bottom:24px" in ln.replace(" ", "")
+               for ln in css.splitlines()), "no .flip-up rule to flip the menu upward"

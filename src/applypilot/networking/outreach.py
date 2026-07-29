@@ -194,13 +194,20 @@ def draft_email(profile: dict, job: dict, contact: dict, style: str = "", warm: 
         warm_block = (
             "WARM / HOT OUTREACH — you are ALREADY CONNECTED with this person on LinkedIn and they "
             "work at this company. Write it as reconnecting with someone you know, NOT a cold intro:\n"
-            "- Open warmly and acknowledge you're already connected (e.g. 'Hope you're doing well!' / "
-            "'It's been a while'). Do NOT introduce yourself as a stranger.\n"
+            f"- The FIRST LINE must acknowledge the gap since you last spoke AND name where they "
+            f"work — the shape of \"Hey <name>, long time without connecting — hope everything is "
+            f"well at {company}\". Vary the wording, keep that content.\n"
+            "- Never introduce yourself as a stranger and never explain who you are as though they "
+            "don't know you — no 'I'm a technical PM with 10+ years'. They already know you.\n"
             "- Mention you just applied for the role at their company and would love their read on it, "
             "an internal referral, or just to reconnect.\n"
             "- The LinkedIn note is a DIRECT MESSAGE to an existing connection (NOT a connection "
             "request) — it can be a bit longer/warmer and does not need the 300-char connect-note "
-            "limit framing, though still keep it concise.\n\n"
+            "limit framing, though still keep it concise. Ignore the 'connection request note' "
+            "framing in the rules above; you are already connected.\n"
+            "- BOTH messages open the same reconnecting way. The LinkedIn DM needs that opening "
+            "even more than the email does, because it lands in a chat thread where your last "
+            "exchange is visible right above it.\n\n"
         )
     else:
         relationship = contact.get("match_reason", "works at the company")

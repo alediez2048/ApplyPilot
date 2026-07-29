@@ -33,6 +33,23 @@ _BOARD_SITES = {
     "uploaded", "ycombinator", "y combinator", "workatastartup",
 }
 
+# Every name that must not be returned as an employer on its own. _BOARD_SITES alone was not
+# enough: it lists discovery SOURCES, while _BOARD_HOSTS lists ATS/board hostnames, and
+# 'greenhouse' appeared only in the latter — so a company field reading "Greenhouse" was
+# returned as the employer.
+_BOARD_NAMES = {n.lower() for n in (_BOARD_SITES | _BOARD_HOSTS)}
+
+# Path segments that mark a company's OWN careers section, as opposed to a board's listing
+# pages. www.google.com/about/careers/... is Google hiring; www.indeed.com/viewjob?jk=... is
+# Indeed showing someone else's job.
+#
+# "jobs"/"job" are deliberately NOT here. This set is only ever consulted for a company whose
+# name is a board, and on a board's own domain /jobs is their PRODUCT, not their careers page:
+# ycombinator.com/jobs is YC's listing index, and treating it as "YC hiring" would search YC's
+# own staff for someone else's job. The eval case `no-signal-at-all` pins that.
+_OWN_CAREERS_PATH = {"careers", "career", "openings", "opening", "apply",
+                     "applications", "hiring", "join", "work-with-us", "join-us"}
+
 # Leading subdomain labels on an employer's own careers portal (careers.amd.com -> amd.com).
 _CAREERS_SUBDOMAINS = {
     "careers", "career", "jobs", "job", "apply", "applying", "recruiting", "recruit",
@@ -134,6 +151,50 @@ def _from_json_ld(full_description: str | None) -> str | None:
     return None
 
 
+def _norm_name(name: str) -> str:
+    """Company name -> comparable host label ("Y Combinator" -> "ycombinator")."""
+    return re.sub(r"[^a-z0-9]", "", (name or "").lower())
+
+
+def _company_owns_the_posting(company: str, job: dict) -> bool:
+    """True when this posting is on the company's OWN careers site, so the board list is wrong.
+
+    Several of the biggest employers are also job boards — Google, LinkedIn, Indeed, Glassdoor.
+    Blocking their names outright meant an application to Google resolved to no employer at all
+    and contact discovery never ran, missing 17 known connections there.
+
+    All three conditions must hold, and each one is load-bearing:
+      * the host's registrable label matches the company name (google == google.com);
+      * the path has NO employer slug — ycombinator.com/companies/hamming-ai names a DIFFERENT
+        employer, which is exactly the case the board list exists to catch;
+      * the path looks like a careers section — google.com/about/careers is Google hiring,
+        while indeed.com/viewjob is Indeed showing someone else's posting.
+    """
+    target = _norm_name(company)
+    if not target:
+        return False
+    for key in ("application_url", "url"):
+        url = job.get(key)
+        if not url:
+            continue
+        if employer_slug_from_url(url):
+            return False
+        try:
+            parsed = urlparse(url)
+            host = (parsed.hostname or "").lower().removeprefix("www.")
+        except ValueError:
+            continue
+        if not host:
+            continue
+        labels = [p for p in host.split(".") if p not in ("com", "io", "co", "net", "org", "ai", "app")]
+        if not any(_norm_name(lbl) == target for lbl in labels):
+            continue
+        segments = {s.lower() for s in (parsed.path or "").split("/") if s}
+        if segments & _OWN_CAREERS_PATH:
+            return True
+    return False
+
+
 def _is_board_host(host: str) -> bool:
     """True if any dot-separated label of `host` is a known job board / ATS."""
     return any(label in _BOARD_HOSTS for label in (host or "").lower().split("."))
@@ -171,9 +232,11 @@ def derive_company(job: dict) -> str | None:
     that is really a job board (Ycombinator, Indeed) is never returned — searching a
     board for "people who work there" finds the board's own recruiters, not the employer's.
     """
-    # 1. explicit stored company (jobspy now persists it) if it's not a board name
+    # 1. explicit stored company (jobspy now persists it) if it's not a board name.
+    #    _BOARD_HOSTS is folded in: 'greenhouse' was in the host list but NOT in _BOARD_SITES,
+    #    so a company field reading "Greenhouse" sailed straight through as the employer.
     stored = _clean_company(job.get("company"))
-    if stored and stored.lower() not in _BOARD_SITES:
+    if stored and (stored.lower() not in _BOARD_NAMES or _company_owns_the_posting(stored, job)):
         return stored
 
     # 2. JSON-LD hiringOrganization from the enriched description
@@ -220,7 +283,10 @@ def derive_domain(job: dict, company: str | None = None) -> str | None:
             continue
         # reject board/ATS hosts (their domain is not the employer's). Label-wise, NOT a
         # substring test: "lever" is inside "clever.com" and "jobs" inside "jobsight.com".
-        if _is_board_host(host):
+        # ...unless the board name IS the employer and this is their own careers site, or
+        # Apollo gets no domain and falls back to a fuzzy name search — the thing that put
+        # five people from the wrong "Zello" on a Zello job.
+        if _is_board_host(host) and not _company_owns_the_posting(company or job.get("company") or "", job):
             continue
         return _employer_domain(host)
     return None

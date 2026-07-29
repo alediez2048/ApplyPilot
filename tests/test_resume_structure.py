@@ -455,3 +455,112 @@ def test_the_prompt_example_is_off_domain():
     example = prompt.split("The test, using an unrelated example", 1)[1].split("VARY THE", 1)[0]
     for leaked in ("T-Mobile", "Botify", "AEM", "GA4", "GSC", "retail locations"):
         assert leaked not in example, f"the worked example leaks {leaked!r} from the real résumé"
+
+
+def test_no_prompt_example_can_be_lifted_into_the_resume():
+    """Three separate times, a worked example written in the candidate's own domain came back
+    almost verbatim in the output:
+
+      bullet example  -> "Ran the platform serving 6,000+ retail locations: instrumented AEM…"
+      summary example -> "Ten years shipping production systems, now building agentic AI…"
+
+    An example has to teach the transformation without supplying usable sentences. Every
+    illustrative line in the prompt is checked against the candidate's own vocabulary.
+    """
+    from applypilot.scoring.tailor import _build_structured_tailor_prompt
+    prompt = _build_structured_tailor_prompt(_profile(), BASE)
+
+    # Only the illustrative blocks — the structure listing legitimately names real employers.
+    examples = []
+    for marker, end in (("The test, using an unrelated example", "VARY THE"),
+                        ("Shown with an unrelated career", "Honest positioning")):
+        if marker in prompt:
+            examples.append(prompt.split(marker, 1)[1].split(end, 1)[0])
+    assert len(examples) == 2, "an illustrative block is missing or was renamed"
+
+    # Vocabulary a model could lift straight back out of the real résumé.
+    from_resume = ("T-Mobile", "Verizon", "Kordami", "Botify", "AEM", "GA4", "GSC",
+                   "retail location", "Technical Project Manager", "agentic",
+                   "production systems", "RAG")
+    for block in examples:
+        leaked = [w for w in from_resume if w.lower() in block.lower()]
+        assert not leaked, f"prompt example leaks the candidate's own vocabulary: {leaked}"
+
+
+# ── target role in the header, real titles in the history ───────────────────
+
+def test_the_header_carries_the_target_role():
+    """The résumé should announce what it is aimed at. `contactInfo.title` was populated but
+    the PDF header only drew the name and contact line, so a résumé aimed at "Applied AI
+    Engineer" showed no sign of it anywhere in the rendered document."""
+    from applypilot.scoring import resume_render as RR
+    block = RR.resume_from_sections({"title": "Applied AI Engineer", "sections": []},
+                                    _profile(), header=["Jorge Alejandro Diez Magni"])
+    assert block["contactInfo"]["title"] == "Applied AI Engineer"
+    assert block["contactInfo"]["name"] == "Jorge Alejandro Diez Magni"
+
+
+def test_the_renderer_draws_the_target_role():
+    import pathlib
+
+    import applypilot
+    doc = (pathlib.Path(applypilot.__file__).parent / "resume_renderer" / "document.mjs").read_text()
+    assert doc.count("styles.targetRole") == 2, \
+        "the target role must be drawn in BOTH header paths (sections and legacy)"
+
+
+def test_employment_titles_are_never_rewritten():
+    """The header title follows the TARGET role; the titles inside WORK EXPERIENCE are
+    background-checkable facts and must survive verbatim."""
+    from applypilot.scoring.tailor import assemble_structured_resume_text
+    data = {"title": "Applied AI Engineer", "sections": [
+        {"title": "WORK EXPERIENCE", "kind": "experience", "entries": [
+            {"employer": "T-Mobile", "role": "Applied AI Engineer",   # model tries to relabel
+             "dates": "2023/2025", "bullets": ["Rewritten bullet."]}]}]}
+    out = assemble_structured_resume_text(data, _profile(), BASE)
+    assert "Applied AI Engineer" in out.splitlines()[1], "header should state the target role"
+    # The base's real title must still be present somewhere in the history.
+    assert "Technical Project Manager" in out, "the real employment title was lost"
+
+
+def test_the_prompt_forbids_opening_with_the_previous_job_title():
+    from applypilot.scoring.tailor import _build_structured_tailor_prompt
+    prompt = _build_structured_tailor_prompt(_profile(), BASE)
+    assert "THE TARGET ROLE" in prompt
+    assert "must NOT open by restating a previous job title" in prompt
+
+
+# ── years of experience must never shrink ───────────────────────────────────
+
+@pytest.mark.parametrize("text,expected", [
+    ("10+ years of experience", 10),
+    ("Ten years building systems", 10),          # the model's preferred phrasing
+    ("seven-year career", 7),
+    ("Twelve years", 12),
+    ("3 years in AI/ML and 10+ years overall", 10),   # career figure, not the specialism
+    ("no numbers here", None),
+])
+def test_years_claim_reads_digits_and_words(text, expected):
+    assert V.years_claim(text) == expected
+
+
+def test_understating_experience_is_detected():
+    """Not hypothetical. A "10+ years" résumé came back saying "Seven years" because a worked
+    example in the prompt used a different figure and the model anchored on it. Understating
+    someone's experience is a factual error against their own interest."""
+    assert V.understated_experience("10+ years of experience", "Seven years building") == (10, 7)
+    assert V.understated_experience("10+ years", "Ten years") is None
+    assert V.understated_experience("10+ years", "12 years") is None, "inflation is a different check"
+    assert V.understated_experience("no figure", "Five years") is None
+
+
+def test_understated_experience_blocks_rather_than_warns():
+    """A retry costs one LLM call; sending a résumé that undersells the candidate does not
+    get a second chance."""
+    profile = {**_profile(), "_base_resume_text": BASE}
+    payload = _sections_payload()
+    payload["sections"].append({"title": "PERSONAL STATEMENT", "kind": "summary",
+                                "text": "Seven years building production systems."})
+    res = V.validate_json_fields(payload, profile, mode="normal")
+    assert not res["passed"]
+    assert any("understated" in e for e in res["errors"]), res["errors"]

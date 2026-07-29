@@ -123,6 +123,47 @@ def _named_tools(base_text: str, profile: dict) -> set[str]:
     return out
 
 
+# Spelled-out numbers matter: the model writes "Ten years" far more often than "10 years",
+# and a digits-only regex returned None for exactly the phrasing it prefers — a check that
+# silently passes on the common case is worse than no check.
+_WORD_NUMBERS = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
+    "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13,
+    "fourteen": 14, "fifteen": 15, "sixteen": 16, "seventeen": 17, "eighteen": 18,
+    "nineteen": 19, "twenty": 20,
+}
+_YEARS = re.compile(
+    r"(\d{1,2}|" + "|".join(_WORD_NUMBERS) + r")\s*\+?\s*(?:-|\s)?\s*years?\b", re.I)
+
+
+def years_claim(text: str) -> int | None:
+    """The largest "N years" figure in a résumé, or None. Digits or words.
+
+    Largest, not first: "10+ years of experience ... 3 years in AI/ML" describes a career and
+    a specialism, and the career figure is the one that must not shrink.
+    """
+    nums = []
+    for m in _YEARS.finditer(text or ""):
+        tok = m.group(1).lower()
+        nums.append(int(tok) if tok.isdigit() else _WORD_NUMBERS[tok])
+    return max(nums) if nums else None
+
+
+def understated_experience(base_text: str, tailored_text: str) -> tuple[int, int] | None:
+    """(base_years, tailored_years) when the rewrite shrank the claim, else None.
+
+    Understating experience is a factual error against the operator's interest, and it is not
+    hypothetical: a "10+ years" résumé came back saying "Seven years" because a worked example
+    in the prompt used a different number and the model anchored on it. Only SHRINKING is
+    reported — a résumé that says more than the base would be inflation, which the fabrication
+    checks and the judge already cover.
+    """
+    base_y, new_y = years_claim(base_text), years_claim(tailored_text)
+    if base_y is None or new_y is None or new_y >= base_y:
+        return None
+    return (base_y, new_y)
+
+
 def verbatim_bullets(base_text: str, tailored_text: str) -> list[str]:
     """Bullets copied straight out of the base résumé.
 
@@ -244,6 +285,12 @@ def _validate_sections(data: dict, profile: dict, mode: str = "normal") -> dict:
         if copied:
             warnings.append(f"{len(copied)} bullet(s) copied verbatim from the base résumé "
                             f"(not tailored): {copied[0][:70]}…")
+        # An ERROR, not a warning: this misrepresents the candidate downward, and a retry is
+        # far cheaper than sending a résumé that undersells them.
+        shrunk = understated_experience(base_text, _sections_to_text(data))
+        if shrunk:
+            errors.append(f"Years of experience understated: résumé says {shrunk[0]}+, "
+                          f"the rewrite says {shrunk[1]}")
 
     if mode == "strict":
         for word in BANNED_WORDS:

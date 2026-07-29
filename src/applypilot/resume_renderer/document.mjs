@@ -134,6 +134,7 @@ export function ResumeDocument({ resume, styles, theme }) {
   if (resume.sections && resume.sections.length) {
     const header = h(View, { key: 'header', style: styles.header }, [
       h(Text, { key: 'n', style: styles.name }, c.name || 'Your Name'),
+      c.title ? h(Text, { key: 'tr', style: styles.targetRole }, String(c.title)) : null,
       ContactLine(styles, c),
     ])
     return h(Document, null,
@@ -186,6 +187,7 @@ export function ResumeDocument({ resume, styles, theme }) {
 
   const header = h(View, { key: 'header', style: styles.header }, [
     h(Text, { key: 'n', style: styles.name }, c.name || 'Your Name'),
+    c.title ? h(Text, { key: 'tr', style: styles.targetRole }, String(c.title)) : null,
     ContactLine(styles, c),
   ])
 

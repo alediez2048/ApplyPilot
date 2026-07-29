@@ -12,7 +12,7 @@ campaign happens to be a job search** — see `docs/crm-prd.md` for where that g
 - **Packaging:** Hatchling, `src/` layout, single package `applypilot`
 - **Entry point:** `applypilot = "applypilot.cli:app"` (Typer CLI)
 - **License:** AGPL-3.0-only · **Version:** 0.4.0 (`pyproject.toml`)
-- **Tests:** 393 passing (`tests/`, 30 files) · ruff clean (line-length 120, py311) · ESLint clean
+- **Tests:** 417 passing (`tests/`, 32 files) · ruff clean (line-length 120, py311) · ESLint clean
 
 ## Quick orientation
 
@@ -62,6 +62,17 @@ Surfaces:
 
 `resume_renderer/` is a Node/React-PDF renderer (`node render.mjs <request.json> <out.pdf>`),
 `npm install`ed at runtime into `~/.applypilot/resume_renderer_runtime/`.
+
+**The header states the TARGET role**, the employment history keeps its real titles. The
+summary must not open by restating a previous job title — a résumé aimed at "Applied AI
+Engineer" that begins "Technical Project Manager with 10+ years" tells the reader they have
+the wrong document. Employment titles are background-checkable and never move.
+
+**Worked examples in the prompt must be OFF-DOMAIN.** Three separate times an example written
+in the candidate's own field came back almost verbatim: a bullet example became his opening
+bullet, a summary example became his summary, and an example's "Eight years" turned "10+ years"
+into "Seven years". `test_no_prompt_example_can_be_lifted_into_the_resume` checks every
+illustrative block against his own vocabulary.
 
 **The base résumé is the template** (`resume_sections.py`, 2026-07-29). Its section titles and
 order flow through tailor → `_DATA.json` → the renderer. Tailoring rewrites content *inside*

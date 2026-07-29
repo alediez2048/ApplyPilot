@@ -474,8 +474,35 @@ was built.
   makes the résumé worse, not tighter. Keep the fact, change the framing.
 - Never copy a bullet verbatim.
 
+## THE TARGET ROLE
+`title` is the role being applied FOR — use the job's own title, not the current one. It is
+rendered under the name, so the résumé announces what it is aimed at.
+
+The summary must NOT open by restating a previous job title. "Technical Project Manager with
+10+ years..." on a résumé aimed at Applied AI Engineer tells the reader they are looking at
+the wrong document before they reach a single achievement. Open with the CAPABILITY the target
+role needs, evidenced by real work:
+
+Shown with an unrelated career so you do not borrow the wording — a warehouse ops manager
+applying for a data engineering role:
+
+  NOT: "Warehouse Operations Manager with N years of experience..."    <- names the old job
+  YES: "N years turning messy supply-chain data into systems people trust, now building the
+        pipelines end to end."                                          <- names the capability
+
+Write the real figure where N appears. YEARS OF EXPERIENCE COME FROM THE RESUME AND NEVER
+CHANGE — an example's number is a placeholder, not a suggestion. Understating someone's
+experience is a factual error, and it happened: a "10+ years" résumé came back saying
+"Seven years" because an example used a different figure.
+
+Honest positioning, not a fake title: employment history keeps its real titles, so nobody is
+misled about what was held where. This is the difference between what someone is aiming at and
+what they were called.
+
 ## WHAT NEVER CHANGES
 - Section titles, section order, employer names, role titles, dates, degrees, schools.
+  Employment role titles are background-checkable. The header `title` is not a claim about
+  a past job, so it follows the target role; the ones inside WORK EXPERIENCE never move.
 - Real numbers: {', '.join(real_metrics) if real_metrics else 'N/A'}
 - Preserved companies: {', '.join(companies) if companies else 'N/A'}
 - Preserved school: {school}{_preserved_projects_rule(resume_facts)}

@@ -100,8 +100,17 @@ export function createDynamicStyles(specs) {
       fontSize: fonts.name?.size ?? 22,
       fontFamily: bold,
       color: text,
-      marginBottom: 8,
+      marginBottom: 4,
       textTransform: tt('name', 'none'),
+    },
+    // The role being applied FOR, under the name. Populated but never drawn until now, so a
+    // résumé aimed at "Applied AI Engineer" showed no sign of it anywhere in the PDF.
+    targetRole: {
+      fontSize: (fonts.companyName?.size ?? 11) + 0.5,
+      fontFamily: bold,
+      color: text,
+      marginBottom: 6,
+      textAlign: 'center',
     },
     contactInfo: {
       flexDirection: 'row',

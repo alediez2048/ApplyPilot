@@ -187,3 +187,43 @@ def test_render_cover_with_node_produces_pdf(tmp_path, monkeypatch):
     out = tmp_path / "cover.pdf"
     assert rr.render_cover_with_node(cover, out) is True
     assert out.read_bytes()[:4] == b"%PDF"
+
+
+# ── PDF freshness (a re-tailored resume must not keep its old PDF) ───────────
+
+def test_is_pdf_stale_detects_missing_and_outdated(tmp_path, monkeypatch):
+    import os
+    from applypilot.scoring import pdf as pdf_mod
+
+    txt = tmp_path / "Acme_job.txt"
+    txt.write_text("tailored v1")
+    # no PDF at all -> stale
+    assert pdf_mod.is_pdf_stale(txt) is True
+
+    out = tmp_path / "Acme_job.pdf"
+    out.write_bytes(b"%PDF-1")
+    os.utime(out, (txt.stat().st_atime + 10, txt.stat().st_mtime + 10))
+    assert pdf_mod.is_pdf_stale(txt) is False          # PDF newer than source
+
+    # re-tailoring rewrites the .txt -> the old PDF is now stale
+    os.utime(txt, (out.stat().st_atime + 20, out.stat().st_mtime + 20))
+    assert pdf_mod.is_pdf_stale(txt) is True
+
+
+def test_is_pdf_stale_watches_the_data_json_too(tmp_path):
+    """The React-PDF renderer reads _DATA.json, so that file going newer also means stale."""
+    import os
+    from applypilot.scoring import pdf as pdf_mod
+
+    txt = tmp_path / "Acme_job.txt"
+    txt.write_text("v1")
+    data = tmp_path / "Acme_job_DATA.json"
+    data.write_text("{}")
+    out = tmp_path / "Acme_job.pdf"
+    out.write_bytes(b"%PDF-1")
+    newer = out.stat().st_mtime + 30
+    os.utime(out, (newer, newer))
+    assert pdf_mod.is_pdf_stale(txt) is False
+
+    os.utime(data, (newer + 60, newer + 60))           # only the JSON changed
+    assert pdf_mod.is_pdf_stale(txt) is True

@@ -271,6 +271,7 @@ def network(
     no_linkedin: bool = typer.Option(False, "--no-linkedin", help="Apollo only (skip LinkedIn fallback)."),
     linkedin_login: bool = typer.Option(False, "--linkedin-login", help="One-time: open Chrome to log into LinkedIn (for the fallback)."),
     gmail_connect: bool = typer.Option(False, "--gmail-connect", help="One-time: connect Gmail via OAuth for sending outreach."),
+    fix_threads: bool = typer.Option(False, "--fix-threads", help="Recover Gmail thread ids so follow-ups reply in the original conversation."),
     import_connections: Optional[str] = typer.Option(None, "--import-connections", help="Import your LinkedIn Connections.csv (to flag existing connections)."),
     dm_login: bool = typer.Option(False, "--dm-login", help="One-time: open a browser to log into LinkedIn for the DM sender (agent-browser)."),
     dm_list: bool = typer.Option(False, "--dm-list", help="List contacts with a drafted LinkedIn note + profile URL (DM-eligible)."),
@@ -314,10 +315,26 @@ def network(
     # One-time Gmail OAuth connect for outreach sending.
     if gmail_connect:
         from applypilot.networking import gmail_oauth
-        console.print("[cyan]Connecting Gmail (opens a browser to authorize send-only access)…[/cyan]")
+        console.print("[cyan]Connecting Gmail (opens a browser)…[/cyan]")
+        console.print("  Requesting: send · read (thread follow-ups) · settings (your signature)")
         ok, msg = gmail_oauth.connect()
         console.print(f"[green]{msg}[/green]" if ok else f"[red]{msg}[/red]")
+        if ok:
+            # Recover thread ids for anything sent before they were persisted, so those
+            # conversations get real replies instead of new threads.
+            from applypilot.networking.gmail_send import backfill_thread_ids
+            res = backfill_thread_ids()
+            console.print(f"[cyan]{res['message']}[/cyan]" if res["ok"] else f"[yellow]{res['message']}[/yellow]")
+            sig = gmail_oauth.fetch_signature(gmail_oauth.connected_email())
+            console.print(f"[cyan]Signature: {'found — will be appended to outreach' if sig else 'none set on this account'}[/cyan]")
         raise typer.Exit(code=0 if ok else 1)
+
+    # Re-run the thread-id recovery on its own (idempotent).
+    if fix_threads:
+        from applypilot.networking.gmail_send import backfill_thread_ids
+        res = backfill_thread_ids()
+        console.print(f"[green]{res['message']}[/green]" if res["ok"] else f"[red]{res['message']}[/red]")
+        raise typer.Exit(code=0 if res["ok"] else 1)
 
     # One-time LinkedIn login for the DM sender (needs consent first).
     if dm_login:
@@ -692,6 +709,19 @@ def doctor() -> None:
         if transport() is not None:
             ok, msg = auth_probe()
             results.append(("Gmail outreach send", ok_mark if ok else fail_mark, msg))
+            # A token issued before the read/settings scopes still sends fine, but
+            # follow-ups won't thread and mail goes out unsigned — say so explicitly.
+            from applypilot.networking import gmail_oauth
+            if gmail_oauth.available():
+                missing = gmail_oauth.missing_scopes()
+                if missing:
+                    short = ", ".join(s.rsplit("/", 1)[-1] for s in missing)
+                    results.append(("Gmail scopes", warn_mark,
+                                    f"missing {short} — follow-ups won't thread / no signature. "
+                                    "Re-run `network --gmail-connect`"))
+                else:
+                    sig = "signature found" if gmail_oauth.fetch_signature() else "no signature set"
+                    results.append(("Gmail scopes", ok_mark, f"send + read + settings ({sig})"))
         else:
             results.append(("Gmail outreach send", "[dim]optional[/dim]",
                             "Run `applypilot network --gmail-connect` (OAuth) to send outreach"))

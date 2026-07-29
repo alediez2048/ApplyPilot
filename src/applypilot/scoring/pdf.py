@@ -573,11 +573,44 @@ def convert_to_pdf(
     return out
 
 
-def batch_convert(limit: int = 50) -> int:
-    """Convert .txt files in TAILORED_DIR that don't have corresponding PDFs.
+def is_pdf_stale(txt_path: Path) -> bool:
+    """True if `txt_path` has no PDF, or its PDF predates the text/JSON it renders from.
 
-    Scans for .txt files (excluding _JOB.txt and _REPORT.json), checks if a
-    .pdf with the same stem already exists, and converts any that are missing.
+    Existence alone is not enough: re-running the tailor stage rewrites the .txt and
+    _DATA.json but leaves the old PDF in place, so the file actually attached to an
+    application silently drifts behind the résumé that was generated for it.
+    """
+    pdf_path = txt_path.with_suffix(".pdf")
+    if not pdf_path.exists():
+        return True
+    try:
+        pdf_mtime = pdf_path.stat().st_mtime
+    except OSError:
+        return True
+    # The React-PDF renderer prefers _DATA.json, so either source going newer means stale.
+    # profile.json counts too: the header (name, email, links) is injected at RENDER time,
+    # so changing your email leaves every existing PDF advertising the old one even though
+    # no .txt changed — which is exactly how four cover letters kept a stale .edu address.
+    sources = [txt_path, txt_path.with_name(txt_path.stem + "_DATA.json")]
+    try:
+        from applypilot.config import PROFILE_PATH
+        sources.append(PROFILE_PATH)
+    except Exception:  # noqa: BLE001
+        pass
+    for src in sources:
+        try:
+            if src.exists() and src.stat().st_mtime > pdf_mtime:
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def batch_convert(limit: int = 50) -> int:
+    """Convert .txt files in TAILORED_DIR whose PDF is missing OR out of date.
+
+    Scans for .txt files (excluding _JOB.txt), and converts any whose PDF is absent or
+    older than the text/_DATA.json it renders from.
 
     Args:
         limit: Maximum number of files to convert.
@@ -597,17 +630,16 @@ def batch_convert(limit: int = 50) -> int:
         if not f.name.endswith("_JOB.txt")
     ]
 
-    # Filter to those without a corresponding PDF
+    # Filter to those whose PDF is missing or older than its source
     to_convert: list[Path] = []
     for f in candidates:
-        pdf_path = f.with_suffix(".pdf")
-        if not pdf_path.exists():
+        if is_pdf_stale(f):
             to_convert.append(f)
         if len(to_convert) >= limit:
             break
 
     if not to_convert:
-        log.info("All text files already have PDFs.")
+        log.info("All text files have up-to-date PDFs.")
         return 0
 
     log.info("Converting %d files to PDF...", len(to_convert))

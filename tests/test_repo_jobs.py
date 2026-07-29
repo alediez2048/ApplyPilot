@@ -1,0 +1,166 @@
+"""ARCH-4: repo/jobs.py, and the dashboard endpoints that go through it.
+
+Written because the extraction broke `_mark_submitted` — the row fetch was replaced with
+an `exists()` check while the next line still read `row["apply_status"]` — and the whole
+suite stayed green. Ruff caught it as an undefined name. Ruff is not a test.
+
+That guard is not cosmetic: it is the only thing stopping "Mark submitted ✓" from recording
+an application that was never filled or reviewed.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+import applypilot.database as database
+from applypilot.repo import jobs as repo
+
+
+@pytest.fixture()
+def db(tmp_path, monkeypatch):
+    path = tmp_path / "t.db"
+    monkeypatch.setattr(database, "DB_PATH", path)
+    database.close_connection(path)
+    database.init_db(path)
+    return database.get_connection(path)
+
+
+def _job(conn, url="http://j/1", **cols):
+    base = {"title": "PM", "site": "Greenhouse", "strategy": "dashboard_upload",
+            "discovered_at": "2026-07-20T10:00:00+00:00"}
+    base.update(cols)
+    keys = ", ".join(["url", *base])
+    marks = ", ".join("?" for _ in range(len(base) + 1))
+    conn.execute(f"INSERT INTO jobs ({keys}) VALUES ({marks})", (url, *base.values()))
+    conn.commit()
+    return url
+
+
+# ── the guard that was silently removed ─────────────────────────────────────
+
+def test_mark_submitted_requires_a_job_awaiting_review(db, monkeypatch):
+    from applypilot import web_dashboard as wd
+    monkeypatch.setattr(wd, "get_connection", lambda *a, **k: db)
+    monkeypatch.setattr(wd, "init_db", lambda *a, **k: db)
+
+    url = _job(db, apply_status="ready")
+    r = wd._mark_submitted(url)
+    assert r["ok"] is False and "not awaiting review" in r["message"]
+    assert repo.applied_at(url, db) is None, "a job that was never filled got marked applied"
+
+
+def test_mark_submitted_accepts_a_copilot_filled_job(db, monkeypatch):
+    from applypilot import web_dashboard as wd
+    monkeypatch.setattr(wd, "get_connection", lambda *a, **k: db)
+    monkeypatch.setattr(wd, "init_db", lambda *a, **k: db)
+
+    url = _job(db, apply_status="ready_to_submit")
+    assert wd._mark_submitted(url)["ok"] is True
+    assert repo.applied_at(url, db)
+    assert repo.apply_status(url, db) == "applied"
+
+
+def test_mark_submitted_rejects_unknown_and_empty_urls(db, monkeypatch):
+    from applypilot import web_dashboard as wd
+    monkeypatch.setattr(wd, "get_connection", lambda *a, **k: db)
+    monkeypatch.setattr(wd, "init_db", lambda *a, **k: db)
+    assert wd._mark_submitted("")["ok"] is False
+    assert wd._mark_submitted("http://nope")["ok"] is False
+
+
+# ── reject / restore round trip ─────────────────────────────────────────────
+
+def test_reject_then_restore_preserves_that_you_applied(db):
+    """`applied_at` must survive a rejection — the record that you DID apply is the point."""
+    url = _job(db, apply_status="applied", applied_at="2026-07-21T00:00:00+00:00")
+    repo.mark_rejected(url, db)
+    assert repo.apply_status(url, db) == "rejected"
+    assert repo.applied_at(url, db), "applied_at was cleared by rejecting"
+
+    repo.unmark_rejected(url, "applied" if repo.applied_at(url, db) else None, db)
+    assert repo.apply_status(url, db) == "applied"
+    assert repo.get(url, db)["rejected_at"] is None
+
+
+def test_restoring_a_never_applied_job_clears_the_status(db):
+    url = _job(db, apply_status="ready")
+    repo.mark_rejected(url, db)
+    repo.unmark_rejected(url, "applied" if repo.applied_at(url, db) else None, db)
+    assert repo.apply_status(url, db) is None
+
+
+# ── queues ──────────────────────────────────────────────────────────────────
+
+def test_queues_only_return_operator_added_jobs(db):
+    _job(db, "http://j/mine")
+    _job(db, "http://j/found", strategy="jobspy")     # discovery-sourced
+    assert [j["url"] for j in repo.queue_needing_detail(conn=db)] == ["http://j/mine"]
+
+
+def test_tailor_queue_respects_the_attempt_cap(db):
+    """Five failed attempts is where a job stops burning LLM calls forever."""
+    _job(db, "http://j/a", full_description="d", tailor_attempts=4)
+    _job(db, "http://j/b", full_description="d", tailor_attempts=5)
+    urls = [j["url"] for j in repo.queue_for_tailor(conn=db)]
+    assert urls == ["http://j/a"]
+
+
+def test_cover_queue_treats_empty_string_as_missing(db):
+    """`cover_letter_path = ''` is not a cover letter; an IS NULL check alone misses it."""
+    _job(db, "http://j/a", full_description="d", tailored_resume_path="/r", cover_letter_path="")
+    assert [j["url"] for j in repo.queue_for_cover(conn=db)] == ["http://j/a"]
+
+
+def test_apply_queue_skips_in_progress_and_applied(db):
+    _job(db, "http://j/ok", tailored_resume_path="/r")
+    _job(db, "http://j/busy", tailored_resume_path="/r", apply_status="in_progress")
+    _job(db, "http://j/done", tailored_resume_path="/r", applied_at="2026-07-21T00:00:00+00:00")
+    urls = [j["url"] for j in repo.queue_for_apply(10, 3, db)]
+    assert urls == ["http://j/ok"]
+
+
+def test_bypass_scoring_only_touches_unscored_enriched_queue_rows(db):
+    _job(db, "http://j/a", full_description="d")
+    _job(db, "http://j/b", full_description="d", fit_score=3)     # already scored
+    _job(db, "http://j/c")                                        # not enriched
+    assert repo.bypass_scoring(db) == 1
+    assert repo.get("http://j/a", db)["fit_score"] == 10
+    assert repo.get("http://j/b", db)["fit_score"] == 3
+
+
+# ── import ──────────────────────────────────────────────────────────────────
+
+def test_touch_import_matches_on_the_application_url_too(db):
+    """A job can be known by either URL; pasting the ATS link must adopt the existing row
+    rather than quietly failing to match and creating a duplicate."""
+    _job(db, "http://j/canonical", strategy="jobspy",
+         application_url="http://ats/apply/1")
+    repo.touch_import("http://ats/apply/1", "http://ats/apply/1", db)
+    assert repo.get("http://j/canonical", db)["strategy"] == "dashboard_upload"
+
+
+def test_delete_removes_contacts_but_only_for_operator_added_jobs(db):
+    from applypilot.networking import store
+    store.init_contacts(db)
+    url = _job(db, "http://j/mine")
+    store.upsert_contact({"job_url": url, "full_name": "Jane"}, db)
+    found = _job(db, "http://j/found", strategy="jobspy")
+
+    assert repo.delete(found, db) == 0, "a discovered job should not be deletable here"
+    assert repo.delete(url, db) == 1
+    assert repo.get(url, db) is None
+    assert db.execute("SELECT COUNT(*) FROM contacts WHERE job_url=?", (url,)).fetchone()[0] == 0
+
+
+# ── the boundary itself ─────────────────────────────────────────────────────
+
+def test_web_dashboard_runs_no_sql_against_jobs():
+    """ARCH-4's headline criterion, for this commit's scope."""
+    import re
+
+    from applypilot import web_dashboard as wd
+    src = (wd._STATIC_DIR.parent / "web_dashboard.py").read_text(encoding="utf-8")
+    hits = [ln.strip() for ln in src.splitlines()
+            if ".execute(" in ln or re.search(r"\b(FROM|INTO|UPDATE)\s+jobs\b", ln, re.I)]
+    assert not [h for h in hits if re.search(r"\bjobs\b", h, re.I)], \
+        "jobs SQL is back in web_dashboard.py:\n  " + "\n  ".join(hits[:5])

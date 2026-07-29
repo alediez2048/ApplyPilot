@@ -21,7 +21,6 @@ import sys
 import threading
 import time
 import webbrowser
-from datetime import datetime, timezone
 from hashlib import sha1
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -32,12 +31,15 @@ from rich.console import Console
 
 from applypilot import __version__, config
 from applypilot.database import get_connection, init_db
+from applypilot.repo import jobs as _jobs
 
 console = Console()
 
 _URL_RE = re.compile(r"https?://[^\s,<>\"']+")
-_URL_QUEUE_STRATEGIES = ("dashboard_upload", "manual_url_batch")
-_URL_QUEUE_SQL = "strategy IN ('dashboard_upload', 'manual_url_batch')"
+# Owned by repo.jobs now — the definition of "a job the operator pasted in" is a data
+# rule, not a view concern. Re-exported because tests and the extension import them.
+_URL_QUEUE_STRATEGIES = _jobs.QUEUE_STRATEGIES
+_URL_QUEUE_SQL = _jobs.QUEUE_SQL
 
 # ── Extension local API (EXT-0) — frozen contract in extension/CONTRACTS.md §3.
 # Paths / header / limits mirror extension/shared/constants.js (API.*, NOTE_MAX_LEN).
@@ -208,10 +210,7 @@ class NetworkRunner:
 
             conn = get_connection()
             init_contacts(conn)
-            row = conn.execute(
-                "SELECT url, title, company, site, application_url, full_description "
-                "FROM jobs WHERE url = ? OR application_url = ? LIMIT 1", (job_url, job_url)
-            ).fetchone()
+            row = _jobs.find_by_any_url(job_url, conn)
             if not row:
                 raise RuntimeError("job not found")
             job = dict(zip(row.keys(), row))
@@ -392,17 +391,7 @@ def run_dashboard_prepare(limit: int = 0, validation_mode: str = "lenient") -> d
     conn = get_connection()
     from applypilot.database import log_event
 
-    pending_detail = conn.execute(
-        f"""
-        SELECT url, title, site
-        FROM jobs
-        WHERE {_URL_QUEUE_SQL}
-          AND detail_scraped_at IS NULL
-        ORDER BY discovered_at DESC, rowid DESC
-        """
-    ).fetchall()
-    if limit > 0:
-        pending_detail = pending_detail[:limit]
+    pending_detail = _jobs.queue_needing_detail(limit, conn)
 
     enriched = 0
     detail_errors = 0
@@ -420,26 +409,13 @@ def run_dashboard_prepare(limit: int = 0, validation_mode: str = "lenient") -> d
             detail_errors += int(stats.get("error", 0))
             # Per-job enrich outcome from the row's detail_error/full_description after the batch.
             for (jurl, _t) in jobs:
-                r = conn.execute("SELECT detail_error, full_description FROM jobs WHERE url = ?", (jurl,)).fetchone()
+                r = _jobs.detail_outcome(jurl, conn)
                 if r and r["detail_error"]:
                     log_event(jurl, "enrich", "failed", f"Could not read the job page: {r['detail_error']}", conn)
                 elif r and r["full_description"]:
                     log_event(jurl, "enrich", "ok", "Read the full job description.", conn)
 
-    now = datetime.now(timezone.utc).isoformat()
-    scored = conn.execute(
-        f"""
-        UPDATE jobs
-        SET fit_score = 10,
-            score_reasoning = 'User-imported URL. Fit scoring intentionally bypassed.',
-            scored_at = ?
-        WHERE {_URL_QUEUE_SQL}
-          AND full_description IS NOT NULL
-          AND fit_score IS NULL
-        """,
-        (now,),
-    ).rowcount
-    conn.commit()
+    scored = _jobs.bypass_scoring(conn)
     print(f"STAGE: score bypass - marked {scored} imported URL(s) as user-approved", flush=True)
 
     profile = None
@@ -447,20 +423,7 @@ def run_dashboard_prepare(limit: int = 0, validation_mode: str = "lenient") -> d
     tailored = 0
     tailor_errors = 0
 
-    tailor_rows = conn.execute(
-        f"""
-        SELECT *
-        FROM jobs
-        WHERE {_URL_QUEUE_SQL}
-          AND full_description IS NOT NULL
-          AND tailored_resume_path IS NULL
-          AND COALESCE(tailor_attempts, 0) < 5
-        ORDER BY discovered_at DESC, rowid DESC
-        """
-    ).fetchall()
-    if limit > 0:
-        tailor_rows = tailor_rows[:limit]
-    tailor_jobs = _rows_to_dicts(tailor_rows)
+    tailor_jobs = _jobs.queue_for_tailor(limit, conn=conn)
 
     if tailor_jobs:
         from applypilot.config import RESUME_PATH, TAILORED_DIR, load_profile
@@ -511,42 +474,24 @@ def run_dashboard_prepare(limit: int = 0, validation_mode: str = "lenient") -> d
                     or (validation_mode == "lenient" and tailored_text.strip())
                 )
                 if accepted:
-                    conn.execute(
-                        "UPDATE jobs SET tailored_resume_path=?, tailored_at=?, tailor_attempts=COALESCE(tailor_attempts,0)+1 WHERE url=?",
-                        (str(txt_path), now, job["url"]),
-                    )
+                    _jobs.set_tailored(job["url"], str(txt_path), conn)
                     tailored += 1
                     note = "" if report.get("status") in {"approved", "approved_with_judge_warning"} else f" ({report.get('status')})"
                     log_event(job["url"], "tailor", "ok", f"Tailored résumé generated{note}.", conn)
                     if report.get("status") not in {"approved", "approved_with_judge_warning"}:
                         print(f"  tailor accepted with note (lenient): {report.get('status')}", flush=True)
                 else:
-                    conn.execute("UPDATE jobs SET tailor_attempts=COALESCE(tailor_attempts,0)+1 WHERE url=?", (job["url"],))
+                    _jobs.bump_tailor_attempts(job["url"], conn)
                     tailor_errors += 1
                     log_event(job["url"], "tailor", "failed", f"Résumé failed validation ({report.get('status')}).", conn)
                 conn.commit()
             except Exception as exc:
-                conn.execute("UPDATE jobs SET tailor_attempts=COALESCE(tailor_attempts,0)+1 WHERE url=?", (job["url"],))
-                conn.commit()
+                _jobs.bump_tailor_attempts(job["url"], conn)
                 tailor_errors += 1
                 log_event(job["url"], "tailor", "failed", f"Error tailoring résumé: {str(exc)[:200]}", conn)
                 print(f"  tailor error: {exc}", flush=True)
 
-    cover_rows = conn.execute(
-        f"""
-        SELECT *
-        FROM jobs
-        WHERE {_URL_QUEUE_SQL}
-          AND full_description IS NOT NULL
-          AND tailored_resume_path IS NOT NULL
-          AND (cover_letter_path IS NULL OR cover_letter_path = '')
-          AND COALESCE(cover_attempts, 0) < 5
-        ORDER BY discovered_at DESC, rowid DESC
-        """
-    ).fetchall()
-    if limit > 0:
-        cover_rows = cover_rows[:limit]
-    cover_jobs = _rows_to_dicts(cover_rows)
+    cover_jobs = _jobs.queue_for_cover(limit, conn=conn)
 
     covers = 0
     cover_errors = 0
@@ -570,16 +515,11 @@ def run_dashboard_prepare(limit: int = 0, validation_mode: str = "lenient") -> d
                     convert_to_pdf(cl_path, kind="cover_letter")
                 except Exception as exc:
                     print(f"  PDF warning: {exc}", flush=True)
-                conn.execute(
-                    "UPDATE jobs SET cover_letter_path=?, cover_letter_at=?, cover_attempts=COALESCE(cover_attempts,0)+1 WHERE url=?",
-                    (str(cl_path), now, job["url"]),
-                )
-                conn.commit()
+                _jobs.set_cover(job["url"], str(cl_path), conn)
                 covers += 1
                 log_event(job["url"], "cover", "ok", "Cover letter generated.", conn)
             except Exception as exc:
-                conn.execute("UPDATE jobs SET cover_attempts=COALESCE(cover_attempts,0)+1 WHERE url=?", (job["url"],))
-                conn.commit()
+                _jobs.bump_cover_attempts(job["url"], conn)
                 cover_errors += 1
                 log_event(job["url"], "cover", "failed", f"Error generating cover letter: {str(exc)[:200]}", conn)
                 print(f"  cover error: {exc}", flush=True)
@@ -612,21 +552,7 @@ def run_dashboard_apply(limit: int = 10, dry_run: bool = False, copilot: bool = 
     # (e.g. the user closed the tab, or a blocking field) can just be re-run from the dashboard —
     # no manual DB reset. 'in_progress' and cap-exhausted jobs are left alone.
     max_attempts = config.DEFAULTS["max_apply_attempts"]
-    rows = conn.execute(
-        """
-        SELECT url, title, site
-        FROM jobs
-        WHERE strategy = 'dashboard_upload'
-          AND tailored_resume_path IS NOT NULL
-          AND applied_at IS NULL
-          AND (apply_status IS NULL OR apply_status = '' OR apply_status = 'failed'
-               OR apply_status = 'dryrun')
-          AND COALESCE(apply_attempts, 0) < ?
-        ORDER BY discovered_at DESC, rowid DESC
-        LIMIT ?
-        """,
-        (max_attempts, limit),
-    ).fetchall()
+    rows = _jobs.queue_for_apply(limit, max_attempts, conn)
 
     print(f"Dashboard URL apply queue: {len(rows)} job(s)", flush=True)
     applied = 0
@@ -641,7 +567,7 @@ def run_dashboard_apply(limit: int = 10, dry_run: bool = False, copilot: bool = 
         elif copilot:
             args.append("--copilot")
         completed = subprocess.run(args, check=False)
-        status = conn.execute("SELECT apply_status, applied_at FROM jobs WHERE url = ?", (row["url"],)).fetchone()
+        status = _jobs.apply_state(row["url"], conn)
         if status and status["applied_at"]:
             applied += 1
         elif status and status["apply_status"] == "ready_to_submit":
@@ -670,8 +596,7 @@ def run_dashboard_fill_one(url: str) -> dict:
     completed = subprocess.run(args, check=False)
     init_db()
     conn = get_connection()
-    row = conn.execute("SELECT apply_status FROM jobs WHERE url = ?", (url,)).fetchone()
-    result = {"url": url, "status": (row["apply_status"] if row else None),
+    result = {"url": url, "status": _jobs.apply_status(url, conn),
               "exit_code": completed.returncode}
     print(f"Dashboard fill-one complete: {result}", flush=True)
     return result
@@ -699,18 +624,10 @@ def run_dashboard_restart(url: str) -> dict:
     # 1) Clean apply slate so nothing blocks a fresh attempt. Restart is an explicit, confirmed
     #    user action (the UI double-confirms for already-applied jobs), so we DO clear applied_at
     #    here — that's the whole point: re-apply something that didn't truly go through.
-    conn.execute(
-        "UPDATE jobs SET apply_status=NULL, apply_error=NULL, apply_attempts=0, agent_id=NULL, applied_at=NULL "
-        "WHERE url=?",
-        (url,),
-    )
-    conn.commit()
+    _jobs.reset_apply_state(url, conn)
 
     # 2) Ensure materials — prepare regenerates only what's missing (idempotent for complete jobs).
-    row = conn.execute(
-        "SELECT (full_description IS NOT NULL) AS enr, (tailored_resume_path IS NOT NULL) AS res, "
-        "(cover_letter_path IS NOT NULL) AS cov FROM jobs WHERE url=?", (url,)
-    ).fetchone()
+    row = _jobs.materials_present(url, conn)
     if row and not (row["enr"] and row["res"] and row["cov"]):
         print("STAGE: restart — regenerating missing materials", flush=True)
         run_dashboard_prepare(validation_mode="lenient")
@@ -720,8 +637,7 @@ def run_dashboard_restart(url: str) -> dict:
             "--min-score", "1", "--copilot"]
     completed = subprocess.run(args, check=False)
     conn = get_connection()
-    st = conn.execute("SELECT apply_status FROM jobs WHERE url=?", (url,)).fetchone()
-    result = {"url": url, "status": (st["apply_status"] if st else None), "exit_code": completed.returncode}
+    result = {"url": url, "status": _jobs.apply_status(url, conn), "exit_code": completed.returncode}
     print(f"Dashboard restart complete: {result}", flush=True)
     return result
 
@@ -740,8 +656,7 @@ def run_dashboard_continue(url: str) -> dict:
     completed = subprocess.run(args, check=False)
     init_db()
     conn = get_connection()
-    status = conn.execute("SELECT apply_status FROM jobs WHERE url = ?", (url,)).fetchone()
-    result = {"url": url, "status": (status["apply_status"] if status else None),
+    result = {"url": url, "status": _jobs.apply_status(url, conn),
               "exit_code": completed.returncode}
     print(f"Dashboard continue complete: {result}", flush=True)
     return result
@@ -753,39 +668,32 @@ def _mark_submitted(url: str) -> dict:
     Only transitions a job that's actually in the ready_to_submit state (guards against
     marking something applied that never went through review).
     """
-    from datetime import datetime, timezone
     if not url:
         return {"ok": False, "message": "url required"}
     init_db()
     conn = get_connection()
-    row = conn.execute("SELECT apply_status FROM jobs WHERE url = ?", (url,)).fetchone()
-    if not row:
+    if not _jobs.exists(url, conn):
         return {"ok": False, "message": "job not found"}
-    if row["apply_status"] != "ready_to_submit":
-        return {"ok": False, "message": f"job is not awaiting review (status: {row['apply_status'] or 'none'})"}
-    now = datetime.now(timezone.utc).isoformat()
-    conn.execute(
-        "UPDATE jobs SET apply_status = 'applied', applied_at = ?, apply_error = NULL WHERE url = ?",
-        (now, url),
-    )
-    conn.commit()
+    status = _jobs.apply_status(url, conn)
+    # The whole point of this endpoint: only a job the co-pilot filled and handed back may
+    # be marked submitted. Without this guard the button would rubber-stamp anything.
+    if status != "ready_to_submit":
+        return {"ok": False, "message": f"job is not awaiting review (status: {status or 'none'})"}
+    _jobs.mark_applied(url, conn)
     return {"ok": True, "message": "Marked as submitted ✓"}
 
 
 def _mark_rejected(url: str) -> dict:
     """Move a job to the rejected pile (apply_status='rejected' + rejected_at). Keeps applied_at
     so the record that you DID apply survives. Logs a rejection to the activity timeline."""
-    from datetime import datetime, timezone
     from applypilot.database import log_event
     if not url:
         return {"ok": False, "message": "url required"}
     init_db()
     conn = get_connection()
-    if not conn.execute("SELECT 1 FROM jobs WHERE url = ?", (url,)).fetchone():
+    if not _jobs.exists(url, conn):
         return {"ok": False, "message": "job not found"}
-    now = datetime.now(timezone.utc).isoformat()
-    conn.execute("UPDATE jobs SET apply_status = 'rejected', rejected_at = ? WHERE url = ?", (now, url))
-    conn.commit()
+    _jobs.mark_rejected(url, conn)
     log_event(url, "apply", "info", "Marked rejected — moved to the rejected pile.", conn)
     return {"ok": True, "message": "Moved to rejected pile"}
 
@@ -798,12 +706,9 @@ def _unmark_rejected(url: str) -> dict:
         return {"ok": False, "message": "url required"}
     init_db()
     conn = get_connection()
-    row = conn.execute("SELECT applied_at FROM jobs WHERE url = ?", (url,)).fetchone()
-    if not row:
+    if not _jobs.exists(url, conn):
         return {"ok": False, "message": "job not found"}
-    restored = "applied" if row["applied_at"] else None
-    conn.execute("UPDATE jobs SET apply_status = ?, rejected_at = NULL WHERE url = ?", (restored, url))
-    conn.commit()
+    _jobs.unmark_rejected(url, "applied" if _jobs.applied_at(url, conn) else None, conn)
     log_event(url, "apply", "info", "Rejection undone — restored from the rejected pile.", conn)
     return {"ok": True, "message": "Restored from rejected pile"}
 
@@ -1121,51 +1026,10 @@ def _status_payload() -> dict:
     init_contacts(conn)
     _net_tasks = _network.statuses()
 
-    stats = conn.execute(f"""
-        SELECT
-          COUNT(*) AS total,
-          SUM(CASE WHEN full_description IS NOT NULL AND lower(trim(full_description)) != 'null' THEN 1 ELSE 0 END) AS enriched,
-          SUM(CASE WHEN fit_score IS NOT NULL THEN 1 ELSE 0 END) AS scored,
-          SUM(CASE WHEN tailored_resume_path IS NOT NULL THEN 1 ELSE 0 END) AS tailored,
-          SUM(CASE WHEN cover_letter_path IS NOT NULL THEN 1 ELSE 0 END) AS covers,
-          SUM(CASE WHEN tailored_resume_path IS NOT NULL AND applied_at IS NULL AND (apply_status IS NULL OR apply_status = '') THEN 1 ELSE 0 END) AS ready,
-          SUM(CASE WHEN applied_at IS NOT NULL THEN 1 ELSE 0 END) AS applied,
-          SUM(CASE WHEN apply_error IS NOT NULL THEN 1 ELSE 0 END) AS errors,
-          SUM(CASE WHEN apply_status = 'in_progress' THEN 1 ELSE 0 END) AS in_progress
-        FROM jobs
-        WHERE {_URL_QUEUE_SQL}
-    """).fetchone()
-    lifetime = conn.execute("""
-        SELECT
-          COUNT(*) AS total,
-          SUM(CASE WHEN applied_at IS NOT NULL THEN 1 ELSE 0 END) AS applied,
-          SUM(CASE WHEN apply_error IS NOT NULL THEN 1 ELSE 0 END) AS errors
-        FROM jobs
-    """).fetchone()
+    stats = _jobs.queue_stats(conn)
+    lifetime = _jobs.lifetime_stats(conn)
 
-    rows = conn.execute(f"""
-        SELECT url, title, site, salary, location, full_description, application_url, detail_error,
-               fit_score, score_reasoning, tailored_resume_path, cover_letter_path,
-               apply_status, apply_error, apply_attempts, applied_at,
-               last_attempted_at, apply_duration_ms, rejected_at
-        FROM jobs
-        WHERE {_URL_QUEUE_SQL}
-        ORDER BY
-          CASE
-            WHEN apply_status = 'rejected' THEN 6            -- rejected pile sinks to the bottom
-            WHEN applied_at IS NOT NULL THEN 0
-            WHEN apply_status = 'in_progress' THEN 1
-            WHEN tailored_resume_path IS NOT NULL THEN 2
-            WHEN {_URL_QUEUE_SQL} AND (full_description IS NULL OR lower(trim(full_description)) = 'null') THEN 3
-            WHEN fit_score IS NOT NULL THEN 4
-            ELSE 5
-          END,
-          rejected_at DESC NULLS LAST,
-          applied_at DESC NULLS LAST,
-          discovered_at DESC,
-          fit_score DESC NULLS LAST
-        LIMIT 500
-    """).fetchall()
+    rows = _jobs.dashboard_rows(conn=conn)
 
     jobs: list[dict] = []
     # Connection counts for every company up front: one scan of the 899-row connections
@@ -1335,7 +1199,6 @@ def _import_urls(text: str) -> dict:
         if url not in urls:
             urls.append(url)
 
-    now = datetime.now(timezone.utc).isoformat()
     inserted = 0
     duplicates = 0
     existing_applied = 0
@@ -1344,22 +1207,10 @@ def _import_urls(text: str) -> dict:
     existing_pending = 0
 
     for url in urls:
-        existing = conn.execute(
-            "SELECT url, strategy, applied_at, apply_status, apply_error, tailored_resume_path FROM jobs WHERE url = ? OR application_url = ?",
-            (url, url),
-        ).fetchone()
+        existing = _jobs.import_state(url, conn)
         if existing:
             if existing["strategy"] != "dashboard_upload":
-                conn.execute(
-                    """
-                    UPDATE jobs
-                    SET strategy = 'dashboard_upload',
-                        discovered_at = ?,
-                        application_url = COALESCE(NULLIF(application_url, ''), ?)
-                    WHERE url = ? OR application_url = ?
-                    """,
-                    (now, url, url, url),
-                )
+                _jobs.touch_import(url, url, conn)
             if existing["applied_at"]:
                 existing_applied += 1
             elif existing["apply_error"] or existing["apply_status"] == "failed":
@@ -1373,11 +1224,7 @@ def _import_urls(text: str) -> dict:
         company = _infer_company(url)
         title = f"{company} uploaded job"
         try:
-            conn.execute(
-                "INSERT INTO jobs (url, title, company, site, strategy, discovered_at, application_url) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (url, title, company, company, "dashboard_upload", now, url),
-            )
+            _jobs.insert_imported(url, title, company, company, url, conn)
             inserted += 1
         except Exception:
             duplicates += 1
@@ -1537,8 +1384,7 @@ def _followup_action(data: dict) -> dict:
         return {"ok": True, "touch": n, "message": f"{name}follow-up #{n} recorded"}
 
     if verb == "draft":
-        row = conn.execute("SELECT * FROM jobs WHERE url = ?", (contact["job_url"],)).fetchone()
-        job = dict(zip(row.keys(), row)) if row else {"url": contact["job_url"]}
+        job = _jobs.get(contact["job_url"], conn) or {"url": contact["job_url"]}
         from applypilot.config import load_profile
         from applypilot.networking import outreach
         try:
@@ -1575,16 +1421,10 @@ def _delete_job(url: str) -> dict:
     if not url:
         return {"ok": False, "message": "Missing job URL"}
 
-    row = conn.execute(
-        f"SELECT title, site FROM jobs WHERE url = ? AND {_URL_QUEUE_SQL}",
-        (url,),
-    ).fetchone()
+    row = _jobs.queued_for_delete(url, conn)
     if not row:
         return {"ok": False, "message": "Application not found"}
-
-    conn.execute(f"DELETE FROM jobs WHERE url = ? AND {_URL_QUEUE_SQL}", (url,))
-    conn.execute("DELETE FROM contacts WHERE job_url = ?", (url,))  # no SQLite FK cascade
-    conn.commit()
+    _jobs.delete(url, conn)
     return {
         "ok": True,
         "message": f"Deleted {row['site'] or 'Unknown'} - {row['title'] or 'Untitled'}",

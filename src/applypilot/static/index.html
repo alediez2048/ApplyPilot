@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ApplyPilot Operator</title>
+<link rel="stylesheet" href="/static/dashboard.css?v=__ASSET_V__">
+</head>
+<body>
+<header>
+  <div class="brand">
+    <div class="logo">✈</div>
+    <div class="brand-text">
+      <div class="brand-name">ApplyPilot</div>
+      <div class="brand-sub">Autonomous Application Console</div>
+    </div>
+  </div>
+  <div id="appDir" class="path-pill"></div>
+</header>
+<main>
+  <div class="stats" id="stats"></div>
+
+  <hr class="section-sep">
+
+  <div class="progress-panel">
+    <div class="progress-head">
+      <div>
+        <div class="progress-title">Pipeline Progress</div>
+        <div id="progressLabel" class="progress-label">Idle</div>
+      </div>
+      <div id="progressPercent" class="path-pill">0%</div>
+    </div>
+    <div class="progress-track"><div id="progressFill" class="progress-fill"></div></div>
+    <div id="progressMeta" class="progress-meta"></div>
+  </div>
+
+  <hr class="section-sep">
+
+  <div class="controls">
+    <section>
+      <h2>Apply to Jobs</h2>
+      <textarea id="urls" placeholder="Paste one or more job URLs here, then click Run. Direct ATS/career URLs work best."></textarea>
+      <div class="row" style="margin-top:10px; align-items:center">
+        <button id="runBtn" class="primary" style="font-size:15px; padding:10px 20px" onclick="runEverything()">🚀 Import, Prepare &amp; Fill</button>
+        <button class="danger" onclick="stopCommand()">Stop</button>
+        <label style="margin-left:12px"><input id="dryRun" type="checkbox"> Dry run (fill, don't submit)</label>
+      </div>
+      <p id="command" class="hint" style="margin-top:10px; font-weight:600; color:#374151"></p>
+      <div id="pipeline" class="pipeline" style="display:none">
+        <div id="pipeSteps" class="pipe-steps"></div>
+        <div class="pipe-log-wrap"><pre id="pipeLog" class="pipe-log"></pre></div>
+      </div>
+      <div id="importStatus" class="hint"></div>
+      <div class="hint">One click runs the whole chain: import → prepare tailored résumé + cover letter → <strong>fill the application in Chrome and hand it to you to review + submit</strong> (co-pilot — never auto-submits). Advanced: <button class="linklike" onclick="toggleAdvanced()">show step controls</button></div>
+      <div id="advancedControls" style="display:none; margin-top:8px" class="row">
+        <label>Limit <input id="limit" type="number" value="10" min="1" max="100" style="width:72px"></label>
+        <button id="prepareBtn" onclick="prepareJobs()">Prepare only</button>
+        <button id="applyBtn" onclick="applyJobs()">Apply only</button>
+      </div>
+    </section>
+  </div>
+
+  <hr class="section-sep">
+
+  <section>
+    <h2>Applications</h2>
+    <div id="jobFilters" class="job-filters"></div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Status</th><th>Job</th><th>Description</th><th>Links</th></tr></thead>
+        <tbody id="jobs"></tbody>
+      </table>
+    </div>
+    <div id="jobsEmpty" class="jobs-empty" hidden></div>
+  </section>
+
+  <hr class="section-sep">
+
+  <div class="logs">
+    <section><h2>Command Log</h2><pre id="cmdLog"></pre></section>
+    <section><h2>Apply Log</h2><pre id="applyLog"></pre></section>
+  </div>
+</main>
+
+<script src="/static/dashboard.js?v=__ASSET_V__"></script>
+</body>
+</html>

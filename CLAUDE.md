@@ -12,7 +12,7 @@ campaign happens to be a job search** — see `docs/crm-prd.md` for where that g
 - **Packaging:** Hatchling, `src/` layout, single package `applypilot`
 - **Entry point:** `applypilot = "applypilot.cli:app"` (Typer CLI)
 - **License:** AGPL-3.0-only · **Version:** 0.4.0 (`pyproject.toml`)
-- **Tests:** 245 passing (`tests/`, 21 files) · ruff clean (line-length 120, py311)
+- **Tests:** 255 passing (`tests/`, 21 files) · ruff clean (line-length 120, py311) · ESLint clean
 
 ## Quick orientation
 
@@ -48,7 +48,8 @@ Surfaces:
 | `database.py` | SQLite layer. Owns `jobs` + `job_events`. Thread-local WAL, forward-only migrations. |
 | `llm.py` | Multi-provider client (round-robin + failover: OpenAI/Gemini/Anthropic/local). |
 | `view.py` | Static HTML results export. |
-| `web_dashboard.py` | **The operator dashboard.** 3,500 lines (1,602 of them the HTML/CSS/JS template) — see *Known debt*. |
+| `web_dashboard.py` | **The operator dashboard.** 1,953 lines, now all Python — the page moved to `static/` in ARCH-2. |
+| `static/` | `index.html` · `dashboard.css` · `dashboard.js`. Served from `/static/…?v=<version>-<mtime>`; the page itself is `no-store`. One **classic** script, not a module — ~56 inline `onclick=` attributes resolve against the global object. |
 
 ### `discovery/` · `enrichment/` · `scoring/`
 `jobspy.py` (Indeed/LinkedIn/Glassdoor/ZipRecruiter/Google) · `workday.py` (CXS API) ·
@@ -214,7 +215,8 @@ company `"Jobs"` — the same substring bug class, inside the function written t
    raises and 500s the whole dashboard. Parse via `_parse_ts()`.
 7. **A JS `ReferenceError` blanks the entire jobs table as silently as a syntax error.**
    `test_dashboard_js_valid.py` only parses; `test_dashboard_render.py` executes the render
-   path under DOM stubs. Both exist because the JS lives in a Python string.
+   path under DOM stubs. ARCH-2 retired the parse-only test — building the `Function` in the
+   render test already throws on a syntax error, and ESLint covers the rest.
 
 ---
 
@@ -224,7 +226,7 @@ company `"Jobs"` — the same substring bug class, inside the function written t
 `docs/tickets/ARCH-README.md` — the ordered ticket list. Read that before starting anything.
 
 **Chosen order (Jorge, 2026-07-28): finish the ARCH set first**, then the product tickets —
-`ARCH-1` ✅ → `ARCH-2` → `ARCH-3` → `ARCH-4` → `ARCH-5` → `ARCH-6`, then `CRM-1` → `DISC-1`
+`ARCH-1` ✅ → `ARCH-2` ✅ → `ARCH-3` → `ARCH-4` → `ARCH-5` → `ARCH-6`, then `CRM-1` → `DISC-1`
 → `CRM-2` → `CRM-3`.
 
 The analysis recommended the reverse, and the reason is measured, not aesthetic: all 7 jobs
@@ -233,7 +235,8 @@ manually), and nothing is aggregated. **The ARCH set delivers no user-visible ch
 funnel stays at 7 hand-pasted jobs and the system stays blind to replies until `CRM-1` lands.
 The tradeoff was raised and accepted; do not re-litigate it, but do not forget it either.
 
-**Next up: `ARCH-2`** (frontend → static files). That is where the 1,602-line template goes.
+**Next up: `ARCH-3`** (the `touches` table) — collapse `followup_*` / `li_followup_*` into
+one sequence table so a third channel costs a row, not a column set.
 
 `docs/crm-prd.md` — the multi-campaign "Spaces" direction. **After** the above.
 
@@ -243,13 +246,18 @@ Ordered by leverage. Nothing here is blocking; all of it compounds.
 
 1. ~~**Extract `domain/`**~~ — **done (ARCH-1, 2026-07-28).** Three duplicate "is it due"
    implementations collapsed to one; `/api/status` verified byte-identical.
-   **`web_dashboard.py` is still 3,500 lines**, but **1,602 of those are the HTML/CSS/JS
-   template** — that is ARCH-2's scope, not leftover domain logic. Actual Python: 1,898.
 2. **`contacts` has two of everything** — `followup_*` / `li_followup_*` is one concept
    (a touch sequence) copy-pasted per channel. A `touches(contact_id, channel, seq, …)` table
    collapses it and makes SMS free. Defensible at 28 contacts; the cost is duplicated *code*.
-3. **996 lines of JS in a Python string** — no linter, no types, no modules. Moving to a
-   static file costs little and buys ESLint + real stack traces.
+3. ~~**996 lines of JS in a Python string**~~ — **done (ARCH-2, 2026-07-28).** The cut was
+   verified by reassembling the three files back into the old string **byte for byte**.
+   ESLint now runs (`npm run lint`, dev-only). It cannot see functions called from `onclick=`
+   attributes, so `test_no_dead_functions` reads the HTML too — on the first run it found
+   **5 dead functions and 3 dead Sets** stranded by the ARCH-1 tabs restructure.
+   **`web_dashboard.py` is 1,953 lines and all Python.** ~430 of them are pipeline
+   orchestration (`run_dashboard_prepare/apply/fill_one/restart/continue`) that are not HTTP
+   concerns and belong to ARCH-4. The ticket's "< 1,800" criterion was arithmetically
+   unreachable and is marked superseded rather than fudged.
 4. **Forward-only migrations.** No rename/drop/backfill/version. `preserved_companies` and the
    stale `.edu` PDFs each needed a hand-written fix.
 5. **40 env vars, no schema.** `FOLLOWUP_SCHEDULE` / `LINKEDIN_FOLLOWUP_SCHEDULE` /
@@ -283,11 +291,16 @@ Ordered by leverage. Nothing here is blocking; all of it compounds.
 lsof -ti:8765 | xargs kill -9 && .venv/bin/applypilot dashboard --serve --no-open
 APPLYPILOT_DIR=$(mktemp -d) PYTHONPATH=src .venv/bin/python -m pytest tests/ -q
 .venv/bin/python -m ruff check .
+npm install && npm run lint                            # frontend only; dev-only, never shipped
 ```
 
 The `APPLYPILOT_DIR=$(mktemp -d)` prefix is **required** — without it tests run against your
-real `~/.applypilot/`. The editable install is flaky; reinstall then restart the dashboard,
-and hard-refresh the browser after frontend edits.
+real `~/.applypilot/`. The editable install is flaky; reinstall then restart the dashboard.
+
+**Frontend edits no longer need a hard refresh.** The install is not editable, so a frontend
+change still needs the `pip install` above — but that copy gives the file a new mtime, the
+`?v=` changes with it, and the browser fetches the new bundle on a normal reload.
+`index.html` is served `no-store`, so it is always re-read.
 
 - Big/risky designs get an adversarial multi-agent review first (Workflow). It has caught 13
   issues on the networking PRD, the agent-browser blocker, and 5 blockers on the extension PRD.

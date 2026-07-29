@@ -22,7 +22,7 @@ improves nothing a user can see). See `architecture-prd.md` §4.0 for the data b
 | 3 | `ARCH-1` extract `domain/` | **testable** (needed by 4 & 5) | M | — | ✅ **Done 2026-07-28** |
 | 4 | `CRM-2` outcome metrics | **learn** | M | CRM-1, ARCH-1 | Todo |
 | 5 | `CRM-3` scheduler | **act unattended** | S | ARCH-1 | Todo |
-| 6 | `ARCH-2` static frontend | — | M | — | Todo |
+| 6 | `ARCH-2` static frontend | — | M | — | ✅ **Done 2026-07-28** |
 | 7 | `ARCH-3` touches table | extensible to new channels | M | ARCH-1 | Todo |
 | 8 | `ARCH-4` repository boundary | — | L | ARCH-1 | Todo |
 | 9 | `ARCH-5` versioned migrations | — | S | ARCH-3 | Todo |
@@ -32,7 +32,7 @@ Roughly 9–10 days. **The first three deliver essentially all the user-visible 
 
 ## Guardrails (every ticket)
 
-- All tests green before merge — no ticket lands red (245 as of ARCH-1)
+- All tests green before merge — no ticket lands red (255 as of ARCH-2)
 - `evals/resolution.jsonl` green — it has already caught a bug every unit test missed
 - No behaviour change inside a refactor ticket; user-visible changes are separate commits
 - Byte-identical output where verifiable (prompts, rendered PDFs, `/api/status`)

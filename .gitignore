@@ -43,3 +43,7 @@ Thumbs.db
 
 # Claude Code
 .claude/
+
+# ARCH-2: dev-only ESLint toolchain for src/applypilot/static (never shipped)
+node_modules/
+package-lock.json

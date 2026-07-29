@@ -1,9 +1,10 @@
 """Guard: the dashboard's render path must not throw at RUNTIME.
 
-test_dashboard_js_valid.py syntax-checks the inline script, which catches stray quotes but
-NOT a call to a function that no longer exists — exactly the failure mode of restructuring
-the job panel. A ReferenceError inside refresh() blanks the whole jobs table just as silently
-as a SyntaxError does.
+Parsing the script catches stray quotes but NOT a call to a function that no longer exists —
+exactly the failure mode of restructuring the job panel. A ReferenceError inside refresh()
+blanks the whole jobs table just as silently as a SyntaxError does. (ARCH-2 retired the
+separate `node --check` test: constructing the Function below already throws on a syntax
+error, so parsing is covered here and by ESLint.)
 
 This evaluates the served script under minimal DOM stubs and actually calls the row renderers
 against a synthetic job covering every branch: each tab, each contact channel, hot/cold
@@ -13,7 +14,6 @@ contacts, missing email, missing LinkedIn, due/waiting follow-ups.
 from __future__ import annotations
 
 import json
-import re
 import shutil
 import subprocess
 
@@ -67,14 +67,10 @@ console.log(JSON.stringify({ checked: n, errors }));
 
 
 def _page_js() -> str:
-    for name in dir(web_dashboard):
-        val = getattr(web_dashboard, name)
-        if isinstance(val, str) and "<script>" in val and "function refresh" in val:
-            m = re.search(r"<script>(.*)</script>", val, re.S)
-            if m:
-                return m.group(1)
-    pytest.skip("dashboard HTML template not found as a module string")
-    return ""
+    path = web_dashboard._STATIC_DIR / "dashboard.js"
+    if not path.exists():
+        pytest.skip("dashboard.js not found")
+    return path.read_text(encoding="utf-8")
 
 
 def _contact(**over):

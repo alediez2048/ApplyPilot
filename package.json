@@ -1,0 +1,13 @@
+{
+  "name": "applypilot-frontend-lint",
+  "private": true,
+  "description": "Dev-only tooling for the dashboard frontend (ARCH-2). Not a runtime dependency, not bundled, not shipped.",
+  "scripts": {
+    "lint": "eslint src/applypilot/static"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.0.0",
+    "eslint": "^9.0.0",
+    "globals": "^15.0.0"
+  }
+}

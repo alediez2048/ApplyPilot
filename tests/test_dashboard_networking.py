@@ -263,14 +263,18 @@ def test_checklist_tolerates_a_bad_timestamp():
 
 def test_mark_followed_up_is_idempotent(tmp_path, monkeypatch):
     database, store, conn, cid = _seed(tmp_path, monkeypatch)
-    assert store.mark_followed_up(cid, conn) is True
-    first = conn.execute("SELECT followed_up_at FROM contacts WHERE id=?", (cid,)).fetchone()[0]
-    assert store.mark_followed_up(cid, conn) is False    # second call is a no-op
-    again = conn.execute("SELECT followed_up_at FROM contacts WHERE id=?", (cid,)).fetchone()[0]
-    assert first == again                                # timestamp not rewritten
+    from applypilot.networking import touches
+
+    def when():
+        return touches.ladder_state(cid, "email", conn)["last_sent_at"]
+
+    assert store.mark_followed_up(cid, conn=conn) is True
+    first = when()
+    assert store.mark_followed_up(cid, conn=conn) is False   # second call is a no-op
+    assert when() == first                                   # timestamp not rewritten
     logged = [e for e in database.get_job_events("http://j/1", conn=conn)
               if "Followed up" in (e["detail"] or "")]
-    assert len(logged) == 1                              # and only logged once
+    assert len(logged) == 1                                  # and only logged once
 
 
 # ── LinkedIn follow-up ladder (accepted the invite, then went quiet) ─────────
@@ -278,10 +282,18 @@ def test_mark_followed_up_is_idempotent(tmp_path, monkeypatch):
 def _li_contact(**kw):
     c = {"id": "c1", "full_name": "Sumit Singh", "title": "Sr. Recruiter",
          "linkedin_url": "https://l/in/sumit", "dm_status": "manual",
-         "dm_sent_at": _dt(7), "li_followup_count": 0, "li_followup_status": "",
-         "email": "", "emailed": False}
+         "dm_sent_at": _dt(7), "email": "", "emailed": False}
     c.update(kw)
     return c
+
+
+def _ladders(**by_channel):
+    """ARCH-3: ladder state is (contact, channel) -> state, not columns on the contact.
+
+    Passing it in keeps these tests database-free while exercising the real engine.
+    """
+    from applypilot.domain.followup import EMPTY_LADDER
+    return {("c1", ch): {**EMPTY_LADDER, **vals} for ch, vals in by_channel.items()}
 
 
 def test_linkedin_followup_due_after_the_invite_window():
@@ -304,12 +316,14 @@ def test_linkedin_needs_a_recorded_invite_to_schedule_anything():
 
 def test_linkedin_replied_or_stopped_halts_the_ladder():
     for status in ("replied", "stopped"):
-        cl = wd._followup_panel([_li_contact(li_followup_status=status)])
+        cl = wd._followup_panel([_li_contact()],
+                                _ladders(linkedin={"sequence_status": status}))
         assert cl["li_due_count"] == 0, f"{status} must stop the sequence"
 
 
 def test_linkedin_ladder_finishes_after_the_last_touch():
-    cl = wd._followup_panel([_li_contact(li_followup_count=2)])   # default ladder is 2 touches
+    # default LinkedIn ladder is 2 touches
+    cl = wd._followup_panel([_li_contact()], _ladders(linkedin={"count": 2}))
     assert cl["li_due_count"] == 0
 
 
@@ -323,23 +337,28 @@ def test_linkedin_schedule_is_configurable(monkeypatch):
 
 def test_email_and_linkedin_ladders_are_independent(tmp_path, monkeypatch):
     """An emailed-and-followed-up contact can still owe a LinkedIn message, and vice versa."""
-    c = _li_contact(email="s@x.com", emailed=True, submitted_at=_dt(9),
-                    followed_up_at=_dt(0), followup_count=1)
-    cl = wd._followup_panel([c])
+    c = _li_contact(email="s@x.com", emailed=True, submitted_at=_dt(9))
+    cl = wd._followup_panel([c], _ladders(email={"count": 1, "last_sent_at": _dt(0)}))
     assert cl["due_count"] == 0          # email follow-up was just sent
     assert cl["li_due_count"] == 1       # LinkedIn still owed
 
 
-def test_mark_li_followup_sent_advances_and_logs(tmp_path, monkeypatch):
+def test_marking_a_linkedin_touch_goes_through_the_same_function_as_email(tmp_path, monkeypatch):
+    """ARCH-3: there is no `mark_li_followup_sent` any more. One function, one `channel` arg.
+
+    If someone reintroduces a LinkedIn-specific writer, this test still passes — but
+    test_no_channel_specific_ladder_functions below will not.
+    """
     database, store, conn, cid = _seed(tmp_path, monkeypatch)
-    n = store.mark_li_followup_sent(cid, conn)
+    from applypilot.networking import touches
+    n = store.mark_followup_sent(cid, "linkedin", conn)
     assert n == 1
-    row = conn.execute("SELECT li_followup_count, li_followed_up_at, li_followup_status "
-                       "FROM contacts WHERE id=?", (cid,)).fetchone()
-    assert row["li_followup_count"] == 1 and row["li_followed_up_at"]
-    assert row["li_followup_status"] == "sent"
+    st = touches.ladder_state(cid, "linkedin", conn)
+    assert st["count"] == 1 and st["last_sent_at"]
     assert any("LinkedIn follow-up #1" in (e["detail"] or "")
                for e in database.get_job_events("http://j/1", conn=conn))
+    # …and the email ladder is untouched: separate rows, not separate columns.
+    assert touches.ladder_state(cid, "email", conn)["count"] == 0
 
 
 def test_mark_connected_now_starts_the_clock(tmp_path, monkeypatch):

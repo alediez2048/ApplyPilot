@@ -805,7 +805,7 @@ function liCopyOpen(cid, encUrl, btn) {
   const card = btn.closest('.fu-card');
   const msg = card ? card.querySelector('.li-body').value : '';
   if (msg) { try { navigator.clipboard.writeText(msg); } catch { /* clipboard denied — the message stays on screen to copy by hand */ } }
-  post('/api/followup', {contact_id: cid, action: 'li_save', message: msg});
+  post('/api/followup', {contact_id: cid, action: 'li_save', body: msg});
   window.open(decodeURIComponent(encUrl), '_blank', 'noopener');
   btn.textContent = 'Copied ✓ — paste in the chat, then "I sent it"';
   setTimeout(() => { btn.textContent = 'Copy + open LinkedIn'; }, 4000);
@@ -847,7 +847,8 @@ async function fuAct(cid, action, btn) {
     body.subject = card.querySelector('.fu-subj').value;
     body.body = card.querySelector('.fu-body').value;
   }
-  if (action === 'li_save') body.message = card.querySelector('.li-body').value;
+  // ARCH-3: one wire shape for every channel. LinkedIn has no subject; it sends body only.
+  if (action === 'li_save') body.body = card.querySelector('.li-body').value;
   if (action === 'send') {
     // Send what's on screen, so an un-saved edit is never silently dropped.
     await post('/api/followup', { contact_id: cid, action: 'save',

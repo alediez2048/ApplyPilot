@@ -761,5 +761,65 @@ def doctor() -> None:
     console.print()
 
 
+@app.command("migrate-touches")
+def migrate_touches(
+    dry_run: bool = typer.Option(False, "--dry-run", help="Print the plan; write nothing."),
+    verify_only: bool = typer.Option(False, "--verify", help="Check the new tables against the old columns."),
+    drop: bool = typer.Option(False, "--drop-legacy", help="Drop the ten migrated columns (after --verify is clean)."),
+) -> None:
+    """ARCH-3: move follow-up state from ten `contacts` columns into `touches`.
+
+    Order matters and is enforced: --dry-run to see it, plain to write it (a backup is
+    taken first), --verify to prove it round-trips, and only then --drop-legacy.
+    """
+    from applypilot.database import get_connection, init_db
+    from applypilot.networking import backfill_touches as B
+    from applypilot.networking import store, touches
+
+    init_db()
+    conn = get_connection()
+    store.init_contacts(conn)
+    touches.init_touches(conn)
+
+    if verify_only:
+        problems = B.verify(conn)
+        if problems:
+            console.print(f"[red]✗ {len(problems)} mismatch(es)[/red]")
+            for p in problems[:40]:
+                console.print(f"  {p}")
+            raise typer.Exit(1)
+        console.print("[green]✓ new tables round-trip to the old columns exactly[/green]")
+        return
+
+    if drop:
+        if B.verify(conn):
+            console.print("[red]✗ refusing to drop: --verify is not clean[/red]")
+            raise typer.Exit(1)
+        dropped = B.drop_legacy_columns(conn)
+        console.print(f"[green]✓ dropped {len(dropped)} legacy column(s)[/green]: {', '.join(dropped) or '(none)'}")
+        return
+
+    items = B.plan(conn)
+    console.print(f"[bold]{len(items)} contact/channel ladder(s) to migrate[/bold]")
+    console.print(B.describe(items))
+    if dry_run:
+        console.print("\n[dim]--dry-run: nothing written.[/dim]")
+        return
+
+    backup = B.backup_db()
+    console.print(f"\n[dim]backup: {backup}[/dim]")
+    result = B.apply(conn, items)
+    console.print(f"[green]✓ wrote {result['touches']} touch(es), "
+                  f"{result['sequences']} sequence row(s)[/green]")
+    problems = B.verify(conn)
+    if problems:
+        console.print(f"[red]✗ verify found {len(problems)} mismatch(es) — legacy columns kept[/red]")
+        for p in problems[:40]:
+            console.print(f"  {p}")
+        raise typer.Exit(1)
+    console.print("[green]✓ verified: round-trips to the old columns exactly[/green]")
+    console.print("[dim]next: applypilot migrate-touches --drop-legacy[/dim]")
+
+
 if __name__ == "__main__":
     app()

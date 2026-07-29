@@ -985,10 +985,35 @@ def _job_checklist(job_status: str, applied_at: str, contacts: list[dict]) -> di
     return job_checklist(job_status, applied_at, contacts)
 
 
-def _followup_panel(contacts: list[dict]) -> dict:
-    """Thin delegate — the rule lives in applypilot.domain.followup."""
+def _followup_panel(contacts: list[dict], ladders: dict | None = None) -> dict:
+    """Thin delegate — the rule lives in applypilot.domain.followup.
+
+    Ladder state comes from `touches` (ARCH-3), loaded in ONE bulk query rather than per
+    contact per channel: this runs on every 2.5s dashboard refresh.
+    """
     from applypilot.domain import followup_panel
-    return followup_panel(contacts)
+    if ladders is None:
+        ladders = _ladder_states([c.get("id") for c in contacts if c.get("id")])
+    return followup_panel(contacts, ladders=ladders)
+
+
+def _ladder_states(contact_ids: list[str]) -> dict:
+    """Bulk-load follow-up ladders. Degrades to empty rather than 500-ing the dashboard.
+
+    Deliberately NOT gated on `_networking_available()` — that means "Apollo key present",
+    and follow-up history for contacts you already have must not disappear because a
+    provider key went missing.
+    """
+    if not contact_ids:
+        return {}
+    try:
+        from applypilot.networking import touches
+        conn = get_connection()
+        touches.init_touches(conn)
+        return touches.ladder_states(contact_ids, conn)
+    except Exception as exc:  # noqa: BLE001
+        console.log(f"[dim]ladder load failed: {exc}[/dim]")
+        return {}
 
 
 def _apollo_search_url(full_name: str | None, company: str | None) -> str:
@@ -1001,9 +1026,31 @@ def _apollo_search_url(full_name: str | None, company: str | None) -> str:
     return f"https://app.apollo.io/#/people?qKeywords={quote(q)}" if q.strip() else ""
 
 
-def _contact_payload(c: dict, company: str | None = None) -> dict:
+def _legacy_followup_status(ladder: dict) -> str:
+    """Flatten the two ARCH-3 lifecycles back into the single field the payload exposes.
+
+    Precedence is the old column's: a halted sequence wins, then an in-flight/staged touch,
+    then 'sent' once at least one touch has gone out. Without the last clause a fully-sent
+    ladder reports '' where it used to report 'sent' — caught by diffing /api/status against
+    the pre-migration payload, not by any unit test.
+    """
+    if ladder["sequence_status"]:
+        return ladder["sequence_status"]
+    if ladder["touch_status"]:
+        return ladder["touch_status"]
+    return "sent" if ladder["count"] else ""
+
+
+def _contact_payload(c: dict, company: str | None = None, ladders: dict | None = None) -> dict:
+    from applypilot.domain.followup import EMPTY_LADDER
     from applypilot.networking import connections
     conn_rec = connections.match(c.get("full_name"), company)
+    ladders = ladders or {}
+    cid = c.get("id") or ""
+    # ARCH-3: ladder state is per (contact, channel) in `touches`, not ten columns here.
+    # The payload keys stay as they were so the frontend is untouched by the storage move.
+    email_l = ladders.get((cid, "email")) or EMPTY_LADDER
+    li_l = ladders.get((cid, "linkedin")) or EMPTY_LADDER
     return {
         "id": c.get("id") or "",
         "full_name": c.get("full_name") or "",
@@ -1028,17 +1075,17 @@ def _contact_payload(c: dict, company: str | None = None) -> dict:
                    or c.get("outreach_status") == "submitted",
         # Checklist + follow-up inputs.
         "submitted_at": c.get("submitted_at") or "",
-        "followed_up_at": c.get("followed_up_at") or "",
-        "followup_count": c.get("followup_count") or 0,
-        "followup_status": c.get("followup_status") or "",
-        "followup_subject": c.get("followup_subject") or "",
-        "followup_message": c.get("followup_message") or "",
-        "followup_error": c.get("followup_error") or "",
+        "followed_up_at": email_l["last_sent_at"],
+        "followup_count": email_l["count"],
+        "followup_status": _legacy_followup_status(email_l),
+        "followup_subject": email_l["draft_subject"],
+        "followup_message": email_l["draft_body"],
+        "followup_error": email_l["error"],
         "threaded": bool((c.get("thread_id") or "").strip()
                          or (c.get("rfc_message_id") or "").strip()),
-        "li_followup_count": c.get("li_followup_count") or 0,
-        "li_followup_status": c.get("li_followup_status") or "",
-        "li_followup_message": c.get("li_followup_message") or "",
+        "li_followup_count": li_l["count"],
+        "li_followup_status": _legacy_followup_status(li_l),
+        "li_followup_message": li_l["draft_body"],
         "dm_sent_at": c.get("dm_sent_at") or "",
         # LinkedIn DM channel state + per-contact readiness (has note + profile, not sent).
         "dm_status": c.get("dm_status") or "none",
@@ -1153,8 +1200,11 @@ def _status_payload() -> dict:
         ]
         job_row = dict(zip(row.keys(), row))
         contact_company = _derive.derive_company(job_row) or row["site"] or ""
-        contacts = [_contact_payload(c, contact_company)
-                    for c in get_contacts_for_job(row["url"], conn)]
+        raw_contacts = get_contacts_for_job(row["url"], conn)
+        # One bulk ladder load per job, shared by the payloads and the follow-up panel —
+        # not one query per contact per channel on a 2.5s refresh.
+        job_ladders = _ladder_states([c.get("id") for c in raw_contacts if c.get("id")])
+        contacts = [_contact_payload(c, contact_company, job_ladders) for c in raw_contacts]
         from applypilot.networking import connections as _conns
         net_task = _net_tasks.get(row["url"], {})
         jobs.append({
@@ -1178,7 +1228,7 @@ def _status_payload() -> dict:
             "materials": materials,
             "contacts": contacts,
             "checklist": _job_checklist(status, row["applied_at"] or "", contacts),
-            "followups": _followup_panel(contacts),
+            "followups": _followup_panel(contacts, job_ladders),
             "activity": _job_activity(row["url"], conn),
             "network_running": bool(net_task.get("running")),
             "network_note": net_task.get("note") or "",
@@ -1407,34 +1457,73 @@ def _save_contact_details(data: dict) -> dict:
     return {"ok": True, "message": "saved"}
 
 
+_SEQUENCE_VERBS = {"stop": "stopped", "replied": "replied", "reopen": ""}
+
+
+def _split_followup_action(action: str):
+    """`li_draft` -> (LINKEDIN, 'draft'); `draft` -> (EMAIL, 'draft').
+
+    Channel lives in the action name, so the handler below never learns which channel it
+    is serving. Email's prefix is '' and must therefore be the fallback, not a match.
+    """
+    from applypilot.domain.followup import CHANNELS, EMAIL
+    for ch in CHANNELS:
+        if ch.prefix and action.startswith(ch.prefix):
+            return ch, action[len(ch.prefix):]
+    return EMAIL, action
+
+
 def _followup_action(data: dict) -> dict:
-    """draft | save | send | stop | reopen for one contact's follow-up."""
+    """draft | save | send | sent | stop | replied | reopen — for ANY channel.
+
+    Before ARCH-3 this was two mirrored blocks: stop/li_stop, save/li_save, draft/li_draft,
+    each with its own store function. One code path now serves both, which is the property
+    the ticket is actually buying — deleting the LinkedIn half is no longer possible,
+    because there is no LinkedIn half.
+    """
     init_db()
     conn = get_connection()
-    from applypilot.networking import store
+    from applypilot.networking import store, touches
     store.init_contacts(conn)
+    touches.init_touches(conn)
 
     cid = (data.get("contact_id") or "").strip()
-    action = (data.get("action") or "").strip()
+    raw_action = (data.get("action") or "").strip()
     contact = store.get_contact(cid) if cid else None
     if not contact:
         return {"ok": False, "message": "contact not found"}
 
-    if action == "stop":
-        store.set_sequence_status(cid, "stopped")
-        return {"ok": True, "message": "sequence stopped"}
-    if action == "replied":
-        store.set_sequence_status(cid, "replied")
-        return {"ok": True, "message": "marked replied — sequence stopped"}
-    if action == "reopen":
-        store.set_sequence_status(cid, "")
-        return {"ok": True, "message": "sequence reopened"}
+    channel, verb = _split_followup_action(raw_action)
+    name = "LinkedIn " if channel.name == "linkedin" else ""
 
-    if action == "save":
-        store.set_followup_draft(cid, data.get("subject", ""), data.get("body", ""))
+    if verb in _SEQUENCE_VERBS:
+        status = _SEQUENCE_VERBS[verb]
+        touches.set_sequence_status(cid, channel.name, status)
+        store.log_contact_event(
+            cid, "info",
+            f"{contact.get('full_name') or 'contact'}: {name}sequence "
+            + ("reopened" if verb == "reopen" else
+               "stopped" if verb == "stop" else "replied — sequence stopped") + ".", conn)
+        return {"ok": True, "message": f"{name}sequence "
+                + ("reopened" if verb == "reopen" else "stopped")}
+
+    # Recording the invite is not a ladder action — it sets the anchor the clock runs from.
+    if verb == "connected":
+        store.mark_connected_now(cid)
+        return {"ok": True, "message": "recorded — follow-up clock started"}
+
+    if verb == "save":
+        touches.set_draft(cid, channel.name, data.get("subject", ""), data.get("body", ""))
         return {"ok": True, "message": "saved"}
 
-    if action == "draft":
+    if verb == "sent":
+        # YOU sent it (LinkedIn is copy-paste only — CLAUDE.md §Lessons 3).
+        n = touches.record_sent(cid, channel.name, conn=conn)
+        store.log_contact_event(cid, "ok", f"{name}follow-up #{n} sent to "
+                                f"{contact.get('full_name') or 'contact'}.", conn)
+        return {"ok": True, "touch": n, "message": f"{name}follow-up #{n} recorded"}
+
+    if verb == "draft":
         row = conn.execute("SELECT * FROM jobs WHERE url = ?", (contact["job_url"],)).fetchone()
         job = dict(zip(row.keys(), row)) if row else {"url": contact["job_url"]}
         from applypilot.config import load_profile
@@ -1443,56 +1532,26 @@ def _followup_action(data: dict) -> dict:
             profile = load_profile()
         except Exception:  # noqa: BLE001
             profile = {}
-        touch = (contact.get("followup_count") or 0) + 1
+        state = touches.ladder_state(cid, channel.name, conn)
+        touch = (state["count"] or 0) + 1
         try:
-            d = outreach.draft_followup(profile, job, contact, touch=touch,
-                                        style=(data.get("style") or "").strip())
+            d = outreach.draft_for_channel(channel.name, profile, job, contact,
+                                           touch=touch, style=(data.get("style") or "").strip())
         except Exception as e:  # noqa: BLE001
             return {"ok": False, "message": f"draft failed: {e}"}
-        store.set_followup_draft(cid, d["subject"], d["body"])
+        touches.set_draft(cid, channel.name, d["subject"], d["body"])
         return {"ok": True, "subject": d["subject"], "body": d["body"], "touch": touch}
 
-    if action == "send":
+    if verb == "send":
+        if not channel.can_autosend:
+            # Structural, not a policy string: driving LinkedIn from outside the browser
+            # was abandoned twice (CLAUDE.md §Lessons 3).
+            return {"ok": False, "message": f"{channel.name} cannot be auto-sent — "
+                                            "copy it and send it yourself"}
         from applypilot.networking.gmail_send import send_followup
         return send_followup(cid)
 
-    # ── LinkedIn: draft / save / mark-sent / stop. We NEVER send these ourselves —
-    # driving LinkedIn from outside the browser was abandoned twice (CLAUDE.md §7, §8),
-    # so the flow is copy → open profile → you paste and send → you confirm.
-    if action == "li_stop":
-        store.set_li_sequence_status(cid, "stopped")
-        return {"ok": True, "message": "LinkedIn sequence stopped"}
-    if action == "li_replied":
-        store.set_li_sequence_status(cid, "replied")
-        return {"ok": True, "message": "marked replied — LinkedIn sequence stopped"}
-    if action == "li_connected":
-        store.mark_connected_now(cid)
-        return {"ok": True, "message": "recorded — follow-up clock started"}
-    if action == "li_save":
-        store.set_li_followup_draft(cid, data.get("message", ""))
-        return {"ok": True, "message": "saved"}
-    if action == "li_sent":
-        n = store.mark_li_followup_sent(cid)
-        return {"ok": True, "touch": n, "message": f"LinkedIn follow-up #{n} recorded"}
-    if action == "li_draft":
-        row = conn.execute("SELECT * FROM jobs WHERE url = ?", (contact["job_url"],)).fetchone()
-        job = dict(zip(row.keys(), row)) if row else {"url": contact["job_url"]}
-        from applypilot.config import load_profile
-        from applypilot.networking import outreach
-        try:
-            profile = load_profile()
-        except Exception:  # noqa: BLE001
-            profile = {}
-        touch = (contact.get("li_followup_count") or 0) + 1
-        try:
-            d = outreach.draft_linkedin_followup(profile, job, contact, touch=touch,
-                                                 style=(data.get("style") or "").strip())
-        except Exception as e:  # noqa: BLE001
-            return {"ok": False, "message": f"draft failed: {e}"}
-        store.set_li_followup_draft(cid, d["message"])
-        return {"ok": True, "message_text": d["message"], "touch": touch}
-
-    return {"ok": False, "message": f"unknown action: {action!r}"}
+    return {"ok": False, "message": f"unknown action: {raw_action!r}"}
 
 
 def _delete_job(url: str) -> dict:

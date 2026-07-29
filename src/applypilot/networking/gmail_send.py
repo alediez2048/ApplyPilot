@@ -323,13 +323,19 @@ def send_followup(contact_id: str, dry_run: bool = False) -> dict:
         return {"ok": False, "message": "contact not found"}
     if not (contact.get("sent_message_id") or "").strip():
         return {"ok": False, "message": "no first email was sent — nothing to follow up on"}
-    if (contact.get("followup_status") or "") == "sending":
+    # ARCH-3: ladder state comes from `touches`, and the two lifecycles it used to conflate
+    # are now separate — an in-flight touch is `touch_status`, a halted ladder is
+    # `sequence_status`. The old single column made these one condition by accident.
+    from applypilot.networking import touches as _touches
+    _touches.init_touches()
+    ladder = _touches.ladder_state(contact_id, "email")
+    if ladder["touch_status"] == "sending":
         return {"ok": False, "message": "a follow-up is already sending"}
-    if (contact.get("followup_status") or "") in ("stopped", "replied"):
-        return {"ok": False, "message": f"sequence {contact['followup_status']} — not sending"}
+    if ladder["sequence_status"] in ("stopped", "replied"):
+        return {"ok": False, "message": f"sequence {ladder['sequence_status']} — not sending"}
 
-    subject = (contact.get("followup_subject") or "").strip()
-    body = (contact.get("followup_message") or "").strip()
+    subject = (ladder["draft_subject"] or "").strip()
+    body = (ladder["draft_body"] or "").strip()
     if not body:
         return {"ok": False, "message": "no follow-up draft — generate one first"}
     to_addr = (contact.get("email") or "").strip()

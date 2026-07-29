@@ -209,11 +209,20 @@ def test_send_outreach_smtp_failure_marks_failed(tmp_path, monkeypatch):
 def _emailed_contact(**kw):
     c = _contact()
     c.update(outreach_status="submitted", sent_message_id="gid-1", thread_id="thr-1",
-             rfc_message_id="<orig@x.com>", outreach_subject="Question about the role",
-             followup_subject="Re: Question about the role",
-             followup_message="Floating this back up — no worries if the timing's off.")
+             rfc_message_id="<orig@x.com>", outreach_subject="Question about the role")
     c.update(kw)
     return c
+
+
+def _with_draft(contact: dict, subject="Re: Question about the role",
+                body="Floating this back up — no worries if the timing's off.") -> str:
+    """ARCH-3: the follow-up draft lives in `touches`, not in columns on the contact."""
+    from applypilot.networking import touches
+    cid = store.upsert_contact(contact)
+    touches.init_touches()
+    if body:
+        touches.set_draft(cid, "email", subject, body)
+    return cid
 
 
 def test_followup_threads_into_the_original_conversation(tmp_path, monkeypatch):
@@ -229,16 +238,16 @@ def test_followup_threads_into_the_original_conversation(tmp_path, monkeypatch):
         return {"id": "gid-2", "thread_id": thread_id or "", "rfc_message_id": "<fu@x.com>"}
     monkeypatch.setattr(gmail_oauth, "send", fake_send)
 
-    cid = store.upsert_contact(_emailed_contact())
+    cid = _with_draft(_emailed_contact())
     res = gmail_send.send_followup(cid)
     assert res["ok"] is True and res["touch"] == 1
     # the whole point: it lands inside the existing thread, not as a new cold email
     assert seen["thread_id"] == "thr-1" and seen["in_reply_to"] == "<orig@x.com>"
     assert not seen["attachments"]          # resume/cover went with email #1
-    got = store.get_contact(cid)
-    assert got["followup_count"] == 1 and got["followup_status"] == "sent"
-    assert got["followed_up_at"]
-    assert not got["followup_message"]      # draft consumed, so it can't be re-sent verbatim
+    from applypilot.networking import touches
+    st = touches.ladder_state(cid, "email")
+    assert st["count"] == 1 and st["last_sent_at"]
+    assert not st["draft_body"]             # draft consumed, so it can't be re-sent verbatim
 
 
 def test_followup_requires_a_first_email_and_a_draft(tmp_path, monkeypatch):
@@ -246,19 +255,20 @@ def test_followup_requires_a_first_email_and_a_draft(tmp_path, monkeypatch):
     never_emailed = store.upsert_contact(_contact())
     assert gmail_send.send_followup(never_emailed)["ok"] is False
 
-    no_draft = store.upsert_contact(_emailed_contact(
-        linkedin_url="https://l/in/other", full_name="Other Person",
-        followup_subject="", followup_message=""))
+    no_draft = _with_draft(_emailed_contact(
+        linkedin_url="https://l/in/other", full_name="Other Person"), body="")
     r = gmail_send.send_followup(no_draft)
     assert r["ok"] is False and "draft" in r["message"]
 
 
 def test_followup_blocked_once_stopped_or_replied(tmp_path, monkeypatch):
     _fresh_db(tmp_path, monkeypatch)
+    from applypilot.networking import touches
     for status in ("stopped", "replied"):
-        cid = store.upsert_contact(_emailed_contact(
-            full_name=f"P {status}", linkedin_url=f"https://l/in/{status}",
-            followup_status=status))
+        cid = _with_draft(_emailed_contact(
+            full_name=f"P {status}", linkedin_url=f"https://l/in/{status}"))
+        # terminal state is on the SEQUENCE, a separate table from the touch itself
+        touches.set_sequence_status(cid, "email", status)
         r = gmail_send.send_followup(cid)
         assert r["ok"] is False and status in r["message"]
 
@@ -266,7 +276,7 @@ def test_followup_blocked_once_stopped_or_replied(tmp_path, monkeypatch):
 def test_followup_claim_is_atomic(tmp_path, monkeypatch):
     """Two clicks must not produce two follow-ups."""
     _fresh_db(tmp_path, monkeypatch)
-    cid = store.upsert_contact(_emailed_contact())
+    cid = _with_draft(_emailed_contact())
     assert store.claim_followup_send(cid) is True
     assert store.claim_followup_send(cid) is False
 
@@ -279,7 +289,7 @@ def test_followup_warns_when_the_original_cannot_be_threaded(tmp_path, monkeypat
     monkeypatch.setattr(gmail_oauth, "connected_email", lambda: "me@x.com")
     monkeypatch.setattr(gmail_oauth, "send",
                         lambda *a, **k: {"id": "gid-3", "thread_id": "", "rfc_message_id": "<n@x>"})
-    cid = store.upsert_contact(_emailed_contact(thread_id="", rfc_message_id=""))
+    cid = _with_draft(_emailed_contact(thread_id="", rfc_message_id=""))
     res = gmail_send.send_followup(cid)
     assert res["ok"] is True and "new email" in res["message"]
 

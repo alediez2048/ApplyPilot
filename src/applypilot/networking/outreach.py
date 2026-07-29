@@ -287,6 +287,21 @@ _LI_TOUCH_INTENT = {
 }
 
 
+def draft_for_channel(channel: str, profile: dict, job: dict, contact: dict,
+                      touch: int = 1, style: str = "") -> dict:
+    """One entry point per channel, returning ONE shape: {"subject", "body"}.
+
+    The two drafters below return different keys for historical reasons (email has a
+    subject line, a LinkedIn DM does not). Normalising here is what lets the dashboard's
+    follow-up handler stop branching on channel — adding SMS means adding a row to this
+    map, not another `if` in the request handler.
+    """
+    if channel == "linkedin":
+        return {"subject": "", "body": draft_linkedin_followup(
+            profile, job, contact, touch=touch, style=style)["message"]}
+    return draft_followup(profile, job, contact, touch=touch, style=style)
+
+
 def draft_linkedin_followup(profile: dict, job: dict, contact: dict, touch: int = 1,
                             style: str = "") -> dict:
     """Draft LinkedIn follow-up #`touch` for a contact who connected but went quiet.

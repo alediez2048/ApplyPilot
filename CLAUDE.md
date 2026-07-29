@@ -12,7 +12,7 @@ campaign happens to be a job search** — see `docs/crm-prd.md` for where that g
 - **Packaging:** Hatchling, `src/` layout, single package `applypilot`
 - **Entry point:** `applypilot = "applypilot.cli:app"` (Typer CLI)
 - **License:** AGPL-3.0-only · **Version:** 0.4.0 (`pyproject.toml`)
-- **Tests:** 255 passing (`tests/`, 21 files) · ruff clean (line-length 120, py311) · ESLint clean
+- **Tests:** 276 passing (`tests/`, 22 files) · ruff clean (line-length 120, py311) · ESLint clean
 
 ## Quick orientation
 
@@ -74,14 +74,16 @@ harness no longer has to import a web server to test scheduling.
 
 | File | Role |
 |------|------|
-| `followup.py` | **ONE ladder engine.** `Channel` dataclass + `touch_state()`. Email and LinkedIn differ only in data (anchor field, schedule, state fields, `can_autosend`) — there is no per-channel branch, and a test enforces that. |
+| `followup.py` | **ONE ladder engine.** `Channel` dataclass + `touch_state()`. Since ARCH-3 it names no ladder column at all — state arrives as a `ladder` dict from `touches`, identical in shape for every channel. |
 | `checklist.py` | `job_checklist()` — completion state; zero-denominator steps are `na` and excluded from the percentage. |
 | `verification.py` | `verify_contact()` — moved from `networking/` (it never was a networking concern). `networking/verify.py` is a re-export shim. |
 | `company.py` | `companies_match()` — shared by connections, Apollo org resolution, and verification, which must all agree. |
 | `timeutil.py` | `parse_ts()` — one implementation of the naive/aware guard. |
 
-**Adding a channel (e.g. SMS) should be one `Channel` entry plus one prompt.** If it ever
-needs a new `if`, `followup.py` has regressed.
+**Adding a channel (e.g. SMS) is one `Channel` entry plus one prompt** — executed, not
+claimed: `test_adding_a_channel_needs_no_schema_change` defines an SMS channel that exists
+nowhere in the codebase and drives it end to end. Readiness is data too (`ready=(("phone",
+None),)`), which is what removed the last `if channel is EMAIL` from `_is_ready`.
 
 ### `networking/` — contacts, outreach, follow-up
 | File | Role |
@@ -110,7 +112,9 @@ incapable of touching a LinkedIn page. See §Lessons.
 | Table | Owner | Purpose |
 |-------|-------|---------|
 | `jobs` (32 cols) | `database.py` | The 6-stage state machine. `_ALL_COLUMNS` is its source of truth. |
-| `contacts` (42 cols) | `networking/store.py` | People per job + outreach + both follow-up ladders + verification. |
+| `contacts` (32 cols) | `networking/store.py` | People per job + outreach + verification. |
+| `touches` | `networking/touches.py` | One follow-up touch per row, ANY channel. `seq` is per (contact, channel). |
+| `sequences` | `networking/touches.py` | Terminal state per (contact, channel): `stopped` / `replied`. |
 | `connections` | `networking/connections.py` | Imported LinkedIn CSV. |
 | `job_events` | `database.py` | Per-job activity log. Append is best-effort, never raises. |
 
@@ -122,9 +126,9 @@ tailor(`tailored_resume_path`) → cover(`cover_letter_path`) → apply(`applied
 apply_error,agent_id,verification_confidence`), plus `rejected_at`.
 
 **`contacts` groups:** identity · outreach(`outreach_subject/message/status,sent_message_id`) ·
-threading(`thread_id,rfc_message_id`) · email follow-up(`followup_count,followed_up_at,
-followup_message,followup_status`) · LinkedIn(`dm_status,dm_sent_at`, `li_followup_*`) ·
+threading(`thread_id,rfc_message_id`) · LinkedIn invite(`dm_status,dm_sent_at`) ·
 operator(`phone,notes`) · verification(`confidence,verify_note`).
+**Follow-up state is NOT here** — it is `touches` / `sequences`, keyed by channel (ARCH-3).
 
 ---
 
@@ -153,7 +157,7 @@ Two independent ladders, both human-in-the-loop. Nothing auto-sends.
 
 | | Email | LinkedIn |
 |---|---|---|
-| Anchor | `submitted_at` → `followed_up_at` | `dm_sent_at` → `li_followed_up_at` |
+| Anchor | `submitted_at` → last `touches.sent_at` | `dm_sent_at` → last `touches.sent_at` |
 | Default | `FOLLOWUP_SCHEDULE=48,96,168` (2d/4d/7d) | `LINKEDIN_FOLLOWUP_SCHEDULE=120,288` (5d/12d) |
 | Send | `gmail_send.send_followup()`, threaded | copy → open profile → you paste → `✓ I sent it` |
 | Stop | reply / stop / sequence complete | same |
@@ -226,7 +230,7 @@ company `"Jobs"` — the same substring bug class, inside the function written t
 `docs/tickets/ARCH-README.md` — the ordered ticket list. Read that before starting anything.
 
 **Chosen order (Jorge, 2026-07-28): finish the ARCH set first**, then the product tickets —
-`ARCH-1` ✅ → `ARCH-2` ✅ → `ARCH-3` → `ARCH-4` → `ARCH-5` → `ARCH-6`, then `CRM-1` → `DISC-1`
+`ARCH-1` ✅ → `ARCH-2` ✅ → `ARCH-3` ✅ → `ARCH-4` → `ARCH-5` → `ARCH-6`, then `CRM-1` → `DISC-1`
 → `CRM-2` → `CRM-3`.
 
 The analysis recommended the reverse, and the reason is measured, not aesthetic: all 7 jobs
@@ -235,8 +239,8 @@ manually), and nothing is aggregated. **The ARCH set delivers no user-visible ch
 funnel stays at 7 hand-pasted jobs and the system stays blind to replies until `CRM-1` lands.
 The tradeoff was raised and accepted; do not re-litigate it, but do not forget it either.
 
-**Next up: `ARCH-3`** (the `touches` table) — collapse `followup_*` / `li_followup_*` into
-one sequence table so a third channel costs a row, not a column set.
+**Next up: `ARCH-4`** (repository boundary) — 17 of ~30 modules still touch the DB directly.
+~430 lines of pipeline orchestration also still sit in `web_dashboard.py`.
 
 `docs/crm-prd.md` — the multi-campaign "Spaces" direction. **After** the above.
 
@@ -246,9 +250,11 @@ Ordered by leverage. Nothing here is blocking; all of it compounds.
 
 1. ~~**Extract `domain/`**~~ — **done (ARCH-1, 2026-07-28).** Three duplicate "is it due"
    implementations collapsed to one; `/api/status` verified byte-identical.
-2. **`contacts` has two of everything** — `followup_*` / `li_followup_*` is one concept
-   (a touch sequence) copy-pasted per channel. A `touches(contact_id, channel, seq, …)` table
-   collapses it and makes SMS free. Defensible at 28 contacts; the cost is duplicated *code*.
+2. ~~**`contacts` has two of everything**~~ — **done (ARCH-3, 2026-07-29).** 42 columns → 32.
+   The copy was already *incomplete*: email had `followup_subject`/`followup_error`, LinkedIn
+   silently had neither. Root cause was `followup_status` doing two jobs — one touch's
+   delivery lifecycle AND the sequence's terminal state — so `touches` + `sequences` are two
+   tables, not the one the ticket sketched.
 3. ~~**996 lines of JS in a Python string**~~ — **done (ARCH-2, 2026-07-28).** The cut was
    verified by reassembling the three files back into the old string **byte for byte**.
    ESLint now runs (`npm run lint`, dev-only). It cannot see functions called from `onclick=`

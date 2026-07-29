@@ -37,8 +37,14 @@ def _bootstrap() -> None:
     """Common setup: load env, create dirs, init DB."""
     from applypilot.config import load_env, ensure_dirs
     from applypilot.database import init_db
+    from applypilot.settings import ConfigError
 
-    load_env()
+    try:
+        load_env()
+    except ConfigError as exc:
+        # A stack trace for a typo in a config file is noise. Say what is wrong and stop.
+        console.print(f"[red]Configuration error[/red]\n\n{exc}")
+        raise typer.Exit(code=2) from None
     ensure_dirs()
     init_db()
 
@@ -544,8 +550,53 @@ def dashboard(
 
 
 @app.command()
-def doctor() -> None:
+def doctor(
+    config: bool = typer.Option(False, "--config", help="Show every setting, its value, and its source."),
+    write_env_example: bool = typer.Option(False, "--write-env-example", help="Regenerate .env.example from the schema."),
+) -> None:
     """Check your setup and diagnose missing requirements."""
+    import pathlib
+
+    from applypilot import settings as _settings
+
+    if write_env_example:
+        target = pathlib.Path(".env.example")
+        target.write_text(_settings.render_env_example(), encoding="utf-8")
+        console.print(f"[green]Wrote {target}[/green] from src/applypilot/settings.py")
+        return
+
+    if config:
+        # strict=False on purpose: diagnosing a broken config is exactly when this has to run.
+        from applypilot.config import load_env as _load
+        problems = _load(strict=False)
+        rows = _settings.describe()
+        group = None
+        for r in rows:
+            if r["group"] != group:
+                group = r["group"]
+                console.print(f"\n[bold]{group}[/bold]")
+            # Pad the PLAIN text, then wrap in markup — rich tags count toward f-string
+            # width and silently break the columns otherwise.
+            mark = {"env": "[cyan]env[/cyan]", ".env": "[blue].env[/blue]",
+                    "default": "[dim]default[/dim]"}[r["source"]]
+            name = f"{r['name']:<34}"
+            if r["deprecated"]:
+                name = f"[yellow]{name}[/yellow]"
+            val = f"{r['value']:<30}"
+            if r["secret"]:
+                val = f"[dim]{val}[/dim]"
+            console.print(f"  {name}{val}{mark}")
+        console.print()
+        if problems:
+            console.print(f"[red]{len(problems)} invalid value(s):[/red]")
+            for prob in problems:
+                console.print(f"  [red]✗[/red] {prob}")
+        else:
+            console.print("[green]All settings parse cleanly.[/green]")
+        for warning in _settings.deprecations():
+            console.print(f"[yellow]![/yellow] {warning}")
+        return
+
     import shutil
     from applypilot.config import (
         load_env, PROFILE_PATH, RESUME_PATH, RESUME_PDF_PATH,

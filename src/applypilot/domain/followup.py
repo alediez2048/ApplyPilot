@@ -18,7 +18,6 @@ Adding SMS is one entry here plus one prompt. If it ever needs a new `if`, this 
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -84,17 +83,18 @@ def channel_by_name(name: str) -> Channel | None:
 
 
 def channel_schedule(channel: Channel) -> list[int]:
-    """Hours after the previous message that each touch comes due."""
-    raw = os.environ.get(channel.env_var, ",".join(str(h) for h in channel.default_schedule))
-    out = []
-    for part in raw.split(","):
-        try:
-            h = int(part.strip())
-        except ValueError:
-            continue
-        if h > 0:
-            out.append(h)
-    return out or list(channel.default_schedule)
+    """Hours after the previous message that each touch comes due.
+
+    Parsing and validation live in `settings.py` (ARCH-6). This still falls back to the
+    channel default on a bad value, because by the time the ladder is being computed the
+    startup check has already refused to run with one — reaching the fallback here means
+    something set the variable after startup, and dropping follow-ups is worse than using
+    the documented default.
+    """
+    from applypilot import settings
+    values, _ = settings.resolve()
+    got = values.get(channel.env_var)
+    return list(got) if got else list(channel.default_schedule)
 
 
 def _is_ready(contact: dict, channel: Channel) -> bool:

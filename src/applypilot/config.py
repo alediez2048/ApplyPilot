@@ -194,13 +194,30 @@ DEFAULTS = {
 }
 
 
-def load_env():
-    """Load environment variables from ~/.applypilot/.env if it exists."""
+def load_env(strict: bool = True):
+    """Load ~/.applypilot/.env, then validate every known setting (ARCH-6).
+
+    `strict` raises on a malformed value rather than falling back silently. A typo in
+    FOLLOWUP_SCHEDULE used to mean follow-ups going out on a schedule you did not choose,
+    with nothing anywhere to say so. `doctor` passes strict=False — diagnosing a broken
+    config is exactly when you need it to still run.
+    """
     from dotenv import load_dotenv
     if ENV_PATH.exists():
         load_dotenv(ENV_PATH)
     # Also try CWD .env as fallback
     load_dotenv()
+
+    from applypilot import settings
+    for warning in settings.deprecations():
+        print(f"WARNING: {warning}", flush=True)
+    problems = settings.validate()
+    if problems and strict:
+        raise settings.ConfigError(
+            "Invalid configuration in ~/.applypilot/.env:\n  - " + "\n  - ".join(problems)
+            + "\n\nRun `applypilot doctor --config` to see every setting and its source."
+        )
+    return problems
 
 
 # ---------------------------------------------------------------------------

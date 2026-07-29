@@ -12,7 +12,7 @@ campaign happens to be a job search** — see `docs/crm-prd.md` for where that g
 - **Packaging:** Hatchling, `src/` layout, single package `applypilot`
 - **Entry point:** `applypilot = "applypilot.cli:app"` (Typer CLI)
 - **License:** AGPL-3.0-only · **Version:** 0.4.0 (`pyproject.toml`)
-- **Tests:** 338 passing (`tests/`, 28 files) · ruff clean (line-length 120, py311) · ESLint clean
+- **Tests:** 364 passing (`tests/`, 29 files) · ruff clean (line-length 120, py311) · ESLint clean
 
 ## Quick orientation
 
@@ -50,6 +50,7 @@ Surfaces:
 | `view.py` | Static HTML results export. |
 | `web_dashboard.py` | **The operator dashboard.** 1,861 lines, **zero SQL** — data access goes through `repo/` and `store.py` (ARCH-4). |
 | `repo/jobs.py` | Every `jobs` query as a named function. Owns `QUEUE_SQL` (what counts as an operator-added job). |
+| `settings.py` | **Every env var, one registry.** Types, defaults, validators, secret flags. Malformed values fail at startup naming the variable. `.env.example` is generated from it. |
 | `migrations/` | Numbered `mNNN_*.py` with `up(conn)`, run at startup after the additive column pass. **Migrations must be idempotent** — this app gets killed mid-operation. `001` = the ARCH-3 touches backfill. |
 | `static/` | `index.html` · `dashboard.css` · `dashboard.js`. Served from `/static/…?v=<version>-<mtime>`; the page itself is `no-store`. One **classic** script, not a module — ~56 inline `onclick=` attributes resolve against the global object. |
 
@@ -236,7 +237,7 @@ company `"Jobs"` — the same substring bug class, inside the function written t
 `docs/tickets/ARCH-README.md` — the ordered ticket list. Read that before starting anything.
 
 **Chosen order (Jorge, 2026-07-28): finish the ARCH set first**, then the product tickets —
-`ARCH-1` ✅ → `ARCH-2` ✅ → `ARCH-3` ✅ → `ARCH-4` ✅ → `ARCH-5` ✅ → `ARCH-6`, then `CRM-1` → `DISC-1`
+`ARCH-1` ✅ → `ARCH-2` ✅ → `ARCH-3` ✅ → `ARCH-4` ✅ → `ARCH-5` ✅ → `ARCH-6` ✅, then `CRM-1` → `DISC-1`
 → `CRM-2` → `CRM-3`.
 
 The analysis recommended the reverse, and the reason is measured, not aesthetic: all 7 jobs
@@ -245,9 +246,13 @@ manually), and nothing is aggregated. **The ARCH set delivers no user-visible ch
 funnel stays at 7 hand-pasted jobs and the system stays blind to replies until `CRM-1` lands.
 The tradeoff was raised and accepted; do not re-litigate it, but do not forget it either.
 
-**Next up: `ARCH-6`** (config schema) — 40 env vars with no validation;
-`FOLLOWUP_SCHEDULE` / `LINKEDIN_FOLLOWUP_SCHEDULE` / `FOLLOWUP_AFTER_DAYS` overlap, parse
-differently, and fail silently on a typo. Last one in the ARCH set.
+**The ARCH set is complete.** Next is the product work, in the order agreed on 2026-07-28:
+`CRM-1` (reply detection — the system is still blind to replies) → `DISC-1` (turn discovery
+on; it has produced 0 jobs) → `CRM-2` → `CRM-3`.
+
+`CRM-1` is the one that changes what the app can do: 13 emails sent, 7 follow-ups, **1 reply
+recorded — typed in by hand.** Everything it needs is already stored (`thread_id`,
+`rfc_message_id` captured at send time); the only missing piece is reading.
 
 `docs/crm-prd.md` — the multi-campaign "Spaces" direction. **After** the above.
 
@@ -276,8 +281,10 @@ Ordered by leverage. Nothing here is blocking; all of it compounds.
    `doctor` and `applypilot migrate --status`. A 300s lease on `claimed_at` is what lets a
    crashed run retry WITHOUT letting concurrent starts double-apply — the first version
    collapsed those two cases and ran a migration 6 times out of 6 concurrent starts.
-5. **40 env vars, no schema.** `FOLLOWUP_SCHEDULE` / `LINKEDIN_FOLLOWUP_SCHEDULE` /
-   `FOLLOWUP_AFTER_DAYS` overlap, parse differently, and fail silently on a typo.
+5. ~~**40 env vars, no schema.**~~ — **done (ARCH-6, 2026-07-29).** 38 declared in
+   `settings.py`; `FOLLOWUP_AFTER_DAYS` is now derived from `FOLLOWUP_SCHEDULE[0]`
+   (deprecated, still honoured, warns). `applypilot doctor --config` shows value + source;
+   a test fails if code reads a variable the registry does not declare.
 6. **14 modules still touch the DB directly** (was 21) — `enrichment/detail.py`,
    `apply/launcher.py`, `view.py`, the discovery/scoring stages. The dashboard no longer
    does (ARCH-4), and `test_sql_lives_only_in_the_data_layer` names the rest in an
@@ -316,6 +323,7 @@ APPLYPILOT_DIR=$(mktemp -d) PYTHONPATH=src .venv/bin/python -m pytest tests/ -q
 .venv/bin/python -m ruff check .
 npm install && npm run lint                            # frontend only; dev-only, never shipped
 .venv/bin/applypilot migrate --status                  # schema version + pending migrations
+.venv/bin/applypilot doctor --config                   # every setting, its value, its source
 ```
 
 The `APPLYPILOT_DIR=$(mktemp -d)` prefix is **required** — without it tests run against your
@@ -328,6 +336,10 @@ change still needs the `pip install` above — but that copy gives the file a ne
 
 - Big/risky designs get an adversarial multi-agent review first (Workflow). It has caught 13
   issues on the networking PRD, the agent-browser blocker, and 5 blockers on the extension PRD.
+- **Check for in-flight applies before restarting the dashboard.** `run_dashboard_restart`
+  runs the apply as a synchronous child, so `kill -9` on the server kills the application
+  mid-flight. Two were lost that way on 2026-07-29. `curl -s localhost:8765/api/status` and
+  look for `in_progress` first.
 - Validator **warnings are never printed** — they only land in `{prefix}_REPORT.json`.
 - Severity ladder: `preserved_companies`/`preserved_school` missing = **error** (blocks);
   `preserved_projects` missing = warning; banned words = strict-mode only.

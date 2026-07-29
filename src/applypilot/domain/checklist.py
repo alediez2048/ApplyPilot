@@ -6,18 +6,25 @@ the single Next action on each row.
 
 from __future__ import annotations
 
-import os
 from datetime import datetime, timedelta, timezone
 
 from applypilot.domain.timeutil import parse_ts
 
 
 def followup_after_days() -> int:
-    """Days after the first email before a follow-up counts as owed, for the checklist step."""
-    try:
-        return max(0, int(os.environ.get("FOLLOWUP_AFTER_DAYS", "2")))
-    except ValueError:
-        return 2
+    """Days after the FIRST email before a follow-up counts as owed, for the checklist step.
+
+    Derived from `FOLLOWUP_SCHEDULE`'s first entry (ARCH-6) — one knob per concept. The
+    legacy `FOLLOWUP_AFTER_DAYS` still overrides it, with a deprecation warning at startup.
+
+    NOTE: this is a DIFFERENT rule from the ladder's, deliberately. The checklist measures
+    from the first email and ignores ladder position; the panel measures from the most
+    recent touch. Sharing the config does not merge the rules — see followup.py's note
+    about `followup_due`, which a byte-identical /api/status check once caught.
+    """
+    from applypilot import settings
+    values, _ = settings.resolve()
+    return max(0, int(values.get("FOLLOWUP_AFTER_DAYS") or 0))
 
 
 def _step(key: str, label: str, done_n: int, total_n: int, hint: str = "") -> dict:

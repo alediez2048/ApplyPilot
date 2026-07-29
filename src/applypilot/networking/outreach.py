@@ -72,6 +72,59 @@ def _scheduling_link(profile: dict) -> str:
             or ((profile or {}).get("personal", {}).get("scheduling_link") or "").strip())
 
 
+#: The exact sentence the operator asked for, verbatim. The LLM is TOLD to include the link,
+#: but a prompt instruction is not a guarantee — so `ensure_intro_deck()` appends this line
+#: when the model leaves it out. Every outreach email carries the deck; LinkedIn notes never do.
+INTRO_DECK_SENTENCE = "Here's a good intro deck we could go over during the call: {url}"
+
+
+def _intro_deck_url(profile: dict) -> str:
+    """The intro-deck LINK offered in every outreach email.
+
+    Distinct from `INTRO_DECK_PATH`, which ATTACHES a PDF. Priority mirrors
+    `_scheduling_link`: INTRO_DECK_URL env → profile['personal']['intro_deck_url'] → ''.
+    """
+    return (os.environ.get("INTRO_DECK_URL", "").strip()
+            or ((profile or {}).get("personal", {}).get("intro_deck_url") or "").strip())
+
+
+def ensure_intro_deck(body: str, url: str) -> str:
+    """Guarantee the deck link is in `body`, appending the standard sentence if it is missing.
+
+    The prompt asks for it; this makes it true. A model that drops the link, paraphrases the
+    URL, or splits it across lines would otherwise silently ship an email without the one thing
+    the operator asked to be in every email. Idempotent: an existing link is left exactly as the
+    model wrote it, so a naturally-phrased mention is preserved rather than duplicated.
+    """
+    if not url:
+        return body
+    if url.rstrip("/") in (body or "").replace("\n", " ").rstrip("/"):
+        return body
+    sentence = INTRO_DECK_SENTENCE.format(url=url)
+    body = (body or "").rstrip()
+
+    # Sit ABOVE the sign-off — a link under "Thanks, / Alejandro" reads as a footer and gets
+    # skimmed past. The sign-off is the final paragraph, and it is a BLOCK ("Thanks," and the
+    # name are two lines of one paragraph); splitting it and inserting between the two lines is
+    # the bug this replaced.
+    paras = [p for p in body.split("\n\n")]
+    if len(paras) >= 2 and _looks_like_signoff(paras[-1]):
+        paras.insert(len(paras) - 1, sentence)
+        return "\n\n".join(p.strip("\n") for p in paras)
+    return f"{body}\n\n{sentence}"
+
+
+def _looks_like_signoff(para: str) -> bool:
+    """A closing block: at most three short lines, e.g. "Thanks,\\nAlejandro".
+
+    Length is the signal, not a keyword list — the drafts sign off as "Thanks", "Best",
+    "Cheers", or just the bare first name, and a keyword list would miss whichever one the
+    model invents next.
+    """
+    lines = [ln.strip() for ln in para.strip().split("\n") if ln.strip()]
+    return bool(lines) and len(lines) <= 3 and all(len(ln) <= 40 for ln in lines)
+
+
 def _resolve_style(profile: dict, style: str = "") -> str:
     """The custom style directive, in priority order: explicit arg → env → profile field."""
     return (
@@ -159,6 +212,14 @@ def draft_email(profile: dict, job: dict, contact: dict, style: str = "", warm: 
         if link else
         "SCHEDULING LINK: none provided — invite a quick call/chat without a link.\n\n"
     )
+    deck = _intro_deck_url(profile)
+    deck_block = (
+        f"INTRO DECK LINK (include in the EMAIL, not the LinkedIn note): {deck}\n"
+        f'Offer it as "{INTRO_DECK_SENTENCE.format(url=deck)}" — or the same idea in your own '
+        "words, as long as the full URL appears verbatim. Put it near the call CTA, before the "
+        "sign-off.\n\n"
+        if deck else ""
+    )
 
     user = (
         "SENDER:\n" + "\n".join(sender_bits) + "\n\n"
@@ -168,7 +229,7 @@ def draft_email(profile: dict, job: dict, contact: dict, style: str = "", warm: 
         f"Relationship: {relationship}\n\n"
         f"JOB APPLIED TO:\nRole: {role}\nCompany: {company}\n"
         f"Description (excerpt):\n{jd}\n\n"
-        + sched_block + warm_block + style_block +
+        + sched_block + deck_block + warm_block + style_block +
         "Write the outreach email. Return the JSON."
     )
 
@@ -185,6 +246,10 @@ def draft_email(profile: dict, job: dict, contact: dict, style: str = "", warm: 
         subject = f"Question about the {role} role"
     if not body:
         raise ValueError("empty outreach body")
+    # Not left to the prompt: the deck goes in EVERY outreach email.
+    body = ensure_intro_deck(body, deck)
+    # The note deliberately does NOT get the deck — LinkedIn strips/penalizes links in connect
+    # notes and the 300-char cap makes a URL expensive. Same reasoning as the scheduling link.
     note = _cap_linkedin(note)
     return {"subject": subject, "body": body, "linkedin_note": note}
 
@@ -229,6 +294,7 @@ def draft_followup(profile: dict, job: dict, contact: dict, touch: int = 1,
     intent = _TOUCH_INTENT.get(max(1, min(touch, 3)), _TOUCH_INTENT[3])
     directive = _resolve_style(profile, style)
     link = _scheduling_link(profile)
+    deck = _intro_deck_url(profile)
 
     sent_on = (contact.get("submitted_at") or "")[:10]
     user = (
@@ -240,6 +306,10 @@ def draft_followup(profile: dict, job: dict, contact: dict, touch: int = 1,
         f"PREVIOUS MESSAGE BODY (do NOT repeat it):\n{(contact.get('outreach_message') or '')[:700]}\n\n"
         f"THIS FOLLOW-UP: {intent}\n\n"
         + (f"SCHEDULING LINK (optional, only if it fits naturally): {link}\n\n" if link else "")
+        + (f"INTRO DECK LINK (include it): {deck}\n"
+           f'Offer it as "{INTRO_DECK_SENTENCE.format(url=deck)}", or the same idea in fewer '
+           "words — the full URL must appear verbatim. This is the concrete thing this "
+           "follow-up offers, so lead with it rather than tacking it on.\n\n" if deck else "")
         + (f"STYLE DIRECTION (follow closely):\n{directive}\n\n" if directive else "")
         + "Write the follow-up. Return the JSON."
     )
@@ -256,6 +326,7 @@ def draft_followup(profile: dict, job: dict, contact: dict, touch: int = 1,
         subject = original_subject if original_subject.lower().startswith("re:") else f"Re: {original_subject}"
     if not body:
         raise ValueError("empty follow-up body")
+    body = ensure_intro_deck(body, deck)
     return {"subject": subject, "body": body}
 
 

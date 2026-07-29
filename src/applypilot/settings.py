@@ -124,6 +124,8 @@ SETTINGS: tuple[Setting, ...] = (
     Setting("OUTREACH_ATTACH_DOCS", "outreach", "bool", True, "Attach résumé + cover letter to the first email."),
     Setting("OUTREACH_ATTACH_DECK", "outreach", "bool", False, "Also attach the intro deck."),
     Setting("INTRO_DECK_PATH", "outreach", "path", "", "Path to the intro deck PDF."),
+    Setting("INTRO_DECK_URL", "outreach", "str", "https://www.jorgealejandrodiez.com/intro/",
+            "Intro-deck link offered in every outreach email (not LinkedIn notes)."),
     Setting("SCHEDULING_LINK", "outreach", "str", "", "Calendar link for the call-to-action."),
     Setting("GMAIL_ADDRESS", "outreach", "str", "", "SMTP fallback address.", secret=False),
     Setting("GMAIL_APP_PASSWORD", "outreach", "str", "", "SMTP app password.", secret=True),

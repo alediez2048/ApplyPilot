@@ -186,8 +186,17 @@ def _company_owns_the_posting(company: str, job: dict) -> bool:
             continue
         if not host:
             continue
-        labels = [p for p in host.split(".") if p not in ("com", "io", "co", "net", "org", "ai", "app")]
-        if not any(_norm_name(lbl) == target for lbl in labels):
+        labels = [p for p in host.split(".")
+                  if p not in ("com", "io", "co", "net", "org", "ai", "app")
+                  and p not in _GENERIC_HOST_LABELS]
+        # The company must be the ONLY meaningful label. A tenant prefix in front of the board
+        # means the board is hosting for someone else, and that someone else is the employer:
+        #   google.com                          -> ['google']                        Google's own
+        #   salesforce.wd12.myworkdayjobs.com   -> ['salesforce','wd12','myworkdayjobs']
+        #                                          Workday hosting SALESFORCE
+        # Matching any label let "Myworkdayjobs" claim a Salesforce posting, which sent a
+        # Salesforce application through tailoring as though the employer were the ATS.
+        if [_norm_name(lbl) for lbl in labels] != [target]:
             continue
         segments = {s.lower() for s in (parsed.path or "").split("/") if s}
         if segments & _OWN_CAREERS_PATH:

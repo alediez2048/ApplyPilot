@@ -61,19 +61,13 @@ def _infer_company(url: str) -> str:
     """
     from applypilot.networking import derive as _derive
 
-    slug = _derive.employer_slug_from_url(url)
-    if slug:
-        return _derive.titleize_slug(slug)
-
-    parsed = urlparse(url)
-    host = parsed.netloc.lower().removeprefix("www.")
-    domain = host.split(".")
-    if len(domain) >= 2:
-        company = domain[-2]
-        if company in {"careers", "jobs"} and len(domain) >= 3:
-            company = domain[-3]
-        return _derive.titleize_slug(company)
-    return "Uploaded"
+    # Delegate wholesale. This used to re-implement the host handling as `domain[-2]` with a
+    # 'careers'/'jobs' special case, which is the REGISTRABLE label — so an ATS tenant URL like
+    # salesforce.wd12.myworkdayjobs.com imported as "Myworkdayjobs". The job was then titled,
+    # tailored and cover-lettered against the ATS instead of Salesforce. derive already walks
+    # ATS path slugs and host labels correctly; two implementations of "who is the employer"
+    # is exactly what the docstring above promises not to have.
+    return _derive.derive_company({"url": url, "application_url": url}) or "Uploaded"
 
 
 class CommandRunner:

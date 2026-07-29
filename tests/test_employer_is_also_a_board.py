@@ -96,3 +96,40 @@ def test_the_domain_of_a_board_hosted_posting_is_still_not_the_board():
     Greenhouse employees for an Affirm job."""
     url = "https://job-boards.greenhouse.io/affirm/jobs/7778204003"
     assert derive.derive_domain({"url": url, "application_url": url}) is None
+
+
+# ── the tenant-subdomain trap this fix created and then closed ───────────────────────────
+
+SF_WORKDAY = ("https://salesforce.wd12.myworkdayjobs.com/External_Career_Site/job/"
+              "California---San-Francisco/Forward-Deployed-Engineer--All-Levels-_JR349466")
+
+
+def test_a_workday_tenant_is_the_employer_not_the_ats():
+    """Caught on a live Salesforce application, and caused by the fix above.
+
+    Enrichment discovered an application_url ending in `/apply`, and 'apply' is a careers-path
+    marker, so `_company_owns_the_posting` matched the 'myworkdayjobs' label in
+    salesforce.wd12.myworkdayjobs.com and declared the ATS the owner. The job went through
+    tailoring as "Myworkdayjobs" and the cover letter never named Salesforce.
+
+    The company must be the ONLY meaningful host label; a tenant prefix in front of the board
+    means the board is hosting for that tenant.
+    """
+    job = {"url": SF_WORKDAY, "company": "Myworkdayjobs", "site": "Myworkdayjobs",
+           "application_url": SF_WORKDAY + "/apply?source=LinkedIn_Jobs"}
+    assert derive.derive_company(job) == "Salesforce"
+
+
+def test_the_ats_name_is_rejected_even_with_an_apply_path():
+    """`/apply` is a legitimate careers-path marker (employers use it), so it must not by
+    itself be enough to hand ownership to whichever board label appears in the host."""
+    job = {"url": SF_WORKDAY + "/apply", "company": "Workday", "site": "workday",
+           "application_url": SF_WORKDAY + "/apply"}
+    assert derive.derive_company(job) != "Workday"
+
+
+def test_a_generic_subdomain_does_not_break_the_own_site_case():
+    """careers.google.com is still Google's own — 'careers' is a generic label, not a tenant."""
+    url = "https://careers.google.com/jobs/results/123-engineer/apply"
+    job = {"url": url, "company": "Google", "site": "Google", "application_url": url}
+    assert derive.derive_company(job) == "Google"

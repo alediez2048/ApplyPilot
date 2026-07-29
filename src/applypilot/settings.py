@@ -144,6 +144,8 @@ SETTINGS: tuple[Setting, ...] = (
     # apply
     Setting("APPLY_STALE_MINUTES", "apply", "int", 30,
             "Release an in-progress apply lock after this long (an interrupted run)."),
+    Setting("APPLY_AGENT_TIMEOUT", "apply", "int", 900,
+            "Seconds the apply agent gets per application before it is given up on."),
     Setting("TAILOR_AGGRESSIVE", "apply", "bool", False,
             "Mirror the job description closely and skip the fabrication judge."),
     Setting("CHROME_PATH", "apply", "path", "", "Chrome binary for the apply agent."),

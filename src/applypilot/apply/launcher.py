@@ -289,6 +289,34 @@ def release_lock(url: str) -> None:
 # live lock is worse than showing a stale one for another ten minutes.
 STALE_LOCK_MINUTES = int(os.environ.get("APPLY_STALE_MINUTES", "30") or 30)
 
+# How long the agent gets before we give up on it. Was a bare `timeout=300` — but a real
+# Deloitte fill already took 208s, so a long application (Google's form is many screens) blew
+# past five minutes and the TimeoutExpired path killed Chrome with the form fully filled. The
+# cost of waiting is a slow run; the cost of cutting it short is destroying finished work.
+AGENT_TIMEOUT_SECONDS = int(os.environ.get("APPLY_AGENT_TIMEOUT", "900") or 900)
+
+#: Co-pilot outcomes where the browser may still hold a COMPLETE, filled application.
+#:
+#: The result is classified by regex over the agent's final text. "No RESULT line" means the
+#: agent stopped without announcing an outcome (turn limit, crash, or just different wording)
+#: and "timeout" means we stopped waiting — in BOTH cases the form on screen may be finished.
+#: Killing the browser there is what "it fills everything, then closes Chrome" actually was.
+#: Co-pilot's whole contract is that a human finishes the job, so an unknown outcome hands over
+#: rather than throwing the work away.
+_COPILOT_KEEP_OPEN_REASONS = ("no_result_line", "timeout")
+
+
+def copilot_should_keep_browser(result: str) -> bool:
+    """True when a co-pilot run ended ambiguously and the browser may hold real work.
+
+    Deliberately NOT true for the permanent, diagnosed failures (expired, captcha,
+    login_issue, not_eligible_*): those are answers, not uncertainty, and leaving a browser
+    open for each would block the queue on jobs nobody can finish.
+    """
+    if not result or not result.startswith("failed:"):
+        return False
+    return result.split(":", 1)[1].strip().lower() in _COPILOT_KEEP_OPEN_REASONS
+
 
 def release_stale_locks(max_age_minutes: int | None = None,
                         conn: sqlite3.Connection | None = None) -> list[str]:
@@ -574,7 +602,7 @@ def run_job(job: dict, port: int, worker_id: int = 0,
                     text_parts.append(line)
                     lf.write(line + "\n")
 
-        proc.wait(timeout=300)
+        proc.wait(timeout=AGENT_TIMEOUT_SECONDS)
         returncode = proc.returncode
         proc = None
 
@@ -809,6 +837,16 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
                 applied += 1
                 update_state(worker_id, jobs_applied=applied,
                              jobs_done=applied + failed)
+            elif copilot and copilot_should_keep_browser(result):
+                # The agent went quiet or ran long, but the form on screen may be COMPLETE.
+                # Hand it to the human instead of reaping the browser and losing the work.
+                reason = result.split(":", 1)[-1]
+                mark_result(job["url"], "needs_human", error=reason, duration_ms=duration_ms)
+                keep_chrome_alive(worker_id)
+                chrome_proc = None  # ensure the finally's cleanup_worker doesn't reap it
+                add_event(f"[W{worker_id}] Agent stopped without a verdict ({reason}) — browser "
+                          f"LEFT OPEN, check the form: {job['title'][:30]}")
+                update_state(worker_id, jobs_done=applied + failed)
             else:
                 reason = result.split(":", 1)[-1] if ":" in result else result
                 mark_result(job["url"], "failed", reason,

@@ -12,7 +12,8 @@ campaign happens to be a job search** — see `docs/crm-prd.md` for where that g
 - **Packaging:** Hatchling, `src/` layout, single package `applypilot`
 - **Entry point:** `applypilot = "applypilot.cli:app"` (Typer CLI)
 - **License:** AGPL-3.0-only · **Version:** 0.4.0 (`pyproject.toml`)
-- **Tests:** 417 passing (`tests/`, 32 files) · ruff clean (line-length 120, py311) · ESLint clean
+- **Tests:** 417 passing (`tests/`, 29 files) · ruff clean (line-length 120, py311) · ESLint clean
+- **Schema version:** 1 (`applypilot migrate --status`) · **Settings:** 39 declared in `settings.py`
 
 ## Quick orientation
 
@@ -29,6 +30,11 @@ Surfaces:
 - `applypilot apply` — browser submission (Tier 3); `--copilot` fills and stops
 - `applypilot dashboard --serve` — the operator UI, and where you actually live
 - `applypilot network` — contact discovery + outreach
+- `applypilot migrate --status` · `applypilot doctor --config` — schema version, settings
+
+**Co-pilot is one-at-a-time.** It ends by handing an open browser to a human, and starting
+another apply closes that browser. The queue refuses to start while a review is pending and
+stops the moment a job hands over — see §Lessons 8, which cost two filled applications.
 
 ## Tiers (`config.py`, gated by `check_tier()`)
 
@@ -45,11 +51,12 @@ Surfaces:
 | `cli.py` | Typer CLI: `init`, `run`, `apply`, `status`, `dashboard`, `doctor`, `network`. |
 | `pipeline.py` | Orchestrates `run` — stage order, deps, sequential + streaming runners. |
 | `config.py` | Paths (`~/.applypilot/`), Chrome detection, profile/YAML loaders, tier system. |
-| `database.py` | SQLite layer. Owns `jobs` + `job_events`. Thread-local WAL, forward-only migrations. |
+| `database.py` | SQLite layer. Owns `jobs` + `job_events`. Thread-local WAL, additive column pass, then numbered migrations. `get_connection()` returns a subclass carrying a per-connection schema memo — see §Lessons 11. |
 | `llm.py` | Multi-provider client (round-robin + failover: OpenAI/Gemini/Anthropic/local). |
 | `view.py` | Static HTML results export. |
-| `web_dashboard.py` | **The operator dashboard.** 1,861 lines, **zero SQL** — data access goes through `repo/` and `store.py` (ARCH-4). |
+| `web_dashboard.py` | **The operator dashboard.** 1,920 lines, **zero SQL** — data access goes through `repo/` and `store.py` (ARCH-4). |
 | `repo/jobs.py` | Every `jobs` query as a named function. Owns `QUEUE_SQL` (what counts as an operator-added job). |
+| `scoring/resume_sections.py` | Parses the BASE résumé into its own sections. The base résumé is the template; tailoring rewrites content inside it. |
 | `settings.py` | **Every env var, one registry.** Types, defaults, validators, secret flags. Malformed values fail at startup naming the variable. `.env.example` is generated from it. |
 | `migrations/` | Numbered `mNNN_*.py` with `up(conn)`, run at startup after the additive column pass. **Migrations must be idempotent** — this app gets killed mid-operation. `001` = the ARCH-3 touches backfill. |
 | `static/` | `index.html` · `dashboard.css` · `dashboard.js`. Served from `/static/…?v=<version>-<mtime>`; the page itself is `no-store`. One **classic** script, not a module — ~56 inline `onclick=` attributes resolve against the global object. |
@@ -139,7 +146,10 @@ incapable of touching a LinkedIn page. See §Lessons.
 | `connections` | `networking/connections.py` | Imported LinkedIn CSV. |
 | `job_events` | `database.py` | Per-job activity log. Append is best-effort, never raises. |
 
-Live counts (2026-07-28): jobs 7, contacts 28, connections 899, job_events 52.
+| `schema_migrations` | `migrations/` | Version, status, `claimed_at` lease. See §Lessons on the 300s lease. |
+
+Live counts (2026-07-29): jobs 9, contacts 28, connections 899, job_events 93, touches 7,
+sequences 1. Schema version 1.
 
 **`jobs` columns by stage:** discover(`title,salary,description,location,site,strategy`) →
 enrich(`full_description,application_url,detail_error`) → score(`fit_score,score_reasoning`) →
@@ -193,12 +203,48 @@ to give an explicit out and never to restate the previous message. LinkedIn copy
 shorter (it lands in a chat window) and must ask exactly one answerable question.
 
 **Threading works with no extra OAuth scope**: Gmail returns `threadId` on the send response
-and we generate the RFC `Message-ID` ourselves — both persisted at send time. Emails sent
-before those columns existed can't thread; those cards say **⚠ won't thread**, and
-`backfill_thread_ids()` recovers them once the read scope is granted.
+and we generate the RFC `Message-ID` ourselves — both persisted at send time. As of 2026-07-29
+**all 13 sent emails have both ids and all 13 threads resolve live** against the mailbox, so
+`backfill_thread_ids()` has nothing left to recover.
 
 **Not built:** no scheduler (nothing fires while the dashboard is closed), no reply
 detection, **no per-company cap** — 5 contacts × 3 touches is 15 emails at one company.
+
+---
+
+## Résumé + cover letter generation
+
+**The base résumé (`~/.applypilot/resume.txt`) is the template.** `resume_sections.py` parses
+its sections and they flow through tailor → `_DATA.json` → the Node renderer. Tailoring
+rewrites content *inside* those sections and may not rename, drop, reorder or invent one.
+
+| Guarantee | Enforced by |
+|---|---|
+| No section lost | assembler falls back to the original when the model omits one |
+| No bullets lost | padded to the original COUNT from the trailing originals |
+| Bullets actually rewritten | `verbatim_bullets()` — experience only, warning |
+| Named tools survive | `skills_boundary` ∩ base résumé, warning |
+| Experience never understated | `understated_experience()` — **error**, retryable |
+| Employer names / school present | preserved_* checks — **error** |
+| Cover letter names the employer | `validate_cover_letter(company=…)` — **error** |
+
+**Padding is by COUNT, not by similarity.** A genuine rewrite doesn't resemble its source, so
+prefix-matching classifies every rewrite as new and appends the originals too — 3 rewrites
+become 6 bullets saying the same thing twice.
+
+**The header states the TARGET role; employment history keeps its real titles.** Employment
+titles are background-checkable. The summary must not open by restating a previous title — a
+résumé aimed at "Applied AI Engineer" that begins "Technical Project Manager with 10+ years"
+tells the reader they have the wrong document.
+
+**`TAILOR_AGGRESSIVE` is voice-only.** It used to force `validation_mode="lenient"`, disabling
+the fabrication judge and every banned-word check. The real lever was the dashboard, which
+hardcoded `lenient` in three places — so every dashboard run skipped the judge regardless of
+the flag. Now `normal`, and validator warnings reach the job's **Activity tab** rather than
+only `{prefix}_REPORT.json`.
+
+**Worked examples in prompts must be off-domain** — see §Lessons 9. This cost three rounds of
+rework and one factual error.
 
 ---
 
@@ -243,9 +289,55 @@ company `"Jobs"` — the same substring bug class, inside the function written t
 6. **Timestamps may be naive.** Older rows have no timezone; subtracting from an aware `now`
    raises and 500s the whole dashboard. Parse via `_parse_ts()`.
 7. **A JS `ReferenceError` blanks the entire jobs table as silently as a syntax error.**
-   `test_dashboard_js_valid.py` only parses; `test_dashboard_render.py` executes the render
-   path under DOM stubs. ARCH-2 retired the parse-only test — building the `Function` in the
-   render test already throws on a syntax error, and ESLint covers the rest.
+   `test_dashboard_render.py` executes the render path under DOM stubs. ARCH-2 retired the
+   parse-only test — building the `Function` there already throws on a syntax error. Note the
+   render test calls functions DIRECTLY, which does not prove the browser can find them from
+   an `onclick=` attribute; `test_every_inline_handler_resolves_at_global_scope` does that,
+   and module scoping breaks 26 of 33 handlers.
+
+8. **A co-pilot review dies the moment the next apply starts.** Launching an apply clears
+   whatever holds the CDP port, so the browser the operator was asked to review in is closed.
+   Measured: `21:24:30.724 Zello → ready_to_submit` then `21:24:31.152 Deloitte → in_progress`
+   — **428ms**. It then happened again in reverse within the hour. The row still read
+   `ready_to_submit`, claiming a form was waiting that no longer existed. Batching N jobs in
+   co-pilot mode leaves every one un-reviewable except the last, and the filled form is
+   unrecoverable. **Co-pilot is inherently one-at-a-time** — it ends by asking a human to act.
+   Guarded at both ends now (refuse to start, and stop on handover).
+
+9. **Never put a worked example in the prompt using the candidate's own domain.** It gets
+   parroted. Three times in one session: a bullet example became his opening T-Mobile bullet
+   (and then every bullet took that same shape), a summary example became his summary, and an
+   example's *"Eight years"* turned a **10+ year résumé into "Seven years"** — a factual error
+   understating him. Examples are off-domain with `N` placeholders, and
+   `test_no_prompt_example_can_be_lifted_into_the_resume` checks each illustrative block
+   against his real vocabulary.
+
+10. **A `@react-pdf` layout error at one font size is usually fine at another.** textkit threw
+    `Cannot read properties of undefined (reading 'overflowLeft')` at scale 1 and 0.97 and
+    rendered the SAME content at 0.94 / 0.90 / 0.88 / 0.82 / 0.76 / 1.05. Treating the first
+    failure as fatal discarded a good document, and the Python fallback then wrote a
+    **380-character PDF missing WORK EXPERIENCE** — worse than an error, because it looks like
+    a résumé. Three wrong hypotheses were tested first (em dashes, hyphenation, a bad
+    character); the fix is not depending on one scale succeeding.
+
+11. **Idempotent-at-the-SQL-level is not free.** `CREATE TABLE IF NOT EXISTS` made `init_*()`
+    look safe to call from every read path. `/api/status` was running **313 statements per
+    request** at a 2.5s refresh — 199 of them schema setup, 108 from `init_connections` alone
+    (once per contact). Nothing failed, nothing was slow enough to notice, and only counting
+    surfaced it. Now 50, with `tests/test_query_budget.py` holding the line.
+
+12. **A validator can check for something the prompt just asked for.** `preserved_school` is
+    `"Gauntlet AI; University of Texas"` — a concatenation appearing nowhere in the résumé. It
+    passed for months because the prompt literally instructed the model to emit
+    `"{school} | {level}"`. A check whose input is derived from its own demand cannot fail.
+
+13. **WRITE THE TEST, THEN BREAK THE THING IT GUARDS.** Five vacuous tests shipped-and-were-
+    caught in one session: the query-budget seed omitted `strategy` so `/api/status` returned
+    an empty payload and every assertion measured nothing; a bullet-count test spanned to
+    end-of-document and swept in other sections' bullets; a schema-convergence assert ended in
+    `or True`; `years_claim` was digits-only and returned `None` for "Ten years", the phrasing
+    the model actually writes. **Every one passed on first run.** Mutation testing is the only
+    thing that found them.
 
 ---
 
@@ -254,88 +346,94 @@ company `"Jobs"` — the same substring bug class, inside the function written t
 `docs/architecture-prd.md` — current state, the architecture grilling, and the plan.
 `docs/tickets/ARCH-README.md` — the ordered ticket list. Read that before starting anything.
 
-**Chosen order (Jorge, 2026-07-28): finish the ARCH set first**, then the product tickets —
-`ARCH-1` ✅ → `ARCH-2` ✅ → `ARCH-3` ✅ → `ARCH-4` ✅ → `ARCH-5` ✅ → `ARCH-6` ✅, then `CRM-1` → `DISC-1`
-→ `CRM-2` → `CRM-3`.
+**The ARCH set is complete** (`ARCH-1` … `ARCH-6`, all ✅ 2026-07-28/29). `ARCH-4` was
+deliberately narrowed — see its ticket.
 
-The analysis recommended the reverse, and the reason is measured, not aesthetic: all 7 jobs
-were pasted in by hand (discovery produced **0**), only 1 reply is recorded (typed in
-manually), and nothing is aggregated. **The ARCH set delivers no user-visible change** — the
-funnel stays at 7 hand-pasted jobs and the system stays blind to replies until `CRM-1` lands.
-The tradeoff was raised and accepted; do not re-litigate it, but do not forget it either.
+**Next, in the order agreed 2026-07-28:** `CRM-1` → `DISC-1` → `CRM-2` → `CRM-3`.
 
-**The ARCH set is complete.** Next is the product work, in the order agreed on 2026-07-28:
-`CRM-1` (reply detection — the system is still blind to replies) → `DISC-1` (turn discovery
-on; it has produced 0 jobs) → `CRM-2` → `CRM-3`.
+`CRM-1` (reply detection) is the one that changes what the app can *do*: 13 emails sent, 7
+follow-ups, **1 reply recorded — typed in by hand.** Everything it needs is already stored
+(`thread_id` + `rfc_message_id` captured at send time, all 13 verified live against the
+mailbox); the only missing piece is reading. The `gmail.metadata` scope is now granted.
 
-`CRM-1` is the one that changes what the app can do: 13 emails sent, 7 follow-ups, **1 reply
-recorded — typed in by hand.** Everything it needs is already stored (`thread_id`,
-`rfc_message_id` captured at send time); the only missing piece is reading.
+The ARCH-first order was chosen against the analysis's advice. The reason it was contentious
+is still true and worth remembering: **the ARCH set delivered no user-visible change.** All 9
+jobs were pasted in by hand (discovery has produced **0**), and the system is still blind to
+replies. The tradeoff was raised and accepted; don't re-litigate it, don't forget it either.
+
+What the ARCH set *did* buy became visible immediately afterwards: the first real end-to-end
+apply surfaced three bugs (§Lessons 8–10), and every one was diagnosable in minutes because
+the data layer, the query budget and the validators existed to measure against.
 
 `docs/crm-prd.md` — the multi-campaign "Spaces" direction. **After** the above.
 
-## Known debt (architecture review, 2026-07-28)
+## Known debt
 
-Ordered by leverage. Nothing here is blocking; all of it compounds.
+The 2026-07-28 architecture review listed six items; **all six were closed by the ARCH set**
+(ARCH-1 `domain/`, ARCH-2 static frontend, ARCH-3 `touches`, ARCH-4 repository boundary,
+ARCH-5 migrations, ARCH-6 settings). Per-ticket detail and the reasoning lives in
+`docs/tickets/ARCH-*.md` — those write down what was *not* done and why, which matters more
+than the checkmarks.
 
-1. ~~**Extract `domain/`**~~ — **done (ARCH-1, 2026-07-28).** Three duplicate "is it due"
-   implementations collapsed to one; `/api/status` verified byte-identical.
-2. ~~**`contacts` has two of everything**~~ — **done (ARCH-3, 2026-07-29).** 42 columns → 32.
-   The copy was already *incomplete*: email had `followup_subject`/`followup_error`, LinkedIn
-   silently had neither. Root cause was `followup_status` doing two jobs — one touch's
-   delivery lifecycle AND the sequence's terminal state — so `touches` + `sequences` are two
-   tables, not the one the ticket sketched.
-3. ~~**996 lines of JS in a Python string**~~ — **done (ARCH-2, 2026-07-28).** The cut was
-   verified by reassembling the three files back into the old string **byte for byte**.
-   ESLint now runs (`npm run lint`, dev-only). It cannot see functions called from `onclick=`
-   attributes, so `test_no_dead_functions` reads the HTML too — on the first run it found
-   **5 dead functions and 3 dead Sets** stranded by the ARCH-1 tabs restructure.
-   **`web_dashboard.py` is 1,953 lines and all Python.** ~430 of them are pipeline
+What is actually open now, ordered by leverage:
+
+1. **Apply runs synchronously inside the HTTP request thread.** `run_dashboard_restart` →
+   `subprocess.run` blocks a dashboard worker for minutes and dies with the server. This is the
+   root cause of the two applies lost on 2026-07-29, and it is only *mitigated*:
+   `release_stale_locks()` cleans up the orphan lock, and the co-pilot queue guard stops the
+   batch from closing a pending review. Making it a real background task is the actual fix and
+   is still open. **Check for `in_progress` before restarting the dashboard** (§Dev workflow).
+
+2. **The system is blind to replies.** 13 emails, 7 follow-ups, 1 reply — recorded by hand.
+   Follow-ups nudge people who may have replied days ago, and no funnel metric is possible.
+   `CRM-1`, and the highest-value thing left in the repo.
+
+3. **Discovery has produced 0 jobs.** ~2,500 lines of working, tested discovery (JobSpy across
+   five boards, 48 Workday portals, an AI scraper) and every one of the 9 jobs was pasted in by
+   hand. A configuration and trust problem, not a code problem — `DISC-1`.
+
+4. **15 modules still execute SQL directly** (was 21) — `apply/launcher.py`,
+   `enrichment/detail.py`, `view.py`, `cli.py`, `pipeline.py`, the three discovery scrapers,
+   three scoring stages, and four `networking/` modules. The dashboard is at zero.
+   `test_sql_lives_only_in_the_data_layer` names the remainder in an allowlist, so the list can
+   only shrink and no NEW module can join it. Deliberately deferred; see ARCH-4's ticket.
+
+5. **`web_dashboard.py` is 1,920 lines**, all Python, zero SQL. ~430 lines are pipeline
    orchestration (`run_dashboard_prepare/apply/fill_one/restart/continue`) that are not HTTP
-   concerns and belong to ARCH-4. The ticket's "< 1,800" criterion was arithmetically
-   unreachable and is marked superseded rather than fudged.
-4. ~~**Forward-only migrations.**~~ — **done (ARCH-5, 2026-07-29).** The additive column dicts
-   stay for adding columns; `migrations/mNNN_*.py` handles rename/drop/backfill. Version is in
-   `doctor` and `applypilot migrate --status`. A 300s lease on `claimed_at` is what lets a
-   crashed run retry WITHOUT letting concurrent starts double-apply — the first version
-   collapsed those two cases and ran a migration 6 times out of 6 concurrent starts.
-5. ~~**40 env vars, no schema.**~~ — **done (ARCH-6, 2026-07-29).** 38 declared in
-   `settings.py`; `FOLLOWUP_AFTER_DAYS` is now derived from `FOLLOWUP_SCHEDULE[0]`
-   (deprecated, still honoured, warns). `applypilot doctor --config` shows value + source;
-   a test fails if code reads a variable the registry does not declare.
-6. **14 modules still touch the DB directly** (was 21) — `enrichment/detail.py`,
-   `apply/launcher.py`, `view.py`, the discovery/scoring stages. The dashboard no longer
-   does (ARCH-4), and `test_sql_lives_only_in_the_data_layer` names the rest in an
-   allowlist so the list can only shrink and no NEW module can join it.
-7. **Apply runs synchronously inside the HTTP request thread** (`run_dashboard_restart` →
-   `subprocess.run`). It blocks a dashboard worker for minutes and dies with the server —
-   which is exactly how two applies were killed on 2026-07-29. `release_stale_locks()`
-   cleans up after it; making it a real background task is still open.
+   concerns. Extracting them is the natural companion to debt item 1.
+
+6. **No per-company outreach cap.** 5 contacts × 3 touches is 15 emails at one company.
+
+7. **`@react-pdf` is a major version behind** (3.4.5 installed, 4.5.1 current). The textkit
+   layout crash in §Lessons 10 may be fixed upstream; the renderer now survives it either way,
+   so this is cleanup rather than a fix.
+
+8. **Résumé quality is measured but not judged.** `verbatim_bullets`, `understated_experience`
+   and the dropped-tool check are mechanical. The LLM fabrication judge now *runs* (ARCH-6 era
+   fix: the dashboard had hardcoded `lenient` in three places) but has not yet caught a real
+   fabrication — it is unproven, not trusted.
 
 ---
 
 ## Environment (this machine)
 
 - **Apollo.io** (paid Basic) is the sole contact provider. Hunter removed.
-- **Gmail OAuth** connected, sends from `jorgealejandrodiezm@gmail.com`. Requested scopes are
-  now `gmail.send` + `gmail.metadata` + `gmail.settings.basic` — **metadata, not readonly**:
-  it gives headers/threads and *cannot read message bodies*. The stored token may still be
-  send-only; `doctor` reports missing scopes, and `_load_creds()` loads with the token's own
-  scopes so an older token keeps working.
-- **Base resume** = `~/.applypilot/resume.txt` (replaced 2026-07-28 with the Technical Project
-  Manager version: PERSONAL STATEMENT / WORK EXPERIENCE / EDUCATION / KEY STRENGTHS, 3
-  employers). `preserved_companies` was reduced to T-Mobile/Verizon/Kordami to match —
-  a preserved company missing from the base resume is a **hard validation failure**.
-  **Open:** the renderer still emits the old section names/order, the résumé says
-  "Diez Magni" while `profile.json` says "Diez", and it uses `alediez2408@gmail.com` while
-  sending happens from `jorgealejandrodiezm@gmail.com`.
-- `TAILOR_AGGRESSIVE=1` — **voice only now.** It used to force `validation_mode="lenient"`,
-  which silently disabled the fabrication judge AND every banned-word check. Content
-  preservation no longer depends on it (the assembler enforces sections + bullet counts), so
-  the mode has no reason to buy JD-matching vocabulary with fabrication detection.
-  **The real lever was the dashboard**, which hardcoded `lenient` in three places — so every
-  dashboard-driven run skipped the judge regardless of the flag. Now `normal`: banned words
-  are warnings, and warnings reach the job's Activity tab instead of only `_REPORT.json`.
+- **Gmail OAuth** connected, sends from `jorgealejandrodiezm@gmail.com`. **All three scopes
+  granted and verified on the token (2026-07-29):** `gmail.send` + `gmail.metadata` +
+  `gmail.settings.basic` — **metadata, not readonly**: headers and threads, *cannot read
+  message bodies*. Signature fetch works (5,172 chars). `doctor` reports missing scopes, and
+  `_load_creds()` loads with the token's own scopes so an older token keeps working.
+- **Base resume** = `~/.applypilot/resume.txt` — PERSONAL STATEMENT / WORK EXPERIENCE /
+  EDUCATION / KEY STRENGTHS, 3 employers (T-Mobile 5 bullets, Verizon 5, Kordami 4), 4,341
+  chars, claims 10+ years. `preserved_companies` = T-Mobile/Verizon/Kordami; a preserved
+  company missing from the output is a **hard validation failure**.
+  `preserved_school` is `"Gauntlet AI; University of Texas"` — a CONCATENATION that appears
+  nowhere in the résumé, so it is split and checked school by school (§Lessons 12).
+  **Still open:** `profile.json` says "Diez" while the résumé says "Diez Magni" (the résumé
+  wins — the assembler reads the header from it), and the résumé lists
+  `alediez2408@gmail.com` while sending happens from `jorgealejandrodiezm@gmail.com`, so the
+  .txt and the PDF show different addresses. Decide which one recruiters should reply to.
+- `TAILOR_AGGRESSIVE=1` — voice only; see §Résumé + cover letter generation.
 - 899 LinkedIn connections imported. Secrets in `~/.applypilot/` are `chmod 600`; FileVault on.
 
 ## Dev workflow
@@ -367,6 +465,12 @@ change still needs the `pip install` above — but that copy gives the file a ne
 - Validator warnings now reach the job's **Activity tab** (`Résumé note:` / `Cover letter
   note:`), not just `{prefix}_REPORT.json`. They were invisible before, which is how banned
   filler and dropped tools shipped unnoticed.
-- Severity ladder: `preserved_companies`/`preserved_school` missing = **error** (blocks);
-  `preserved_projects` missing = warning; banned words = strict-mode only.
-- Working tree currently has **24 uncommitted files** — the whole of the 2026-07-28 session.
+- Severity ladder: `preserved_companies` / `preserved_school` missing, understated years, and
+  a cover letter that never names the employer = **errors** (block + retry).
+  `preserved_projects` missing, verbatim bullets, dropped tools, banned words = **warnings**
+  (surface in Activity, never block). Banned words become errors only in `strict`.
+- **Never `pip install` while an apply is running.** The apply is a live subprocess; rewriting
+  site-packages under it is how you get a half-loaded module. Wait for it to exit.
+- Working tree clean; **13 commits on `main` are unpushed** (`origin/main` is at
+  `stable-arch2`). Tags: `stable-arch2` / `stable-arch3` / `stable-arch5` / `stable-arch6`.
+  A tag restores CODE only — the database needs its own backup from `~/.applypilot/backups/`.

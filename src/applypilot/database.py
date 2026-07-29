@@ -196,8 +196,20 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_job_events_url ON job_events(job_url, ts)")
     conn.commit()
 
-    # Run migrations for any columns added after initial schema
+    # Additive pass first: numbered migrations may reference columns the dicts declare.
     ensure_columns(conn)
+
+    # Then the numbered migrations (ARCH-5) — rename/drop/backfill, which the additive
+    # dicts cannot express. Never fatal: a migration failure must leave the app usable and
+    # reportable via `applypilot migrate --status`, not prevent it from starting.
+    try:
+        from applypilot import migrations
+        for result in migrations.run_pending(conn):
+            if not result["ok"]:
+                print(f"WARNING: migration {result['version']} ({result['name']}) failed: "
+                      f"{result['error']}", flush=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"WARNING: migration runner unavailable: {exc}", flush=True)
 
     return conn
 

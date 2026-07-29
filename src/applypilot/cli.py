@@ -747,6 +747,23 @@ def doctor() -> None:
 
     console.print()
 
+    # Schema version (ARCH-5) — a failed migration is otherwise invisible until something
+    # reads a column that was never backfilled.
+    try:
+        from applypilot import migrations
+        from applypilot.database import get_connection, init_db
+        init_db()
+        st = migrations.status(get_connection())
+        line = f"[bold]Schema version:[/bold] {st['version']}"
+        if st["failed"]:
+            line += f"  [red]{len(st['failed'])} FAILED[/red] — run `applypilot migrate --status`"
+        elif st["pending"]:
+            line += f"  [yellow]{len(st['pending'])} pending[/yellow]"
+        console.print(line)
+        console.print()
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[dim]Schema version unavailable: {exc}[/dim]\n")
+
     # Tier summary
     from applypilot.config import get_tier, TIER_LABELS
     tier = get_tier()
@@ -759,6 +776,44 @@ def doctor() -> None:
         console.print("[dim]  → Tier 3 unlocks: auto-apply (needs Claude Code CLI + Chrome + Node.js)[/dim]")
 
     console.print()
+
+
+@app.command("migrate")
+def migrate(
+    status: bool = typer.Option(False, "--status", help="Show schema version and pending migrations."),
+) -> None:
+    """Apply pending schema migrations (ARCH-5), or report what is pending.
+
+    Migrations also run automatically at startup; this is for inspecting them, and for
+    retrying one that failed.
+    """
+    from applypilot import migrations
+    from applypilot.database import get_connection, init_db
+
+    init_db()                       # this already runs pending migrations
+    conn = get_connection()
+    st = migrations.status(conn)
+
+    console.print(f"[bold]Schema version:[/bold] {st['version']}")
+    for v in st["applied"]:
+        console.print(f"  [green]✓[/green] {v:03d}")
+    for f in st["failed"]:
+        console.print(f"  [red]✗ {f['version']:03d}[/red] {f['name']}  [dim]{f['error']}[/dim]")
+    for p_ in st["pending"]:
+        console.print(f"  [yellow]·[/yellow] {p_['version']:03d} {p_['name']} [dim]pending[/dim]")
+    if not st["failed"] and not st["pending"]:
+        console.print("[dim]Up to date.[/dim]")
+
+    if status:
+        return
+    results = migrations.run_pending(conn)
+    for r in results:
+        mark = "[green]✓[/green]" if r["ok"] else "[red]✗[/red]"
+        console.print(f"  {mark} {r['version']:03d} {r['name']} {r.get('note') or r.get('error', '')}")
+    if not results:
+        console.print("[dim]Nothing to apply.[/dim]")
+    if any(not r["ok"] for r in results):
+        raise typer.Exit(1)
 
 
 @app.command("migrate-touches")

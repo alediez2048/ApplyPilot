@@ -25,14 +25,14 @@ improves nothing a user can see). See `architecture-prd.md` §4.0 for the data b
 | 6 | `ARCH-2` static frontend | — | M | — | ✅ **Done 2026-07-28** |
 | 7 | `ARCH-3` touches table | extensible to new channels | M | ARCH-1 | ✅ **Done 2026-07-29** |
 | 8 | `ARCH-4` repository boundary | — | L | ARCH-1 | ✅ **Done 2026-07-29** (narrowed) |
-| 9 | `ARCH-5` versioned migrations | — | S | ARCH-3 | Todo |
+| 9 | `ARCH-5` versioned migrations | — | S | ARCH-3 | ✅ **Done 2026-07-29** |
 | 10 | `ARCH-6` config schema | — | S | — | Todo |
 
 Roughly 9–10 days. **The first three deliver essentially all the user-visible value.**
 
 ## Guardrails (every ticket)
 
-- All tests green before merge — no ticket lands red (325 as of ARCH-4)
+- All tests green before merge — no ticket lands red (338 as of ARCH-5)
 - `evals/resolution.jsonl` green — it has already caught a bug every unit test missed
 - No behaviour change inside a refactor ticket; user-visible changes are separate commits
 - Byte-identical output where verifiable (prompts, rendered PDFs, `/api/status`)

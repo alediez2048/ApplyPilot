@@ -179,6 +179,8 @@ def test_sql_lives_only_in_the_data_layer():
     root = pathlib.Path(applypilot.__file__).parent
     allowed = {
         "database.py", "repo/jobs.py",                       # the data layer proper
+        "migrations/__init__.py",                            # the migration runner (ARCH-5)
+        "migrations/m001_touches_backfill.py",               # migrations ARE schema changes
         "networking/store.py", "networking/touches.py",      # per-table repositories
         "networking/connections.py", "networking/backfill_touches.py",
         # --- not yet migrated (remaining ARCH-4 scope) ---

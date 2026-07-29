@@ -12,7 +12,7 @@ campaign happens to be a job search** — see `docs/crm-prd.md` for where that g
 - **Packaging:** Hatchling, `src/` layout, single package `applypilot`
 - **Entry point:** `applypilot = "applypilot.cli:app"` (Typer CLI)
 - **License:** AGPL-3.0-only · **Version:** 0.4.0 (`pyproject.toml`)
-- **Tests:** 325 passing (`tests/`, 26 files) · ruff clean (line-length 120, py311) · ESLint clean
+- **Tests:** 338 passing (`tests/`, 28 files) · ruff clean (line-length 120, py311) · ESLint clean
 
 ## Quick orientation
 
@@ -50,6 +50,7 @@ Surfaces:
 | `view.py` | Static HTML results export. |
 | `web_dashboard.py` | **The operator dashboard.** 1,861 lines, **zero SQL** — data access goes through `repo/` and `store.py` (ARCH-4). |
 | `repo/jobs.py` | Every `jobs` query as a named function. Owns `QUEUE_SQL` (what counts as an operator-added job). |
+| `migrations/` | Numbered `mNNN_*.py` with `up(conn)`, run at startup after the additive column pass. **Migrations must be idempotent** — this app gets killed mid-operation. `001` = the ARCH-3 touches backfill. |
 | `static/` | `index.html` · `dashboard.css` · `dashboard.js`. Served from `/static/…?v=<version>-<mtime>`; the page itself is `no-store`. One **classic** script, not a module — ~56 inline `onclick=` attributes resolve against the global object. |
 
 ### `discovery/` · `enrichment/` · `scoring/`
@@ -235,7 +236,7 @@ company `"Jobs"` — the same substring bug class, inside the function written t
 `docs/tickets/ARCH-README.md` — the ordered ticket list. Read that before starting anything.
 
 **Chosen order (Jorge, 2026-07-28): finish the ARCH set first**, then the product tickets —
-`ARCH-1` ✅ → `ARCH-2` ✅ → `ARCH-3` ✅ → `ARCH-4` ✅ → `ARCH-5` → `ARCH-6`, then `CRM-1` → `DISC-1`
+`ARCH-1` ✅ → `ARCH-2` ✅ → `ARCH-3` ✅ → `ARCH-4` ✅ → `ARCH-5` ✅ → `ARCH-6`, then `CRM-1` → `DISC-1`
 → `CRM-2` → `CRM-3`.
 
 The analysis recommended the reverse, and the reason is measured, not aesthetic: all 7 jobs
@@ -244,8 +245,9 @@ manually), and nothing is aggregated. **The ARCH set delivers no user-visible ch
 funnel stays at 7 hand-pasted jobs and the system stays blind to replies until `CRM-1` lands.
 The tradeoff was raised and accepted; do not re-litigate it, but do not forget it either.
 
-**Next up: `ARCH-5`** (versioned migrations) — `schema_migrations` table, numbered
-`migrations/NNN_*.py`, and the ARCH-3 touches backfill re-expressed as migration 001.
+**Next up: `ARCH-6`** (config schema) — 40 env vars with no validation;
+`FOLLOWUP_SCHEDULE` / `LINKEDIN_FOLLOWUP_SCHEDULE` / `FOLLOWUP_AFTER_DAYS` overlap, parse
+differently, and fail silently on a typo. Last one in the ARCH set.
 
 `docs/crm-prd.md` — the multi-campaign "Spaces" direction. **After** the above.
 
@@ -269,8 +271,11 @@ Ordered by leverage. Nothing here is blocking; all of it compounds.
    orchestration (`run_dashboard_prepare/apply/fill_one/restart/continue`) that are not HTTP
    concerns and belong to ARCH-4. The ticket's "< 1,800" criterion was arithmetically
    unreachable and is marked superseded rather than fudged.
-4. **Forward-only migrations.** No rename/drop/backfill/version. `preserved_companies` and the
-   stale `.edu` PDFs each needed a hand-written fix.
+4. ~~**Forward-only migrations.**~~ — **done (ARCH-5, 2026-07-29).** The additive column dicts
+   stay for adding columns; `migrations/mNNN_*.py` handles rename/drop/backfill. Version is in
+   `doctor` and `applypilot migrate --status`. A 300s lease on `claimed_at` is what lets a
+   crashed run retry WITHOUT letting concurrent starts double-apply — the first version
+   collapsed those two cases and ran a migration 6 times out of 6 concurrent starts.
 5. **40 env vars, no schema.** `FOLLOWUP_SCHEDULE` / `LINKEDIN_FOLLOWUP_SCHEDULE` /
    `FOLLOWUP_AFTER_DAYS` overlap, parse differently, and fail silently on a typo.
 6. **14 modules still touch the DB directly** (was 21) — `enrichment/detail.py`,
@@ -310,6 +315,7 @@ lsof -ti:8765 | xargs kill -9 && .venv/bin/applypilot dashboard --serve --no-ope
 APPLYPILOT_DIR=$(mktemp -d) PYTHONPATH=src .venv/bin/python -m pytest tests/ -q
 .venv/bin/python -m ruff check .
 npm install && npm run lint                            # frontend only; dev-only, never shipped
+.venv/bin/applypilot migrate --status                  # schema version + pending migrations
 ```
 
 The `APPLYPILOT_DIR=$(mktemp -d)` prefix is **required** — without it tests run against your

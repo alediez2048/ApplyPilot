@@ -626,6 +626,10 @@ function findContactsPrompt(j) {
   const label = running ? '⏳ finding contacts…' : '👥 Find contacts';
   let out = `<button class="find-link" ${dis} title="${title}" onclick="findContacts(decodeURIComponent('${encodeURIComponent(j.url)}'))">${label}</button>`;
   if (j.network_error) out += `<div class="neterr">${esc(j.network_error)}</div>`;
+  // The note is the only place a COMPLETED-but-empty search shows up. /api/status has always
+  // sent it and nothing rendered it, so a run that considered 5 people and dropped all 5 as
+  // working elsewhere looked exactly like a button that never fired.
+  else if (j.network_note && !running) out += `<div class="netnote">${esc(j.network_note)}</div>`;
   return out;
 }
 function fmtDate(iso) {

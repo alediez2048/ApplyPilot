@@ -152,3 +152,53 @@ def test_job_panel_renders_without_runtime_errors(tmp_path):
     result = json.loads(proc.stdout.strip().splitlines()[-1])
     assert not result["errors"], "render errors:\n  " + "\n  ".join(result["errors"][:10])
     assert result["checked"] > 50, f"suspiciously few render calls: {result['checked']}"
+
+
+_NOTE_DRIVER = """
+const F = (new Function(SRC + `; NET_AVAIL = true; return { findContactsPrompt };`))();
+const out = {};
+for (const [name, j] of Object.entries(CASES)) out[name] = F.findContactsPrompt(j);
+console.log(JSON.stringify(out));
+"""
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node not available")
+def test_a_finished_empty_search_shows_its_outcome(tmp_path):
+    """/api/status has always sent `network_note`; for months no JS read it.
+
+    So a search that ran, spent Apollo credits on 5 people and then dropped all 5 as working
+    at a different company with the same name rendered the identical "No contacts yet. [Find
+    contacts]" as a job nobody had ever searched. That is what made "find contacts is not
+    working" undiagnosable from the UI.
+    """
+    note = "No contacts kept at Zello — considered 5 and dropped 5 who work elsewhere."
+    cases = {
+        "never_run": _job(network_note="", network_error="", network_running=False),
+        "finished_empty": _job(network_note=note, network_error="", network_running=False),
+        "running": _job(network_note="searching…", network_error="", network_running=True),
+        "errored": _job(network_note="error", network_error="No usable provider",
+                        network_running=False),
+    }
+    script = tmp_path / "note.mjs"
+    script.write_text(
+        _STUBS
+        + f"const SRC = {json.dumps(_page_js())};\n"
+        + f"const CASES = {json.dumps(cases)};\n"
+        + _NOTE_DRIVER
+    )
+    proc = subprocess.run(["node", str(script)], capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, f"node failed:\n{proc.stderr[:2000]}"
+    out = json.loads(proc.stdout.strip().splitlines()[-1])
+
+    # The whole point: a finished-but-empty run must not look like an un-run one.
+    assert out["never_run"] != out["finished_empty"], \
+        "a completed search that kept nobody renders identically to one that never ran"
+    assert "considered 5" in out["finished_empty"], out["finished_empty"]
+    assert "netnote" in out["finished_empty"]
+
+    # A job nobody searched stays clean — no empty note div.
+    assert "netnote" not in out["never_run"], out["never_run"]
+    # Mid-flight, the spinner is the status; a stale note next to it contradicts it.
+    assert "netnote" not in out["running"], out["running"]
+    # A hard error already has its own red line; showing both says the same thing twice.
+    assert "neterr" in out["errored"] and "netnote" not in out["errored"], out["errored"]

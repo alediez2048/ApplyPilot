@@ -260,6 +260,11 @@
   .tabs .tab .n.due { background:var(--yellow-soft); color:var(--yellow); }
   .pane { padding:10px 4px 6px; }
   .pane-empty { font-size:12px; color:var(--muted); font-style:italic; padding:6px 2px; }
+  /* Outcome of a FINISHED search. Muted, not red — "considered 5, kept 0" is information,
+     not a crash — but it has to be visible somewhere, or an empty result is indistinguishable
+     from a button that never fired. Not scoped to td.people: findContactsPrompt() renders
+     inside the tabbed panel's People pane, which is a different cell entirely. */
+  .netnote { color:var(--muted); font-size:11px; margin-top:4px; max-width:420px; line-height:1.4; font-style:normal; }
   /* ── Contacts: one line each until opened ── */
   .plist { display:flex; flex-direction:column; }
   .prow { display:flex; align-items:center; gap:9px; padding:7px 6px; font-size:12.5px;

@@ -13,6 +13,12 @@ from applypilot.networking import derive, providers, rank, store, verify
 
 log = logging.getLogger(__name__)
 
+# How many batches of `per_job` people we are willing to enrich before giving up. Verification
+# runs after enrichment, so a whole batch can be rejected; without a top-up an ambiguous
+# employer name returns nobody while real colleagues sit unexamined further down the pool.
+# 3 is a credits/coverage tradeoff: per_job=5 enriches at most 15 of the ~25 candidates.
+_TOPUP_ROUNDS = 3
+
 
 def _draft_and_store(profile: dict, job: dict, contact: dict, warm: bool = False) -> None:
     """Best-effort outreach draft for one contact; failures are non-fatal.
@@ -133,8 +139,21 @@ def find_contacts_for_job(
     result = {"company": company, "found": 0, "revealed": 0, "contacts": [],
               "connections_at_company": conns_at_company, "note": ""}
 
+    def _log(detail: str, status: str = "ok") -> None:
+        """Record the outcome on the job. EVERY exit from this function logs.
+
+        A search that finds nobody used to log nothing at all, which made a completed run
+        indistinguishable from a button that never fired — see tests/test_networking_silent_zero.
+        """
+        if dry_run:
+            return
+        from applypilot.database import log_event
+        log_event(job_url, "outreach", status, detail)
+
     if not company and not domain:
         result["note"] = "could not determine employer/domain"
+        _log("Could not find contacts: the employer name and domain could not be derived "
+             "from this job's URL.", "error")
         return result
 
     titles = rank.role_to_person_titles(role)
@@ -143,22 +162,30 @@ def find_contacts_for_job(
     candidates = providers.search(company, domain, role, titles, per_page=25)
     if not candidates:
         result["note"] = f"no candidates from {providers.active() or 'provider'} (coverage or plan/key)"
+        _log(f"No contacts found at {company or 'the employer'} — "
+             f"{providers.active() or 'the provider'} returned nobody for this company "
+             f"(coverage, or the plan/key).", "warn")
         return result
 
-    selected = rank.select(candidates, role, n=per_job)
+    # Rank the WHOLE pool, then work down it in batches. Ranking scores title relevance and
+    # knows nothing about which employer a person actually works for, while the strongest
+    # verification signal (the work-email domain) only exists after enrichment. So a batch can
+    # come back 100% rejected while genuine colleagues sit further down the same pool.
+    #
+    # That is exactly what "find contacts is not working" was on a Zello job: Apollo lists
+    # THREE orgs named Zello/ZELLO, none with a primary_domain to tell them apart. The five
+    # best-titled people were all from the wrong one, were all correctly dropped, and the two
+    # real @zello.com recruiters were never looked at — they were candidates 6..25. Stopping
+    # after batch one turned an ambiguous employer into a silent zero.
+    ranked = rank.select(candidates, role, n=len(candidates))
 
     # LinkedIn fallback (opt-in): when the provider under-covers this company, read
     # the company People page and merge the found profiles.
-    if use_linkedin and len(selected) < per_job:
-        selected = _augment_with_linkedin(selected, company, role, per_job, result)
+    if use_linkedin and len(ranked) < per_job:
+        ranked = _augment_with_linkedin(ranked, company, role, per_job, result)
 
-    result["found"] = len(selected)
-
-    # Reveal contact info for the selected few (Apollo bulk enrichment; consumes credits).
-    revealed: dict[str, dict] = {}
-    if not dry_run:
-        revealed = providers.enrich(selected)
-        result["revealed"] = sum(1 for r in revealed.values() if r.get("email"))
+    # Enrichment costs Apollo credits, so topping up is bounded rather than "walk all 25".
+    max_enriched = min(len(ranked), max(per_job, per_job * _TOPUP_ROUNDS))
 
     _profile_cache: dict = {}
 
@@ -171,44 +198,68 @@ def find_contacts_for_job(
                 _profile_cache["p"] = {}
         return _profile_cache["p"]
 
-    stored_contacts = []
+    stored_contacts: list[dict] = []
     rejected: list[str] = []
-    for c in selected:
-        rev = revealed.get(c.get("key"), {})
-        contact = {
-            "job_url": job_url,
-            "full_name": c.get("full_name"),
-            "title": c.get("title"),
-            "company": company or c.get("company"),
-            "linkedin_url": rev.get("linkedin_url") or c.get("linkedin_url"),
-            "email": rev.get("email"),
-            "email_status": rev.get("email_status", "none"),
-            "location": c.get("location"),
-            "seniority": c.get("seniority"),
-            "match_reason": c.get("match_reason"),
-            "source": c.get("source") or providers.active() or "apollo",
-            "apollo_id": c.get("apollo_id"),
-        }
-        # Self-check before this reaches the dashboard. Catches the contacts an org-name
-        # filter alone misses — Apollo returns people with no email whose employer is
-        # plainly someone else (a freelance resume writer on a "Writer" job).
-        v = verify.verify_contact({**contact, "company": c.get("company")},
-                                  company, c.get("employer_domain") or "")
-        if v["verdict"] == verify.REJECT:
-            log.info("Dropping %s — %s", contact.get("full_name"), "; ".join(v["reasons"]))
-            rejected.append(contact.get("full_name") or "?")
-            continue
-        contact["confidence"] = v["confidence"]
-        contact["verify_note"] = "; ".join(v["reasons"])
+    considered: list[dict] = []
+    cursor = 0
+
+    while len(stored_contacts) < per_job and cursor < max_enriched:
+        batch = ranked[cursor:cursor + (per_job - len(stored_contacts))]
+        if not batch:
+            break
+        cursor += len(batch)
+        considered.extend(batch)
+
+        # Reveal contact info for this batch only (Apollo bulk enrichment; consumes credits).
+        revealed: dict[str, dict] = {}
         if not dry_run:
-            cid = store.upsert_contact(contact)
-            contact["id"] = cid
-            # Draft outreach for anyone reachable — an EMAIL or a LINKEDIN profile. A no-email
-            # contact still has a LinkedIn note (Copy note + open LinkedIn); only truly
-            # unreachable contacts (no email AND no LinkedIn) are skipped.
-            if draft and (contact.get("email") or contact.get("linkedin_url")):
-                _draft_and_store(_profile_for_drafting(), job, contact)
-        stored_contacts.append(contact)
+            revealed = providers.enrich(batch)
+            result["revealed"] += sum(1 for r in revealed.values() if r.get("email"))
+
+        for c in batch:
+            rev = revealed.get(c.get("key"), {})
+            contact = {
+                "job_url": job_url,
+                "full_name": c.get("full_name"),
+                "title": c.get("title"),
+                "company": company or c.get("company"),
+                "linkedin_url": rev.get("linkedin_url") or c.get("linkedin_url"),
+                "email": rev.get("email"),
+                "email_status": rev.get("email_status", "none"),
+                "location": c.get("location"),
+                "seniority": c.get("seniority"),
+                "match_reason": c.get("match_reason"),
+                "source": c.get("source") or providers.active() or "apollo",
+                "apollo_id": c.get("apollo_id"),
+            }
+            # Self-check before this reaches the dashboard. Catches the contacts an org-name
+            # filter alone misses — Apollo returns people with no email whose employer is
+            # plainly someone else (a freelance resume writer on a "Writer" job).
+            v = verify.verify_contact({**contact, "company": c.get("company")},
+                                      company, c.get("employer_domain") or "")
+            if v["verdict"] == verify.REJECT:
+                log.info("Dropping %s — %s", contact.get("full_name"), "; ".join(v["reasons"]))
+                rejected.append(contact.get("full_name") or "?")
+                continue
+            contact["confidence"] = v["confidence"]
+            contact["verify_note"] = "; ".join(v["reasons"])
+            if not dry_run:
+                cid = store.upsert_contact(contact)
+                contact["id"] = cid
+                # Draft outreach for anyone reachable — an EMAIL or a LINKEDIN profile. A
+                # no-email contact still has a LinkedIn note (Copy note + open LinkedIn); only
+                # truly unreachable contacts (no email AND no LinkedIn) are skipped.
+                if draft and (contact.get("email") or contact.get("linkedin_url")):
+                    _draft_and_store(_profile_for_drafting(), job, contact)
+            stored_contacts.append(contact)
+
+        # A dry run reveals nothing, so verification has no email domain to judge and every
+        # further batch would be decided on identical evidence. One pass is all it can learn.
+        if dry_run:
+            break
+
+    selected = considered
+    result["found"] = len(considered)
 
     # ── HOT layer: your existing 1st-degree connections at this company (the warm approach). ──
     # Cold (Apollo, above) = strangers. Hot = people you already know there. Enrich their email
@@ -248,14 +299,21 @@ def find_contacts_for_job(
             f"dropped {len(rejected)} who work elsewhere"
         log.info("Verification dropped %d contact(s) at %s: %s",
                  len(rejected), company, ", ".join(rejected))
-    if not dry_run and stored_contacts:
-        from applypilot.database import log_event
-        hot_n = result.get("hot", 0)
+    hot_n = result.get("hot", 0)
+    dropped = f" Dropped {len(rejected)} who work elsewhere." if rejected else ""
+    if stored_contacts:
         warm = f", {hot_n} you already know" if hot_n else ""
-        dropped = f" Dropped {len(rejected)} who work elsewhere." if rejected else ""
-        log_event(job_url, "outreach", "ok",
-                  f"Found {len(stored_contacts)} contact(s) at {company or 'the employer'} — "
-                  f"{result['revealed']} with a verified email{warm}.{dropped}")
+        _log(f"Found {len(stored_contacts)} contact(s) at {company or 'the employer'} — "
+             f"{result['revealed']} with a verified email{warm}.{dropped}")
+    else:
+        # Nobody survived. This is the case that used to be silent, and it is the one the
+        # operator most needs explained: the search DID run and DID spend credits. Naming the
+        # people who were dropped is what makes an ambiguous employer diagnosable — Apollo
+        # lists three orgs called "Zello", none with a domain to disambiguate them.
+        who = f" ({', '.join(rejected[:4])})" if rejected else ""
+        _log(f"No contacts kept at {company or 'the employer'} — considered "
+             f"{result['found']} and dropped {len(rejected)} who work elsewhere{who}. "
+             f"The employer name may match more than one company.", "warn")
     return result
 
 

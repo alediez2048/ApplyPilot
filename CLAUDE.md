@@ -12,7 +12,7 @@ campaign happens to be a job search** — see `docs/crm-prd.md` for where that g
 - **Packaging:** Hatchling, `src/` layout, single package `applypilot`
 - **Entry point:** `applypilot = "applypilot.cli:app"` (Typer CLI)
 - **License:** AGPL-3.0-only · **Version:** 0.4.0 (`pyproject.toml`)
-- **Tests:** 417 passing (`tests/`, 29 files) · ruff clean (line-length 120, py311) · ESLint clean
+- **Tests:** 425 passing (`tests/`, 30 files) · ruff clean (line-length 120, py311) · ESLint clean
 - **Schema version:** 1 (`applypilot migrate --status`) · **Settings:** 39 declared in `settings.py`
 
 ## Quick orientation
@@ -338,6 +338,32 @@ company `"Jobs"` — the same substring bug class, inside the function written t
     `or True`; `years_claim` was digits-only and returned `None` for "Ten years", the phrasing
     the model actually writes. **Every one passed on first run.** Mutation testing is the only
     thing that found them.
+
+14. **Filtering AFTER narrowing throws away the good candidates.** "Find contacts is not
+    working" on Zello: Apollo returned 25 people, `rank.select()` cut that to the 5
+    best-*titled*, verification then dropped all 5 as working elsewhere → zero contacts. The
+    two real `@zello.com` recruiters were candidates 6–7 and were **never enriched or
+    examined**. Ranking scores title relevance and knows nothing about the employer; the
+    strongest verification signal (work-email domain) only exists *after* enrichment. So the
+    narrow step and the correctness step were ordered so that being right produced nothing.
+    Fixed by ranking the whole pool and **topping up from the rest when a batch is rejected**,
+    bounded at `_TOPUP_ROUNDS` batches because enrichment costs credits.
+    Root cause of the ambiguity: **Apollo lists THREE orgs named Zello/ZELLO, none with a
+    `primary_domain`** — Lesson 5 with no domain available to disambiguate.
+
+15. **A zero result must be as loud as an error.** The same incident: the search ran, spent
+    credits, dropped everyone — and logged *nothing*. `log_event` was gated on
+    `stored_contacts` being non-empty, and `network_note` was returned by `/api/status` and
+    **rendered by no JS at all**. So a completed search that kept nobody was byte-identical in
+    the UI to a button that had never been clicked. That is what made it undiagnosable, not the
+    dropping. Every exit from `find_contacts_for_job` now logs.
+
+16. **A same-second, same-byte-length edit can be invisible to Python's `.pyc` cache.**
+    Reverting `_TOPUP_ROUNDS = 1` → `= 3` inside one second left the *cached bytecode* in
+    force: `grep` said 3, the import said 1, and a passing test started failing for no visible
+    reason. Bytecode staleness is checked by source **mtime + size**, and `1` and `3` are the
+    same size. When a mutation test's result contradicts the file, clear `__pycache__` before
+    believing either.
 
 ---
 

@@ -136,10 +136,18 @@ def search_people(
 
 
 def company_search(name: str, per_page: int = 5) -> list[str]:
-    """Resolve a company name to Apollo organization_ids[] (no per-record credit).
+    """Apollo organization_ids[] for a company name. Prefer `company_lookup` — this
+    returns bare ids with no way to tell which org is actually the right employer."""
+    return [o["id"] for o in company_lookup(name, per_page)]
 
-    Used when we don't have the employer domain, to give people-search a precise org
-    filter instead of a weak keyword match.
+
+def company_lookup(name: str, per_page: int = 5) -> list[dict]:
+    """Resolve a company name to candidate orgs: [{id, name, domain}, ...].
+
+    Returns names and domains, not just ids, because Apollo name search is fuzzy: asking
+    for "WRITER" returns Writer (writer.com), Writer Corporation, The Writer, Content
+    Writer and a freelance resume writer. Passing all of those to people-search mixes five
+    companies' employees into one job. The caller must pick.
     """
     if not name or not _api_key():
         return []
@@ -159,7 +167,16 @@ def company_search(name: str, per_page: int = 5) -> list[str]:
         log.warning("Apollo company search failed: %s", e)
         return []
     orgs = data.get("organizations") or data.get("accounts") or []
-    return [o.get("id") for o in orgs if o.get("id")][:per_page]
+    out = []
+    for o in orgs[:per_page]:
+        if not o.get("id"):
+            continue
+        domain = (o.get("primary_domain") or "").strip().lower()
+        if not domain:
+            site = (o.get("website_url") or "").strip().lower()
+            domain = site.split("//")[-1].split("/")[0].removeprefix("www.")
+        out.append({"id": o["id"], "name": o.get("name") or "", "domain": domain})
+    return out
 
 
 def bulk_enrich(apollo_ids: list[str], *, reveal_personal_emails: bool = True) -> dict[str, dict]:

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 
-from applypilot.networking import derive, providers, rank, store
+from applypilot.networking import derive, providers, rank, store, verify
 
 log = logging.getLogger(__name__)
 
@@ -172,6 +172,7 @@ def find_contacts_for_job(
         return _profile_cache["p"]
 
     stored_contacts = []
+    rejected: list[str] = []
     for c in selected:
         rev = revealed.get(c.get("key"), {})
         contact = {
@@ -188,6 +189,17 @@ def find_contacts_for_job(
             "source": c.get("source") or providers.active() or "apollo",
             "apollo_id": c.get("apollo_id"),
         }
+        # Self-check before this reaches the dashboard. Catches the contacts an org-name
+        # filter alone misses — Apollo returns people with no email whose employer is
+        # plainly someone else (a freelance resume writer on a "Writer" job).
+        v = verify.verify_contact({**contact, "company": c.get("company")},
+                                  company, c.get("employer_domain") or "")
+        if v["verdict"] == verify.REJECT:
+            log.info("Dropping %s — %s", contact.get("full_name"), "; ".join(v["reasons"]))
+            rejected.append(contact.get("full_name") or "?")
+            continue
+        contact["confidence"] = v["confidence"]
+        contact["verify_note"] = "; ".join(v["reasons"])
         if not dry_run:
             cid = store.upsert_contact(contact)
             contact["id"] = cid
@@ -209,13 +221,75 @@ def find_contacts_for_job(
             result["hot"] = len(hot)
         except Exception as e:  # noqa: BLE001
             log.debug("Hot (connections) layer failed: %s", e)
+        # Self-heal rows a previous (buggier) company match attached to this job.
+        try:
+            pruned = _prune_stale_connection_contacts(job_url, company)
+            if pruned:
+                result["pruned"] = pruned
+                stored_contacts = [c for c in stored_contacts
+                                   if (c.get("full_name") or "") not in set(pruned)]
+                log.info("Dropped %d stale connection contact(s) at %s: %s",
+                         len(pruned), company, ", ".join(pruned))
+                from applypilot.database import log_event
+                log_event(job_url, "outreach", "info",
+                          f"Removed {len(pruned)} contact(s) who no longer match "
+                          f"{company}: {', '.join(pruned)}.")
+        except Exception as e:  # noqa: BLE001
+            log.debug("Stale-connection prune failed: %s", e)
 
     result["contacts"] = stored_contacts
     result["note"] = "dry-run (no reveal)" if dry_run else "ok"
     log.info("Networking: %s → %d cold + %d hot contacts (%d with email)%s",
              company, result["found"], result.get("hot", 0), result["revealed"],
              " [dry-run]" if dry_run else "")
+    if rejected:
+        result["rejected"] = rejected
+        result["note"] = (result["note"] + "; " if result["note"] else "") + \
+            f"dropped {len(rejected)} who work elsewhere"
+        log.info("Verification dropped %d contact(s) at %s: %s",
+                 len(rejected), company, ", ".join(rejected))
+    if not dry_run and stored_contacts:
+        from applypilot.database import log_event
+        hot_n = result.get("hot", 0)
+        warm = f", {hot_n} you already know" if hot_n else ""
+        dropped = f" Dropped {len(rejected)} who work elsewhere." if rejected else ""
+        log_event(job_url, "outreach", "ok",
+                  f"Found {len(stored_contacts)} contact(s) at {company or 'the employer'} — "
+                  f"{result['revealed']} with a verified email{warm}.{dropped}")
     return result
+
+
+def _prune_stale_connection_contacts(job_url: str, company: str | None) -> list[str]:
+    """Drop stored hot-layer contacts that no longer match a connection at `company`.
+
+    Contact discovery only ever upserts, so a row written by a buggy matcher survives the
+    fix forever — a substring bug once attached Armanino and State Farm people to an "Arm"
+    job, and they stayed after the matcher was corrected. Re-running discovery now
+    self-heals instead of needing a manual DELETE.
+
+    Deliberately conservative. A row is kept if ANY of these hold, because the cost of
+    deleting something real is far higher than leaving a stale row visible:
+      - it was emailed or a LinkedIn invite went out (there is history on it)
+      - you typed a phone number or notes on it (you invested in it by hand)
+      - we cannot tell who the employer is (no company -> no basis to judge)
+    """
+    from applypilot.networking import connections, store
+    if not company or not job_url:
+        return []
+    removed = []
+    for c in store.get_contacts_for_job(job_url):
+        if (c.get("source") or "") != "connection":
+            continue
+        if (c.get("sent_message_id") or "").strip() or (c.get("dm_status") or "") in ("sent", "manual"):
+            continue
+        if (c.get("phone") or "").strip() or (c.get("notes") or "").strip():
+            continue
+        rec = connections.match(c.get("full_name"), company)
+        if rec and rec.get("company_match"):
+            continue
+        if store.delete_contact(c["id"]):
+            removed.append(c.get("full_name") or c["id"])
+    return removed
 
 
 def _find_hot_contacts(job: dict, company: str | None, cold_selected: list[dict],

@@ -20,13 +20,11 @@ from datetime import datetime, timezone
 from hashlib import sha1
 
 from applypilot.database import get_connection
+# Company matching is a shared domain rule — connections, Apollo org resolution and contact
+# verification must all agree. Lives in domain/company.py; re-exported for existing callers.
+from applypilot.domain.company import companies_match, norm_company
 
 log = logging.getLogger(__name__)
-
-_COMPANY_SUFFIXES = re.compile(
-    r"\b(inc|inc\.|llc|l\.l\.c\.|ltd|ltd\.|corp|corp\.|co|co\.|company|gmbh|plc|sa|nv|ag)\b",
-    re.IGNORECASE,
-)
 
 _CONN_COLUMNS: dict[str, str] = {
     "id": "TEXT PRIMARY KEY",     # sha1(name_norm + company_norm)
@@ -45,10 +43,7 @@ def _norm_name(s: str | None) -> str:
     return re.sub(r"[^a-z0-9 ]", "", (s or "").lower()).strip()
 
 
-def _norm_company(s: str | None) -> str:
-    base = re.sub(r"[^a-z0-9 &]", " ", (s or "").lower())
-    base = _COMPANY_SUFFIXES.sub("", base)
-    return re.sub(r"\s+", " ", base).strip()
+_norm_company = norm_company   # internal alias, kept for existing call sites
 
 
 def init_connections(conn: sqlite3.Connection | None = None) -> sqlite3.Connection:
@@ -149,8 +144,7 @@ def match(full_name: str | None, company: str | None = None,
     best = None
     for r in rows:
         rec = dict(zip(r.keys(), r))
-        rec["company_match"] = bool(target and rec["company_norm"] and
-                                    (target in rec["company_norm"] or rec["company_norm"] in target))
+        rec["company_match"] = companies_match(target, rec["company_norm"])
         if rec["company_match"]:
             return rec  # exact-ish company match wins immediately
         best = best or rec
@@ -165,9 +159,8 @@ def count_at_company(company: str | None, conn: sqlite3.Connection | None = None
     if conn is None:
         conn = get_connection()
     init_connections(conn)
-    # substring match both ways to tolerate 'Affirm' vs 'Affirm, Inc.'
     rows = conn.execute("SELECT company_norm FROM connections WHERE company_norm != ''").fetchall()
-    return sum(1 for (cn,) in rows if target in cn or cn in target)
+    return sum(1 for (cn,) in rows if companies_match(target, cn))
 
 
 def at_company(company: str | None, limit: int = 25,
@@ -175,7 +168,8 @@ def at_company(company: str | None, limit: int = 25,
     """Your 1st-degree connections who currently work at `company` (the 'hot' layer).
 
     Returns connection records {full_name, company, position, url}, most-recently-connected first.
-    Substring match both ways so 'Affirm' matches 'Affirm, Inc.'.
+    Company matching is word-aware (see companies_match) — a raw substring test made short
+    employer names like "Arm" match Armanino, State Farm and Centrient Pharmaceuticals.
     """
     target = _norm_company(company)
     if not target:
@@ -191,7 +185,7 @@ def at_company(company: str | None, limit: int = 25,
     for r in rows:
         rec = dict(zip(r.keys(), r))
         cn = rec.get("company_norm") or ""
-        if target in cn or cn in target:
+        if companies_match(target, cn):
             rec.pop("company_norm", None)
             out.append(rec)
             if len(out) >= limit:

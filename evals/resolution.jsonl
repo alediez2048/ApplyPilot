@@ -1,0 +1,52 @@
+{"_comment": "Golden set for contact resolution: job URL -> employer -> domain, and company-name matching. Every row is a REAL case from this account, including every bug that shipped. Negative cases are the point: a set of happy paths passed all four shipped bugs. Runner: tests/test_eval_resolution.py"}
+{"kind": "employer", "id": "yc-hamming", "why": "shipped bug: YC is the board, Hamming AI is the employer", "url": "https://www.ycombinator.com/companies/hamming-ai/jobs/XTCQPuO-product-engineer", "site": "Ycombinator", "company": "Ycombinator", "expect_company": "Hamming AI", "expect_domain": null}
+{"kind": "employer", "id": "waas-openai", "why": "YC's other board uses the same /companies/<slug>/ shape", "url": "https://www.workatastartup.com/companies/openai", "site": "Workatastartup", "company": null, "expect_company": "OpenAI", "expect_domain": null}
+{"kind": "employer", "id": "gh-devrev", "why": "greenhouse: employer is in the path, not the host", "url": "https://job-boards.greenhouse.io/devrev/jobs/5823633004", "site": "Devrev", "company": "Devrev", "expect_company": "Devrev", "expect_domain": null}
+{"kind": "employer", "id": "gh-affirm-nocompany", "why": "no stored company; must come from the greenhouse slug", "url": "https://job-boards.greenhouse.io/affirm/jobs/7778204003", "site": "Affirm", "company": "", "expect_company": "Affirm", "expect_domain": null}
+{"kind": "employer", "id": "ashby-webai-case", "why": "Ashby preserves real casing; .title() would flatten it to Webai", "url": "https://jobs.ashbyhq.com/webAI/c55123d9-d821-42d0-983f-cd5bf4ee003d", "site": "Webai", "company": null, "expect_company": "webAI", "expect_domain": null}
+{"kind": "employer", "id": "ashby-writer", "why": "the WRITER job that pulled in four other companies", "url": "https://jobs.ashbyhq.com/WRITER/a9bff2f8-2443-47fa-8aa5-529026eb268c/application", "site": "WRITER", "company": "WRITER", "expect_company": "WRITER", "expect_domain": null}
+{"kind": "employer", "id": "careers-arm", "why": "employer's own careers host", "url": "https://careers.arm.com/job/austin/project-manager/33099/98187464416", "site": "Arm", "company": "Arm", "expect_company": "Arm", "expect_domain": "arm.com"}
+{"kind": "employer", "id": "careers-amd-subdomain", "why": "careers. subdomain must be stripped", "url": "https://careers.amd.com/careers-home/jobs/1", "site": "Amd", "company": null, "expect_company": "Amd", "expect_domain": "amd.com"}
+{"kind": "employer", "id": "clever-not-lever", "why": "shipped bug: 'lever' is a substring of 'clever'", "url": "https://careers.clever.com/jobs/1", "site": null, "company": null, "expect_company": "Clever", "expect_domain": "clever.com"}
+{"kind": "employer", "id": "leverage-not-lever", "why": "same collision, different word", "url": "https://jobs.leverage.io/x", "site": null, "company": null, "expect_company": "Leverage", "expect_domain": "leverage.io"}
+{"kind": "employer", "id": "jobsight-not-jobs", "why": "'jobs' is a substring of 'jobsight'", "url": "https://www.jobsight.com/apply/9", "site": null, "company": null, "expect_company": "Jobsight", "expect_domain": "jobsight.com"}
+{"kind": "employer", "id": "jobs-subdomain-stripe", "why": "jobs.<employer>.com is a careers portal, not a board", "url": "https://jobs.stripe.com/positions/123", "site": "Indeed", "company": null, "expect_company": "Stripe", "expect_domain": "stripe.com"}
+{"kind": "employer", "id": "walmart-w-initial", "why": "shipped bug: lstrip('www.') ate the leading w", "url": "https://www.walmart.com/jobs/1", "site": null, "company": null, "expect_company": "Walmart", "expect_domain": "walmart.com"}
+{"kind": "employer", "id": "webai-w-initial", "why": "same lstrip bug: webai.com -> ebai.com", "url": "https://webai.com/careers/1", "site": null, "company": null, "expect_company": "Webai", "expect_domain": "webai.com"}
+{"kind": "employer", "id": "board-domain-greenhouse", "why": "a board's own domain must never be handed to Apollo", "url": "https://job-boards.greenhouse.io/affirm/jobs/1", "site": "Affirm", "company": null, "expect_company": "Affirm", "expect_domain": null}
+{"kind": "employer", "id": "board-domain-lever", "why": "same, for lever", "url": "https://jobs.lever.co/acme/1234", "site": null, "company": null, "expect_company": "Acme", "expect_domain": null}
+{"kind": "employer", "id": "no-signal-at-all", "why": "report nothing rather than the board name", "url": "https://www.ycombinator.com/jobs", "site": "Ycombinator", "company": "Ycombinator", "expect_company": null, "expect_domain": null}
+
+{"kind": "company_match", "id": "arm-exact", "a": "Arm", "b": "Arm", "expect": true, "strict_expect": true}
+{"kind": "company_match", "id": "arm-holdings", "why": "trailing corporate descriptor is the same company", "a": "Arm", "b": "Arm Holdings", "expect": true, "strict_expect": false}
+{"kind": "company_match", "id": "armanino", "why": "shipped bug: arm-anino", "a": "Arm", "b": "Armanino", "expect": false, "strict_expect": false}
+{"kind": "company_match", "id": "armadillo", "why": "shipped bug: arm-adillo", "a": "Arm", "b": "Armadillo World Headquarters", "expect": false, "strict_expect": false}
+{"kind": "company_match", "id": "state-farm", "why": "shipped bug: state f-arm", "a": "Arm", "b": "State Farm", "expect": false, "strict_expect": false}
+{"kind": "company_match", "id": "centrient", "why": "shipped bug: ph-arm-aceuticals", "a": "Arm", "b": "Centrient Pharmaceuticals", "expect": false, "strict_expect": false}
+{"kind": "company_match", "id": "dharma", "why": "shipped bug: dh-arm-a", "a": "Arm", "b": "Dharma Capital Holding", "expect": false, "strict_expect": false}
+{"kind": "company_match", "id": "trex-arms", "why": "shipped bug: arm-s", "a": "Arm", "b": "T.REX ARMS, Inc.", "expect": false, "strict_expect": false}
+{"kind": "company_match", "id": "writer-exact", "a": "WRITER", "b": "WRITER", "expect": true, "strict_expect": true}
+{"kind": "company_match", "id": "writer-corporation", "why": "shipped bug: a different company entirely", "a": "WRITER", "b": "Writer Corporation", "expect": false, "strict_expect": false}
+{"kind": "company_match", "id": "the-writer", "why": "shipped bug: leading word differs", "a": "WRITER", "b": "The Writer", "expect": false, "strict_expect": false}
+{"kind": "company_match", "id": "content-writer", "why": "shipped bug", "a": "WRITER", "b": "Content Writer", "expect": false, "strict_expect": false}
+{"kind": "company_match", "id": "freelance-writer", "why": "shipped bug: a freelancer's Apollo org", "a": "WRITER", "b": "Muhammad Ejaz | ATS Resume Writer", "expect": false, "strict_expect": false}
+{"kind": "company_match", "id": "affirm-health", "why": "near-miss: a real, different company", "a": "Affirm", "b": "Affirm Health", "expect": true, "strict_expect": false}
+{"kind": "company_match", "id": "affirm-partners", "why": "near-miss: a real, different company", "a": "Affirm", "b": "Affirm Partners", "expect": true, "strict_expect": false}
+{"kind": "company_match", "id": "affirm-inc", "why": "legal suffix is the same company", "a": "Affirm", "b": "Affirm, Inc.", "expect": true, "strict_expect": true}
+{"kind": "company_match", "id": "apple-bank", "why": "'Bank' is not a corporate descriptor", "a": "Apple", "b": "Apple Bank", "expect": false, "strict_expect": false}
+{"kind": "company_match", "id": "meta-platforms", "why": "nearly regressed while fixing Arm", "a": "Meta", "b": "Meta Platforms", "expect": true, "strict_expect": false}
+{"kind": "company_match", "id": "google-llc", "a": "Google", "b": "Google LLC", "expect": true, "strict_expect": true}
+{"kind": "company_match", "id": "case-insensitive", "a": "arm", "b": "ARM", "expect": true, "strict_expect": true}
+{"kind": "company_match", "id": "empty-a", "a": "", "b": "Arm", "expect": false, "strict_expect": false}
+{"kind": "company_match", "id": "empty-b", "a": "Arm", "b": "", "expect": false, "strict_expect": false}
+
+{"kind": "verify", "id": "writer-real-1", "why": "genuine writer.com employee", "employer": "WRITER", "domain": "writer.com", "contact": {"email": "miles.parroco@writer.com", "company": "WRITER"}, "expect": "ok"}
+{"kind": "verify", "id": "writer-corp-email", "why": "shipped bug: caught by the email domain", "employer": "WRITER", "domain": "writer.com", "contact": {"email": "payal.bhanushali@writercorporation.com", "company": "Writer Corporation"}, "expect": "reject"}
+{"kind": "verify", "id": "writer-corp-no-email", "why": "shipped bug: NO email, caught only by org name", "employer": "WRITER", "domain": "writer.com", "contact": {"email": "", "company": "Writer Corporation"}, "expect": "reject"}
+{"kind": "verify", "id": "freelancer-no-email", "why": "shipped bug: the headhunter, no email", "employer": "WRITER", "domain": "writer.com", "contact": {"email": "", "company": "Muhammad Ejaz | ATS Resume Writer"}, "expect": "reject"}
+{"kind": "verify", "id": "no-evidence-either-way", "why": "unknown is not a rejection", "employer": "WRITER", "domain": "", "contact": {"email": "", "company": ""}, "expect": "unverified"}
+{"kind": "verify", "id": "subdomain-ok", "why": "eu.writer.com is still writer.com", "employer": "WRITER", "domain": "writer.com", "contact": {"email": "x@eu.writer.com", "company": ""}, "expect": "ok"}
+{"kind": "verify", "id": "personal-email-no-org", "why": "a gmail address alone must not disqualify a real employee", "employer": "WRITER", "domain": "", "contact": {"email": "someone@gmail.com", "company": "WRITER"}, "expect": "ok"}
+{"kind": "verify", "id": "arm-holdings-variant", "why": "must NOT reject on a legitimate name variant", "employer": "Arm", "domain": "arm.com", "contact": {"email": "waheed.brown@arm.com", "company": "Arm Holdings"}, "expect": "ok"}
+{"kind": "verify", "id": "betterup-co-tld", "why": "betterup.co, not .com — domain comes from Apollo, never guessed", "employer": "BetterUp", "domain": "betterup.co", "contact": {"email": "sage.soronen@betterup.co", "company": "BetterUp"}, "expect": "ok"}
+{"kind": "verify", "id": "devrev-ai-tld", "why": "devrev.ai, not .com", "employer": "DevRev", "domain": "devrev.ai", "contact": {"email": "sumit.singh@devrev.ai", "company": "DevRev"}, "expect": "ok"}

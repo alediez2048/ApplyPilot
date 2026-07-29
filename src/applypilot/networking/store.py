@@ -42,6 +42,34 @@ _CONTACT_COLUMNS: dict[str, str] = {
     "dm_status": "TEXT",          # none|sending|composed|sent|manual|skipped|failed
     "dm_sent_at": "TEXT",
     "dm_error": "TEXT",
+    # Operator-entered, NOT from a provider. Apollo only releases a direct dial to a public
+    # webhook, so the number is copied by hand out of the Apollo UI (see the "Apollo ↗" button).
+    "phone": "TEXT",
+    "notes": "TEXT",
+    # Follow-up sequence. followed_up_at is the LAST touch (the checklist reads it);
+    # followup_count is how many have gone out, which selects the per-touch prompt.
+    "followed_up_at": "TEXT",
+    "followup_count": "INTEGER DEFAULT 0",
+    "followup_subject": "TEXT",
+    "followup_message": "TEXT",
+    "followup_status": "TEXT",     # NULL|drafted|sending|sent|stopped|replied
+    "followup_error": "TEXT",
+    # Threading. Captured at SEND time from Gmail's own response + the RFC header we
+    # generate, so a follow-up lands inside the original conversation instead of as a
+    # second cold email. Needs no extra OAuth scope — both are already in hand at send.
+    "thread_id": "TEXT",           # Gmail threadId
+    "rfc_message_id": "TEXT",      # the RFC 5322 Message-ID header (for In-Reply-To)
+    # LinkedIn follow-up, tracked separately from email: someone who ACCEPTED your invite
+    # and then went quiet is a different (warmer) situation than an unanswered cold email,
+    # and LinkedIn can only ever be copy-paste — we never auto-send it (see CLAUDE.md §7).
+    "li_followup_count": "INTEGER DEFAULT 0",
+    "li_followed_up_at": "TEXT",
+    "li_followup_message": "TEXT",
+    "li_followup_status": "TEXT",  # NULL|drafted|sent|replied|stopped
+    # Self-check result (networking/verify.py): does the evidence agree this person
+    # actually works at the employer? high|medium|low, plus the reasoning shown in the UI.
+    "confidence": "TEXT",
+    "verify_note": "TEXT",
     "discovered_at": "TEXT",
     "updated_at": "TEXT",
 }
@@ -192,15 +220,57 @@ def claim_for_send(contact_id: str, conn: sqlite3.Connection | None = None) -> b
     return cur.rowcount == 1
 
 
-def mark_sent(contact_id: str, message_id: str, conn: sqlite3.Connection | None = None) -> None:
+def log_contact_event(contact_id: str, status: str, detail: str,
+                      conn: sqlite3.Connection | None = None) -> None:
+    """Append an `outreach`-stage row to the job's activity log for a contact action.
+
+    Lives here rather than in the dashboard so EVERY path is recorded — dashboard button,
+    CLI, and the Chrome extension all funnel through these store helpers. Best-effort:
+    log_event already swallows its own errors, and a missing contact is simply skipped.
+    """
+    try:
+        c = conn or get_connection()
+        row = c.execute("SELECT job_url FROM contacts WHERE id = ?", (contact_id,)).fetchone()
+        if not row or not row["job_url"]:
+            return
+        from applypilot.database import log_event
+        log_event(row["job_url"], "outreach", status, detail, c)
+    except Exception:  # noqa: BLE001 — activity logging must never break a send
+        pass
+
+
+def _contact_label(contact_id: str, conn: sqlite3.Connection | None = None) -> str:
+    """'Jane Doe' for log lines; falls back to the id so a line is never nameless."""
+    try:
+        c = conn or get_connection()
+        row = c.execute("SELECT full_name FROM contacts WHERE id = ?", (contact_id,)).fetchone()
+        return (row["full_name"] if row and row["full_name"] else contact_id) or contact_id
+    except Exception:  # noqa: BLE001
+        return contact_id
+
+
+def mark_sent(contact_id: str, message_id: str, conn: sqlite3.Connection | None = None,
+              thread_id: str = "", rfc_message_id: str = "") -> None:
+    """Record a successful send. thread_id / rfc_message_id are what let a later
+    follow-up thread into this same conversation (COALESCE keeps the FIRST message's
+    ids, which are the ones a reply must reference)."""
     if conn is None:
         conn = get_connection()
     conn.execute(
         "UPDATE contacts SET outreach_status = 'submitted', sent_message_id = ?, "
+        "thread_id = COALESCE(NULLIF(thread_id,''), ?), "
+        "rfc_message_id = COALESCE(NULLIF(rfc_message_id,''), ?), "
         "send_error = NULL, updated_at = ? WHERE id = ?",
-        (message_id, datetime.now(timezone.utc).isoformat(), contact_id),
+        (message_id, thread_id or "", rfc_message_id or "",
+         datetime.now(timezone.utc).isoformat(), contact_id),
     )
     conn.commit()
+    row = conn.execute("SELECT full_name, email, title FROM contacts WHERE id = ?",
+                       (contact_id,)).fetchone()
+    who = (row["full_name"] if row else None) or contact_id
+    role = f" ({row['title']})" if row and row["title"] else ""
+    addr = f" <{row['email']}>" if row and row["email"] else ""
+    log_contact_event(contact_id, "ok", f"Emailed {who}{role}{addr}.", conn)
 
 
 def mark_send_failed(contact_id: str, error: str, conn: sqlite3.Connection | None = None) -> None:
@@ -213,6 +283,8 @@ def mark_send_failed(contact_id: str, error: str, conn: sqlite3.Connection | Non
         (error[:300], datetime.now(timezone.utc).isoformat(), contact_id),
     )
     conn.commit()
+    log_contact_event(contact_id, "failed",
+                      f"Email to {_contact_label(contact_id, conn)} failed: {error[:200]}", conn)
 
 
 # ── LinkedIn DM channel ──────────────────────────────────────────────────────
@@ -298,6 +370,8 @@ def mark_dm_sent(contact_id: str, conn: sqlite3.Connection | None = None) -> Non
         (now, now, contact_id),
     )
     conn.commit()
+    log_contact_event(contact_id, "ok",
+                      f"Connected on LinkedIn — invite note sent to {_contact_label(contact_id, conn)}.", conn)
 
 
 def mark_dm_composed(contact_id: str, conn: sqlite3.Connection | None = None) -> None:
@@ -327,6 +401,8 @@ def mark_dm_manual(contact_id: str, conn: sqlite3.Connection | None = None) -> N
         (now, now, contact_id),
     )
     conn.commit()
+    log_contact_event(contact_id, "ok",
+                      f"Connected on LinkedIn — sent {_contact_label(contact_id, conn)} an invite manually.", conn)
 
 
 def mark_dm_skipped(contact_id: str, conn: sqlite3.Connection | None = None) -> None:
@@ -339,6 +415,8 @@ def mark_dm_skipped(contact_id: str, conn: sqlite3.Connection | None = None) -> 
         (datetime.now(timezone.utc).isoformat(), contact_id),
     )
     conn.commit()
+    log_contact_event(contact_id, "skipped",
+                      f"Skipped LinkedIn outreach to {_contact_label(contact_id, conn)}.", conn)
 
 
 def mark_dm_failed(contact_id: str, error: str, conn: sqlite3.Connection | None = None) -> None:
@@ -351,6 +429,175 @@ def mark_dm_failed(contact_id: str, error: str, conn: sqlite3.Connection | None 
         (error[:300], datetime.now(timezone.utc).isoformat(), contact_id),
     )
     conn.commit()
+    log_contact_event(
+        contact_id, "failed",
+        f"LinkedIn outreach to {_contact_label(contact_id, conn)} failed: {error[:200]}", conn)
+
+
+def mark_followed_up(contact_id: str, conn: sqlite3.Connection | None = None) -> bool:
+    """Record a follow-up touch. Idempotent — the first one wins, so double-clicking
+    the button (or a stale tab replaying it) can't rewrite the timestamp."""
+    if conn is None:
+        conn = get_connection()
+    now = datetime.now(timezone.utc).isoformat()
+    cur = conn.execute(
+        "UPDATE contacts SET followed_up_at = ?, updated_at = ? "
+        "WHERE id = ? AND (followed_up_at IS NULL OR followed_up_at = '')",
+        (now, now, contact_id),
+    )
+    conn.commit()
+    if cur.rowcount == 1:
+        log_contact_event(contact_id, "ok",
+                          f"Followed up with {_contact_label(contact_id, conn)}.", conn)
+    return cur.rowcount == 1
+
+
+def claim_followup_send(contact_id: str, conn: sqlite3.Connection | None = None) -> bool:
+    """Atomically claim a follow-up send. Mirrors claim_for_send — under the threading
+    server two clicks can race, and a duplicate follow-up is the worst possible bug here."""
+    if conn is None:
+        conn = get_connection()
+    cur = conn.execute(
+        "UPDATE contacts SET followup_status = 'sending', updated_at = ? "
+        "WHERE id = ? AND (followup_status IS NULL OR followup_status NOT IN "
+        "('sending', 'stopped', 'replied'))",
+        (datetime.now(timezone.utc).isoformat(), contact_id),
+    )
+    conn.commit()
+    return cur.rowcount == 1
+
+
+def mark_followup_sent(contact_id: str, conn: sqlite3.Connection | None = None) -> int:
+    """Record a sent follow-up and advance the touch counter. Returns the new count."""
+    if conn is None:
+        conn = get_connection()
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        "UPDATE contacts SET followup_count = COALESCE(followup_count, 0) + 1, "
+        "followed_up_at = ?, followup_status = 'sent', followup_error = NULL, "
+        "followup_subject = NULL, followup_message = NULL, updated_at = ? WHERE id = ?",
+        (now, now, contact_id),
+    )
+    conn.commit()
+    row = conn.execute("SELECT followup_count FROM contacts WHERE id = ?", (contact_id,)).fetchone()
+    n = (row["followup_count"] if row else 1) or 1
+    log_contact_event(contact_id, "ok",
+                      f"Follow-up #{n} sent to {_contact_label(contact_id, conn)}.", conn)
+    return n
+
+
+def mark_followup_failed(contact_id: str, error: str,
+                         conn: sqlite3.Connection | None = None) -> None:
+    """Release the claim so the follow-up can be retried."""
+    if conn is None:
+        conn = get_connection()
+    conn.execute(
+        "UPDATE contacts SET followup_status = 'drafted', followup_error = ?, updated_at = ? "
+        "WHERE id = ?",
+        (error[:300], datetime.now(timezone.utc).isoformat(), contact_id),
+    )
+    conn.commit()
+    log_contact_event(contact_id, "failed",
+                      f"Follow-up to {_contact_label(contact_id, conn)} failed: {error[:200]}", conn)
+
+
+def set_followup_draft(contact_id: str, subject: str, body: str,
+                       conn: sqlite3.Connection | None = None) -> None:
+    if conn is None:
+        conn = get_connection()
+    conn.execute(
+        "UPDATE contacts SET followup_subject = ?, followup_message = ?, "
+        "followup_status = 'drafted', updated_at = ? WHERE id = ?",
+        (subject, body, datetime.now(timezone.utc).isoformat(), contact_id),
+    )
+    conn.commit()
+
+
+def set_sequence_status(contact_id: str, status: str,
+                        conn: sqlite3.Connection | None = None) -> None:
+    """Stop or reopen a sequence. 'stopped' and 'replied' both halt further follow-ups."""
+    if conn is None:
+        conn = get_connection()
+    conn.execute("UPDATE contacts SET followup_status = ?, updated_at = ? WHERE id = ?",
+                 (status or None, datetime.now(timezone.utc).isoformat(), contact_id))
+    conn.commit()
+    if status in ("stopped", "replied"):
+        word = "replied — sequence stopped" if status == "replied" else "sequence stopped"
+        log_contact_event(contact_id, "info", f"{_contact_label(contact_id, conn)}: {word}.", conn)
+
+
+def set_li_followup_draft(contact_id: str, message: str,
+                          conn: sqlite3.Connection | None = None) -> None:
+    if conn is None:
+        conn = get_connection()
+    conn.execute(
+        "UPDATE contacts SET li_followup_message = ?, li_followup_status = 'drafted', "
+        "updated_at = ? WHERE id = ?",
+        (message, datetime.now(timezone.utc).isoformat(), contact_id),
+    )
+    conn.commit()
+
+
+def mark_li_followup_sent(contact_id: str, conn: sqlite3.Connection | None = None) -> int:
+    """Record that YOU sent the LinkedIn follow-up (we never send it). Returns the count.
+
+    Idempotence is deliberately NOT enforced here the way it is for email: LinkedIn sends
+    are manual, so a second click means you really did send a second message.
+    """
+    if conn is None:
+        conn = get_connection()
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        "UPDATE contacts SET li_followup_count = COALESCE(li_followup_count, 0) + 1, "
+        "li_followed_up_at = ?, li_followup_status = 'sent', li_followup_message = NULL, "
+        "updated_at = ? WHERE id = ?",
+        (now, now, contact_id),
+    )
+    conn.commit()
+    row = conn.execute("SELECT li_followup_count FROM contacts WHERE id = ?",
+                       (contact_id,)).fetchone()
+    n = (row["li_followup_count"] if row else 1) or 1
+    log_contact_event(contact_id, "ok",
+                      f"LinkedIn follow-up #{n} sent to {_contact_label(contact_id, conn)}.", conn)
+    return n
+
+
+def set_li_sequence_status(contact_id: str, status: str,
+                           conn: sqlite3.Connection | None = None) -> None:
+    if conn is None:
+        conn = get_connection()
+    conn.execute("UPDATE contacts SET li_followup_status = ?, updated_at = ? WHERE id = ?",
+                 (status or None, datetime.now(timezone.utc).isoformat(), contact_id))
+    conn.commit()
+    if status in ("stopped", "replied"):
+        word = "replied on LinkedIn — sequence stopped" if status == "replied" else "LinkedIn sequence stopped"
+        log_contact_event(contact_id, "info", f"{_contact_label(contact_id, conn)}: {word}.", conn)
+
+
+def mark_connected_now(contact_id: str, conn: sqlite3.Connection | None = None) -> None:
+    """Record that an invite went out (or was accepted) so the LinkedIn clock can start.
+
+    Needed because invites sent before ApplyPilot tracked them leave dm_sent_at empty,
+    and without an anchor there is nothing to schedule a follow-up from.
+    """
+    if conn is None:
+        conn = get_connection()
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        "UPDATE contacts SET dm_status = 'manual', dm_sent_at = COALESCE(NULLIF(dm_sent_at,''), ?), "
+        "updated_at = ? WHERE id = ?",
+        (now, now, contact_id),
+    )
+    conn.commit()
+
+
+def delete_contact(contact_id: str, conn: sqlite3.Connection | None = None) -> bool:
+    """Remove a contact row. Returns True if a row was actually deleted."""
+    if conn is None:
+        conn = get_connection()
+    cur = conn.execute("DELETE FROM contacts WHERE id = ?", (contact_id,))
+    conn.commit()
+    return cur.rowcount == 1
 
 
 def get_contacts_for_job(job_url: str, conn: sqlite3.Connection | None = None) -> list[dict]:

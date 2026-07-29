@@ -154,13 +154,46 @@ def test_delete_removes_contacts_but_only_for_operator_added_jobs(db):
 
 # ── the boundary itself ─────────────────────────────────────────────────────
 
-def test_web_dashboard_runs_no_sql_against_jobs():
-    """ARCH-4's headline criterion, for this commit's scope."""
-    import re
+def test_web_dashboard_runs_no_sql_at_all():
+    """ARCH-4's headline criterion: web_dashboard.py contains ZERO SQL (was 39 statements).
 
+    A view layer that can reach the database will, and every statement added there is one
+    more place a schema change has to be found. The boundary only holds if crossing it fails.
+    """
     from applypilot import web_dashboard as wd
     src = (wd._STATIC_DIR.parent / "web_dashboard.py").read_text(encoding="utf-8")
-    hits = [ln.strip() for ln in src.splitlines()
-            if ".execute(" in ln or re.search(r"\b(FROM|INTO|UPDATE)\s+jobs\b", ln, re.I)]
-    assert not [h for h in hits if re.search(r"\bjobs\b", h, re.I)], \
-        "jobs SQL is back in web_dashboard.py:\n  " + "\n  ".join(hits[:5])
+    hits = [f"{i}: {ln.strip()[:90]}" for i, ln in enumerate(src.splitlines(), 1)
+            if ".execute(" in ln]
+    assert not hits, "SQL is back in web_dashboard.py:\n  " + "\n  ".join(hits[:8])
+
+
+def test_sql_lives_only_in_the_data_layer():
+    """The wider boundary. Listed explicitly so adding a module here is a decision.
+
+    Still-unmigrated modules are named rather than wildcarded — the list is the remaining
+    ARCH-4 scope, and it should only ever shrink.
+    """
+    import pathlib
+
+    import applypilot
+    root = pathlib.Path(applypilot.__file__).parent
+    allowed = {
+        "database.py", "repo/jobs.py",                       # the data layer proper
+        "networking/store.py", "networking/touches.py",      # per-table repositories
+        "networking/connections.py", "networking/backfill_touches.py",
+        # --- not yet migrated (remaining ARCH-4 scope) ---
+        "enrichment/detail.py", "apply/launcher.py", "view.py", "cli.py", "pipeline.py",
+        "discovery/jobspy.py", "discovery/workday.py", "discovery/smartextract.py",
+        "scoring/scorer.py", "scoring/cover_letter.py", "scoring/tailor.py",
+        "networking/gmail_send.py", "networking/gmail_oauth.py", "networking/service.py",
+        "networking/linkedin_agent.py",
+    }
+    offenders = sorted(
+        str(p.relative_to(root)) for p in root.rglob("*.py")
+        if ".execute(" in p.read_text(encoding="utf-8")
+        and str(p.relative_to(root)) not in allowed
+    )
+    assert not offenders, (
+        "new modules are executing SQL directly: " + ", ".join(offenders) +
+        "\nRoute them through repo/ or a table's repository instead."
+    )

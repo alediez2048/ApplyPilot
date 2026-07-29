@@ -31,6 +31,7 @@ from rich.console import Console
 
 from applypilot import __version__, config
 from applypilot.database import get_connection, init_db
+from applypilot.networking import store as _store
 from applypilot.repo import jobs as _jobs
 
 console = Console()
@@ -1251,7 +1252,7 @@ def _save_or_regen_draft(data: dict) -> dict:
     cid = data.get("contact_id", "")
     if not cid:
         return {"ok": False, "message": "contact_id required"}
-    row = conn.execute("SELECT id, job_url FROM contacts WHERE id = ?", (cid,)).fetchone()
+    row = _store.contact_ref(cid, conn)
     if not row:
         return {"ok": False, "message": "contact not found"}
 
@@ -1295,7 +1296,7 @@ def _save_contact_details(data: dict) -> dict:
     cid = data.get("contact_id", "")
     if not cid:
         return {"ok": False, "message": "contact_id required"}
-    row = conn.execute("SELECT id, job_url FROM contacts WHERE id = ?", (cid,)).fetchone()
+    row = _store.contact_ref(cid, conn)
     if not row:
         return {"ok": False, "message": "contact not found"}
 
@@ -1306,7 +1307,7 @@ def _save_contact_details(data: dict) -> dict:
         fields["notes"] = str(data.get("notes") or "").strip()[:_NOTES_MAX_LEN]
     if len(fields) == 2:
         return {"ok": False, "message": "nothing to save"}
-    before = conn.execute("SELECT full_name, phone FROM contacts WHERE id = ?", (cid,)).fetchone()
+    before = _store.contact_name_and_phone(cid, conn)
     upsert_contact(fields)
     # Only log a phone that actually changed — re-saving a note shouldn't spam the timeline.
     new_phone = fields.get("phone")
@@ -1495,13 +1496,7 @@ def _ext_queue(job_url: str | None, include_skipped: bool = False) -> dict:
     init_contacts(conn)
 
     if include_skipped:
-        conn.execute(
-            "UPDATE contacts SET dm_status = 'none' "
-            "WHERE dm_status = 'skipped' "
-            "AND linkedin_url IS NOT NULL AND trim(linkedin_url) != '' "
-            "AND linkedin_message IS NOT NULL AND trim(linkedin_message) != ''"
-        )
-        conn.commit()
+        _store.unskip_dms(conn)
 
     if job_url:
         # Per-job: reuse the shared eligibility helper (linkedin_url + note + not done-set).
@@ -1509,19 +1504,9 @@ def _ext_queue(job_url: str | None, include_skipped: bool = False) -> dict:
     else:
         # All-jobs variant: single SELECT over contacts, then dedupe by normalized profile URL
         # so the same person surfaced under two jobs yields exactly one queue row.
-        placeholders = ", ".join("?" for _ in _EXT_QUEUE_EXCLUDE)
-        rows = conn.execute(
-            "SELECT * FROM contacts "
-            "WHERE linkedin_url IS NOT NULL AND trim(linkedin_url) != '' "
-            "AND linkedin_message IS NOT NULL AND trim(linkedin_message) != '' "
-            f"AND (dm_status IS NULL OR dm_status NOT IN ({placeholders})) "
-            "ORDER BY discovered_at ASC",
-            tuple(_EXT_QUEUE_EXCLUDE),
-        ).fetchall()
         contacts = []
         seen: set[str] = set()
-        for r in rows:
-            c = dict(zip(r.keys(), r))
+        for c in _store.dm_queue(tuple(_EXT_QUEUE_EXCLUDE), conn):
             norm = _norm_linkedin(c.get("linkedin_url"))
             if norm in seen:
                 continue

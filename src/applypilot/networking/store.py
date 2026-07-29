@@ -540,3 +540,77 @@ def get_contacts_for_job(job_url: str, conn: sqlite3.Connection | None = None) -
         "SELECT * FROM contacts WHERE job_url = ? ORDER BY discovered_at ASC", (job_url,)
     ).fetchall()
     return [dict(zip(r.keys(), r)) for r in rows] if rows else []
+
+
+# ── readers the dashboard used to run inline (ARCH-4) ───────────────────────
+# `store.py` already was the repository for `contacts`; these are the four statements
+# `web_dashboard.py` was still executing itself. Adding them here rather than creating a
+# `repo/contacts.py` — two abstractions over one table is the failure mode the ticket
+# explicitly warns about.
+
+def contact_ref(contact_id: str, conn: sqlite3.Connection | None = None) -> dict | None:
+    """Just identity: does this contact exist, and which job is it under?
+
+    The dashboard's save/draft handlers need the job_url to build an upsert, and nothing
+    else off the row — fetching `SELECT *` for two columns read a 32-column row per keystroke.
+    """
+    if conn is None:
+        conn = get_connection()
+    init_contacts(conn)
+    row = conn.execute("SELECT id, job_url FROM contacts WHERE id = ?", (contact_id,)).fetchone()
+    return dict(zip(row.keys(), row)) if row else None
+
+
+def contact_name_and_phone(contact_id: str,
+                           conn: sqlite3.Connection | None = None) -> dict | None:
+    """Pre-save snapshot, so only a phone that ACTUALLY changed gets logged.
+
+    Re-saving a note would otherwise spam the activity timeline with phone events.
+    """
+    if conn is None:
+        conn = get_connection()
+    init_contacts(conn)
+    row = conn.execute("SELECT full_name, phone FROM contacts WHERE id = ?",
+                       (contact_id,)).fetchone()
+    return dict(zip(row.keys(), row)) if row else None
+
+
+def unskip_dms(conn: sqlite3.Connection | None = None) -> int:
+    """Put previously-skipped contacts back in the extension queue.
+
+    `sent` / `manual` are genuinely done and deliberately untouched — only `skipped`
+    (a decision you can change your mind about) is reset.
+    """
+    if conn is None:
+        conn = get_connection()
+    init_contacts(conn)
+    n = conn.execute(
+        "UPDATE contacts SET dm_status = 'none' "
+        "WHERE dm_status = 'skipped' "
+        "AND linkedin_url IS NOT NULL AND trim(linkedin_url) != '' "
+        "AND linkedin_message IS NOT NULL AND trim(linkedin_message) != ''"
+    ).rowcount
+    conn.commit()
+    return n
+
+
+def dm_queue(exclude_statuses: tuple[str, ...],
+             conn: sqlite3.Connection | None = None) -> list[dict]:
+    """Everyone with a LinkedIn profile and a drafted note who hasn't been messaged.
+
+    Ordered oldest-first so the queue is stable across polls; the caller dedupes by
+    normalized profile URL, since one person can surface under two jobs.
+    """
+    if conn is None:
+        conn = get_connection()
+    init_contacts(conn)
+    marks = ", ".join("?" for _ in exclude_statuses)
+    rows = conn.execute(
+        "SELECT * FROM contacts "
+        "WHERE linkedin_url IS NOT NULL AND trim(linkedin_url) != '' "
+        "AND linkedin_message IS NOT NULL AND trim(linkedin_message) != '' "
+        f"AND (dm_status IS NULL OR dm_status NOT IN ({marks})) "
+        "ORDER BY discovered_at ASC",
+        tuple(exclude_statuses),
+    ).fetchall()
+    return [dict(zip(r.keys(), r)) for r in rows]

@@ -410,7 +410,10 @@ def _structure_block(resume_text: str) -> str:
            "",
            "This person's résumé has the sections below. Return EXACTLY these, with EXACTLY",
            "these titles, in EXACTLY this order. Do not rename, merge, reorder, add or drop",
-           "any section. A section you have nothing new to say about is returned unchanged.",
+           "any section.",
+           "",
+           "This constrains the SHAPE of the document, not its words. Every section still gets",
+           "rewritten for this role — returning one unchanged is a failure, not a safe default.",
            ""]
     for i, sec in enumerate(r.sections, 1):
         n = len(sec.bullets())
@@ -447,12 +450,29 @@ You are given their résumé and a job description. Rewrite the CONTENT for this
 keeping the DOCUMENT'S STRUCTURE identical.
 
 {_structure_block(resume_text)}
-## WHAT TO CHANGE
-- Rewrite prose and bullets so the most relevant work leads and the language matches the role.
-- Reorder bullets WITHIN an employer by relevance. Never delete one.
+## WHAT TO CHANGE — REWRITE EVERY BULLET
+Reframe EVERY bullet for THIS role. Same real work, a different angle. Every bullet must be
+genuinely reworded — lead with the verb and the outcome this job cares about. Reordering the
+clauses of the original sentence is NOT rewriting it.
+
+The test, using an unrelated example so you do not borrow its wording or its shape:
+
+  original : "Managed the warehouse inventory system, reducing stockouts by 30% using
+              forecasting models and supplier integrations."
+  NOT this : "Managed the warehouse inventory system, using forecasting models and supplier
+              integrations to reduce stockouts by 30%."      <- same sentence, clauses moved
+  REWRITTEN: "Cut stockouts 30% by rebuilding demand forecasting and wiring supplier feeds
+              straight into the inventory system."
+
+VARY THE SENTENCE SHAPE across bullets. If every bullet reads "Verb + object: tools, outcome"
+the résumé looks generated. Some lead with the outcome, some with the problem, some with what
+was built.
+
+- Reorder bullets WITHIN an employer so the most relevant leads. Never delete one.
 - Keep every named tool, platform and metric that is already there. Those are what a keyword
   screen matches on; dropping "AEM, Botify, GA4, GSC" to say "improved customer experience"
-  makes the résumé worse, not tighter.
+  makes the résumé worse, not tighter. Keep the fact, change the framing.
+- Never copy a bullet verbatim.
 
 ## WHAT NEVER CHANGES
 - Section titles, section order, employer names, role titles, dates, degrees, schools.

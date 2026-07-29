@@ -571,8 +571,23 @@ def run_dashboard_apply(limit: int = 10, dry_run: bool = False, copilot: bool = 
     # still under the retry cap. Including 'failed' (under-cap) means a botched/interrupted apply
     # (e.g. the user closed the tab, or a blocking field) can just be re-run from the dashboard —
     # no manual DB reset. 'in_progress' and cap-exhausted jobs are left alone.
+    from applypilot.database import log_event
     max_attempts = config.DEFAULTS["max_apply_attempts"]
     rows = _jobs.queue_for_apply(limit, max_attempts, conn)
+
+    # Refuse to start at all while a co-pilot review is already open. The queue below is
+    # blind to it (`queue_for_apply` filters on the JOB, not on whether a browser is being
+    # used), so without this a fresh apply silently closes the form you were mid-review on.
+    if copilot and not dry_run:
+        awaiting = _jobs.awaiting_human(conn)
+        if awaiting:
+            names = ", ".join(r["title"][:28] for r in awaiting[:3])
+            msg = (f"{len(awaiting)} application(s) are filled and waiting for you ({names}). "
+                   f"Starting another would close the browser you need. Submit or dismiss "
+                   f"them first.")
+            print(f"BLOCKED: {msg}", flush=True)
+            return {"queued": 0, "applied": 0, "failed": 0, "needs_review": len(awaiting),
+                    "held_back": len(rows), "blocked": msg}
 
     print(f"Dashboard URL apply queue: {len(rows)} job(s)", flush=True)
     applied = 0
@@ -596,7 +611,32 @@ def run_dashboard_apply(limit: int = 10, dry_run: bool = False, copilot: bool = 
             failed += 1
         print(f"=== Finished {index}/{len(rows)} with exit code {completed.returncode} ===", flush=True)
 
-    result = {"queued": len(rows), "applied": applied, "failed": failed, "needs_review": needs_review}
+        # STOP the batch the moment a job needs the human. Co-pilot mode ends by asking you
+        # to review and submit in an open browser — and starting the next apply KILLS that
+        # browser, because launch clears whatever holds the CDP port.
+        #
+        # 2026-07-29: a Zello application was filled correctly in 78s and handed over for
+        # review; the next queued job (Deloitte) started 428ms later and destroyed the
+        # browser. The row still read `ready_to_submit`, so the status claimed a form was
+        # waiting that no longer existed. Batching N jobs in co-pilot mode leaves every one
+        # of them un-reviewable except the last.
+        #
+        # Real fix is sequencing, not a bigger warning: one pending review at a time.
+        pending = status and status["apply_status"] in ("ready_to_submit", "needs_human")
+        if copilot and not dry_run and pending and index < len(rows):
+            remaining = len(rows) - index
+            print(f"=== PAUSED: {row['site']} is filled and waiting for your review. "
+                  f"{remaining} job(s) left in the queue — they will NOT start until you "
+                  f"submit or dismiss this one, because starting one would close the browser "
+                  f"you need. ===", flush=True)
+            log_event(row["url"], "apply", "info",
+                      f"Queue paused here: {remaining} job(s) held back so this review "
+                      f"stays open. Submit or dismiss, then run apply again.", conn)
+            break
+
+    result = {"queued": len(rows), "applied": applied, "failed": failed,
+              "needs_review": needs_review,
+              "held_back": max(0, len(rows) - index) if rows else 0}
     print(f"Dashboard URL apply complete: {result}", flush=True)
     return result
 

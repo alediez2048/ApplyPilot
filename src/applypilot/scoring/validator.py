@@ -123,9 +123,55 @@ def _named_tools(base_text: str, profile: dict) -> set[str]:
     return out
 
 
+def verbatim_bullets(base_text: str, tailored_text: str) -> list[str]:
+    """Bullets copied straight out of the base résumé.
+
+    A structure-preserving prompt can over-correct: told firmly enough what never to change,
+    the model returns the original sentences with the clauses shuffled. That happened on a
+    real Zello run — the summary was fully rewritten and the work bullets were untouched, so
+    the résumé read as "the base résumé with a new first paragraph".
+
+    Exact-match only, deliberately. Similarity scoring would need a threshold, and a
+    threshold on prose is a number nobody can defend; "you shipped my own sentence" needs no
+    threshold.
+    """
+    from applypilot.scoring import resume_sections as RS
+
+    def bullets(text: str) -> list[str]:
+        # EXPERIENCE only. Education bullets are degrees and dates that must NOT be
+        # reworded, and a skills section is a list — counting those as "not tailored" would
+        # fire on every résumé ever generated and train the operator to ignore the warning.
+        out = []
+        for sec in RS.parse(text).sections:
+            if sec.kind != RS.KIND_EXPERIENCE:
+                continue
+            out += [b.strip() for b in sec.bullets() if b.strip()]
+        return out
+
+    original = {b.lower() for b in bullets(base_text)}
+    return [b for b in bullets(tailored_text) if b.lower() in original]
+
+
 def _split_schools(raw: str) -> list[str]:
     """"Gauntlet AI; University of Texas" -> two schools that must each be present."""
     return [p.strip() for p in re.split(r"[;/|]|,\s*(?=[A-Z])", raw or "") if p.strip()]
+
+
+def _sections_to_text(data: dict) -> str:
+    """Flatten the returned sections into résumé-shaped text for text-level checks."""
+    lines = []
+    for sec in data.get("sections") or []:
+        lines.append(str(sec.get("title") or "").upper())
+        if sec.get("text"):
+            lines.append(str(sec["text"]))
+        for b in sec.get("bullets") or []:
+            lines.append(f"- {b}")
+        for e in sec.get("entries") or []:
+            if isinstance(e, dict):
+                lines.append(str(e.get("employer") or e.get("school") or ""))
+                for b in e.get("bullets") or []:
+                    lines.append(f"- {b}")
+    return "\n".join(lines)
 
 
 def _validate_sections(data: dict, profile: dict, mode: str = "normal") -> dict:
@@ -185,6 +231,19 @@ def _validate_sections(data: dict, profile: dict, mode: str = "normal") -> dict:
                if t.lower() not in low]
     if dropped:
         warnings.append("Named tools dropped from the base résumé: " + ", ".join(sorted(dropped)[:12]))
+
+    # Bullets shipped verbatim mean the résumé was not tailored, only reformatted. A WARNING:
+    # one recycled bullet among fourteen is not worth a retry, and the count makes the
+    # difference between "mostly rewritten" and "the base résumé with a new summary" visible.
+    base_text = profile.get("_base_resume_text", "")
+    if base_text:
+        try:
+            copied = verbatim_bullets(base_text, _sections_to_text(data))
+        except Exception:  # noqa: BLE001 - a reporting nicety must never fail validation
+            copied = []
+        if copied:
+            warnings.append(f"{len(copied)} bullet(s) copied verbatim from the base résumé "
+                            f"(not tailored): {copied[0][:70]}…")
 
     if mode == "strict":
         for word in BANNED_WORDS:

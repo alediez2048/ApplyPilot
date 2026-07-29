@@ -103,6 +103,12 @@ async function main() {
   //                   content one unit at a time and re-render — GUARANTEEING a single page.
   const shrinkSteps = fit === 'comfortable' ? [1] : [1, 0.94, 0.88, 0.82, 0.76]
 
+  // Returns null instead of aborting. @react-pdf's textkit can throw on a specific
+  // line-break layout ("Cannot read properties of undefined (reading 'overflowLeft')") for
+  // one font size and lay the SAME content out fine at another — measured on a real résumé:
+  // scale 1 and 0.97 threw, while 0.94 / 0.90 / 0.88 / 0.82 / 0.76 / 1.05 all succeeded.
+  // Treating the first failure as fatal threw away a perfectly renderable document and left
+  // the operator with a 380-character fallback PDF missing WORK EXPERIENCE entirely.
   const renderAt = async (r, scale) => {
     const theme = adjustStyling(baseTheme, r, scale)
     const styles = createDynamicStyles(theme)
@@ -110,17 +116,25 @@ async function main() {
     try {
       return await renderToBuffer(el)
     } catch (e) {
-      fail(`render failed: ${e.message}`)
+      process.stderr.write(`resume-renderer: layout failed at scale ${scale} (${e.message}); trying the next size\n`)
+      return null
     }
   }
 
   // Phase 1 — shrink fonts. Stop at the first scale that fits on one page.
   let finalBuf = null
   let fitScale = shrinkSteps[shrinkSteps.length - 1]
-  for (let i = 0; i < shrinkSteps.length; i++) {
-    finalBuf = await renderAt(resume, shrinkSteps[i])
-    if (countPages(finalBuf) <= 1) { fitScale = shrinkSteps[i]; break }
+  // Extra sizes beyond the shrink ladder: if every laddered scale hits the textkit bug, a
+  // slightly different size usually lays out fine, and a 2-page résumé beats no résumé.
+  const scales = [...shrinkSteps, 0.97, 0.91, 0.85, 1.03]
+  for (let i = 0; i < scales.length; i++) {
+    const buf = await renderAt(resume, scales[i])
+    if (!buf) continue                       // layout threw at this size — try another
+    finalBuf = buf
+    fitScale = scales[i]
+    if (countPages(buf) <= 1) break
   }
+  if (!finalBuf) fail('render failed at every font size')
 
   // Phase 2 — still 2+ pages at the tightest font: trim content until it fits (or nothing left).
   // Only runs for compact/auto (not 'comfortable'). Keeps recent roles; sheds projects and the
@@ -131,7 +145,9 @@ async function main() {
       const trimmed = trimOneUnit(working)
       if (!trimmed) break // nothing left to trim — write the smallest we achieved
       working = trimmed
-      finalBuf = await renderAt(working, fitScale)
+      const buf = await renderAt(working, fitScale)
+      if (!buf) break     // keep the last good buffer rather than losing the document
+      finalBuf = buf
     }
   }
 
@@ -150,6 +166,26 @@ async function main() {
  */
 function trimOneUnit(r) {
   const R = JSON.parse(JSON.stringify(r))
+  // Sections shape: shed a trailing bullet from the OLDEST role that still has more than
+  // one. Without this branch the whole function returned null immediately and phase 2 was
+  // a no-op for every structure-preserving résumé.
+  if (Array.isArray(R.sections)) {
+    const exp = R.sections.filter((s) => s.kind === 'experience')
+    for (let si = exp.length - 1; si >= 0; si--) {
+      const entries = exp[si].entries || []
+      for (let i = entries.length - 1; i >= 0; i--) {
+        const e = entries[i]
+        if (Array.isArray(e.bullets) && e.bullets.length > 1) { e.bullets.pop(); return R }
+      }
+    }
+    for (const sec of R.sections) {
+      if (sec.kind === 'summary' && String(sec.text || '').length > 140) {
+        sec.text = String(sec.text).slice(0, 140).replace(/\s+\S*$/, '') + '.'
+        return R
+      }
+    }
+    return null
+  }
   // 1) Projects: drop trailing bullets, then the whole project (oldest/last first).
   if (Array.isArray(R.projects) && R.projects.length) {
     const last = R.projects[R.projects.length - 1]

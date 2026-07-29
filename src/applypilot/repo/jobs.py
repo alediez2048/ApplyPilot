@@ -168,6 +168,18 @@ def dashboard_rows(limit: int = 500, conn: sqlite3.Connection | None = None) -> 
     """, (limit,)).fetchall()
 
 
+def awaiting_human(conn: sqlite3.Connection | None = None) -> list[dict]:
+    """Jobs whose co-pilot browser is open and waiting on the operator.
+
+    Starting another apply closes that browser (launch clears the CDP port), so this is the
+    gate on batch apply — see the queue guard in `run_dashboard_apply`.
+    """
+    return _dicts(_c(conn).execute(
+        "SELECT url, title, apply_status FROM jobs "
+        "WHERE apply_status IN ('ready_to_submit', 'needs_human') "
+        "ORDER BY last_attempted_at DESC").fetchall())
+
+
 # ── aggregates ──────────────────────────────────────────────────────────────
 
 def queue_stats(conn: sqlite3.Connection | None = None) -> dict:

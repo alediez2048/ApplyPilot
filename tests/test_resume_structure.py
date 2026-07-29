@@ -384,3 +384,74 @@ def test_the_dashboard_does_not_hardcode_lenient():
     src = (pathlib.Path(applypilot.__file__).parent / "web_dashboard.py").read_text()
     assert "validation_mode='lenient'" not in src and 'validation_mode="lenient"' not in src, \
         "the dashboard is forcing lenient again"
+
+
+# ── verbatim bullets: tailored or just reformatted? ─────────────────────────
+
+def test_bullets_copied_from_the_base_are_counted():
+    """A structure-preserving prompt can over-correct into copying.
+
+    Told firmly enough what never to change, the model returns the original sentences with
+    the clauses shuffled. Measured on a real Zello run: 10 of 14 bullets were verbatim and
+    only the summary had been rewritten, so the résumé was the base document with a new
+    first paragraph. Nothing flagged it.
+    """
+    tailored = BASE.replace("Seasoned Technical Project Manager with 10+ years of experience.",
+                            "Completely different summary for this role.")
+    copied = V.verbatim_bullets(BASE, tailored)
+    assert len(copied) == 5, f"expected all 5 bullets flagged, got {len(copied)}"
+
+
+def test_a_genuine_rewrite_is_not_flagged():
+    rewritten = BASE
+    for old, new in [
+        ("Led enterprise platform initiatives through AEM, Botify, GA4, and GSC.",
+         "Instrumented AEM, Botify, GA4 and GSC to find what was breaking, then fixed it."),
+        ("Owned the retail location experience platform, 40% YoY traffic increase.",
+         "Grew retail platform traffic 40% year over year."),
+        ("Drove Dialed In, increasing organic traffic by 1M visits in six months.",
+         "Launched Dialed In; 1M extra organic visits inside six months."),
+        ("Managed the authenticated web experience with REST/GraphQL integration.",
+         "Delivered the authenticated web experience end to end over REST and GraphQL."),
+        ("Led web promotion best practices, 25% organic traffic increase.",
+         "Rolled out web promotion standards company-wide; organic traffic up 25%."),
+    ]:
+        rewritten = rewritten.replace(old, new)
+    assert V.verbatim_bullets(BASE, rewritten) == []
+
+
+def test_the_verbatim_check_surfaces_as_a_warning_not_a_block():
+    """One recycled bullet among fourteen is not worth a retry — but the count must be seen."""
+    profile = {**_profile(), "_base_resume_text": BASE}
+    payload = _sections_payload()
+    payload["sections"].append({
+        "title": "WORK EXPERIENCE", "kind": "experience", "entries": [
+            {"employer": "T-Mobile", "bullets": [
+                "Led enterprise platform initiatives through AEM, Botify, GA4, and GSC."]},
+            {"employer": "Verizon", "bullets": ["Something genuinely new."]}]})
+    res = V.validate_json_fields(payload, profile, mode="normal")
+    assert res["passed"], "a recycled bullet must not block the résumé"
+    assert any("verbatim" in w for w in res["warnings"]), res["warnings"]
+
+
+def test_the_prompt_demands_a_rewrite_not_just_a_reshuffle():
+    """The instruction I deleted when replacing the prompt, and the reason quality dropped."""
+    from applypilot.scoring.tailor import _build_structured_tailor_prompt
+    prompt = _build_structured_tailor_prompt(_profile(), BASE)
+    assert "REWRITE EVERY BULLET" in prompt
+    assert "clauses moved" in prompt, "no worked example of what does NOT count as rewriting"
+    assert "VARY THE SENTENCE SHAPE" in prompt
+
+
+def test_the_prompt_example_is_off_domain():
+    """A concrete example in the candidate's own domain gets copied.
+
+    The first version used his real T-Mobile facts; the model returned my example sentence
+    nearly verbatim, and then every bullet in the same "Verb + object: tools, outcome" shape.
+    The example must teach the transformation without supplying usable wording.
+    """
+    from applypilot.scoring.tailor import _build_structured_tailor_prompt
+    prompt = _build_structured_tailor_prompt(_profile(), BASE)
+    example = prompt.split("The test, using an unrelated example", 1)[1].split("VARY THE", 1)[0]
+    for leaked in ("T-Mobile", "Botify", "AEM", "GA4", "GSC", "retail locations"):
+        assert leaked not in example, f"the worked example leaks {leaked!r} from the real résumé"

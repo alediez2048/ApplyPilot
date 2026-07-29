@@ -6,6 +6,21 @@
  *   - accepts an `extraShrink` multiplier so render.mjs can iterate down to 1 page
  */
 
+/**
+ * Collapse a sections-shaped résumé into the flat keys the density estimate understands.
+ * Read-only: used for MEASUREMENT, never for rendering.
+ */
+export function flattenSections(resume) {
+  const out = { experience: [], projects: [], skills: [], education: [], summary: '' }
+  for (const sec of resume.sections || []) {
+    if (sec.kind === 'summary') out.summary += String(sec.text || '')
+    else if (sec.kind === 'experience') out.experience.push(...(sec.entries || []))
+    else if (sec.kind === 'education') out.education.push(...(sec.education || []))
+    else out.skills.push(...(sec.skills || []))
+  }
+  return out
+}
+
 const MIN_FONT = 8
 const MAX_FONT = 28  // headroom for the 24pt name; body/section fonts never approach it
 
@@ -18,16 +33,19 @@ function clampFont(v, scale) {
  */
 export function densityScore(resume) {
   if (!resume) return 0
-  const exp = resume.experience || []
-  const proj = resume.projects || []
+  // Structure-preserving résumés carry their content under `sections`; reading the old flat
+  // keys scored them 0, which picked the EXPAND scale for a dense document.
+  const r = resume.sections ? flattenSections(resume) : resume
+  const exp = r.experience || []
+  const proj = r.projects || []
   const entries = exp.length + proj.length
   const bullets =
     exp.reduce((s, e) => s + (e.bullets?.length || 0), 0) +
     proj.reduce((s, e) => s + (e.bullets?.length || 0), 0)
-  const summaryLen = resume.summary ? String(resume.summary).length : 0
-  const skillsLen = (resume.skills || []).reduce(
+  const summaryLen = r.summary ? String(r.summary).length : 0
+  const skillsLen = (r.skills || []).reduce(
     (s, k) => s + (k.category?.length || 0) + (k.value?.length || 0), 0)
-  const eduCount = (resume.education || []).length
+  const eduCount = (r.education || []).length
 
   return entries * 90 + bullets * 30 + summaryLen / 10 + skillsLen / 18 + eduCount * 40
 }

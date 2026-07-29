@@ -12,7 +12,7 @@ campaign happens to be a job search** — see `docs/crm-prd.md` for where that g
 - **Packaging:** Hatchling, `src/` layout, single package `applypilot`
 - **Entry point:** `applypilot = "applypilot.cli:app"` (Typer CLI)
 - **License:** AGPL-3.0-only · **Version:** 0.4.0 (`pyproject.toml`)
-- **Tests:** 276 passing (`tests/`, 22 files) · ruff clean (line-length 120, py311) · ESLint clean
+- **Tests:** 325 passing (`tests/`, 26 files) · ruff clean (line-length 120, py311) · ESLint clean
 
 ## Quick orientation
 
@@ -48,7 +48,8 @@ Surfaces:
 | `database.py` | SQLite layer. Owns `jobs` + `job_events`. Thread-local WAL, forward-only migrations. |
 | `llm.py` | Multi-provider client (round-robin + failover: OpenAI/Gemini/Anthropic/local). |
 | `view.py` | Static HTML results export. |
-| `web_dashboard.py` | **The operator dashboard.** 1,953 lines, now all Python — the page moved to `static/` in ARCH-2. |
+| `web_dashboard.py` | **The operator dashboard.** 1,861 lines, **zero SQL** — data access goes through `repo/` and `store.py` (ARCH-4). |
+| `repo/jobs.py` | Every `jobs` query as a named function. Owns `QUEUE_SQL` (what counts as an operator-added job). |
 | `static/` | `index.html` · `dashboard.css` · `dashboard.js`. Served from `/static/…?v=<version>-<mtime>`; the page itself is `no-store`. One **classic** script, not a module — ~56 inline `onclick=` attributes resolve against the global object. |
 
 ### `discovery/` · `enrichment/` · `scoring/`
@@ -149,6 +150,10 @@ sibling accordions into:
 The 2.5s refresh replaces `#jobs` wholesale, so `refresh()` **skips while any input in that
 subtree has focus** — otherwise it eats what you're typing.
 
+`/api/status` costs **50 SQL statements** (was 313 before ARCH-4 measured it — 199 of those
+were `CREATE TABLE IF NOT EXISTS` re-run every request). `tests/test_query_budget.py` holds
+the line and fails on a per-contact N+1. Batch a new query; don't raise the budget.
+
 ---
 
 ## Follow-up sequences
@@ -230,7 +235,7 @@ company `"Jobs"` — the same substring bug class, inside the function written t
 `docs/tickets/ARCH-README.md` — the ordered ticket list. Read that before starting anything.
 
 **Chosen order (Jorge, 2026-07-28): finish the ARCH set first**, then the product tickets —
-`ARCH-1` ✅ → `ARCH-2` ✅ → `ARCH-3` ✅ → `ARCH-4` → `ARCH-5` → `ARCH-6`, then `CRM-1` → `DISC-1`
+`ARCH-1` ✅ → `ARCH-2` ✅ → `ARCH-3` ✅ → `ARCH-4` ✅ → `ARCH-5` → `ARCH-6`, then `CRM-1` → `DISC-1`
 → `CRM-2` → `CRM-3`.
 
 The analysis recommended the reverse, and the reason is measured, not aesthetic: all 7 jobs
@@ -239,8 +244,8 @@ manually), and nothing is aggregated. **The ARCH set delivers no user-visible ch
 funnel stays at 7 hand-pasted jobs and the system stays blind to replies until `CRM-1` lands.
 The tradeoff was raised and accepted; do not re-litigate it, but do not forget it either.
 
-**Next up: `ARCH-4`** (repository boundary) — 17 of ~30 modules still touch the DB directly.
-~430 lines of pipeline orchestration also still sit in `web_dashboard.py`.
+**Next up: `ARCH-5`** (versioned migrations) — `schema_migrations` table, numbered
+`migrations/NNN_*.py`, and the ARCH-3 touches backfill re-expressed as migration 001.
 
 `docs/crm-prd.md` — the multi-campaign "Spaces" direction. **After** the above.
 
@@ -268,7 +273,14 @@ Ordered by leverage. Nothing here is blocking; all of it compounds.
    stale `.edu` PDFs each needed a hand-written fix.
 5. **40 env vars, no schema.** `FOLLOWUP_SCHEDULE` / `LINKEDIN_FOLLOWUP_SCHEDULE` /
    `FOLLOWUP_AFTER_DAYS` overlap, parse differently, and fail silently on a typo.
-6. **17 of ~30 modules touch the DB directly.** No repository boundary.
+6. **14 modules still touch the DB directly** (was 21) — `enrichment/detail.py`,
+   `apply/launcher.py`, `view.py`, the discovery/scoring stages. The dashboard no longer
+   does (ARCH-4), and `test_sql_lives_only_in_the_data_layer` names the rest in an
+   allowlist so the list can only shrink and no NEW module can join it.
+7. **Apply runs synchronously inside the HTTP request thread** (`run_dashboard_restart` →
+   `subprocess.run`). It blocks a dashboard worker for minutes and dies with the server —
+   which is exactly how two applies were killed on 2026-07-29. `release_stale_locks()`
+   cleans up after it; making it a real background task is still open.
 
 ---
 

@@ -156,6 +156,18 @@ def find_contacts_for_job(
              "from this job's URL.", "error")
         return result
 
+    # An ATS-hosted posting carries no employer domain (ats.rippling.com is the vendor's), and
+    # without one Apollo falls back to a fuzzy NAME search. For a common word that finds the
+    # wrong company entirely: "Wander" returned four unrelated Wanders, every candidate came
+    # from "Wander AG", verification correctly dropped all 15 — and the real employer's CEO and
+    # CMO sat at wander.com untouched. Recover the domain first; the guess is only accepted if
+    # Apollo's own people there report a matching employer name.
+    if not domain and company:
+        slug = derive.employer_slug_from_url(job.get("url") or job.get("application_url"))
+        domain = providers.confirm_employer_domain(company, slug) or None
+        if domain:
+            result["employer_domain"] = domain
+
     titles = rank.role_to_person_titles(role)
 
     # Query the active contact provider (Apollo).

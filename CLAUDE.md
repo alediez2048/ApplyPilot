@@ -90,9 +90,25 @@ turns 3 rewrites into 6 duplicated bullets). Cover letters must name the employe
 
 ### `apply/` — autonomous submission
 `launcher.py` (acquires jobs, spawns Chrome + Claude Code per job) · `chrome.py` ·
-`prompt.py` · `dashboard.py`. The agent is **tool-scoped**: `--allowedTools
+`prompt.py` · `dashboard.py` · `pause.py`. The agent is **tool-scoped**: `--allowedTools
 mcp__playwright,mcp__gmail__send_email` plus a hard deny-list. It browses attacker-controlled
 careers pages, so inbox read is denied twice (allowlist + deny-list) — pinned by a test.
+**Do not grant it inbox read for account verification codes**: it would turn a prompt injection
+on a careers page into a mailbox-exfiltration path. Registration is the human's job (§The
+human-in-the-loop apply model).
+
+`pause.py` is the ⏸ handover: a **file** flag in `APP_DIR`, because the apply runs in a
+separate OS process from the dashboard, polled once per agent action in `run_job`'s stdout
+loop. Three guards keep a flag from outliving its run — the loop consumes what it acts on,
+`main()` clears a stale one at startup, and the endpoint sets nothing when no job is
+`in_progress`. A leftover would pause every future apply the instant it began.
+
+The agent is spawned with `start_new_session=True`. Without it `_kill_process_tree`'s
+`killpg` walks up to *our own* group — see §Lessons 17. `_reap_agents_on_exit` (atexit) stops
+it outliving the run now that it no longer dies with us.
+
+`AGENT_TIMEOUT_SECONDS` (`APPLY_AGENT_TIMEOUT`, default **900**) was a bare `timeout=300`
+literal; a real Deloitte fill took 208s, so long forms were killed mid-application.
 
 ### `domain/` — the business rules (ARCH-1, 2026-07-28)
 
@@ -118,8 +134,8 @@ None),)`), which is what removed the last `if channel is EMAIL` from `_is_ready`
 |------|------|
 | `service.py` | Orchestrator: derive → search → rank → verify → persist → draft. COLD (Apollo) + HOT (your connections) layers. |
 | `store.py` | The `contacts` table (42 cols, own migration in `_CONTACT_COLUMNS`). Atomic claims for every send. |
-| `derive.py` | Job URL → employer name + domain. ATS path slugs, board rejection. |
-| `providers.py` / `apollo.py` | Apollo is the sole provider (paid plan). `resolve_orgs()` disambiguates fuzzy name search. |
+| `derive.py` | Job URL → employer name + domain. ATS path slugs, board rejection, tenant subdomains. |
+| `providers.py` / `apollo.py` | Apollo is the sole provider (paid plan). `resolve_orgs()` disambiguates fuzzy name search; `confirm_employer_domain()` recovers a missing domain. |
 | `verify.py` | **Self-check**: does this person actually work there? Runs before contacts reach you. |
 | `rank.py` | Pick 3–5 (peers + a recruiter). |
 | `connections.py` | LinkedIn `Connections.csv` import + `companies_match()` (word-aware, strict/lenient). |
@@ -175,7 +191,16 @@ sibling accordions into:
   survive the 2.5s refresh.
 - **Contacts collapse to one line** with channel pills (`✉ sent · 🔗 connected · ↻ due`).
   Opening one shows channels as tabs so email/LinkedIn/phone stop stacking.
-- `⋯` row menu holds destructive actions (rejected, delete).
+- `⋯` row menu holds destructive actions (rejected, delete). It is anchored `right:0` and
+  flips up near the bottom: `.table-wrap` clips with `overflow:hidden` to round the table's
+  corners, so an absolutely-positioned menu is CUT, never scrolled to (it rendered as "✕ Ma",
+  "🗑 De"). Whether a row is the last one is runtime geometry, so `positionRowMenu()` measures.
+- Row actions added 2026-07-30: **🔐 Sign in first** (`/api/signin`, `/api/signin-done`) and
+  **⏸ Pause & take over** (`/api/pause-apply`). Pause is NOT `/api/stop` — stop `killpg`s the
+  run and takes Chrome with it, destroying a part-filled form.
+- **`network_note` renders under the Find-contacts button.** `/api/status` had always sent it
+  and no JS read it, so a search that ran, spent credits and kept nobody looked exactly like a
+  button that never fired.
 
 The 2.5s refresh replaces `#jobs` wholesale, so `refresh()` **skips while any input in that
 subtree has focus** — otherwise it eats what you're typing.
@@ -196,6 +221,19 @@ Two independent ladders, both human-in-the-loop. Nothing auto-sends.
 | Default | `FOLLOWUP_SCHEDULE=48,96,168` (2d/4d/7d) | `LINKEDIN_FOLLOWUP_SCHEDULE=120,288` (5d/12d) |
 | Send | `gmail_send.send_followup()`, threaded | copy → open profile → you paste → `✓ I sent it` |
 | Stop | reply / stop / sequence complete | same |
+
+**Every outreach email offers the intro deck** (`INTRO_DECK_URL`, default
+`https://www.jorgealejandrodiez.com/intro/`) — cold email and all three follow-up touches.
+Both prompts are told the URL and the wording, AND `ensure_intro_deck()` appends the exact
+sentence if the model drops it: a prompt instruction is not a guarantee (§Lessons 9, 12). It is
+idempotent, tolerates a missing trailing slash or a wrapped URL, and inserts **above** the
+sign-off — a link under "Thanks, Alejandro" reads as a footer. LinkedIn notes never get it
+(300-char cap, and LinkedIn penalises links), same as the scheduling link. Distinct from
+`INTRO_DECK_PATH`, which *attaches* a PDF.
+
+**Warm (hot-layer) copy opens by naming the gap and the employer** on BOTH channels — "Hey
+Gina, long time without connecting, hope everything is well at Salesforce" — and is told never
+to re-introduce the sender to someone who already knows them.
 
 Per-touch prompts differ by position: touch 1 adds something new, touch 2 offers a redirect
 ("is someone else the right person?"), touch 3 says plainly it's the last one. All are told
@@ -247,6 +285,40 @@ only `{prefix}_REPORT.json`.
 rework and one factual error.
 
 ---
+
+## Contact discovery: how the chain actually resolves (2026-07-30)
+
+**Employer name.** An ATS host is never the employer, and an employer may also be a board:
+
+| URL | Employer | Why |
+|---|---|---|
+| `ats.rippling.com/wander/jobs/…` | **Wander** | path slug; without a `rippling.com` rule it became **"Ats"** |
+| `salesforce.wd12.myworkdayjobs.com/…` | **Salesforce** | tenant subdomain, not the ATS |
+| `google.com/about/careers/…` | **Google** | own careers site, even though Google Jobs is a board |
+| `ycombinator.com/companies/hamming-ai/…` | **Hamming AI** | YC hosts for others; employer is in the path |
+| `ycombinator.com/jobs` | *(none)* | that is YC's listing index, not YC hiring |
+
+`_BOARD_NAMES` = `_BOARD_SITES ∪ _BOARD_HOSTS` (they had drifted — "Greenhouse" passed as an
+employer because it was only in the host set). A board name is accepted as the employer only
+when `_company_owns_the_posting()` agrees: the company must be the **only** meaningful host
+label, the path must name no other employer, and the path must look like a careers section.
+`jobs`/`job` are deliberately NOT careers markers — on a board's own domain that is its product.
+
+**Domain.** Board hosts yield none, and without a domain Apollo does a fuzzy NAME search.
+`confirm_employer_domain()` guesses `<slug>.<tld>` and makes Apollo **corroborate** it: accepted
+only if people at that domain report a matching employer name. A wrong guess returns `""`, never
+a plausible lie. ("Wander" → 4 unrelated Wanders in Apollo; the real one, `wander.com`, is not in
+the name search at all but has the CEO, CMO and engineers.)
+
+**Selection.** Ranking scores TITLE relevance and knows nothing about the employer, while the
+strongest verification signal (work-email domain) only exists after enrichment. So a whole batch
+can be rejected while real colleagues sit further down the pool. `_TOPUP_ROUNDS` (3) keeps
+walking the ranked pool when a batch is dropped, bounded because enrichment costs credits. And a
+title filter matching nobody widens to the whole company — but only when the company is already
+confirmed, never for an unanchored keyword search.
+
+**Every exit logs.** A search that found nobody used to log nothing, making a completed run
+byte-identical to a dead button (§Lessons 15).
 
 ## Correctness: verify + evals
 
@@ -568,6 +640,18 @@ change still needs the `pip install` above — but that copy gives the file a ne
   (surface in Activity, never block). Banned words become errors only in `strict`.
 - **Never `pip install` while an apply is running.** The apply is a live subprocess; rewriting
   site-packages under it is how you get a half-loaded module. Wait for it to exit.
-- Working tree clean; **13 commits on `main` are unpushed** (`origin/main` is at
-  `stable-arch2`). Tags: `stable-arch2` / `stable-arch3` / `stable-arch5` / `stable-arch6`.
+- **Never chain `pip install` with backgrounding the dashboard in one command.** That command
+  shape hit the 2-minute tool timeout and was killed mid-write, leaving site-packages with no
+  `applypilot/__init__.py` and no dist-info `RECORD` — so even `pip --force-reinstall` refused.
+  The dashboard kept serving (its modules were already imported), so ONLY the buttons that
+  spawn subprocesses broke: Re-apply, Prepare, Fill, Continue all died with
+  `ImportError: cannot import name '__version__' from 'applypilot' (unknown location)`, buried
+  in a command log nobody opens. Recovery: `rm -rf` both directories in site-packages, reinstall.
+  Run the install alone, and verify with `python -c "import applypilot; print(applypilot.__version__)"`.
+- **Check for in-flight applies before ANY restart or reinstall.** The apply is a child of the
+  dashboard, so it dies with the server. This happened three times on 2026-07-30 alone.
+- Working tree clean; `origin/main` is at **`stable-e2e-20260730`** (2026-07-30 — full pipeline
+  working end to end, human in the loop). Tags: `stable-arch2/3/5/6` · `stable-e2e-20260730`.
+  A tag restores **CODE only** — `~/.applypilot/` (13 jobs, 47 contacts, 33 sent emails, 899
+  connections) needs its own backup.
   A tag restores CODE only — the database needs its own backup from `~/.applypilot/backups/`.

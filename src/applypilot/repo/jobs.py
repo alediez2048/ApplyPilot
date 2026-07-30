@@ -276,6 +276,28 @@ def reset_apply_state(url: str, conn: sqlite3.Connection | None = None) -> None:
     conn.commit()
 
 
+def was_attempted(url: str, conn: sqlite3.Connection | None = None) -> bool:
+    """Has an apply agent ever actually opened this job?
+
+    The gate on "Mark submitted ✓". The operator is the authority on whether they submitted an
+    application, but they should not be able to bless one the app never even ran — that would
+    quietly turn the button into a way to fabricate an application record.
+    """
+    row = _c(conn).execute(
+        "SELECT last_attempted_at, apply_attempts, apply_status FROM jobs WHERE url = ?",
+        (url,)).fetchone()
+    if not row:
+        return False
+    d = dict(row)
+    if d.get("last_attempted_at") or d.get("apply_attempts"):
+        return True
+    # These statuses can ONLY be reached by an agent run, so they are evidence in their own
+    # right — a co-pilot handover proves the form was opened and filled even if the timestamp
+    # is missing. 'ready' and 'rejected' are deliberately absent: 'ready' means materials were
+    # prepared and nothing more.
+    return d.get("apply_status") in ("ready_to_submit", "needs_human", "in_progress", "failed")
+
+
 def mark_applied(url: str, conn: sqlite3.Connection | None = None) -> str:
     conn = _c(conn)
     now = _now()

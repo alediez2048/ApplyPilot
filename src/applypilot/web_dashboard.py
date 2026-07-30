@@ -868,6 +868,7 @@ def _mark_submitted(url: str) -> dict:
     Only transitions a job that's actually in the ready_to_submit state (guards against
     marking something applied that never went through review).
     """
+    from applypilot.database import log_event
     if not url:
         return {"ok": False, "message": "url required"}
     init_db()
@@ -875,11 +876,27 @@ def _mark_submitted(url: str) -> dict:
     if not _jobs.exists(url, conn):
         return {"ok": False, "message": "job not found"}
     status = _jobs.apply_status(url, conn)
-    # The whole point of this endpoint: only a job the co-pilot filled and handed back may
-    # be marked submitted. Without this guard the button would rubber-stamp anything.
-    if status != "ready_to_submit":
-        return {"ok": False, "message": f"job is not awaiting review (status: {status or 'none'})"}
+    # The guard exists so the button cannot rubber-stamp a job that was never filled. It used
+    # to require exactly `ready_to_submit`, which was too narrow: a real Salesforce application
+    # — signed in and submitted by hand — was classified `failed` by the agent, and this
+    # endpoint then refused the operator's correction, leaving a successful application
+    # recorded as a failure with no way to fix it from the UI.
+    #
+    # The operator saying "I submitted this" is a statement of fact about the outside world,
+    # and they are the authority on it. What they must NOT be able to do is bless a job the
+    # app never even attempted, so the gate is now "has this been attempted", not "is it in
+    # one exact state".
+    if status == "applied":
+        return {"ok": False, "message": "already marked as submitted"}
+    # Checked for EVERY status, not just the empty ones. Gating on the status name let a job
+    # sitting at 'ready' — prepared but never opened by an agent — be marked applied, because
+    # 'ready' is not in any "suspicious" list. What matters is whether it was ever attempted.
+    if not _jobs.was_attempted(url, conn):
+        return {"ok": False, "message": "not awaiting review — this application was never "
+                                        "filled, so there is nothing to confirm"}
     _jobs.mark_applied(url, conn)
+    note = "" if status == "ready_to_submit" else f" (was: {status or 'not attempted'})"
+    log_event(url, "apply", "ok", f"You confirmed this was submitted{note}.", conn)
     return {"ok": True, "message": "Marked as submitted ✓"}
 
 

@@ -681,7 +681,24 @@ def run_job(job: dict, port: int, worker_id: int = 0,
                              last_action=f"ready to review ({elapsed}s)")
                 return "needs_review", duration_ms
             if re.search(r"RESULT:\s*APPLIED\b", output, re.IGNORECASE):
-                # Agent submitted in co-pilot mode — a safety violation (the human should submit).
+                if resume:
+                    # RESUME means the operator was AT the keyboard: they had just resolved a
+                    # blocker (signed in, solved a captcha) and clicked Continue. Very often
+                    # they finish and submit it themselves, and the agent then truthfully
+                    # reports the application as submitted. Reading that as "the agent
+                    # submitted" recorded a real Salesforce application — signed in and
+                    # submitted by hand — as `failed:copilot_violation_agent_submitted`.
+                    #
+                    # Not marked applied outright either, because we genuinely cannot tell WHO
+                    # clicked submit. Hand it back for the one-click confirmation that already
+                    # exists, which is the human's call to make.
+                    add_event(f"[W{worker_id}] Submitted during your session ({elapsed}s) — "
+                              f"confirm with 'Mark submitted ✓'")
+                    update_state(worker_id, status="needs_review",
+                                 last_action=f"submitted in your session ({elapsed}s)")
+                    return "needs_review", duration_ms
+                # A FRESH co-pilot run submitting on its own is a real safety breach: nobody
+                # reviewed it. That stays loud and stays a failure.
                 add_event(f"[W{worker_id}] ⚠ CO-PILOT VIOLATION: agent submitted! ({elapsed}s)")
                 update_state(worker_id, status="failed",
                              last_action=f"CO-PILOT VIOLATION: submitted ({elapsed}s)")

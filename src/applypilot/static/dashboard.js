@@ -451,11 +451,36 @@ const CONTACT_OPEN = new Set();
 const CHANNEL_TAB = new Map();
 function toggleContact(cid) { if (CONTACT_OPEN.has(cid)) CONTACT_OPEN.delete(cid); else CONTACT_OPEN.add(cid); refresh(); }
 function setChannel(cid, ch) { CHANNEL_TAB.set(cid, ch); CONTACT_OPEN.add(cid); refresh(); }
+// CRM-4. Someone the OTHER side added to a thread — a recruiter looping in a hiring manager
+// is the single most valuable event in a job-search conversation, and a boolean `replied` threw
+// it away. Surfaced as an offer, never auto-created: a contact added here is one an automated
+// follow-up ladder would then email, and threads collect schedulers and ATS robots.
+function introBanner(j) {
+  const intros = j.introductions || [];
+  if (!intros.length) return '';
+  return intros.map(i => {
+    const args = [i.email, i.name || '', i.introduced_by || ''].map(v => `decodeURIComponent('${encodeURIComponent(v)}')`).join(', ');
+    const u = `decodeURIComponent('${encodeURIComponent(j.url)}')`;
+    return `<div class="intro-bar">
+      <span>👋 <strong>${esc(i.introduced_by || 'Someone')}</strong> added <strong>${esc(i.name || i.email)}</strong> (${esc(i.email)}) to the thread — they may be handling this now.</span>
+      <button class="primary" onclick="addIntroduced(${u}, ${args}, this)">+ Add as contact</button>
+    </div>`;
+  }).join('');
+}
+async function addIntroduced(url, email, name, by, btn) {
+  btn.disabled = true; btn.textContent = 'Adding…';
+  const r = await post('/api/contact/add-introduced', {job_url: url, email, name, introduced_by: by});
+  const cmdEl = document.getElementById('command');
+  if (cmdEl) cmdEl.textContent = r.message || '';
+  if (!r.ok) { btn.disabled = false; btn.textContent = '+ Add as contact'; }
+  refresh();
+}
 function peopleList(j) {
   const cs = j.contacts || [];
-  if (!cs.length) return `<div class="pane-empty">No contacts yet. ${findContactsPrompt(j)}</div>`;
+  const intro = introBanner(j);
+  if (!cs.length) return intro + `<div class="pane-empty">No contacts yet. ${findContactsPrompt(j)}</div>`;
   const hot = cs.filter(c => c.hot), cold = cs.filter(c => !c.hot);
-  let out = bulkBar(j);
+  let out = intro + bulkBar(j);
   if (hot.length)  out += `<div class="ppl-group hot">🔥 People you know here <span class="ppl-g-n">${hot.length}</span></div>` + hot.map(c => contactRow(c)).join('');
   if (cold.length) out += `<div class="ppl-group cold">🧊 New contacts <span class="ppl-g-n">${cold.length}</span></div>` + cold.map(c => contactRow(c)).join('');
   return `<div class="plist">${out}</div>`;

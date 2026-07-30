@@ -574,3 +574,9 @@
   .th-when { color:var(--faint); font-variant-numeric:tabular-nums; }
   .th-cc { color:var(--faint); }
   .th-intro { padding:6px 12px; font-size:11.5px; background:var(--green-soft); color:#046c3c; border-top:1px solid var(--line); }
+  /* CRM-4 handoff banner. Green, not amber: an introduction is GOOD news — the warmest lead
+     the system can produce — and should not read like a blocker. */
+  .intro-bar { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin:0 0 10px;
+    padding:9px 11px; border-radius:8px; background:var(--green-soft);
+    border:1px solid #b6e0c8; font-size:12px; color:#04603a; }
+  .intro-bar button { font-size:12px; padding:4px 12px; }

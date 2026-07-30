@@ -168,11 +168,45 @@ def timeline(messages: list[dict], me: str) -> list[dict]:
             "direction": "out" if sender == mine else "in",
             "from_addr": sender,
             "from_name": display_name(msg.get("from")),
-            "to_addrs": split_addrs(msg.get("to")),
-            "cc_addrs": split_addrs(msg.get("cc")),
+            # RAW fragments, not bare addresses. Storing "david@writer.com" loses the display
+            # name for good — the only fallback left is the local part, so "David Loveless"
+            # degrades to "David" the moment it is written. Consumers call addr() to compare.
+            "to_addrs": split_parts(msg.get("to")),
+            "cc_addrs": split_parts(msg.get("cc")),
             "subject": msg.get("subject") or "",
             "at": msg.get("internalDate") or "",
         })
     # internalDate is ms-since-epoch as a STRING; compare numerically or "9999" sorts after
     # "10000" (the same trap as domain.replies._ts).
     return sorted(rows, key=lambda r: int(r["at"]) if str(r["at"]).isdigit() else 0)
+
+
+def pending_introductions(threads: dict, contact_emails: list[str], me: str) -> list[dict]:
+    """People introduced on stored threads who are NOT yet contacts on this job.
+
+    Works from the `messages` table rather than a live fetch, so the dashboard can show a
+    pending handoff on every refresh without touching Gmail.
+
+    `threads` is contact_id -> stored message rows (already normalised: `from_addr`, `cc_addrs`
+    as lists), which is what `messages.threads_for_job()` returns.
+    """
+    known = {addr(e) for e in (contact_emails or []) if e}
+    mine = addr(me)
+    out: dict[str, dict] = {}
+    for contact_id, msgs in (threads or {}).items():
+        for msg in msgs or []:
+            if msg.get("direction") != "in":
+                continue  # only the other side can introduce someone
+            sender = addr(msg.get("from_addr"))
+            for one in (msg.get("cc_addrs") or []) + (msg.get("to_addrs") or []):
+                a = addr(one)
+                if not a or a == mine or a == sender or a in known or a in out:
+                    continue
+                if is_robot(a):
+                    continue
+                out[a] = {"email": a,
+                          "name": display_name(one),
+                          "introduced_by": msg.get("from_name") or sender,
+                          "from_contact_id": contact_id,
+                          "at": msg.get("sent_at") or ""}
+    return list(out.values())

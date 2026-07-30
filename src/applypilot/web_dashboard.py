@@ -1387,6 +1387,7 @@ def _status_payload() -> dict:
             "checklist": _job_checklist(status, row["applied_at"] or "", contacts),
             "followups": _followup_panel(contacts, job_ladders),
             "conversations": job_threads,
+            "introductions": _pending_introductions(job_threads, raw_contacts),
             "activity": _job_activity(row["url"], conn),
             "network_running": bool(net_task.get("running")),
             "network_note": net_task.get("note") or "",
@@ -1420,6 +1421,82 @@ def _status_payload() -> dict:
     }
 
 
+def _pending_introductions(job_threads: dict, raw_contacts: list) -> list[dict]:
+    """People the other side added to a thread who are not contacts yet (CRM-4).
+
+    Computed from STORED messages, so it costs no Gmail call on a 2.5s refresh.
+    """
+    try:
+        from applypilot.domain import conversations as cv
+        from applypilot.networking import gmail_oauth
+        emails = [c.get("email") for c in raw_contacts if c.get("email")]
+        return cv.pending_introductions(job_threads, emails, gmail_oauth.connected_email())
+    except Exception:  # noqa: BLE001
+        log.debug("Pending-introduction scan failed", exc_info=True)
+        return []
+
+
+def _add_introduced_contact(data: dict) -> dict:
+    """Add someone who was introduced on a thread, as a real contact.
+
+    Kept behind an explicit click rather than created automatically: threads collect
+    schedulers, assistants and ATS robots, and a contact created here is one an automated
+    follow-up ladder would then EMAIL.
+
+    `source='introduction'` is deliberately distinct from apollo/connection — this is the
+    warmest lead the system can produce (a human at the company handed you to them), and
+    CRM-2's by_layer() should eventually be able to prove that.
+    """
+    from applypilot.database import log_event
+    from applypilot.networking.store import init_contacts, upsert_contact
+
+    job_url = (data.get("job_url") or "").strip()
+    email = (data.get("email") or "").strip().lower()
+    if not job_url or not email:
+        return {"ok": False, "message": "job_url and email required"}
+
+    init_db()
+    conn = get_connection()
+    init_contacts(conn)
+    row = _jobs.find_by_any_url(job_url, conn)
+    if not row:
+        return {"ok": False, "message": "job not found"}
+    job = dict(row)
+
+    name = (data.get("name") or "").strip() or email.split("@")[0].replace(".", " ").title()
+    by = (data.get("introduced_by") or "").strip()
+    cid = upsert_contact({
+        "job_url": job["url"],
+        "full_name": name,
+        "email": email,
+        "email_status": "verified",   # it came off a real thread they were Cc'd on
+        "company": job.get("company"),
+        "source": "introduction",
+        "match_reason": f"introduced by {by}" if by else "introduced on the thread",
+        "confidence": "high",
+        "verify_note": f"{by} added them to a live thread" if by else "added to a live thread",
+        "outreach_status": "none",
+    }, conn)
+
+    log_event(job["url"], "outreach", "ok",
+              f"Added {name} ({email}) as a contact — introduced by {by or 'the thread'}.", conn)
+
+    drafted = False
+    try:
+        from applypilot.config import load_profile
+        from applypilot.networking import service
+        contact = _store.get_contact(cid, conn)
+        service._draft_and_store(load_profile(), job, contact, warm=False)
+        drafted = True
+    except Exception:  # noqa: BLE001
+        # A missing draft is recoverable from the UI; a failed add is not.
+        log.debug("Draft for introduced contact failed", exc_info=True)
+
+    return {"ok": True, "contact_id": cid,
+            "message": f"Added {name}." + (" Draft ready." if drafted else
+                                           " Use “Regenerate” to draft an email.")}
+
+
 def _introduced_by(contact: dict, thread: list) -> str:
     """Who added this contact to the conversation, if anybody did.
 
@@ -1435,7 +1512,10 @@ def _introduced_by(contact: dict, thread: list) -> str:
     for msg in thread:
         if msg.get("direction") != "in":
             continue
-        if email in [a.lower() for a in (msg.get("cc_addrs") or [])]:
+        # cc_addrs holds RAW fragments ("David Loveless <david@writer.com>"), so compare on
+        # the extracted address rather than the whole string.
+        from applypilot.domain.conversations import addr as _addr
+        if email in [_addr(a) for a in (msg.get("cc_addrs") or [])]:
             return msg.get("from_name") or msg.get("from_addr") or ""
     return ""
 
@@ -2086,6 +2166,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/contact/details":
                 _json_response(self, _save_contact_details(data))
+                return
+            if path == "/api/contact/add-introduced":
+                _json_response(self, _add_introduced_contact(data))
                 return
             if path == "/api/contact/delete":
                 _json_response(self, _delete_contact(data.get("contact_id", "")))

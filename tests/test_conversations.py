@@ -125,7 +125,10 @@ def test_the_timeline_marks_direction():
     rows = cv.timeline(WRITER_THREAD, ME)
     assert [r["direction"] for r in rows] == ["out", "in", "out"]
     assert rows[1]["from_name"] == "Victoria Shearer"
-    assert rows[1]["cc_addrs"] == ["david@writer.com"]
+    # RAW fragments, name intact. Storing bare addresses loses the display name permanently —
+    # "David Loveless" degrades to "David", because the only fallback is the local part.
+    assert rows[1]["cc_addrs"] == ["David Loveless <david@writer.com>"]
+    assert cv.addr(rows[1]["cc_addrs"][0]) == "david@writer.com"
 
 
 def test_the_timeline_sorts_numerically_not_lexicographically():
@@ -144,3 +147,57 @@ def test_the_messages_table_cannot_hold_a_body():
 
     cols = set(_MESSAGE_COLUMNS)
     assert not (cols & {"body", "snippet", "content", "text", "html"})
+
+
+# ── pending introductions: what the dashboard offers to add ─────────────────────────────
+
+STORED = {
+    "c1": [
+        {"direction": "out", "from_addr": ME, "from_name": "", "to_addrs": ["v@writer.com"],
+         "cc_addrs": [], "sent_at": "2026-07-28T00:00:00+00:00"},
+        {"direction": "in", "from_addr": "v@writer.com", "from_name": "Victoria Shearer",
+         "to_addrs": [f"<{ME}>"], "cc_addrs": ["David Loveless <david@writer.com>"],
+         "sent_at": "2026-07-29T00:00:00+00:00"},
+    ]
+}
+
+
+def test_a_pending_introduction_is_found_from_stored_messages():
+    """Computed from the messages table, not a live fetch — the dashboard shows this on every
+    2.5s refresh and must not call Gmail to do it."""
+    out = cv.pending_introductions(STORED, ["v@writer.com"], ME)
+    assert len(out) == 1
+    assert out[0]["email"] == "david@writer.com"
+    assert out[0]["name"] == "David Loveless", "the display name was lost in storage"
+    assert out[0]["introduced_by"] == "Victoria Shearer"
+
+
+def test_someone_already_a_contact_is_not_offered_again():
+    """Otherwise the banner would never go away after you add them."""
+    assert cv.pending_introductions(STORED, ["v@writer.com", "david@writer.com"], ME) == []
+
+
+def test_our_own_address_is_never_offered():
+    assert cv.pending_introductions(STORED, [], ME) and ME not in [
+        p["email"] for p in cv.pending_introductions(STORED, [], ME)]
+
+
+def test_a_person_on_OUR_message_is_not_an_introduction():
+    """We already know about anyone we chose to email or Cc."""
+    ours = {"c1": [{"direction": "out", "from_addr": ME, "from_name": "",
+                    "to_addrs": ["a@x.com"], "cc_addrs": ["colleague@x.com"],
+                    "sent_at": "2026-07-28T00:00:00+00:00"}]}
+    assert cv.pending_introductions(ours, ["a@x.com"], ME) == []
+
+
+def test_robots_are_not_offered_as_contacts():
+    """A contact added from this banner is one an automated ladder would then EMAIL."""
+    bot = {"c1": [{"direction": "in", "from_addr": "v@writer.com", "from_name": "V",
+                   "to_addrs": [], "cc_addrs": ["noreply@greenhouse.io"],
+                   "sent_at": "2026-07-29T00:00:00+00:00"}]}
+    assert cv.pending_introductions(bot, ["v@writer.com"], ME) == []
+
+
+def test_no_threads_means_nothing_to_offer():
+    assert cv.pending_introductions({}, [], ME) == []
+    assert cv.pending_introductions(None, None, ME) == []

@@ -245,6 +245,12 @@
     font-size:11px; padding:4px 9px; min-height:0; }
   .restart-inline:hover { background:rgba(0,0,0,.04); color:var(--text); box-shadow:none; }
   .strip-hint { font-size:11px; color:var(--muted); padding:5px 12px 0; line-height:1.4; }
+  /* Sign-in handover bar. Amber like the other "you need to act" states, and it sits INSIDE
+     the row rather than floating, so it cannot be mistaken for a page-level banner. */
+  .signin-bar { display:flex; align-items:center; gap:8px; flex-wrap:wrap;
+    margin:6px 12px 0; padding:8px 10px; border-radius:8px;
+    background:#fff8e6; border:1px solid #f2d9a0; font-size:12px; color:#7a5a12; }
+  .signin-bar button { font-size:12px; padding:4px 10px; }
   button.amber { background:var(--yellow-soft); border-color:#f0d9ac; color:var(--yellow); }
   button.amber:hover { background:#fdecd0; }
   /* ── Tabs replace four sibling accordions ── */

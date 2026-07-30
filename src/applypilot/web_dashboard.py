@@ -208,7 +208,13 @@ class NetworkRunner:
             row = _jobs.find_by_any_url(job_url, conn)
             if not row:
                 raise RuntimeError("job not found")
-            job = dict(zip(row.keys(), row))
+            # `dict(row)`, NOT dict(zip(row.keys(), row)) — find_by_any_url already returns a
+            # dict, and zipping a dict against its own keys maps every key to ITSELF. This
+            # search was running on {"company": "company", "url": "url", ...}, so the dashboard
+            # button searched Apollo for a company literally named "company" and verification
+            # dropped everything it found. The CLI path passed a real row and worked, which is
+            # why it looked like a coverage problem.
+            job = dict(row)
             res = service.find_contacts_for_job(job, per_job=per_job, use_linkedin=use_linkedin)
             note = f"{res['found']} found, {res['revealed']} with email ({res['note']})"
         except Exception as exc:  # noqa: BLE001
@@ -653,6 +659,91 @@ def run_dashboard_apply(limit: int = 10, dry_run: bool = False, copilot: bool = 
         result["stale_reviews_note"] = stale_note
     print(f"Dashboard URL apply complete: {result}", flush=True)
     return result
+
+
+#: job_url -> when its "Sign in first" window was opened. In-process only: a browser that
+#: outlives this dashboard is detected by probing the CDP port, never by trusting this dict.
+_SIGNIN_OPEN: dict[str, float] = {}
+
+
+def _signin_state(job_url: str) -> bool:
+    """Is a sign-in window open for this job RIGHT NOW?
+
+    Both halves matter. The dict alone would keep claiming a window the operator closed; the
+    port alone cannot tell a sign-in window from an agent's review browser.
+    """
+    return bool(_SIGNIN_OPEN.get(job_url)) and _review_browser_alive()
+
+
+def _start_signin(job_url: str) -> dict:
+    """Open the apply profile's Chrome on this job, with NO agent attached.
+
+    Registration walls (Deloitte, Workday, Salesforce) need a human: an account, a password, a
+    verification code. The agent cannot and should not do that. But the profile it drives is
+    persistent — 830 cookie hosts and counting — so signing in ONCE makes every later
+    application to that employer already authenticated.
+
+    The value is in the timing. Doing it here costs a minute before anything starts; doing it
+    mid-run means an agent burning time on a wall it can never pass.
+    """
+    from applypilot.apply.chrome import BASE_CDP_PORT, launch_chrome
+    from applypilot.database import log_event
+
+    init_db()
+    conn = get_connection()
+    row = _jobs.find_by_any_url(job_url, conn)
+    if not row:
+        return {"ok": False, "message": "job not found"}
+    job = dict(row)
+
+    # Chrome refuses to run two instances on one user-data-dir, and the apply profile is that
+    # dir — so a sign-in window and a running apply cannot coexist. Refuse rather than let
+    # launch_chrome's _kill_on_port silently reap whatever is there.
+    running = _jobs.in_progress(conn)
+    if running:
+        names = ", ".join((r["title"] or "?")[:28] for r in running[:3])
+        return {"ok": False, "message": f"{names} is being filled right now. Pause it first — "
+                                        f"sign-in uses the same Chrome profile."}
+    if _review_browser_alive() and not _SIGNIN_OPEN.get(job_url):
+        return {"ok": False, "message": "A browser is already open for a review. Finish or "
+                                        "dismiss it first — sign-in uses the same profile."}
+
+    target = job.get("application_url") or job.get("url")
+    try:
+        launch_chrome(0, port=BASE_CDP_PORT, url=target, human=True)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "message": f"Could not open Chrome: {exc}"}
+
+    _SIGNIN_OPEN[job_url] = time.time()
+    log_event(job_url, "apply", "info",
+              "Opened the application in Chrome for you to register / sign in. The session is "
+              "saved in the apply profile, so later applications to this employer skip it.",
+              conn)
+    return {"ok": True, "message": "Chrome is open. Register or sign in, then choose "
+                                   "“Fill it now” or “Done for now”."}
+
+
+def _finish_signin(job_url: str, fill: bool = False) -> dict:
+    """Close the sign-in window, or hand it straight to the agent.
+
+    "Fill it now" deliberately does NOT close and relaunch: the apply's resume path reconnects
+    to a live browser on the same port (`resume_now = resume and chrome_alive_on_port(port)`),
+    so the agent inherits the session that was just created instead of meeting the wall again.
+    """
+    from applypilot.apply.chrome import BASE_CDP_PORT, _kill_on_port
+    from applypilot.database import log_event
+
+    _SIGNIN_OPEN.pop(job_url, None)
+    if fill:
+        ok, msg = _start_continue(job_url)
+        if ok:
+            log_event(job_url, "apply", "info", "Signed in — handing the open browser to the agent.")
+        return {"ok": ok, "message": msg if not ok else
+                "Filling in the browser you just signed in to."}
+    _kill_on_port(BASE_CDP_PORT)
+    log_event(job_url, "apply", "info",
+              "Sign-in window closed. The session is saved for later applications.")
+    return {"ok": True, "message": "Closed. You are signed in for next time."}
 
 
 def _pause_apply() -> dict:
@@ -1219,6 +1310,7 @@ def _status_payload() -> dict:
             "network_running": bool(net_task.get("running")),
             "network_note": net_task.get("note") or "",
             "network_error": net_task.get("error") or "",
+            "signin_open": _signin_state(row["url"]),
         })
 
     worker_log = _tail_file(config.LOG_DIR / "worker-0.log")
@@ -1923,6 +2015,21 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/pause-apply":
                 _json_response(self, _pause_apply())
+                return
+            if path == "/api/signin":
+                url = (data.get("url") or "").strip()
+                if not url:
+                    _json_response(self, {"ok": False, "message": "url required"}, 400)
+                    return
+                _json_response(self, _start_signin(url))
+                return
+            if path == "/api/signin-done":
+                url = (data.get("url") or "").strip()
+                if not url:
+                    _json_response(self, {"ok": False, "message": "url required"}, 400)
+                    return
+                fill = str(data.get("fill", "")).lower() in {"1", "true", "yes", "on"}
+                _json_response(self, _finish_signin(url, fill=fill))
                 return
         except Exception as exc:
             _json_response(self, {"error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)

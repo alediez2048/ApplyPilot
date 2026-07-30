@@ -693,8 +693,8 @@ function stepStrip(j) {
   return `<div class="strip">
       <button class="strip-toggle" onclick="onPanelToggle(${u})" title="${open ? 'Collapse' : 'Open details'}">${open ? '▾' : '▸'}</button>
       <div class="steps">${steps}</div>
-      <div class="next">${na ? `<span class="next-label">Next</span>${na}` : `<span class="next-done">🏆 fully worked</span>`}${restartButton(j)}${rowMenu(j)}</div>
-    </div>${hint ? `<div class="strip-hint">${hint}</div>` : ''}`;
+      <div class="next">${na ? `<span class="next-label">Next</span>${na}` : `<span class="next-done">🏆 fully worked</span>`}${signinButton(j)}${restartButton(j)}${rowMenu(j)}</div>
+    </div>${signinBar(j)}${hint ? `<div class="strip-hint">${hint}</div>` : ''}`;
 }
 // The ONE thing to do next, in priority order. Returns '' when the job is fully worked.
 function nextAction(j) {
@@ -907,6 +907,48 @@ function nextHint(j) {
   if (j.status === 'failed')
     return `${j.apply_error ? esc(j.apply_error) : 'Last attempt failed.'} Regenerates materials, then re-applies.`;
   return '';
+}
+// "Sign in first" — for employers whose ATS makes you register before you can apply
+// (Deloitte, Workday, Salesforce). Opens the SAME persistent Chrome profile the agent uses,
+// with no agent attached, so you create the account once and every later application to that
+// employer is already authenticated.
+//
+// Only offered before an application has gone through: once it is applied or waiting for
+// review, signing in is not the thing to do next. It is deliberately NOT shown as the primary
+// action — most jobs never need it, and it should not compete with "Fill application".
+function signinButton(j) {
+  if (j.signin_open) return '';
+  if (['applied', 'ready_to_submit', 'rejected', 'in_progress'].includes(j.status)) return '';
+  const u = `decodeURIComponent('${encodeURIComponent(j.url)}')`;
+  return `<button class="restart-inline" onclick="signIn(${u}, this)" title="Open this application in Chrome so you can register or log in. The session is saved, so later applications to this employer skip it.">🔐 Sign in first</button>`;
+}
+// The waiting state. Deliberately two exits: hand the open window straight to the agent, or
+// keep the session and come back later. "Fill it now" resumes INTO this browser rather than
+// relaunching, so the login that was just created is the one the agent uses.
+function signinBar(j) {
+  if (!j.signin_open) return '';
+  const u = `decodeURIComponent('${encodeURIComponent(j.url)}')`;
+  return `<div class="signin-bar">
+    <span>🔐 Chrome is open on this application. Register or sign in, then:</span>
+    <button class="primary" onclick="signinDone(${u}, true, this)">▶ Fill it now</button>
+    <button class="ghost" onclick="signinDone(${u}, false, this)">✓ Done for now</button>
+  </div>`;
+}
+async function signIn(url, btn) {
+  btn.disabled = true; btn.textContent = 'Opening…';
+  const r = await post('/api/signin', {url});
+  const cmdEl = document.getElementById('command');
+  if (cmdEl) cmdEl.textContent = r.message || '';
+  if (!r.ok) { btn.disabled = false; btn.textContent = '🔐 Sign in first'; }
+  refresh();
+}
+async function signinDone(url, fill, btn) {
+  btn.disabled = true; btn.textContent = fill ? 'Starting…' : 'Closing…';
+  const r = await post('/api/signin-done', {url, fill});
+  const cmdEl = document.getElementById('command');
+  if (cmdEl) cmdEl.textContent = r.message || '';
+  if (fill && r.ok) { await pollCommandUntilDone('Fill'); }
+  refresh();
 }
 // Re-apply stays visible on the row rather than living only in the ⋯ menu: on an applied
 // job it is the main thing you might still want, and burying it made it unfindable.

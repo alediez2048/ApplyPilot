@@ -219,13 +219,19 @@ def _suppress_restore_nag(profile_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def launch_chrome(worker_id: int, port: int | None = None,
-                  headless: bool = False) -> subprocess.Popen:
+                  headless: bool = False, url: str | None = None,
+                  human: bool = False) -> subprocess.Popen:
     """Launch a Chrome instance with remote debugging for a worker.
 
     Args:
         worker_id: Numeric worker identifier.
         port: CDP port. Defaults to BASE_CDP_PORT + worker_id.
         headless: Run Chrome in headless mode (no visible window).
+        url: Open directly on this page instead of the new-tab page.
+        human: This window is for the OPERATOR, not the agent — used by "Sign in first",
+            where they register at an ATS so every later application to that employer is
+            already authenticated. Chrome's own password manager is left enabled here; it is
+            suppressed for agent runs so a save-password bubble cannot cover the form.
 
     Returns:
         subprocess.Popen handle for the Chrome process.
@@ -256,7 +262,6 @@ def launch_chrome(worker_id: int, port: int | None = None,
         "--hide-crash-restore-bubble",
         "--noerrdialogs",
         "--password-store=basic",
-        "--disable-save-password-bubble",
         "--disable-popup-blocking",
         # Block dangerous permissions at browser level
         "--use-fake-device-for-media-stream",
@@ -264,8 +269,13 @@ def launch_chrome(worker_id: int, port: int | None = None,
         "--deny-permission-prompts",
         "--disable-notifications",
     ]
+    if not human:
+        # Agent runs only: a save-password bubble can sit on top of the form it is filling.
+        cmd.append("--disable-save-password-bubble")
     if headless:
         cmd.append("--headless=new")
+    if url:
+        cmd.append(url)
 
     # On Unix, start in a new process group so we can kill the whole tree
     kwargs: dict = dict(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

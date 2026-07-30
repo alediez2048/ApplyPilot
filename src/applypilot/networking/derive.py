@@ -25,7 +25,16 @@ _BOARD_HOSTS = {
 
 # Labels that are never the employer's name but don't make the host a job board either
 # (jobs.stripe.com is Stripe's own careers portal, not a board).
-_GENERIC_HOST_LABELS = {"jobs", "job", "boards", "job-boards", "careers", "career"}
+# Suffix labels that are never part of a company name. `hr` was missing, so acme.breezy.hr
+# resolved to the employer "Hr" — the same shape as the "Ats" bug.
+_TLD_LABELS = ("com", "io", "co", "net", "org", "ai", "app", "hr", "jobs", "dev", "us", "uk")
+
+# Host labels that describe INFRASTRUCTURE, not an employer. "ats" and "apply" are the
+# general fix for ats.<vendor>.com: without them the fallback returns whichever label comes
+# first, which is how a Wander posting on ats.rippling.com became the company "Ats" and
+# produced a cover letter addressed to nobody.
+_GENERIC_HOST_LABELS = {"jobs", "job", "boards", "job-boards", "careers", "career",
+                        "ats", "apply", "applications", "recruiting", "hire", "hiring"}
 
 # site values that are clearly job boards (not employers)
 _BOARD_SITES = {
@@ -64,6 +73,11 @@ _ATS_PATH_SLUG = {
     "ashbyhq.com": lambda p: p[0],
     "lever.co": lambda p: p[0],
     "smartrecruiters.com": lambda p: p[0],
+    # ats.rippling.com/<employer>/jobs/<uuid> — no rule here meant the employer slug was
+    # never read and the host fallback produced "Ats".
+    "rippling.com": lambda p: p[0],
+    # apply.workable.com/<employer>/j/<id> — same shape.
+    "workable.com": lambda p: p[0],
     # myworkdayjobs hosts look like acme.wd1.myworkdayjobs.com/en-US/External — the
     # employer is the first host label, not the path (handled by _host_label).
     "workdayjobs.com": lambda p: p[0].split("_")[0],
@@ -187,7 +201,7 @@ def _company_owns_the_posting(company: str, job: dict) -> bool:
         if not host:
             continue
         labels = [p for p in host.split(".")
-                  if p not in ("com", "io", "co", "net", "org", "ai", "app")
+                  if p not in _TLD_LABELS
                   and p not in _GENERIC_HOST_LABELS]
         # The company must be the ONLY meaningful label. A tenant prefix in front of the board
         # means the board is hosting for someone else, and that someone else is the employer:
@@ -222,7 +236,7 @@ def _host_label(url: str | None) -> str | None:
         return None
     parts = host.split(".")
     # e.g. careers.affirm.com -> affirm ; jobs.lever.co/acme -> lever (board, rejected)
-    labels = [p for p in parts if p not in ("com", "io", "co", "net", "org", "ai", "app")]
+    labels = [p for p in parts if p not in _TLD_LABELS]
     if not labels:
         return None
     # A label is unusable as a company name if it's a board identity OR a generic

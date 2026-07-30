@@ -599,6 +599,37 @@ function isEditingJobs() {
   const el = document.activeElement;
   return !!(el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') && el.closest('#jobs'));
 }
+const BASE_TITLE = 'ApplyPilot Operator';
+// Jobs already acknowledged by looking at the tab. A badge that counts EVERY actionable row
+// would be permanently lit — two stale needs_human rows would show "(2)" forever and train you
+// to ignore it. The badge is for what is NEW since you last looked.
+const NEEDS_SEEN = new Set();
+
+// What "needs you" means, and it is exactly what the row's own Next action offers:
+// a filled form waiting to be submitted, a blocker only a human can clear, or follow-ups due.
+function needsYou(j) {
+  if (j.status === 'ready_to_submit' || j.status === 'needs_human') return true;
+  const f = j.followups || {};
+  return ((f.due_count || 0) + (f.li_due_count || 0)) > 0;
+}
+
+// Co-pilot apply ENDS by waiting for the operator, and the queue stays paused until they act.
+// Nothing pulled them back to the tab — no sound, no notification, no badge — so a filled
+// application sat until someone happened to look, and a restart eventually closed it.
+function updateNeedsYouBadge(jobs) {
+  const actionable = (jobs || []).filter(needsYou).map(j => j.url);
+  const focused = typeof document.hasFocus === 'function' ? document.hasFocus() : true;
+  if (focused) {
+    // Looking at it counts as seeing it. Marks the CURRENT set, so a job that becomes
+    // actionable later still raises the badge.
+    actionable.forEach(u => NEEDS_SEEN.add(u));
+  }
+  for (const u of [...NEEDS_SEEN]) if (!actionable.includes(u)) NEEDS_SEEN.delete(u);
+  const unseen = actionable.filter(u => !NEEDS_SEEN.has(u)).length;
+  document.title = unseen ? `(${unseen}) \u26a0 ${BASE_TITLE}` : BASE_TITLE;
+  return unseen;
+}
+
 async function refresh() {
   if (isEditingJobs()) return;
   const data = await (await fetch('/api/status')).json();
@@ -611,6 +642,7 @@ async function refresh() {
   document.getElementById('command').textContent = c.running ? `Running: ${c.name}` : (c.name ? `Last: ${c.name}, exit ${c.returncode}` : 'Idle');
   document.getElementById('cmdLog').textContent = (c.log || []).join('\n');
   document.getElementById('applyLog').textContent = [...(data.worker_log || []), '', ...(data.claude_log || [])].join('\n');
+  updateNeedsYouBadge(data.jobs);
   NET_AVAIL = !!data.networking_available;
   GMAIL_AVAIL = !!data.gmail_available;
   const allJobs = data.jobs || [];

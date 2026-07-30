@@ -56,7 +56,27 @@ _claude_procs: dict[int, subprocess.Popen] = {}
 _claude_lock = threading.Lock()
 
 # Register cleanup on exit
+def _reap_agents_on_exit() -> None:
+    """Kill any agent still running when this process exits.
+
+    Needed because the agent now runs in its OWN process group (see the Popen call in
+    `run_job`): that stops a kill of the agent from taking this process down with it, but it
+    also means the agent no longer dies automatically when we are signalled. Without this an
+    interrupted run would leave a Claude session driving a browser with nobody watching.
+    """
+    with _claude_lock:
+        procs = list(_claude_procs.values())
+        _claude_procs.clear()
+    for p in procs:
+        try:
+            if p.poll() is None:
+                _kill_process_tree(p.pid)
+        except Exception:  # noqa: BLE001
+            logger.debug("Failed to reap an agent process on exit", exc_info=True)
+
+
 atexit.register(cleanup_on_exit)
+atexit.register(_reap_agents_on_exit)
 if platform.system() != "Windows":
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 
@@ -541,6 +561,13 @@ def run_job(job: dict, port: int, worker_id: int = 0,
             errors="replace",
             env=env,
             cwd=str(worker_dir),
+            # Its OWN process group. `_kill_process_tree` does os.killpg, which without this
+            # walks up to the group the AGENT SHARES WITH US and SIGKILLs this process too.
+            # Pause hit exactly that: the flag was consumed, the agent was killed, and the CLI
+            # died at the same instant (exit -9) before it could mark the job needs_human — so
+            # the browser was left open with the row still reading "in progress" and no
+            # Continue button. The Ctrl+C skip paths call the same helper and had the same bug.
+            start_new_session=(platform.system() != "Windows"),
         )
         with _claude_lock:
             _claude_procs[worker_id] = proc

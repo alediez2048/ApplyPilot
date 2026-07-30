@@ -87,8 +87,8 @@ def thread_messages(thread_id: str, service=None) -> list[dict]:
     try:
         thread = svc.users().threads().get(
             userId="me", id=thread_id, format="metadata",
-            metadataHeaders=["From", "Date", "Message-ID", "In-Reply-To", "References",
-                             "Subject", "Auto-Submitted"],
+            metadataHeaders=["From", "To", "Cc", "Date", "Message-ID", "In-Reply-To",
+                             "References", "Subject", "Auto-Submitted"],
         ).execute()
     except Exception as e:  # noqa: BLE001
         log.debug("Gmail thread %s unreadable: %s", thread_id, e)
@@ -103,6 +103,10 @@ def thread_messages(thread_id: str, service=None) -> list[dict]:
             "labelIds": msg.get("labelIds") or [],
             "internalDate": msg.get("internalDate") or "",
             "from": h.get("from", ""),
+            # To/Cc are how a HANDOFF is visible: an introduction usually arrives as a Cc, and
+            # reading senders alone misses it entirely (CRM-4).
+            "to": h.get("to", ""),
+            "cc": h.get("cc", ""),
             "subject": h.get("subject", ""),
             "in_reply_to": h.get("in-reply-to", ""),
             "references": h.get("references", ""),

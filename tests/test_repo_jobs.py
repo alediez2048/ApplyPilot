@@ -182,6 +182,7 @@ def test_sql_lives_only_in_the_data_layer():
         "migrations/__init__.py",                            # the migration runner (ARCH-5)
         "migrations/m001_touches_backfill.py",               # migrations ARE schema changes
         "networking/store.py", "networking/touches.py",      # per-table repositories
+        "networking/messages.py",                            # the CRM-4 conversation store
         "networking/connections.py", "networking/backfill_touches.py",
         # --- not yet migrated (remaining ARCH-4 scope) ---
         "enrichment/detail.py", "apply/launcher.py", "view.py", "cli.py", "pipeline.py",

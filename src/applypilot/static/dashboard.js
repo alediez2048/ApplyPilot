@@ -492,6 +492,23 @@ function contactRow(c) {
 }
 // Channels become tabs inside the open contact, so the email draft, the LinkedIn note and
 // the phone field stop competing for the same vertical space.
+// CRM-4. The conversation, from stored HEADERS only — who wrote, when, and who was added.
+// No bodies are stored, so this deliberately shows structure rather than pretending to be an
+// email client: the point is "there is a live conversation here and somebody new is on it",
+// which a boolean `replied` threw away entirely.
+function threadView(c) {
+  const msgs = c.thread || [];
+  if (msgs.length < 2) return '';   // one outbound message is not a conversation
+  const rows = msgs.map(m => {
+    const who = m.direction === 'in' ? (m.from_name || m.from_addr) : 'You';
+    const cc = (m.cc_addrs || []).length ? ` <span class="th-cc">cc ${(m.cc_addrs||[]).map(esc).join(', ')}</span>` : '';
+    return `<div class="th-row ${m.direction}"><span class="th-who">${esc(who)}</span>` +
+           `<span class="th-when">${esc(shortDate(m.sent_at))}</span>${cc}</div>`;
+  }).join('');
+  const intro = c.introduced_by
+    ? `<div class="th-intro">👋 ${esc(c.introduced_by)} added them to this thread</div>` : '';
+  return `<details class="thread"><summary>💬 Conversation (${msgs.length})</summary>${intro}${rows}</details>`;
+}
 function contactPanel(c) {
   const ch = CHANNEL_TAB.get(c.id) || (c.email ? 'email' : (c.linkedin_url ? 'linkedin' : 'phone'));
   const tab = (k, label, on) => `<span class="${ch === k ? 'on' : ''}" onclick="event.stopPropagation();setChannel('${esc(c.id)}','${k}')">${label}${on || ''}</span>`;
@@ -510,6 +527,7 @@ function contactPanel(c) {
         ${c.verify_note ? `<div class="verify-note ${esc(c.confidence)}">${c.confidence === 'high' ? '✓' : '?'} ${esc(c.verify_note)}</div>` : ''}
       </div>
       <div class="chan">${tab('email','✉ Email')}${tab('linkedin','🔗 LinkedIn')}${tab('phone','📇 Phone & notes')}</div>
+      ${threadView(c)}
       ${body}
       <div class="crow-del"><button class="link-danger" onclick="deleteContact('${esc(c.id)}', decodeURIComponent('${encodeURIComponent(c.full_name || '')}'), ${!!c.emailed})">🗑 Not at this company — remove</button></div>
     </div>`;

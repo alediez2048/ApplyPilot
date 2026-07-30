@@ -17,7 +17,8 @@ from datetime import datetime, timezone
 
 from applypilot.database import get_connection, log_event
 from applypilot.domain import replies as domain_replies
-from applypilot.networking import gmail_oauth, gmail_read, store, touches
+from applypilot.networking import gmail_oauth, gmail_read, messages as msg_store
+from applypilot.networking import store, touches
 
 log = logging.getLogger(__name__)
 
@@ -70,6 +71,42 @@ def mark_bounced(contact: dict, when: str, conn=None) -> None:
     log.info("Bounce detected for %s (%s)", contact.get("full_name"), contact.get("email"))
 
 
+def _sync_thread(contact: dict, msgs: list[dict], me: str, conn) -> dict:
+    """Persist the conversation and report anyone the OTHER side introduced (CRM-4).
+
+    Stored per message so re-syncing is a no-op — `tick` re-reads every open thread hourly.
+    """
+    from applypilot.domain import conversations as cv
+
+    rows = []
+    for m in cv.timeline(msgs, me):
+        rows.append({"message_id": m["id"], "thread_id": contact.get("thread_id"),
+                     "contact_id": contact["id"], "job_url": contact["job_url"],
+                     "direction": m["direction"], "from_addr": m["from_addr"],
+                     "from_name": m["from_name"], "to_addrs": m["to_addrs"],
+                     "cc_addrs": m["cc_addrs"], "subject": m["subject"],
+                     "sent_at": _iso(m["at"])})
+    new = msg_store.upsert_messages(rows, conn)
+    intro = cv.introductions(msgs, me, known=[contact.get("email")])
+    return {"new_messages": new, "introductions": intro}
+
+
+def note_introductions(contact: dict, intros: list[dict], conn) -> None:
+    """Surface a handoff. Deliberately does NOT create the contact.
+
+    Threads collect schedulers, assistants and ATS robots, and an auto-created contact is one an
+    automated ladder will then email. `is_robot()` filters the obvious ones, but "obvious" is
+    not "all" — so this reports, and the operator confirms.
+    """
+    for person in intros:
+        who = person.get("name") or person["email"]
+        by = person.get("introduced_by_name") or person.get("introduced_by") or "someone"
+        log_event(contact["job_url"], "outreach", "ok",
+                  f"{by} introduced {who} ({person['email']}) on the thread — "
+                  f"they may be the person actually handling this now.", conn)
+        log.info("Introduction on %s: %s -> %s", contact["job_url"], by, person["email"])
+
+
 def poll(conn=None, force_full: bool = False) -> dict:
     """One incremental poll. Safe to run repeatedly; returns a summary for the caller to log.
 
@@ -82,7 +119,10 @@ def poll(conn=None, force_full: bool = False) -> dict:
         return {"ok": False, "note": why, "checked": 0, "replied": 0}
 
     conn = conn or get_connection()
-    contacts = store.contacts_awaiting_reply(conn)
+    # Read every live thread, not just the silent ones — a replied contact's thread is
+    # the one still moving. Reply/bounce MARKING is still gated below, so re-reading an
+    # answered thread cannot overwrite `replied_at` or re-log anything.
+    contacts = store.contacts_with_threads(conn)
     if not contacts:
         gmail_read.save_watermark(checked_at=datetime.now(timezone.utc).isoformat())
         return {"ok": True, "note": "no awaiting-reply contacts", "checked": 0, "replied": 0}
@@ -105,6 +145,7 @@ def poll(conn=None, force_full: bool = False) -> dict:
     checked = 0
     found: list[dict] = []
     bounced: list[dict] = []
+    intros: list[dict] = []
     for c in contacts:
         tid = (c.get("thread_id") or "").strip()
         if not tid:
@@ -113,8 +154,24 @@ def poll(conn=None, force_full: bool = False) -> dict:
             continue
         checked += 1
         msgs = gmail_read.thread_messages(tid, service)
-        found.extend(domain_replies.replies_in(msgs, [c], me))
-        bounced.extend(domain_replies.bounces_in(msgs, [c], me))
+        if not (c.get("replied_at") or "").strip():
+            # Already-answered contacts are re-read for conversation memory but never re-marked:
+            # re-marking would push `replied_at` forward to a later message in the thread and
+            # lose when the conversation actually turned.
+            found.extend(domain_replies.replies_in(msgs, [c], me))
+            bounced.extend(domain_replies.bounces_in(msgs, [c], me))
+        try:
+            synced = _sync_thread(c, msgs, me, conn)
+            if synced["introductions"]:
+                # Only announce an introduction the FIRST time the message carrying it is seen,
+                # or an hourly tick would re-log the same handoff forever — the exact duplicate
+                # -logging bug bounces already hit.
+                if synced["new_messages"]:
+                    note_introductions(c, synced["introductions"], conn)
+                intros.extend(synced["introductions"])
+        except Exception:  # noqa: BLE001
+            # Conversation memory is additive. It must never break reply detection.
+            log.debug("Thread sync failed for %s", c.get("full_name"), exc_info=True)
 
     for hit in found:
         mark_replied(hit["contact"], _iso(hit["message"].get("internalDate", "")), conn)
@@ -125,5 +182,7 @@ def poll(conn=None, force_full: bool = False) -> dict:
                               checked_at=datetime.now(timezone.utc).isoformat())
     return {"ok": True, "note": "ok", "checked": checked,
             "replied": len(found), "bounced": len(bounced),
+            "introduced": len(intros),
             "names": [h["contact"].get("full_name") for h in found],
-            "bounced_names": [h["contact"].get("full_name") for h in bounced]}
+            "bounced_names": [h["contact"].get("full_name") for h in bounced],
+            "introduced_names": [i.get("name") or i.get("email") for i in intros]}

@@ -1220,7 +1220,7 @@ def _legacy_followup_status(ladder: dict) -> str:
 
 
 def _contact_payload(c: dict, company: str | None = None, ladders: dict | None = None,
-                     conn_matches: dict | None = None) -> dict:
+                     conn_matches: dict | None = None, thread: list | None = None) -> dict:
     from applypilot.domain.followup import EMPTY_LADDER
     from applypilot.networking import connections
     # Prebuilt by the caller in one query when rendering a whole job; falls back to a
@@ -1285,6 +1285,10 @@ def _contact_payload(c: dict, company: str | None = None, ladders: dict | None =
         "confidence": c.get("confidence") or "",
         "verify_note": c.get("verify_note") or "",
         "replied_at": c.get("replied_at") or "",
+        # CRM-4: the stored conversation (headers only) and, when the other side added this
+        # person to a thread, who did it — the handoff a boolean `replied` used to discard.
+        "thread": thread or [],
+        "introduced_by": _introduced_by(c, thread or []),
         # HOT layer marker: found via your connections (vs cold Apollo). Either the stored source
         # or a live connection match makes it "hot".
         "hot": c.get("source") == "connection" or bool(conn_rec),
@@ -1355,7 +1359,9 @@ def _status_payload() -> dict:
         job_ladders = _ladder_states([c.get("id") for c in raw_contacts if c.get("id")])
         job_matches = _conns.match_many([c.get("full_name") for c in raw_contacts],
                                         contact_company, conn)
-        contacts = [_contact_payload(c, contact_company, job_ladders, job_matches)
+        job_threads = _conversations_for_job(row["url"], conn)
+        contacts = [_contact_payload(c, contact_company, job_ladders, job_matches,
+                                     thread=job_threads.get(c.get("id")) or [])
                     for c in raw_contacts]
         net_task = _net_tasks.get(row["url"], {})
         jobs.append({
@@ -1380,6 +1386,7 @@ def _status_payload() -> dict:
             "contacts": contacts,
             "checklist": _job_checklist(status, row["applied_at"] or "", contacts),
             "followups": _followup_panel(contacts, job_ladders),
+            "conversations": job_threads,
             "activity": _job_activity(row["url"], conn),
             "network_running": bool(net_task.get("running")),
             "network_note": net_task.get("note") or "",
@@ -1411,6 +1418,40 @@ def _status_payload() -> dict:
         # Mutual shared token for the LinkedIn extension — operator pastes it into the popup once.
         "ext_token": _ext_token(),
     }
+
+
+def _introduced_by(contact: dict, thread: list) -> str:
+    """Who added this contact to the conversation, if anybody did.
+
+    Only meaningful for someone who first appears as a Cc on a message WE did not send — that
+    is the shape of a handoff ("Victoria introduced David"). A contact we emailed directly was
+    introduced by nobody.
+    """
+    if not thread:
+        return ""
+    email = (contact.get("email") or "").strip().lower()
+    if not email:
+        return ""
+    for msg in thread:
+        if msg.get("direction") != "in":
+            continue
+        if email in [a.lower() for a in (msg.get("cc_addrs") or [])]:
+            return msg.get("from_name") or msg.get("from_addr") or ""
+    return ""
+
+
+def _conversations_for_job(job_url: str, conn) -> dict:
+    """contact_id -> stored thread (CRM-4). One query per JOB, never one per contact.
+
+    Degrades to {} rather than raising: conversation memory is additive, and a job row must
+    still render if the messages table is missing or unreadable.
+    """
+    try:
+        from applypilot.networking import messages as _messages
+        return _messages.threads_for_job(job_url, conn)
+    except Exception:  # noqa: BLE001
+        log.debug("Conversation load failed for %s", job_url, exc_info=True)
+        return {}
 
 
 def _metrics_payload(job_rows: list, conn) -> dict:

@@ -528,7 +528,7 @@ def mark_connected_now(contact_id: str, conn: sqlite3.Connection | None = None) 
 def delete_contact(contact_id: str, conn: sqlite3.Connection | None = None) -> bool:
     """Remove a contact AND its follow-up state. Returns True if a contact row was deleted.
 
-    `touches` and `sequences` are keyed by contact_id with no foreign key, so deleting only the
+    `touches`, `sequences` and `messages` are keyed by contact_id with no foreign key, so deleting only the
     contact leaves a live follow-up ladder pointing at somebody who no longer exists — due
     counts that can never be cleared, and a `sequences` row that would silently re-attach if
     the same contact id were ever minted again (ids are a hash of job + identity, so
@@ -536,7 +536,7 @@ def delete_contact(contact_id: str, conn: sqlite3.Connection | None = None) -> b
     """
     if conn is None:
         conn = get_connection()
-    for table in ("touches", "sequences"):
+    for table in ("touches", "sequences", "messages"):
         try:
             conn.execute(f"DELETE FROM {table} WHERE contact_id = ?", (contact_id,))
         except sqlite3.OperationalError:
@@ -589,6 +589,28 @@ def all_contacts_for_metrics(conn: sqlite3.Connection | None = None) -> list[dic
     rows = conn.execute(
         "SELECT id, job_url, company, source, confidence, email_status, "
         "sent_message_id, submitted_at, replied_at FROM contacts"
+    ).fetchall()
+    return [dict(zip(r.keys(), r)) for r in rows]
+
+
+def contacts_with_threads(conn: sqlite3.Connection | None = None) -> list[dict]:
+    """Every contact whose conversation is worth re-reading (CRM-4).
+
+    Wider than `contacts_awaiting_reply` on purpose, and the difference matters: that pool
+    excludes anyone who already replied, which is exactly BACKWARDS for conversation memory —
+    a replied contact is the one with a LIVE thread. Excluding them meant the Writer handoff
+    (Victoria introducing a colleague) could never be seen, because her thread stopped being
+    read the moment she answered.
+
+    Bounced addresses are still excluded: that mail never arrived and never will.
+    """
+    if conn is None:
+        conn = get_connection()
+    init_contacts(conn)
+    rows = conn.execute(
+        "SELECT id, job_url, full_name, email, thread_id, rfc_message_id, submitted_at, "
+        "replied_at FROM contacts WHERE thread_id IS NOT NULL AND thread_id != '' "
+        "AND COALESCE(email_status, '') != 'bounced'"
     ).fetchall()
     return [dict(zip(r.keys(), r)) for r in rows]
 

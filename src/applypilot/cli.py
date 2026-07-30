@@ -464,6 +464,47 @@ def network(
 
 
 @app.command()
+def tick(
+    dry_run: bool = typer.Option(False, "--dry-run", help="Print what it would do; change nothing."),
+) -> None:
+    """One unattended heartbeat: poll replies, free stale locks, draft what came due.
+
+    Idempotent and safe to run repeatedly — this is what the schedule calls. It NEVER sends
+    anything and NEVER starts an apply; both stay a human action.
+    """
+    from applypilot import tick as tick_mod
+
+    out = tick_mod.run(dry_run=dry_run)
+    console.print(f"\n[bold]tick[/bold]{' [dim](dry run)[/dim]' if dry_run else ''}")
+    for name, res in out["steps"].items():
+        mark = "[red]✗[/red]" if res.get("error") else "[green]✓[/green]"
+        console.print(f"  {mark} {name:<11} {res.get('detail', '')}")
+
+
+@app.command()
+def schedule(
+    install: bool = typer.Option(False, "--install", help="Install the hourly launchd job."),
+    uninstall: bool = typer.Option(False, "--uninstall", help="Remove it."),
+) -> None:
+    """Install or remove the macOS schedule that runs `tick` hourly."""
+    from applypilot import schedule as sched
+
+    if install and uninstall:
+        console.print("[red]Pick one of --install / --uninstall.[/red]")
+        raise typer.Exit(1)
+    if install:
+        ok, msg = sched.install()
+    elif uninstall:
+        ok, msg = sched.uninstall()
+    else:
+        state = "installed" if sched.installed() else "not installed"
+        console.print(f"Schedule: [bold]{state}[/bold]  ({sched.plist_path()})")
+        return
+    console.print(f"[{'green' if ok else 'red'}]{msg}[/]")
+    raise typer.Exit(0 if ok else 1)
+
+
+@app.command()
 def stats(
     outreach: bool = typer.Option(False, "--outreach", help="Reply rates and the outreach funnel."),
 ) -> None:
@@ -855,6 +896,17 @@ def doctor(
             results.append(("Reply detection", warn_mark, why))
     except Exception:
         results.append(("Reply detection", warn_mark, "probe failed"))
+
+    # Unattended schedule (CRM-3b). Optional: everything still works by hand without it.
+    try:
+        from applypilot import schedule as _sched
+        if _sched.installed():
+            results.append(("Unattended tick", ok_mark, f"scheduled ({_sched.plist_path().name})"))
+        else:
+            results.append(("Unattended tick", "[dim]optional[/dim]",
+                            "not scheduled — run `applypilot schedule --install`"))
+    except Exception:
+        results.append(("Unattended tick", warn_mark, "probe failed"))
 
     # CapSolver (optional)
     capsolver = os.environ.get("CAPSOLVER_API_KEY")

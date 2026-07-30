@@ -603,10 +603,15 @@ def contacts_awaiting_reply(conn: sqlite3.Connection | None = None) -> list[dict
     if conn is None:
         conn = get_connection()
     init_contacts(conn)
+    # Excludes BOUNCED addresses too. A bounce is terminal — that mail will never arrive and
+    # the person can never answer — so leaving them in meant every poll re-detected the same
+    # failure and appended another "BOUNCED" line to the activity log. `applypilot tick` running
+    # hourly turned that into 11 identical entries for one address in a single afternoon.
     rows = conn.execute(
         "SELECT id, job_url, full_name, email, thread_id, rfc_message_id, submitted_at "
         "FROM contacts WHERE sent_message_id IS NOT NULL "
-        "AND (replied_at IS NULL OR replied_at = '')"
+        "AND (replied_at IS NULL OR replied_at = '') "
+        "AND COALESCE(email_status, '') != 'bounced'"
     ).fetchall()
     return [dict(zip(r.keys(), r)) for r in rows]
 

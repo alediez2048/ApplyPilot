@@ -309,3 +309,45 @@ def test_a_bounce_is_visible_in_the_activity_log(db):
                           "email": "ali@affirm.com"}, "2026-07-16T10:00:00+00:00", db)
     blob = " ".join(e["detail"] or "" for e in database.get_job_events("http://j/1", conn=db))
     assert "BOUNCED" in blob and "ali@affirm.com" in blob
+
+
+def test_a_known_bounce_is_not_polled_again(db):
+    """Idempotence. A bounce is terminal — that mail will never arrive — so a bounced contact
+    must leave the polling pool. Left in, every poll re-detected the same failure and appended
+    another log line: `applypilot tick` running hourly produced ELEVEN identical BOUNCED
+    entries for one address in an afternoon."""
+    from applypilot.networking import replies
+
+    cid = store.upsert_contact({"job_url": "http://j/1", "full_name": "Ali",
+                                "email": "ali@affirm.com", "sent_message_id": "m1"}, db)
+    assert cid in [c["id"] for c in store.contacts_awaiting_reply(db)]
+
+    replies.mark_bounced({"id": cid, "job_url": "http://j/1", "full_name": "Ali",
+                          "email": "ali@affirm.com"}, "2026-07-16T10:00:00+00:00", db)
+    assert cid not in [c["id"] for c in store.contacts_awaiting_reply(db)], \
+        "a bounced address stayed in the pool and will be re-logged on every poll"
+
+
+def test_polling_twice_does_not_duplicate_anything(db, monkeypatch):
+    """The acceptance criterion for an unattended schedule: running it twice in a row produces
+    no duplicate work and no duplicate log entries."""
+    from applypilot.networking import gmail_read, replies
+
+    cid = store.upsert_contact({"job_url": "http://j/1", "full_name": "Ali",
+                                "email": "ali@affirm.com", "sent_message_id": "m1",
+                                "thread_id": "t1"}, db)
+    monkeypatch.setattr(gmail_read, "available", lambda: (True, "ok"))
+    monkeypatch.setattr(gmail_read, "_service", lambda: object())
+    monkeypatch.setattr(gmail_read, "current_history_id", lambda s=None: "1")
+    monkeypatch.setattr(gmail_read, "threads_with_activity", lambda h, s=None: set())
+    monkeypatch.setattr(gmail_read, "thread_messages",
+                        lambda tid, s=None: [_bounce(thread_id="t1")])
+    from applypilot.networking import gmail_oauth
+    monkeypatch.setattr(gmail_oauth, "connected_email", lambda: ME)
+
+    replies.poll(db)
+    replies.poll(db)
+    n = sum(1 for e in database.get_job_events("http://j/1", conn=db)
+            if "BOUNCED" in (e["detail"] or ""))
+    assert n == 1, f"the same bounce was logged {n} times"
+    assert cid  # keep the id referenced for clarity

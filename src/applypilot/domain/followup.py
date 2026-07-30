@@ -97,6 +97,21 @@ def channel_schedule(channel: Channel) -> list[int]:
     return list(got) if got else list(channel.default_schedule)
 
 
+def normalize_for_ladder(contact: dict) -> dict:
+    """Fill the DERIVED fields the ladder reads, so a raw DB row works as well as a UI payload.
+
+    `emailed` is not a column — the dashboard computes it in `_contact_payload` from
+    `sent_message_id`. Anything passing raw rows straight from the database therefore saw every
+    email channel as "never used" and reported ZERO follow-ups due, silently. `applypilot tick`
+    did exactly that: the dashboard showed 3 due while tick found none.
+
+    Idempotent, so a payload that already carries the field is untouched.
+    """
+    if "emailed" in contact:
+        return contact
+    return {**contact, "emailed": bool((contact.get("sent_message_id") or "").strip())}
+
+
 def _is_ready(contact: dict, channel: Channel) -> bool:
     """Has this channel been used at all? No first message means nothing to follow up on."""
     for name, allowed in channel.ready:
@@ -151,6 +166,11 @@ def followup_panel(contacts: list[dict], now: datetime | None = None,
     buckets: dict[str, dict[str, list[dict]]] = {
         c.name: {"due": [], "waiting": [], "finished": [], "stopped": []} for c in CHANNELS
     }
+
+    # Normalise ONCE, here, rather than at each call site: the dashboard passes UI payloads
+    # and `tick` passes raw DB rows, and only one of those carries the derived `emailed`
+    # field the email ladder needs.
+    contacts = [normalize_for_ladder(c) for c in contacts]
 
     for contact in contacts:
         for channel in CHANNELS:

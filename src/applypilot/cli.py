@@ -779,6 +779,21 @@ def doctor(
     except Exception:
         results.append(("Gmail outreach send", warn_mark, "probe failed"))
 
+    # Reply detection (CRM-1). Reported separately from sending: it degrades on its own — a
+    # token without gmail.metadata still sends perfectly well, it just cannot see answers.
+    try:
+        from applypilot.networking import gmail_read
+        ok, why = gmail_read.available()
+        if ok:
+            wm = gmail_read.load_watermark()
+            last = (wm.get("checked_at") or "")[:16].replace("T", " ")
+            results.append(("Reply detection", ok_mark,
+                            f"on — last checked {last}" if last else "on — never polled yet"))
+        else:
+            results.append(("Reply detection", warn_mark, why))
+    except Exception:
+        results.append(("Reply detection", warn_mark, "probe failed"))
+
     # CapSolver (optional)
     capsolver = os.environ.get("CAPSOLVER_API_KEY")
     if capsolver:

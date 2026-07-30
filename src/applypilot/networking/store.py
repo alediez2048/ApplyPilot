@@ -58,6 +58,9 @@ _CONTACT_COLUMNS: dict[str, str] = {
     # actually works at the employer? high|medium|low, plus the reasoning shown in the UI.
     "confidence": "TEXT",
     "verify_note": "TEXT",
+    # CRM-1. Set when an inbound message is matched to this contact. The email ladder halts via
+    # `sequences` (ARCH-3) — this column is the DATE, for the UI and for time_to_reply (CRM-2).
+    "replied_at": "TEXT",
     "discovered_at": "TEXT",
     "updated_at": "TEXT",
 }
@@ -571,6 +574,24 @@ def contact_ref(contact_id: str, conn: sqlite3.Connection | None = None) -> dict
     init_contacts(conn)
     row = conn.execute("SELECT id, job_url FROM contacts WHERE id = ?", (contact_id,)).fetchone()
     return dict(zip(row.keys(), row)) if row else None
+
+
+def contacts_awaiting_reply(conn: sqlite3.Connection | None = None) -> list[dict]:
+    """Contacts we emailed who have not yet been recorded as replying (CRM-1).
+
+    Only these can receive a reply, and excluding the already-replied matters: re-marking one
+    would overwrite `replied_at` with a LATER message in the same thread, losing when the
+    conversation actually turned — which is exactly what time_to_reply (CRM-2) measures.
+    """
+    if conn is None:
+        conn = get_connection()
+    init_contacts(conn)
+    rows = conn.execute(
+        "SELECT id, job_url, full_name, email, thread_id, rfc_message_id, submitted_at "
+        "FROM contacts WHERE sent_message_id IS NOT NULL "
+        "AND (replied_at IS NULL OR replied_at = '')"
+    ).fetchall()
+    return [dict(zip(r.keys(), r)) for r in rows]
 
 
 def contact_for_delete(contact_id: str, conn: sqlite3.Connection | None = None) -> dict | None:

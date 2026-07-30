@@ -187,12 +187,25 @@ def test_sql_lives_only_in_the_data_layer():
         "enrichment/detail.py", "apply/launcher.py", "view.py", "cli.py", "pipeline.py",
         "discovery/jobspy.py", "discovery/workday.py", "discovery/smartextract.py",
         "scoring/scorer.py", "scoring/cover_letter.py", "scoring/tailor.py",
-        "networking/gmail_send.py", "networking/gmail_oauth.py", "networking/service.py",
+        "networking/gmail_send.py", "networking/service.py",
         "networking/linkedin_agent.py",
     }
+    # Detect SQL, not the string ".execute(". The Google API client uses the same call shape —
+    # `service.users().threads().get(...).execute()` — so the old heuristic flagged every Gmail
+    # module as a data-layer violation, which is why gmail_oauth.py and gmail_send.py sit in the
+    # allowlist below for a rule they never actually broke. A false positive here is not
+    # harmless: it pushes real modules onto an allowlist that is supposed to only ever shrink.
+    import re
+    sql_execute = re.compile(
+        r"""(?:conn|cur|cursor|db|self\._conn)\.execute(?:many|script)?\(     # a DB handle
+          | \.execute(?:many|script)?\(\s*                                    # or a literal
+            (?:f|r|u|b)*["']{1,3}\s*
+            (?:SELECT|INSERT|UPDATE|DELETE|CREATE|ALTER|DROP|PRAGMA|BEGIN|WITH|REPLACE)\b""",
+        re.IGNORECASE | re.VERBOSE,
+    )
     offenders = sorted(
         str(p.relative_to(root)) for p in root.rglob("*.py")
-        if ".execute(" in p.read_text(encoding="utf-8")
+        if sql_execute.search(p.read_text(encoding="utf-8"))
         and str(p.relative_to(root)) not in allowed
     )
     assert not offenders, (

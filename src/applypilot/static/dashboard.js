@@ -199,6 +199,17 @@ function toggleAdvanced() {
 async function stopCommand() { await post('/api/stop', {}); refresh(); }
 // Pause is NOT Stop. Stop killpg's the run, which reaches Chrome and loses a part-filled form.
 // Pause stops only the agent and leaves the browser up for you to finish in.
+// Manual poke at the same poller the background thread uses — for when you know a reply just
+// landed and do not want to wait out the 5-minute cycle.
+async function checkReplies(btn) {
+  const was = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Checking…';
+  const r = await post('/api/check-replies', {});
+  const cmdEl = document.getElementById('command');
+  if (cmdEl) cmdEl.textContent = r.message || '';
+  btn.disabled = false; btn.textContent = was;
+  refresh();
+}
 async function pauseApply() {
   const cmdEl = document.getElementById('command');
   const r = await post('/api/pause-apply', {});
@@ -449,6 +460,13 @@ function peopleList(j) {
   if (cold.length) out += `<div class="ppl-group cold">🧊 New contacts <span class="ppl-g-n">${cold.length}</span></div>` + cold.map(c => contactRow(c)).join('');
   return `<div class="plist">${out}</div>`;
 }
+// "Jul 28" from an ISO timestamp, without dragging in a formatter.
+function shortDate(iso) {
+  try {
+    const d = new Date(iso);
+    return isNaN(d) ? '' : d.toLocaleDateString([], {month:'short', day:'numeric'});
+  } catch { return ''; }
+}
 function contactRow(c) {
   const open = CONTACT_OPEN.has(c.id);
   const pills = [];
@@ -456,7 +474,10 @@ function contactRow(c) {
     : (c.email ? `<span class="pill off">✉ draft</span>` : `<span class="pill off">✉ no email</span>`));
   pills.push((c.dm_status === 'sent' || c.dm_status === 'manual') ? `<span class="pill on">🔗 connected</span>`
     : (c.linkedin_url ? `<span class="pill off">🔗 —</span>` : ''));
-  if (c.followup_state === 'due')      pills.push(`<span class="pill due">↻ due</span>`);
+  // `replied_at` is authoritative (CRM-1 writes it); `followup_status` is the ARCH-3 legacy
+  // shim and stays as a fallback for rows recorded before reply detection existed.
+  if (c.replied_at) pills.push(`<span class="pill on">✓ replied ${esc(shortDate(c.replied_at))}</span>`);
+  else if (c.followup_state === 'due')      pills.push(`<span class="pill due">↻ due</span>`);
   else if (c.followup_status === 'replied') pills.push(`<span class="pill on">✓ replied</span>`);
   else if (c.followup_state === 'waiting')  pills.push(`<span class="pill off">↻ ${fuWhen(c.followup_due_in_h)}</span>`);
   if (c.phone) pills.push(`<span class="pill on">📱</span>`);

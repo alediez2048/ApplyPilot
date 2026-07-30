@@ -42,6 +42,7 @@
       <textarea id="urls" placeholder="Paste one or more job URLs here, then click Run. Direct ATS/career URLs work best."></textarea>
       <div class="row" style="margin-top:10px; align-items:center">
         <button id="runBtn" class="primary" style="font-size:15px; padding:10px 20px" onclick="runEverything()">🚀 Import, Prepare &amp; Fill</button>
+        <button class="ghost" onclick="checkReplies(this)" title="Ask Gmail whether anyone replied. Runs automatically every 5 minutes while the dashboard is open.">📥 Check replies</button>
         <button class="ghost" onclick="pauseApply()" title="Stop the agent but KEEP the browser open so you can finish the form yourself">⏸ Pause &amp; take over</button>
         <button class="danger" onclick="stopCommand()" title="Kill the whole run — this also closes the browser and loses a part-filled form">Stop</button>
         <label style="margin-left:12px"><input id="dryRun" type="checkbox"> Dry run (fill, don't submit)</label>

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import logging
 import mimetypes
 import os
 import re
@@ -746,6 +747,60 @@ def _finish_signin(job_url: str, fill: bool = False) -> dict:
     return {"ok": True, "message": "Closed. You are signed in for next time."}
 
 
+log = logging.getLogger(__name__)
+
+#: Background reply polling. Gmail is the slow part, so it never runs inside a request — a
+#: 2.5s dashboard refresh cannot wait on a mailbox round-trip.
+class ReplyPoller:
+    """Polls Gmail for replies on a timer while the dashboard is up.
+
+    Unattended polling with the dashboard CLOSED is CRM-3b (`applypilot tick`), deliberately not
+    this. The point of keeping it in-process here is that it costs nothing when idle: with a
+    watermark, a poll that finds no new mail is one `history.list` call and reads no threads.
+    """
+
+    def __init__(self, interval_s: int = 300) -> None:
+        self._lock = threading.Lock()
+        self._interval = interval_s
+        self._last: dict = {}
+        self._running = False
+
+    def status(self) -> dict:
+        with self._lock:
+            return dict(self._last)
+
+    def poll_now(self, force_full: bool = False) -> dict:
+        from applypilot.networking import replies as reply_svc
+        with self._lock:
+            if self._running:
+                return {"ok": False, "note": "a poll is already running"}
+            self._running = True
+        try:
+            res = reply_svc.poll(force_full=force_full)
+        except Exception as exc:  # noqa: BLE001
+            # Reply detection must never take the dashboard down with it.
+            log.debug("Reply poll failed", exc_info=True)
+            res = {"ok": False, "note": f"poll failed: {exc}", "checked": 0, "replied": 0}
+        finally:
+            with self._lock:
+                self._running = False
+                self._last = {**res, "at": time.time()}
+        return res
+
+    def start(self) -> None:
+        def loop() -> None:
+            while True:
+                try:
+                    self.poll_now()
+                except Exception:  # noqa: BLE001
+                    log.debug("Reply poll loop error", exc_info=True)
+                time.sleep(self._interval)
+        threading.Thread(target=loop, name="reply-poller", daemon=True).start()
+
+
+_replies = ReplyPoller()
+
+
 def _pause_apply() -> dict:
     """Ask the running apply to stop and hand its browser over.
 
@@ -1228,6 +1283,7 @@ def _contact_payload(c: dict, company: str | None = None, ladders: dict | None =
         "connection_company": (conn_rec or {}).get("company", "") or "",
         "confidence": c.get("confidence") or "",
         "verify_note": c.get("verify_note") or "",
+        "replied_at": c.get("replied_at") or "",
         # HOT layer marker: found via your connections (vs cold Apollo). Either the stored source
         # or a live connection match makes it "hot".
         "hot": c.get("source") == "connection" or bool(conn_rec),
@@ -1348,6 +1404,7 @@ def _status_payload() -> dict:
         "claude_log": claude_log,
         "app_dir": str(config.APP_DIR),
         "networking_available": _networking_available(),
+        "replies": _replies.status(),
         "gmail_available": _gmail_available(),
         # Mutual shared token for the LinkedIn extension — operator pastes it into the popup once.
         "ext_token": _ext_token(),
@@ -2071,6 +2128,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if path == "/api/pause-apply":
                 _json_response(self, _pause_apply())
                 return
+            if path == "/api/check-replies":
+                res = _replies.poll_now(force_full=bool(data.get("full")))
+                msg = (f"Checked {res.get('checked', 0)} thread(s) — "
+                       f"{res.get('replied', 0)} new repl"
+                       f"{'y' if res.get('replied') == 1 else 'ies'}."
+                       if res.get("ok") else res.get("note", "could not check"))
+                _json_response(self, {"ok": bool(res.get("ok")), "message": msg, **res})
+                return
             if path == "/api/signin":
                 url = (data.get("url") or "").strip()
                 if not url:
@@ -2111,6 +2176,21 @@ def serve_dashboard(host: str = "127.0.0.1", port: int = 8765, open_browser: boo
     # Generate the extension token up front so the operator can read it before any request
     # (the guard short-circuits on a missing header, so it would never be created lazily).
     ext_token = _ext_token()
+
+    # Reply polling runs on its own thread from start-up. Never inside a request: a 2.5s
+    # dashboard refresh cannot wait on a Gmail round-trip. Unattended polling with the
+    # dashboard CLOSED is CRM-3b (`applypilot tick`), not this.
+    _ok, _why = (False, "")
+    try:
+        from applypilot.networking import gmail_read
+        _ok, _why = gmail_read.available()
+    except Exception:  # noqa: BLE001
+        _why = "reply detection unavailable"
+    if _ok:
+        _replies.start()
+        console.print("[dim]Reply detection:[/dim] on (polling every 5 min)")
+    else:
+        console.print(f"[dim]Reply detection:[/dim] off — {_why}")
 
     server = ThreadingHTTPServer((host, port), DashboardHandler)
     url = f"http://{host}:{port}/"

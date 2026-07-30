@@ -49,6 +49,13 @@ def detect_ats(url: str) -> str | None:
     u = (url or "").lower()
     if "greenhouse.io" in u:
         return "greenhouse"
+    # An EMBEDDED Greenhouse board lives on the employer's OWN domain and betrays itself only
+    # by `gh_jid` in the query string — e.g. avathongov.com/careers-job-listings/?gh_jid=…
+    # Matching on the hostname alone missed those entirely, so they fell through to the generic
+    # scrape cascade and hit a 403 bot wall: "no data extracted", no description, and every
+    # downstream stage then correctly did nothing. The job looked simply ignored.
+    if "gh_jid=" in u:
+        return "greenhouse"
     if "lever.co" in u:
         return "lever"
     if "ashbyhq.com" in u:
@@ -64,8 +71,30 @@ def _get_json(api_url: str) -> dict | list | None:
     return resp.json()
 
 
+def _greenhouse_board_token(job_id: str) -> str | None:
+    """Find the board token for a job id, by asking Greenhouse.
+
+    An embedded board's URL carries the job id but not the board — `?gh_jid=4683241005` says
+    nothing about which company's board it belongs to, and the token is rarely guessable
+    ("Avathon Government" is board `ag`). Greenhouse's own embed endpoint resolves it: request
+    it with just the token and the redirect lands on `…/embed/job_app?for=<board>&token=<id>`.
+    """
+    try:
+        resp = httpx.get(f"https://boards.greenhouse.io/embed/job_app?token={job_id}",
+                         headers={"User-Agent": _UA}, timeout=_TIMEOUT, follow_redirects=True)
+    except Exception as e:  # noqa: BLE001
+        log.debug("Greenhouse embed lookup failed for %s: %s", job_id, e)
+        return None
+    if resp.status_code != 200:
+        return None
+    token = parse_qs(urlparse(str(resp.url)).query).get("for", [None])[0]
+    if token:
+        log.info("Resolved embedded Greenhouse board for job %s: %s", job_id, token)
+    return token
+
+
 def _greenhouse(url: str) -> dict | None:
-    """Greenhouse: job-boards/boards.greenhouse.io/{company}/jobs/{id} (or embed form)."""
+    """Greenhouse: job-boards/boards.greenhouse.io/{company}/jobs/{id}, embed, or `gh_jid`."""
     p = urlparse(url)
     qs = parse_qs(p.query)
     company = job_id = None
@@ -74,6 +103,10 @@ def _greenhouse(url: str) -> dict | None:
         company, job_id = m.group(1), m.group(2)
     elif qs.get("for") and qs.get("token"):
         company, job_id = qs["for"][0], qs["token"][0]
+    elif qs.get("gh_jid"):
+        # Embedded on the employer's own site: the id is here, the board is not.
+        job_id = qs["gh_jid"][0]
+        company = _greenhouse_board_token(job_id)
     if not (company and job_id):
         return None
 

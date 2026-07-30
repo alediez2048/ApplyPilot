@@ -164,7 +164,7 @@ incapable of touching a LinkedIn page. See §Lessons.
 
 | `schema_migrations` | `migrations/` | Version, status, `claimed_at` lease. See §Lessons on the 300s lease. |
 
-Live counts (2026-07-30): jobs 13, contacts 47 (**33 emailed**), connections 899,
+Live counts (2026-07-30): jobs 13, contacts 50 (**33 emailed**), connections 899,
 job_events 201, touches 7, sequences 10. Schema version 1.
 
 **`jobs` columns by stage:** discover(`title,salary,description,location,site,strategy`) →
@@ -545,7 +545,7 @@ What is actually open now, ordered by leverage:
    batch from closing a pending review. Making it a real background task is the actual fix and
    is still open. **Check for `in_progress` before restarting the dashboard** (§Dev workflow).
 
-2. **The system is blind to replies.** **33 emails sent** across 47 contacts as of 2026-07-30,
+2. **The system is blind to replies.** **33 emails sent** across 50 contacts as of 2026-07-30,
    and still exactly one reply — recorded by hand. Follow-ups nudge people who may have replied
    days ago, and no funnel metric is possible. This gets worse with every send: it was 13
    emails this morning. `CRM-1`, and by some distance the highest-value thing left.
@@ -652,6 +652,6 @@ change still needs the `pip install` above — but that copy gives the file a ne
   dashboard, so it dies with the server. This happened three times on 2026-07-30 alone.
 - Working tree clean; `origin/main` is at **`stable-e2e-20260730`** (2026-07-30 — full pipeline
   working end to end, human in the loop). Tags: `stable-arch2/3/5/6` · `stable-e2e-20260730`.
-  A tag restores **CODE only** — `~/.applypilot/` (13 jobs, 47 contacts, 33 sent emails, 899
+  A tag restores **CODE only** — `~/.applypilot/` (13 jobs, 50 contacts, 33 sent emails, 899
   connections) needs its own backup.
   A tag restores CODE only — the database needs its own backup from `~/.applypilot/backups/`.

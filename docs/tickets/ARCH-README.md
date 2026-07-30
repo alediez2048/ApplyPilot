@@ -30,14 +30,24 @@ improves nothing a user can see). See `architecture-prd.md` §4.0 for the data b
 > `CRM-1` and `CRM-2` also had instructions that are now factually wrong (`followup_status` was
 > removed by ARCH-3); both tickets carry a "what changed" table.
 
+> **Update, later the same day.** CRM-3a, CRM-1, CRM-2 and CRM-3b all shipped on branch
+> `crm-phase-1`. CRM-1 earned itself on the first live poll: it found a **real reply nobody
+> knew about** (Writer, Jul 29) and an **address that had been bouncing silently since Jul 16**.
+>
+> That first reply also exposed the next gap, now `CRM-4`: the reply was an **introduction** —
+> the sender CC'd a colleague — and ApplyPilot recorded a boolean, stopped the ladder, and lost
+> the only live conversation in the database. Noticing a reply is not the same as knowing what
+> the conversation is.
+
 | # | Ticket | Makes the system… | Size | Depends | Status |
 |---|--------|-------------------|------|---------|--------|
-| 1 | `CRM-1` reply detection | **see** | M | Gmail metadata scope | Todo |
+| 1 | `CRM-1` reply detection | **see** | M | Gmail metadata scope | ✅ **Done 2026-07-30** |
 | 2 | `DISC-1` turn discovery on | have a **real funnel** | S | — | Todo |
+| 2b | `CRM-4` conversations | **remember and reply** | L | CRM-1 | Todo — *added 2026-07-30* |
 | 3 | `ARCH-1` extract `domain/` | **testable** (needed by 4 & 5) | M | — | ✅ **Done 2026-07-28** |
-| 4 | `CRM-2` outcome metrics | **learn** | M | CRM-1, ARCH-1 | Todo |
-| 5 | `CRM-3` scheduler | **act unattended** | S | ARCH-1 (3b needs CRM-1) | Todo |
-| 0 | `CRM-3a` needs-you notification | **not be missed** | XS | — | Todo — *split out 2026-07-30, do first* |
+| 4 | `CRM-2` outcome metrics | **learn** | M | CRM-1, ARCH-1 | ✅ **Done 2026-07-30** |
+| 5 | `CRM-3` scheduler | **act unattended** | S | ARCH-1 (3b needs CRM-1) | ✅ **Done 2026-07-30** |
+| 0 | `CRM-3a` needs-you notification | **not be missed** | XS | — | ✅ **Done 2026-07-30** |
 | 6 | `ARCH-2` static frontend | — | M | — | ✅ **Done 2026-07-28** |
 | 7 | `ARCH-3` touches table | extensible to new channels | M | ARCH-1 | ✅ **Done 2026-07-29** |
 | 8 | `ARCH-4` repository boundary | — | L | ARCH-1 | ✅ **Done 2026-07-29** (narrowed) |

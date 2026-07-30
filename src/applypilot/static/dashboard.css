@@ -540,3 +540,25 @@
   .crow-del .link-danger { background:none; border:none; box-shadow:none; padding:2px 0;
     color:var(--muted); font-size:11px; cursor:pointer; }
   .crow-del .link-danger:hover { color:var(--red); text-decoration:underline; }
+  /* CRM-2 Outcomes panel. Collapsed by default — it informs, it does not need acting on, so it
+     must not compete with the job rows for attention. */
+  .metrics-panel { background:var(--surface); border:1px solid var(--line); border-radius:10px; padding:14px 18px; }
+  .metrics-panel > summary { list-style:none; cursor:pointer; display:flex; align-items:baseline; gap:12px; }
+  .metrics-panel > summary::-webkit-details-marker { display:none; }
+  .m-title { font-size:16px; font-weight:600; }
+  .m-headline { font-size:13px; color:var(--muted); }
+  .m-body { margin-top:14px; display:grid; gap:16px; }
+  .m-funnel { display:flex; gap:6px; flex-wrap:wrap; align-items:stretch; }
+  .m-step { flex:1 1 90px; background:var(--surface2); border:1px solid var(--line); border-radius:8px; padding:8px 10px; }
+  .m-step strong { display:block; font-size:20px; line-height:1.1; }
+  .m-step span { font-size:11px; color:var(--muted); }
+  .m-step.leak { background:var(--red-soft); border-color:#e7b9b9; }
+  .m-cuts { display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:14px; }
+  .m-cut h4 { margin:0 0 6px; font-size:12px; font-weight:600; color:var(--soft); }
+  .m-rate { display:flex; justify-content:space-between; gap:10px; font-size:12px; padding:3px 0; border-bottom:1px solid var(--line); }
+  .m-rate:last-child { border-bottom:none; }
+  .m-rate .v { font-variant-numeric:tabular-nums; font-weight:600; }
+  /* Not enough data to be a rate. Shown, never hidden — "1 of 3" is useful, "33%" is not. */
+  .m-rate.thin .v { color:var(--faint); font-weight:400; }
+  .m-note { font-size:11px; color:var(--muted); line-height:1.45; }
+  .m-rate .m-n { color:var(--faint); font-weight:400; font-size:11px; }

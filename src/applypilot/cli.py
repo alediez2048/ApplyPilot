@@ -464,6 +464,68 @@ def network(
 
 
 @app.command()
+def stats(
+    outreach: bool = typer.Option(False, "--outreach", help="Reply rates and the outreach funnel."),
+) -> None:
+    """Outcome metrics — what actually worked (CRM-2).
+
+    The same numbers the dashboard's Outcomes panel shows, from the same pure aggregation, so
+    the two can never disagree.
+    """
+    _bootstrap()
+    from applypilot.database import get_connection
+    from applypilot.domain import metrics as metrics_mod
+    from applypilot.domain.timeutil import parse_ts
+    from applypilot.networking import store as _store
+    from applypilot.networking import touches as _touches
+    from applypilot.repo import jobs as _jobs
+
+    if not outreach:
+        console.print("Nothing else to show yet — try [bold]applypilot stats --outreach[/bold]")
+        return
+
+    conn = get_connection()
+    rows = _jobs.dashboard_rows(conn=conn)
+    jobs = [dict(zip(r.keys(), r)) if not isinstance(r, dict) else r for r in rows]
+    mx = metrics_mod.summary(jobs, _store.all_contacts_for_metrics(conn),
+                             _touches.all_sent_touches(conn), parse_ts)
+
+    f = mx["funnel"]
+    console.print("\n[bold]Outreach funnel[/bold]")
+    for step in f["steps"]:
+        console.print(f"  {step['label']:<16} {step['n']}")
+    if f["bounced"]:
+        console.print(f"  [red]{'bounced':<16} {f['bounced']}[/red]  "
+                      f"[dim](never arrived — excluded from every rate below)[/dim]")
+
+    def _rates(title, rates):
+        if not rates:
+            return
+        console.print(f"\n[bold]{title}[/bold]")
+        for r in rates:
+            # Below the threshold we print the raw counts, never a percentage: a rate from a
+            # handful of sends is arithmetic dressed up as evidence.
+            value = f"{r['pct']}% ({r['hits']}/{r['n']})" if r["meaningful"] \
+                else f"[dim]{r['hits']} of {r['n']} — too few to rate[/dim]"
+            console.print(f"  {r['label']:<28} {value}")
+
+    _rates("Overall", [mx["overall"]])
+    _rates("Warm vs cold", mx["by_layer"])
+    _rates("By verification confidence", mx["by_confidence"])
+    _rates("By follow-ups sent", mx["by_touch"])
+
+    if mx["median_hours_to_reply"] is not None:
+        console.print(f"\n[bold]Median time to reply:[/bold] {mx['median_hours_to_reply']}h")
+
+    quiet = [r for r in mx["by_company"] if not r["replied"]]
+    if quiet:
+        console.print("\n[bold]Companies that have never replied[/bold]")
+        for r in quiet[:10]:
+            extra = f", {r['bounced']} bounced" if r["bounced"] else ""
+            console.print(f"  {r['company']:<28} {r['emailed']} emailed{extra}")
+
+
+@app.command()
 def status() -> None:
     """Show pipeline statistics from the database."""
     _bootstrap()

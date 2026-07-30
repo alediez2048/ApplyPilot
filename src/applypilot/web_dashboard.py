@@ -33,6 +33,7 @@ from rich.console import Console
 from applypilot import __version__, config
 from applypilot.database import get_connection, init_db
 from applypilot.networking import store as _store
+from applypilot.networking import touches as _touches
 from applypilot.repo import jobs as _jobs
 
 console = Console()
@@ -1404,11 +1405,34 @@ def _status_payload() -> dict:
         "claude_log": claude_log,
         "app_dir": str(config.APP_DIR),
         "networking_available": _networking_available(),
+        "metrics": _metrics_payload(rows, conn),
         "replies": _replies.status(),
         "gmail_available": _gmail_available(),
         # Mutual shared token for the LinkedIn extension — operator pastes it into the popup once.
         "ext_token": _ext_token(),
     }
+
+
+def _metrics_payload(job_rows: list, conn) -> dict:
+    """CRM-2 aggregates for the dashboard panel.
+
+    Three narrow reads and one pass of pure aggregation — `domain.metrics` does the arithmetic,
+    so the same numbers back `applypilot stats --outreach` and are unit-testable against
+    fixtures. Kept cheap deliberately: this runs on every /api/status, which the query budget
+    holds at 50 statements.
+    """
+    from applypilot.domain import metrics as metrics_mod
+    from applypilot.domain.timeutil import parse_ts
+
+    try:
+        contacts = _store.all_contacts_for_metrics(conn)
+        touch_rows = _touches.all_sent_touches(conn)
+        jobs = [dict(zip(r.keys(), r)) if not isinstance(r, dict) else r for r in job_rows]
+        return metrics_mod.summary(jobs, contacts, touch_rows, parse_ts)
+    except Exception:  # noqa: BLE001
+        # A metrics panel must never be able to take the dashboard down with it.
+        log.debug("Metrics payload failed", exc_info=True)
+        return {}
 
 
 def _progress_payload(stats: dict, jobs: list[dict], command_status: dict) -> dict:

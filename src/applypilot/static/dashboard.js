@@ -651,6 +651,56 @@ function updateNeedsYouBadge(jobs) {
   return unseen;
 }
 
+// CRM-2. Every rate renders WITH its n, and a rate below the meaningful threshold shows the
+// raw counts instead of a percentage — "1 of 3" is information, "33%" from the same three is a
+// lie with a decimal point.
+function rateRow(r) {
+  const thin = !r.meaningful;
+  const value = thin ? `${r.hits} of ${r.n}` : `${r.pct}% <span class="m-n">(${r.hits}/${r.n})</span>`;
+  return `<div class="m-rate ${thin ? 'thin' : ''}"><span>${esc(r.label || '')}</span><span class="v">${value}</span></div>`;
+}
+function cut(title, rates) {
+  if (!rates || !rates.length) return '';
+  return `<div class="m-cut"><h4>${esc(title)}</h4>${rates.map(rateRow).join('')}</div>`;
+}
+function renderMetrics(mx) {
+  const panel = document.getElementById('metricsPanel');
+  if (!panel) return;
+  if (!mx || !mx.funnel) { panel.hidden = true; return; }
+  panel.hidden = false;
+  const f = mx.funnel, o = mx.overall || {};
+
+  const head = document.getElementById('metricsHeadline');
+  if (head) {
+    head.textContent = o.n
+      ? (o.meaningful ? `${o.pct}% reply rate (${o.hits}/${o.n})`
+                      : `${o.hits} repl${o.hits === 1 ? 'y' : 'ies'} from ${o.n} delivered`)
+      : 'nothing sent yet';
+  }
+
+  const steps = (f.steps || []).map(s =>
+    `<div class="m-step"><strong>${s.n}</strong><span>${esc(s.label)}</span></div>`).join('');
+  // A bounce is a real leak in the funnel, not a non-answer: the mail never arrived. Shown
+  // beside the stages so "emailed 33, replied 1" cannot quietly include sends that failed.
+  const leak = f.bounced
+    ? `<div class="m-step leak"><strong>${f.bounced}</strong><span>bounced</span></div>` : '';
+
+  const ttr = mx.median_hours_to_reply;
+  const notes = [];
+  if (ttr != null) notes.push(`Median time to reply: <strong>${ttr}h</strong>.`);
+  if (f.bounced) notes.push(`${f.bounced} email(s) never arrived — those addresses are excluded from every rate above.`);
+  notes.push(`Rates need n\u2265${mx.min_meaningful_n} to be shown as a percentage.`);
+
+  document.getElementById('metricsBody').innerHTML = `
+    <div class="m-funnel">${steps}${leak}</div>
+    <div class="m-cuts">
+      ${cut('Warm vs cold', mx.by_layer)}
+      ${cut('By verification confidence', mx.by_confidence)}
+      ${cut('By follow-ups sent', mx.by_touch)}
+    </div>
+    <div class="m-note">${notes.join(' ')}</div>`;
+}
+
 async function refresh() {
   if (isEditingJobs()) return;
   const data = await (await fetch('/api/status')).json();
@@ -664,6 +714,7 @@ async function refresh() {
   document.getElementById('cmdLog').textContent = (c.log || []).join('\n');
   document.getElementById('applyLog').textContent = [...(data.worker_log || []), '', ...(data.claude_log || [])].join('\n');
   updateNeedsYouBadge(data.jobs);
+  renderMetrics(data.metrics);
   NET_AVAIL = !!data.networking_available;
   GMAIL_AVAIL = !!data.gmail_available;
   const allJobs = data.jobs || [];

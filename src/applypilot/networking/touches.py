@@ -118,6 +118,21 @@ def ladder_state(contact_id: str, channel: str,
     return ladder_states([contact_id], conn).get((contact_id, channel)) or _empty_state()
 
 
+def all_sent_touches(conn: sqlite3.Connection | None = None) -> list[dict]:
+    """Every touch that was actually SENT — the input to by_touch() (CRM-2).
+
+    Only sent ones: a drafted-but-unsent follow-up did not influence whether anybody replied,
+    and counting it would credit the schedule for work that never left the outbox.
+    """
+    if conn is None:
+        conn = get_connection()
+    init_touches(conn)
+    rows = conn.execute(
+        "SELECT contact_id, channel, seq, sent_at FROM touches WHERE sent_at IS NOT NULL"
+    ).fetchall()
+    return [dict(zip(r.keys(), r)) for r in rows]
+
+
 def ladder_states(contact_ids: list[str],
                   conn: sqlite3.Connection | None = None) -> dict[tuple[str, str], dict]:
     """Bulk load, keyed by (contact_id, channel).

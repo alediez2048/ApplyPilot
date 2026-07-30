@@ -12,8 +12,8 @@ campaign happens to be a job search** — see `docs/crm-prd.md` for where that g
 - **Packaging:** Hatchling, `src/` layout, single package `applypilot`
 - **Entry point:** `applypilot = "applypilot.cli:app"` (Typer CLI)
 - **License:** AGPL-3.0-only · **Version:** 0.4.0 (`pyproject.toml`)
-- **Tests:** 425 passing (`tests/`, 30 files) · ruff clean (line-length 120, py311) · ESLint clean
-- **Schema version:** 1 (`applypilot migrate --status`) · **Settings:** 39 declared in `settings.py`
+- **Tests:** 562 passing (`tests/`, 41 files) · ruff clean (line-length 120, py311) · ESLint clean
+- **Schema version:** 1 (`applypilot migrate --status`) · **Settings:** 41 declared in `settings.py`
 
 ## Quick orientation
 
@@ -54,7 +54,7 @@ stops the moment a job hands over — see §Lessons 8, which cost two filled app
 | `database.py` | SQLite layer. Owns `jobs` + `job_events`. Thread-local WAL, additive column pass, then numbered migrations. `get_connection()` returns a subclass carrying a per-connection schema memo — see §Lessons 11. |
 | `llm.py` | Multi-provider client (round-robin + failover: OpenAI/Gemini/Anthropic/local). |
 | `view.py` | Static HTML results export. |
-| `web_dashboard.py` | **The operator dashboard.** 1,920 lines, **zero SQL** — data access goes through `repo/` and `store.py` (ARCH-4). |
+| `web_dashboard.py` | **The operator dashboard.** 2,096 lines, **zero SQL** — data access goes through `repo/` and `store.py` (ARCH-4). |
 | `repo/jobs.py` | Every `jobs` query as a named function. Owns `QUEUE_SQL` (what counts as an operator-added job). |
 | `scoring/resume_sections.py` | Parses the BASE résumé into its own sections. The base résumé is the template; tailoring rewrites content inside it. |
 | `settings.py` | **Every env var, one registry.** Types, defaults, validators, secret flags. Malformed values fail at startup naming the variable. `.env.example` is generated from it. |
@@ -148,8 +148,8 @@ incapable of touching a LinkedIn page. See §Lessons.
 
 | `schema_migrations` | `migrations/` | Version, status, `claimed_at` lease. See §Lessons on the 300s lease. |
 
-Live counts (2026-07-29): jobs 9, contacts 28, connections 899, job_events 93, touches 7,
-sequences 1. Schema version 1.
+Live counts (2026-07-30): jobs 13, contacts 47 (**33 emailed**), connections 899,
+job_events 201, touches 7, sequences 10. Schema version 1.
 
 **`jobs` columns by stage:** discover(`title,salary,description,location,site,strategy`) →
 enrich(`full_description,application_url,detail_error`) → score(`fit_score,score_reasoning`) →
@@ -365,6 +365,69 @@ company `"Jobs"` — the same substring bug class, inside the function written t
     same size. When a mutation test's result contradicts the file, clear `__pycache__` before
     believing either.
 
+17. **`os.killpg` on a child you spawned kills YOU.** Pause was clicked on a live Deloitte
+    application; the flag was consumed, the agent died — and the apply CLI died with it,
+    `exit -9`. `_kill_process_tree` does `killpg(getpgid(pid))`, and the agent was spawned
+    without `start_new_session`, so that group was *our own*. The handover was never recorded:
+    job stuck `in_progress`, browser open, no Continue button. The feature looked like it did
+    nothing when it actually did too much. Latent long before pause — the Ctrl+C skip paths
+    call the same helper. Agents now get their own session, with an atexit reaper so they
+    cannot outlive the run.
+
+18. **`dict(zip(row.keys(), row))` on a DICT maps every key to itself.** `repo.find_by_any_url`
+    already returns a dict, so the dashboard's Find-contacts button handed discovery
+    `{"company": "company", "url": "url", …}` and searched Apollo for a company named
+    "company". Verification then correctly dropped everything. The CLI path passed a real row
+    and worked — which is exactly why it read as an Apollo *coverage* problem for days. Use
+    `dict(row)`; it is correct for both `sqlite3.Row` and `dict`.
+
+19. **A guard that only accepts one exact state will refuse a true correction.** A Salesforce
+    application that was signed into and submitted BY HAND was recorded
+    `failed:copilot_violation_agent_submitted` — the resumed agent truthfully reported it
+    submitted, and co-pilot reads `RESULT:APPLIED` as a safety breach. Then "Mark submitted ✓"
+    refused the fix, because it required `apply_status == 'ready_to_submit'` exactly. A real
+    application was stuck as a failure with no UI path out. **On resume the human is at the
+    keyboard by definition**, so APPLIED is expected there; a *fresh* co-pilot run submitting
+    alone is still a real breach. And the operator is the authority on whether they submitted
+    something — gate on "was this ever attempted", not on one state name.
+
+20. **An employer can also be a job board, and an ATS host is never the employer.** Three
+    variants of the same bug in one day: `google.com` was rejected as an employer because
+    Google Jobs is a discovery source (17 known connections never searched);
+    `ats.rippling.com/wander/...` imported as the company **"Ats"** and produced a cover letter
+    addressed to nobody; `acme.breezy.hr` resolved to **"Hr"**. The employer is the tenant, not
+    the vendor — match the *only* meaningful host label, and keep one shared TLD list.
+
+---
+
+## The human-in-the-loop apply model (2026-07-30)
+
+**The agent never submits. The operator always does.** Every path ends at `Mark submitted ✓`.
+
+| Ending | `apply_status` | Browser | Operator's move |
+|---|---|---|---|
+| Filled, waiting | `ready_to_submit` | **open** | review → Mark submitted ✓ |
+| Auth / account wall | `needs_human:login` | **open** | register → Continue |
+| Captcha, stuck field | `needs_human:*` | **open** | resolve → Continue |
+| ⏸ Pause & take over | `needs_human:paused` | **open** | anything → Continue |
+| Ran past `APPLY_AGENT_TIMEOUT` | `needs_human:timeout` | **open** | finish → Continue |
+| Agent stopped with no verdict | `needs_human:no_result_line` | **open** | check — may be done |
+| Expired / not eligible / captcha-dead | `failed` | closed | Re-apply or reject |
+
+**Anything a human can fix keeps the browser.** Only genuine dead ends close it. `Continue`
+runs `apply --copilot --resume`, which reconnects on the live CDP port
+(`resume_now = resume and chrome_alive_on_port(port)`) and falls back to a fresh launch only
+when the window is gone.
+
+**🔐 Sign in first** opens that same persistent profile with **no agent attached**, so an
+account is created deliberately *before* a run rather than discovered mid-form. Sessions
+persist (830+ cookie hosts), so it is once per employer. It refuses while an apply or review
+browser is live — Chrome cannot share a `user-data-dir`.
+
+**Not built: any notification.** The dashboard self-refreshes every 2.5s, but there is no
+sound, desktop notification or tab-title badge. If the operator is in another tab, a filled
+application waits indefinitely — and the longer it waits, the likelier something closes it.
+
 ---
 
 ## Where the work goes next
@@ -410,13 +473,21 @@ What is actually open now, ordered by leverage:
    batch from closing a pending review. Making it a real background task is the actual fix and
    is still open. **Check for `in_progress` before restarting the dashboard** (§Dev workflow).
 
-2. **The system is blind to replies.** 13 emails, 7 follow-ups, 1 reply — recorded by hand.
-   Follow-ups nudge people who may have replied days ago, and no funnel metric is possible.
-   `CRM-1`, and the highest-value thing left in the repo.
+2. **The system is blind to replies.** **33 emails sent** across 47 contacts as of 2026-07-30,
+   and still exactly one reply — recorded by hand. Follow-ups nudge people who may have replied
+   days ago, and no funnel metric is possible. This gets worse with every send: it was 13
+   emails this morning. `CRM-1`, and by some distance the highest-value thing left.
+
+2a. **Nothing tells the operator an application is waiting.** Co-pilot ends by handing over a
+   browser, the queue stays paused until they act, and the dashboard has **no notification of
+   any kind** — no sound, no desktop notification, no tab-title badge. It only self-refreshes
+   every 2.5s, which helps only if you are looking at it. A filled form left sitting is a form
+   that eventually gets closed by a restart. A tab-title badge is near-free and covers most of
+   it; a desktop notification behind an opt-in toggle covers the rest.
 
 3. **Discovery has produced 0 jobs.** ~2,500 lines of working, tested discovery (JobSpy across
-   five boards, 48 Workday portals, an AI scraper) and every one of the 9 jobs was pasted in by
-   hand. A configuration and trust problem, not a code problem — `DISC-1`.
+   five boards, 48 Workday portals, an AI scraper) and every one of the **13** jobs was pasted
+   in by hand. A configuration and trust problem, not a code problem — `DISC-1`.
 
 4. **15 modules still execute SQL directly** (was 21) — `apply/launcher.py`,
    `enrichment/detail.py`, `view.py`, `cli.py`, `pipeline.py`, the three discovery scrapers,
@@ -424,7 +495,7 @@ What is actually open now, ordered by leverage:
    `test_sql_lives_only_in_the_data_layer` names the remainder in an allowlist, so the list can
    only shrink and no NEW module can join it. Deliberately deferred; see ARCH-4's ticket.
 
-5. **`web_dashboard.py` is 1,920 lines**, all Python, zero SQL. ~430 lines are pipeline
+5. **`web_dashboard.py` is 2,096 lines**, all Python, zero SQL. ~430 lines are pipeline
    orchestration (`run_dashboard_prepare/apply/fill_one/restart/continue`) that are not HTTP
    concerns. Extracting them is the natural companion to debt item 1.
 

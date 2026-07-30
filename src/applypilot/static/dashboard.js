@@ -255,10 +255,17 @@ function renderJobFilters(jobs) {
     return `<button class="filter-pill${active}" onclick="setJobFilter('${key}')">${b.icon ? b.icon + ' ' : ''}${b.label} <span class="fp-n">${n}</span></button>`;
   }).join('');
 }
+// Every one of these ends the same way — you act in the open tab, then Continue, which
+// reconnects a FRESH agent to that same browser and carries on from the current page. The
+// wording differs because "the agent is stuck" and "you chose to take over" call for different
+// reactions, and the generic 'blocker' text made a deliberate pause read like a failure.
 const BLOCKER_ASK = {
   captcha: 'Solve the captcha in the open Chrome window, then click Continue.',
-  login: 'Log in / clear the account wall in the open Chrome window, then click Continue.',
+  login: 'Sign up or log in in the open Chrome window, then click Continue.',
   field: 'Fill the field it got stuck on in the open Chrome window, then click Continue.',
+  paused: 'Paused. Do whatever you need in the open Chrome window — sign up, log in, fix a field — then click Continue and the agent picks up from there.',
+  timeout: 'The agent ran out of time with the form part-filled. Finish or unblock it in the open Chrome window, then click Continue.',
+  no_result_line: 'The agent stopped without saying why — the form may already be complete. Check the open Chrome window, then Continue (or Mark submitted).',
   blocker: 'Resolve the blocker in the open Chrome window, then click Continue.',
 };
 function badge(status) {

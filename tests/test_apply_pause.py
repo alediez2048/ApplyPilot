@@ -171,3 +171,57 @@ def test_pausing_a_live_apply_sets_the_flag_and_names_the_job(wd, db, app_dir):
     assert pause.pause_requested() is True
     assert "Salesforce" in res["message"], res["message"]
     assert "browser stays open" in res["message"], res["message"]
+
+
+# ── pause hands over to Continue, which is a real resume ─────────────────────────────────
+
+def test_a_paused_job_lands_in_the_state_that_shows_continue():
+    """Pause is only useful if you can hand the browser BACK. It marks needs_human, which is
+    the status the ▶ Continue button renders for, and Continue spawns `apply --resume`, which
+    reconnects to the still-open browser on the same CDP port rather than starting over.
+
+    Asserted structurally because the alternative — a pause that dead-ends — is silent: the
+    browser sits there and the row offers nothing to click.
+    """
+    import inspect
+
+    from applypilot.apply import launcher
+    from applypilot import web_dashboard
+
+    lines = inspect.getsource(launcher).splitlines()
+    i = [n for n, ln in enumerate(lines) if ln.strip() == 'elif result == "paused":'][0]
+    indent = len(lines[i]) - len(lines[i].lstrip())
+    body = []
+    for ln in lines[i + 1:]:
+        s = ln.strip()
+        if s and (len(ln) - len(ln.lstrip())) <= indent and s.startswith(("elif ", "else:")):
+            break
+        body.append(ln)
+    assert '"needs_human"' in "\n".join(body), "a paused job is not put in the resumable state"
+
+    cont = inspect.getsource(web_dashboard.run_dashboard_continue)
+    assert "--resume" in cont, "Continue does not resume"
+    assert "--copilot" in cont, "Continue drops co-pilot mode and could auto-submit"
+
+
+def test_resume_reconnects_only_while_the_browser_lives():
+    """If the operator closed the window there is nothing to reconnect to, and silently
+    reusing a dead port would fail in a confusing way. It must fall back to a fresh launch."""
+    import inspect
+
+    from applypilot.apply import launcher
+    src = inspect.getsource(launcher)
+    assert "resume_now = resume and chrome_alive_on_port(port)" in src, \
+        "resume no longer checks that the browser is actually alive"
+
+
+@pytest.mark.parametrize("reason", ["paused", "timeout", "no_result_line", "login"])
+def test_every_handover_reason_tells_the_operator_what_to_do(reason):
+    """These all render the same 'needs_human' row. Without an entry each falls back to the
+    generic 'Resolve the blocker' text, which reads as a failure for a pause the operator
+    chose, and says nothing useful for a timeout."""
+    from applypilot import web_dashboard
+    js = (web_dashboard._STATIC_DIR / "dashboard.js").read_text(encoding="utf-8")
+    block = js[js.index("const BLOCKER_ASK"):js.index("function badge(")]
+    assert f"{reason}:" in block, f"no operator instruction for handover reason {reason!r}"
+    assert "Continue" in block

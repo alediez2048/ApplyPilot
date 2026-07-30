@@ -16,6 +16,11 @@ from applypilot.scoring.validator import sanitize_text
 log = logging.getLogger(__name__)
 
 _LINKEDIN_LIMIT = 300
+#: A DM to someone you are ALREADY connected to is not a connection-request note: no 300-char
+#: cap, and links are not penalised. Warm notes were being cut at 300 anyway, contradicting the
+#: warm prompt that tells the model the cap does not apply — so they arrived truncated with an
+#: ellipsis. Still bounded, because a DM should not be an essay.
+_LINKEDIN_DM_LIMIT = 900
 
 _SYSTEM = """You write short, casual networking messages for a job seeker reaching out to
 someone at a company they just applied to. Think: a friendly, real message you'd actually
@@ -207,7 +212,9 @@ def draft_email(profile: dict, job: dict, contact: dict, style: str = "", warm: 
             "framing in the rules above; you are already connected.\n"
             "- BOTH messages open the same reconnecting way. The LinkedIn DM needs that opening "
             "even more than the email does, because it lands in a chat thread where your last "
-            "exchange is visible right above it.\n\n"
+            "exchange is visible right above it.\n"
+            "- The intro deck link belongs in the LinkedIn DM as well as the email. A link is "
+            "fine in a DM; only connection-REQUEST notes penalise them.\n\n"
         )
     else:
         relationship = contact.get("match_reason", "works at the company")
@@ -255,9 +262,14 @@ def draft_email(profile: dict, job: dict, contact: dict, style: str = "", warm: 
         raise ValueError("empty outreach body")
     # Not left to the prompt: the deck goes in EVERY outreach email.
     body = ensure_intro_deck(body, deck)
-    # The note deliberately does NOT get the deck — LinkedIn strips/penalizes links in connect
-    # notes and the 300-char cap makes a URL expensive. Same reasoning as the scheduling link.
-    note = _cap_linkedin(note)
+    if warm:
+        # A DM to an existing connection: no connect-note cap, and links are fine in a chat
+        # thread. Cap FIRST so the URL can never be the thing that gets truncated.
+        note = ensure_intro_deck(_cap_linkedin(note, _LINKEDIN_DM_LIMIT), deck)
+    else:
+        # A cold CONNECTION REQUEST note. Still no deck: LinkedIn strips/penalises links in
+        # invite notes, and a 41-char URL is 14% of a 300-char budget that is already tight.
+        note = _cap_linkedin(note)
     return {"subject": subject, "body": body, "linkedin_note": note}
 
 
@@ -392,6 +404,7 @@ def draft_linkedin_followup(profile: dict, job: dict, contact: dict, touch: int 
     company = contact.get("company") or job.get("company") or job.get("site") or "the company"
     intent = _LI_TOUCH_INTENT.get(max(1, min(touch, 3)), _LI_TOUCH_INTENT[3])
     directive = _resolve_style(profile, style)
+    deck = _intro_deck_url(profile)
     sent_on = (contact.get("dm_sent_at") or "")[:10]
 
     user = (
@@ -402,6 +415,10 @@ def draft_linkedin_followup(profile: dict, job: dict, contact: dict, touch: int 
         f"{(contact.get('linkedin_message') or '')[:400]}\n"
         f"They accepted the invite{f' around {sent_on}' if sent_on else ''} and have not replied.\n\n"
         f"THIS MESSAGE: {intent}\n\n"
+        + (f"INTRO DECK LINK (include it): {deck}\n"
+           "This is a DM to an existing connection, so a link is fine here — LinkedIn only "
+           "penalises them in connection-request notes. Offer it in your own words; the full "
+           "URL must appear verbatim.\n\n" if deck else "")
         + (f"STYLE DIRECTION (follow closely):\n{directive}\n\n" if directive else "")
         + "Write the LinkedIn follow-up. Return the JSON."
     )
@@ -415,14 +432,20 @@ def draft_linkedin_followup(profile: dict, job: dict, contact: dict, touch: int 
     msg = sanitize_text(str(data.get("message", ""))).strip()
     if not msg:
         raise ValueError("empty LinkedIn follow-up")
+    # Cap first, then add the link, so trimming can never produce a broken half-URL.
+    msg = ensure_intro_deck(_cap_linkedin(msg, _LINKEDIN_DM_LIMIT), deck)
     return {"message": msg}
 
 
-def _cap_linkedin(note: str) -> str:
-    """Enforce LinkedIn's 300-char note limit (inclusive), trimming at a word boundary."""
-    if len(note) <= _LINKEDIN_LIMIT:
+def _cap_linkedin(note: str, limit: int = _LINKEDIN_LIMIT) -> str:
+    """Trim to `limit` chars at a word boundary. Default is the connection-note cap.
+
+    Always applied BEFORE the deck link is added, never after: trimming a message that ends in
+    a URL produces a broken half-link, which is worse than no link at all.
+    """
+    if len(note) <= limit:
         return note
-    cut = note[:_LINKEDIN_LIMIT - 1]  # leave room for the ellipsis
+    cut = note[:limit - 1]  # leave room for the ellipsis
     if " " in cut:
         cut = cut[:cut.rfind(" ")]
     return cut.rstrip(" ,;:-") + "…"

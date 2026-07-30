@@ -179,3 +179,66 @@ def test_the_signoff_block_is_never_split_in_half(signoff):
     out = outreach.ensure_intro_deck(body, URL)
     assert out.endswith(signoff), f"the sign-off was broken up:\n{out}"
     assert out.index(URL) < out.index(signoff.split("\n")[0]), out
+
+
+# ── LinkedIn: DMs get the deck, connection-request notes do not ──────────────────────────
+#
+# Three different messages, and only one of them has LinkedIn's link problem:
+#   cold linkedin_note   = a CONNECTION REQUEST -> 300-char hard cap, links penalised
+#   warm linkedin_note   = a DM to someone already connected  -> link fine
+#   linkedin follow-up   = a DM to someone who accepted       -> link fine
+
+DM_JSON = ('{"subject":"s","body":"Hi,\\n\\nBody.\\n\\nThanks,\\nAlejandro",'
+           '"linkedin_note":"Hey Gina, long time without connecting, hope all is well at Zello."}')
+
+
+def test_a_warm_linkedin_dm_carries_the_deck(monkeypatch):
+    """You are already connected, so it lands in a chat window where a link works."""
+    monkeypatch.setattr(outreach, "get_client", lambda *a, **k: _C(DM_JSON))
+    monkeypatch.setenv("INTRO_DECK_URL", URL)
+    out = outreach.draft_email(PROFILE, JOB, CONTACT, warm=True)
+    assert URL in out["linkedin_note"], out["linkedin_note"]
+
+
+def test_a_cold_connection_note_still_does_not(monkeypatch):
+    """A connect note is capped at 300 chars and LinkedIn penalises links in invites. Spending
+    41 of those characters on a URL that may be stripped is a bad trade."""
+    monkeypatch.setattr(outreach, "get_client", lambda *a, **k: _C(DM_JSON))
+    monkeypatch.setenv("INTRO_DECK_URL", URL)
+    out = outreach.draft_email(PROFILE, JOB, CONTACT, warm=False)
+    assert URL not in out["linkedin_note"], out["linkedin_note"]
+    assert len(out["linkedin_note"]) <= 300
+
+
+@pytest.mark.parametrize("touch", [1, 2, 3])
+def test_every_linkedin_followup_carries_the_deck(monkeypatch, touch):
+    monkeypatch.setattr(outreach, "get_client",
+                        lambda *a, **k: _C('{"message":"Hey Gina, circling back on the role."}'))
+    monkeypatch.setenv("INTRO_DECK_URL", URL)
+    out = outreach.draft_linkedin_followup(
+        PROFILE, JOB, {**CONTACT, "linkedin_message": "first note"}, touch=touch)
+    assert URL in out["message"], f"touch {touch}: {out['message']}"
+
+
+def test_a_warm_dm_is_not_cut_at_the_connection_note_limit(monkeypatch):
+    """Warm notes were capped at 300 despite the warm prompt telling the model the cap does not
+    apply, so they arrived truncated with an ellipsis. A DM has no such limit."""
+    long_note = "Hey Gina, " + ("it has genuinely been a while and I wanted to reconnect. " * 8)
+    monkeypatch.setattr(outreach, "get_client", lambda *a, **k: _C(
+        '{"subject":"s","body":"b","linkedin_note":"' + long_note + '"}'))
+    monkeypatch.setenv("INTRO_DECK_URL", URL)
+    out = outreach.draft_email(PROFILE, JOB, CONTACT, warm=True)
+    assert len(out["linkedin_note"]) > 300, "warm DM was cut at the connect-note limit"
+    assert "…" not in out["linkedin_note"].replace(URL, ""), out["linkedin_note"]
+
+
+def test_the_link_is_never_the_thing_that_gets_truncated(monkeypatch):
+    """Capping AFTER appending would leave a broken half-URL, which is worse than no link."""
+    huge = "word " * 400  # well past the DM limit
+    monkeypatch.setattr(outreach, "get_client", lambda *a, **k: _C(
+        '{"message":"' + huge + '"}'))
+    monkeypatch.setenv("INTRO_DECK_URL", URL)
+    out = outreach.draft_linkedin_followup(
+        PROFILE, JOB, {**CONTACT, "linkedin_message": "x"}, touch=1)
+    assert out["message"].rstrip().endswith(URL), "the URL was cut by the cap"
+    assert URL in out["message"]

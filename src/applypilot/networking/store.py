@@ -523,9 +523,21 @@ def mark_connected_now(contact_id: str, conn: sqlite3.Connection | None = None) 
 
 
 def delete_contact(contact_id: str, conn: sqlite3.Connection | None = None) -> bool:
-    """Remove a contact row. Returns True if a row was actually deleted."""
+    """Remove a contact AND its follow-up state. Returns True if a contact row was deleted.
+
+    `touches` and `sequences` are keyed by contact_id with no foreign key, so deleting only the
+    contact leaves a live follow-up ladder pointing at somebody who no longer exists — due
+    counts that can never be cleared, and a `sequences` row that would silently re-attach if
+    the same contact id were ever minted again (ids are a hash of job + identity, so
+    re-running discovery on the same person reproduces it exactly).
+    """
     if conn is None:
         conn = get_connection()
+    for table in ("touches", "sequences"):
+        try:
+            conn.execute(f"DELETE FROM {table} WHERE contact_id = ?", (contact_id,))
+        except sqlite3.OperationalError:
+            pass  # table not created yet on a fresh DB
     cur = conn.execute("DELETE FROM contacts WHERE id = ?", (contact_id,))
     conn.commit()
     return cur.rowcount == 1
@@ -558,6 +570,22 @@ def contact_ref(contact_id: str, conn: sqlite3.Connection | None = None) -> dict
         conn = get_connection()
     init_contacts(conn)
     row = conn.execute("SELECT id, job_url FROM contacts WHERE id = ?", (contact_id,)).fetchone()
+    return dict(zip(row.keys(), row)) if row else None
+
+
+def contact_for_delete(contact_id: str, conn: sqlite3.Connection | None = None) -> dict | None:
+    """Exactly what removing a contact needs to log the removal honestly.
+
+    Deliberately NOT `contact_ref`, which returns only id + job_url — it was narrowed on
+    purpose so a per-keystroke save would stop fetching a 32-column row. Widening it for this
+    would put that cost back on the hot path.
+    """
+    if conn is None:
+        conn = get_connection()
+    init_contacts(conn)
+    row = conn.execute(
+        "SELECT id, job_url, full_name, sent_message_id FROM contacts WHERE id = ?",
+        (contact_id,)).fetchone()
     return dict(zip(row.keys(), row)) if row else None
 
 

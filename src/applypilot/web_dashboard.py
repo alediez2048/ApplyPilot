@@ -1498,6 +1498,41 @@ _PHONE_MAX_LEN = 40
 _NOTES_MAX_LEN = 2000
 
 
+def _delete_contact(contact_id: str) -> dict:
+    """Remove a contact discovery got wrong — someone who does not work at this employer.
+
+    Verification catches most of them, but it deliberately errs towards keeping an unconfirmed
+    person (dropping a real contact is worse than showing a doubtful one), so wrong people do
+    reach the list. Until now there was no way to remove one: `store.delete_contact` existed
+    with no endpoint and no button.
+
+    Deleting is allowed even after an email was sent. The row is the only record of that send,
+    so the activity log keeps the name and the fact — otherwise the outreach simply vanishes
+    from the job's history and it looks like it never happened.
+    """
+    from applypilot.database import log_event
+    from applypilot.networking.store import delete_contact, init_contacts
+
+    if not contact_id:
+        return {"ok": False, "message": "contact_id required"}
+    init_db()
+    conn = get_connection()
+    init_contacts(conn)
+    row = _store.contact_for_delete(contact_id, conn)
+    if not row:
+        return {"ok": False, "message": "contact not found"}
+
+    name = row.get("full_name") or "?"
+    job_url = row.get("job_url")
+    emailed = bool(row.get("sent_message_id"))
+    if not delete_contact(contact_id, conn):
+        return {"ok": False, "message": "contact not found"}
+
+    sent = " (an email had already been sent to them)" if emailed else ""
+    log_event(job_url, "outreach", "info", f"Removed contact: {name}{sent}.", conn)
+    return {"ok": True, "message": f"Removed {name}"}
+
+
 def _save_contact_details(data: dict) -> dict:
     """Persist the operator-entered phone / notes for one contact.
 
@@ -1929,6 +1964,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/contact/details":
                 _json_response(self, _save_contact_details(data))
+                return
+            if path == "/api/contact/delete":
+                _json_response(self, _delete_contact(data.get("contact_id", "")))
                 return
             if path == "/api/followup":
                 _json_response(self, _followup_action(data))

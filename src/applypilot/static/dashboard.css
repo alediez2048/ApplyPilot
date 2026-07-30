@@ -534,3 +534,9 @@
     .path-pill { max-width:200px; }
     .brand-sub { display:none; }
   }
+  /* Remove-contact action. Lives at the foot of the EXPANDED panel and is styled as a quiet
+     link, not a button: it is destructive and should never compete with the send actions. */
+  .crow-del { margin-top:8px; padding-top:7px; border-top:1px solid var(--line); }
+  .crow-del .link-danger { background:none; border:none; box-shadow:none; padding:2px 0;
+    color:var(--muted); font-size:11px; cursor:pointer; }
+  .crow-del .link-danger:hover { color:var(--red); text-decoration:underline; }

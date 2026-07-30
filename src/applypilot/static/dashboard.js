@@ -490,7 +490,22 @@ function contactPanel(c) {
       </div>
       <div class="chan">${tab('email','✉ Email')}${tab('linkedin','🔗 LinkedIn')}${tab('phone','📇 Phone & notes')}</div>
       ${body}
+      <div class="crow-del"><button class="link-danger" onclick="deleteContact('${esc(c.id)}', decodeURIComponent('${encodeURIComponent(c.full_name || '')}'), ${!!c.emailed})">🗑 Not at this company — remove</button></div>
     </div>`;
+}
+// Verification errs towards KEEPING an unconfirmed person (dropping a real contact is worse
+// than showing a doubtful one), so wrong people do reach the list. This is how they leave.
+// Inside the expanded panel, not on the collapsed row: deletion is destructive and should take
+// a deliberate open-then-click, never a stray click while scanning.
+async function deleteContact(id, name, emailed) {
+  const warn = emailed
+    ? `Remove ${name}?\n\nYou have ALREADY EMAILED this person. Removing them deletes the draft and the follow-up schedule; the activity log keeps a record that the email was sent.`
+    : `Remove ${name}?\n\nThis deletes the contact and any drafted outreach for them.`;
+  if (!confirm(warn)) return;
+  const r = await post('/api/contact/delete', {contact_id: id});
+  const cmdEl = document.getElementById('command');
+  if (cmdEl) cmdEl.textContent = r.message || '';
+  refresh();
 }
 function emailChannel(c) {
   // A due follow-up is the more urgent thing to write, so it takes the channel.

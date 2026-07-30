@@ -26,6 +26,7 @@ from rich.live import Live
 
 from applypilot import config
 from applypilot.database import get_connection, log_event
+from applypilot.apply import pause
 from applypilot.apply import prompt as prompt_mod
 from applypilot.apply.chrome import (
     launch_chrome, cleanup_worker, kill_all_chrome, keep_chrome_alive,
@@ -552,6 +553,15 @@ def run_job(job: dict, port: int, worker_id: int = 0,
             lf.write(log_header)
 
             for line in proc.stdout:
+                # Checked per agent action (each tool call emits a message), so a pause lands
+                # within a second or two without polling a timer. Kill only the AGENT — Chrome
+                # stays up so the operator inherits everything already typed in.
+                if pause.pause_requested():
+                    pause.clear_pause()
+                    add_event(f"[W{worker_id}] PAUSED by you — browser left open")
+                    _kill_process_tree(proc.pid)
+                    proc = None
+                    return "paused", int((time.time() - start) * 1000)
                 line = line.strip()
                 if not line:
                     continue
@@ -837,6 +847,17 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
                 applied += 1
                 update_state(worker_id, jobs_applied=applied,
                              jobs_done=applied + failed)
+            elif result == "paused":
+                # The operator asked to take over. Same handover as a co-pilot review, so the
+                # dashboard's Continue / Mark-submitted paths work on it unchanged. Applies in
+                # non-copilot mode too — an autonomous run is exactly when you most want a
+                # stop button that does not throw the work away.
+                mark_result(job["url"], "needs_human", error="paused", duration_ms=duration_ms)
+                keep_chrome_alive(worker_id)
+                chrome_proc = None  # ensure the finally's cleanup_worker doesn't reap it
+                add_event(f"[W{worker_id}] Paused — take over in the open tab: {job['title'][:30]}")
+                update_state(worker_id, status="needs_human", last_action="paused by you")
+                break
             elif copilot and copilot_should_keep_browser(result):
                 # The agent went quiet or ran long, but the form on screen may be COMPLETE.
                 # Hand it to the human instead of reaping the browser and losing the work.
@@ -904,6 +925,9 @@ def main(limit: int = 1, target_url: str | None = None,
     global POLL_INTERVAL
     POLL_INTERVAL = poll_interval
     _stop_event.clear()
+    # A flag left behind by a crash would pause every future apply the instant it
+    # started, which is indistinguishable from the apply being broken.
+    pause.clear_pause()
 
     config.ensure_dirs()
     console = Console()

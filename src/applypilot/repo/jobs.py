@@ -168,6 +168,17 @@ def dashboard_rows(limit: int = 500, conn: sqlite3.Connection | None = None) -> 
     """, (limit,)).fetchall()
 
 
+def in_progress(conn: sqlite3.Connection | None = None) -> list[dict]:
+    """Jobs an apply agent is working on RIGHT NOW.
+
+    Used by the pause action to tell the operator what it is about to interrupt, and to refuse
+    when nothing is running rather than leaving a pause flag behind for the next run to trip on.
+    """
+    return _dicts(_c(conn).execute(
+        "SELECT url, title, last_attempted_at FROM jobs "
+        "WHERE apply_status = 'in_progress' ORDER BY last_attempted_at DESC").fetchall())
+
+
 def awaiting_human(conn: sqlite3.Connection | None = None) -> list[dict]:
     """Jobs whose co-pilot browser is open and waiting on the operator.
 

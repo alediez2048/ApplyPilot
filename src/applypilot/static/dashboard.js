@@ -197,6 +197,14 @@ function toggleAdvanced() {
   el.style.display = el.style.display === 'none' ? 'flex' : 'none';
 }
 async function stopCommand() { await post('/api/stop', {}); refresh(); }
+// Pause is NOT Stop. Stop killpg's the run, which reaches Chrome and loses a part-filled form.
+// Pause stops only the agent and leaves the browser up for you to finish in.
+async function pauseApply() {
+  const cmdEl = document.getElementById('command');
+  const r = await post('/api/pause-apply', {});
+  if (cmdEl) cmdEl.textContent = r.message || (r.ok ? 'Pausing…' : 'Nothing to pause.');
+  refresh();
+}
 async function deleteJob(url, label) {
   if (!confirm(`Delete this application?\n\n${label}`)) return;
   const data = await post('/api/delete', {url});

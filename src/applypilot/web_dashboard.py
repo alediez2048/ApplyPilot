@@ -655,6 +655,26 @@ def run_dashboard_apply(limit: int = 10, dry_run: bool = False, copilot: bool = 
     return result
 
 
+def _pause_apply() -> dict:
+    """Ask the running apply to stop and hand its browser over.
+
+    Distinct from `/api/stop`, which `killpg`s the process group — that signal reaches Chrome
+    too and destroys the half-filled form. Pause stops only the agent and leaves the browser on
+    screen as `needs_human:paused`, so the operator finishes the application themselves.
+    """
+    from applypilot.apply import pause
+
+    init_db()
+    conn = get_connection()
+    running = _jobs.in_progress(conn)
+    if not running:
+        return {"ok": False, "message": "No application is being filled right now."}
+    pause.request_pause()
+    names = ", ".join((r["title"] or "?")[:28] for r in running[:3])
+    return {"ok": True, "message": f"Pausing {names} — the browser stays open for you to finish. "
+                                   f"It stops at the agent's next step."}
+
+
 def _review_browser_alive(max_workers: int = 4) -> bool:
     """Is a co-pilot review browser actually still open on any worker's CDP port?
 
@@ -1900,6 +1920,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if path == "/api/stop":
                 ok, msg = _runner.stop()
                 _json_response(self, {"ok": ok, "message": msg}, 200 if ok else 409)
+                return
+            if path == "/api/pause-apply":
+                _json_response(self, _pause_apply())
                 return
         except Exception as exc:
             _json_response(self, {"error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)

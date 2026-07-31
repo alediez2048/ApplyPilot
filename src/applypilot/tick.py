@@ -221,11 +221,32 @@ def _step_deck_clicks(conn, dry_run: bool) -> dict:
 #: `unanswered` runs after the poll so a reply that arrived this minute is already counted.
 #: `deck` sits before drafting too — knowing somebody read the deck changes what a follow-up
 #: should say, and a step that ran after the draft could not influence it.
+def _step_bookings(conn, dry_run: bool) -> dict:
+    """Notice when somebody actually booked a call.
+
+    The strongest signal a contact can produce — time, not just words — and it was invisible:
+    the scheduling link goes to cal.com, which we do not control. But cal.com emails the host
+    on every booking, and that email is already in the mailbox we can search.
+    """
+    from applypilot.networking import bookings, gmail_read
+    ok, why = gmail_read.can_read_content()
+    if not ok:
+        return {"skipped": True, "detail": f"booking detection needs reply content — {why}"}
+    if dry_run:
+        return {"detail": "would check the mailbox for booking confirmations"}
+    res = bookings.poll(conn)
+    return {"found": res.get("found", 0), "new": res.get("new", 0),
+            "detail": res.get("note", "")}
+
+
 STEPS = (
     ("locks", _step_release_locks),
     ("replies", _step_poll_replies),
     ("unanswered", _step_unanswered),
     ("deck", _step_deck_clicks),
+    # Before drafting, like the others: a follow-up written to somebody who already booked a
+    # call is the most obviously automated message this system could send.
+    ("bookings", _step_bookings),
     ("followups", _step_draft_followups),
 )
 

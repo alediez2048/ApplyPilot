@@ -1403,6 +1403,7 @@ def _status_payload() -> dict:
             "conversations": job_threads,
             "awaiting_reply": _awaiting_us(contacts),
             "introductions": _pending_introductions(job_threads, raw_contacts),
+            "interactions": _interactions_for_job(row["url"], contacts, conn),
             "activity": _job_activity(row["url"], conn),
             "network_running": bool(net_task.get("running")),
             "network_note": net_task.get("note") or "",
@@ -1610,6 +1611,59 @@ def _sync_all_gmail(data: dict) -> dict:
                   f"Pulled {res['messages']} message(s) across {res['threads']} Gmail "
                   f"conversation(s) with {contact.get('full_name') or cid}.", conn)
     return res
+
+
+def _interactions_for_job(job_url: str, contacts: list, conn) -> dict:
+    """Everything these people have DONE, as one timeline per person.
+
+    Derived from the contacts already in hand plus ONE query for the stored events, so this
+    costs a single statement per job rather than one per contact — /api/status is held to a
+    50-statement budget and re-renders every 2.5 seconds.
+    """
+    try:
+        from applypilot.domain import interactions as _ix
+        from applypilot.networking import interactions_store
+        return _ix.for_job(contacts, interactions_store.for_job(job_url, conn))
+    except Exception:  # noqa: BLE001
+        log.debug("Could not build interactions", exc_info=True)
+        return {"people": [], "total": 0, "engaged": 0}
+
+
+def _log_interaction(data: dict) -> dict:
+    """Record something the operator SAW. Never dressed up as a detection.
+
+    LinkedIn profile views are the motivating case and the reason `source` exists: they are not
+    in the LinkedIn data export and generate no notification email, so the only source is
+    LinkedIn's own UI — which this project abandoned automating twice (Lessons 3). An operator
+    note is honest; a fake detector would not be.
+    """
+    from applypilot.database import log_event
+    from applypilot.domain import interactions as _ix
+    from applypilot.networking import interactions_store, store as _store
+
+    cid = (data.get("contact_id") or "").strip()
+    kind = (data.get("kind") or "").strip()
+    if not cid:
+        return {"ok": False, "message": "contact_id required"}
+    if kind not in (_ix.PROFILE_VIEW, _ix.NOTE, _ix.BOOKED):
+        return {"ok": False, "message": f"cannot log {kind!r} by hand"}
+
+    conn = get_connection()
+    _store.init_contacts(conn)
+    contact = _store.get_contact(cid, conn)
+    if not contact:
+        return {"ok": False, "message": "contact not found"}
+
+    at = (data.get("at") or "").strip()
+    detail = (data.get("detail") or "").strip()
+    is_new = interactions_store.record(cid, kind, at=at, detail=detail, source="manual",
+                                       job_url=contact.get("job_url") or "", conn=conn)
+    who = contact.get("full_name") or cid
+    if is_new:
+        log_event(contact.get("job_url", ""), "outreach", "ok",
+                  f"Noted: {who} — {_ix.LABEL.get(kind, kind)}"
+                  + (f" ({detail})" if detail else "") + ".", conn)
+    return {"ok": True, "message": f"Noted for {who}." if is_new else "Already recorded."}
 
 
 def _job_description(data: dict) -> dict:
@@ -2462,6 +2516,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/contact/fetch-reply":
                 _json_response(self, _fetch_reply_text(data))
+                return
+            if path == "/api/contact/interaction":
+                _json_response(self, _log_interaction(data))
                 return
             if path == "/api/contact/sync-gmail":
                 _json_response(self, _sync_all_gmail(data))

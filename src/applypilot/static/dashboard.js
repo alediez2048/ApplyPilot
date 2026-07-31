@@ -1343,6 +1343,8 @@ function jobTabs(j) {
       !!(f.due_count || f.li_due_count)],
     ['materials', 'Materials',  (j.materials || []).length, false],
     ['activity',  'Activity',   (j.activity || []).length, false],
+    ['interactions', 'Interactions', (j.interactions || {}).total || 0,
+      !!((j.interactions || {}).engaged)],
     ['job',       'Job',        0, false],
   ];
   return `<div class="tabs">` + defs.map(([k, label, n, due]) =>
@@ -1414,8 +1416,64 @@ async function toggleJobDesc(url, btn) {
   refresh();
 }
 
+// What people have actually DONE, per person. The pieces existed but each lived somewhere
+// else — sends on the contact, replies in the thread, deck clicks in three columns — so
+// "has anyone engaged?" meant opening four panels and holding the answer in your head.
+//
+// People with NO engagement are listed too, and say so. A tab showing only the people who did
+// something cannot answer "has anyone?", which is the question being asked.
+function interactionsPane(j) {
+  const ix = j.interactions || {};
+  const people = ix.people || [];
+  if (!people.length) return `<div class="pane-empty">No contacts yet.</div>`;
+
+  const head = `<div class="ix-head">${ix.engaged
+    ? `<strong>${ix.engaged} of ${people.length}</strong> ${ix.engaged === 1 ? 'person has' : 'people have'} engaged · ${ix.total} interaction${ix.total === 1 ? '' : 's'}`
+    : `Nobody has engaged yet — ${people.length} contact${people.length === 1 ? '' : 's'} tracked`}</div>`;
+
+  const body = people.map(p => {
+    const rows = (p.rows || []).map(r => `
+      <div class="ix-row ${esc(r.kind)}">
+        <span class="ix-icon">${r.icon}</span>
+        <span class="ix-label">${esc(r.label)}</span>
+        <span class="ix-when">${esc(shortDate(r.at))}</span>
+        ${r.detail ? `<span class="ix-detail">${esc(r.detail)}</span>` : ''}
+        ${r.source === 'manual' ? `<span class="ix-manual" title="Logged by you, not detected">noted</span>` : ''}
+      </div>`).join('');
+    const badge = p.engaged
+      ? `<span class="ix-top">${p.icon} ${esc(p.label)}</span>`
+      : `<span class="ix-none">no engagement yet</span>`;
+    return `<div class="ix-person">
+        <div class="ix-who"><strong>${esc(p.full_name)}</strong>
+          <span class="ix-title">${esc(p.title)}</span>${badge}</div>
+        ${rows || `<div class="ix-row empty">Nothing recorded.</div>`}
+        <div class="ix-log">
+          <button class="linklike" onclick="logInteraction('${esc(p.id)}','profile_view')">🔗 They viewed my LinkedIn</button>
+          <button class="linklike" onclick="logInteraction('${esc(p.id)}','booked')">📅 They booked a call</button>
+        </div>
+      </div>`;
+  }).join('');
+
+  // Said once, at the bottom, rather than beside every button: LinkedIn profile views are not
+  // in the data export and generate no notification email, so there is nothing to detect from.
+  return `${head}${body}
+    <div class="ix-note">Deck opens and booked calls are detected automatically.
+      LinkedIn profile views have to be noted by hand — LinkedIn does not put them in the data
+      export or send an email about them.</div>`;
+}
+async function logInteraction(cid, kind) {
+  const detail = kind === 'profile_view'
+    ? prompt('Anything to remember? (optional — e.g. "saw it in LinkedIn notifications")') : '';
+  if (detail === null) return;                 // cancelled
+  const r = await post('/api/contact/interaction', {contact_id: cid, kind, detail});
+  const el = document.getElementById('command');
+  if (el) el.textContent = r.message || '';
+  refresh();
+}
+
 function jobPane(j) {
   const t = activeTab(j);
+  if (t === 'interactions') return interactionsPane(j);
   if (t === 'job')       return jobDetail(j);
   if (t === 'activity')  return `<div class="timeline">${activityHtml(j.activity)}</div>`;
   if (t === 'materials') return materialLinks(j.materials) || `<div class="pane-empty">No materials generated yet.</div>`;

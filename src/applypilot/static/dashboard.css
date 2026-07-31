@@ -626,6 +626,27 @@
   .sync-gm.off code { font-style:normal; background:var(--surface2); padding:0 4px; border-radius:3px; }
   .sync-note { color:#046c3c; }
   .sync-note.bad { color:#92400e; }
+  /* Interactions tab */
+  .ix-head { font-size:12.5px; margin-bottom:10px; color:var(--soft); }
+  .ix-person { border:1px solid var(--line); border-radius:8px; padding:9px 11px; margin-bottom:8px;
+    background:var(--surface2); }
+  .ix-who { display:flex; gap:8px; align-items:baseline; flex-wrap:wrap; font-size:12.5px; margin-bottom:5px; }
+  .ix-title { color:var(--faint); font-size:11.5px; }
+  .ix-top { margin-left:auto; font-size:11px; font-weight:600; color:#046c3c;
+    background:var(--green-soft); border:1px solid #b6e0c8; padding:1px 8px; border-radius:999px; }
+  .ix-none { margin-left:auto; font-size:11px; color:var(--faint); font-style:italic; }
+  .ix-row { display:flex; gap:8px; align-items:baseline; font-size:11.5px; padding:2px 0; }
+  .ix-row.empty { color:var(--faint); font-style:italic; }
+  .ix-icon { width:16px; }
+  .ix-label { min-width:170px; }
+  .ix-when { color:var(--faint); font-variant-numeric:tabular-nums; }
+  .ix-detail { color:var(--faint); font-style:italic; }
+  /* Operator-entered, never dressed up as a detection. */
+  .ix-manual { font-size:10px; color:var(--faint); border:1px solid var(--line);
+    border-radius:999px; padding:0 6px; }
+  .ix-row.sent { opacity:.6; }         /* our own action — context, not engagement */
+  .ix-log { margin-top:6px; display:flex; gap:12px; }
+  .ix-note { font-size:11px; color:var(--faint); margin-top:8px; line-height:1.5; }
   .turn-us { color:#92400e; font-weight:700; }
   .turn-them { color:var(--faint); font-weight:400; }
   .reply-box { border-top:1px solid var(--line); padding:10px 12px; background:var(--surface); border-radius:0 0 8px 8px; }

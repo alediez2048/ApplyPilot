@@ -561,7 +561,8 @@ def mark_connected_now(contact_id: str, conn: sqlite3.Connection | None = None) 
 def delete_contact(contact_id: str, conn: sqlite3.Connection | None = None) -> bool:
     """Remove a contact AND its follow-up state. Returns True if a contact row was deleted.
 
-    `touches`, `sequences` and `messages` are keyed by contact_id with no foreign key, so deleting only the
+    `touches`, `sequences`, `messages` and `interactions` are keyed by contact_id with no
+    foreign key, so deleting only the
     contact leaves a live follow-up ladder pointing at somebody who no longer exists — due
     counts that can never be cleared, and a `sequences` row that would silently re-attach if
     the same contact id were ever minted again (ids are a hash of job + identity, so
@@ -569,7 +570,7 @@ def delete_contact(contact_id: str, conn: sqlite3.Connection | None = None) -> b
     """
     if conn is None:
         conn = get_connection()
-    for table in ("touches", "sequences", "messages"):
+    for table in ("touches", "sequences", "messages", "interactions"):
         try:
             conn.execute(f"DELETE FROM {table} WHERE contact_id = ?", (contact_id,))
         except sqlite3.OperationalError:

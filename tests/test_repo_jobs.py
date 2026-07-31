@@ -184,6 +184,7 @@ def test_sql_lives_only_in_the_data_layer():
         "migrations/m002_messages_per_contact.py",           # same — a table rebuild, by definition
         "networking/store.py", "networking/touches.py",      # per-table repositories
         "networking/messages.py",                            # the CRM-4 conversation store
+        "networking/interactions_store.py",                  # the `interactions` table's own repository
         "networking/connections.py", "networking/backfill_touches.py",
         # --- not yet migrated (remaining ARCH-4 scope) ---
         "enrichment/detail.py", "apply/launcher.py", "view.py", "cli.py", "pipeline.py",

@@ -46,6 +46,15 @@ _CONTACT_COLUMNS: dict[str, str] = {
     # webhook, so the number is copied by hand out of the Apollo UI (see the "Apollo ↗" button).
     "phone": "TEXT",
     "notes": "TEXT",
+    # iMessage/SMS channel. ONE timestamp, not a status: the ladder only needs to know a first
+    # text went out, and everything after it is a row in `touches` like every other channel.
+    #
+    # This exists because `phone` cannot prove it. The number is typed in by hand for anyone the
+    # operator MIGHT text, so keying the ladder on it would mark a follow-up due for people
+    # nobody has ever messaged. Email proves itself with sent_message_id and LinkedIn with
+    # dm_status; this is that same fact for texting, and the operator sets it by clicking
+    # "✓ I sent it" — we cannot observe an iMessage leaving the Messages app.
+    "sms_sent_at": "TEXT",
     # NOTE: the ten follow-up columns that used to live here (followup_* and li_followup_*)
     # moved to the `touches` / `sequences` tables in ARCH-3. Do NOT add them back — a
     # channel is a value in those tables, not a column-name prefix here. See touches.py.
@@ -517,6 +526,31 @@ def mark_followed_up(contact_id: str, channel: str = "email",
     touches.record_sent(contact_id, channel, conn=conn)
     log_contact_event(contact_id, "ok",
                       f"Followed up with {_contact_label(contact_id, conn)}.", conn)
+    return True
+
+
+def mark_sms_sent(contact_id: str, conn: sqlite3.Connection | None = None) -> bool:
+    """Record that the FIRST text went out. Returns False if one was already recorded.
+
+    Idempotent on purpose, and it is the operator who calls it: an iMessage is sent from the
+    Messages app, so nothing here can observe it leaving. Clicking "✓ I sent it" is the only
+    evidence that exists, which makes double-clicking the obvious failure — and a second stamp
+    would silently move the ladder's anchor forward and push every touch later.
+
+    Only the FIRST text lands here. Subsequent ones are `touches` rows like every other channel,
+    which is what keeps the ladder engine from needing to know SMS exists.
+    """
+    if conn is None:
+        conn = get_connection()
+    init_contacts(conn)
+    cur = conn.execute(
+        "UPDATE contacts SET sms_sent_at = ? WHERE id = ? "
+        "AND (sms_sent_at IS NULL OR sms_sent_at = '')",
+        (datetime.now(timezone.utc).isoformat(), contact_id))
+    conn.commit()
+    if not cur.rowcount:
+        return False
+    log_contact_event(contact_id, "ok", f"Texted {_contact_label(contact_id, conn)}.", conn)
     return True
 
 

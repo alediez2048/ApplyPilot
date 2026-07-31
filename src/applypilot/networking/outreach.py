@@ -426,13 +426,16 @@ def draft_for_channel(channel: str, profile: dict, job: dict, contact: dict,
                       touch: int = 1, style: str = "") -> dict:
     """One entry point per channel, returning ONE shape: {"subject", "body"}.
 
-    The two drafters below return different keys for historical reasons (email has a
-    subject line, a LinkedIn DM does not). Normalising here is what lets the dashboard's
-    follow-up handler stop branching on channel — adding SMS means adding a row to this
-    map, not another `if` in the request handler.
+    The drafters below return different keys for historical reasons (email has a subject
+    line, a LinkedIn DM does not, a text certainly does not). Normalising here is what lets
+    the dashboard's follow-up handler stop branching on channel — adding SMS was adding a
+    row to this map, not another `if` in the request handler.
     """
     if channel == "linkedin":
         return {"subject": "", "body": draft_linkedin_followup(
+            profile, job, contact, touch=touch, style=style)["message"]}
+    if channel == "sms":
+        return {"subject": "", "body": draft_sms(
             profile, job, contact, touch=touch, style=style)["message"]}
     return draft_followup(profile, job, contact, touch=touch, style=style)
 
@@ -654,6 +657,92 @@ def draft_linkedin_followup(profile: dict, job: dict, contact: dict, touch: int 
     # Cap first, then add the link, so trimming can never produce a broken half-URL.
     msg = ensure_intro_deck(_cap_linkedin(msg, _LINKEDIN_DM_LIMIT), deck)
     return {"message": msg}
+
+
+#: Two SMS segments. iMessage has no practical cap, but the number may not be an iPhone and a
+#: text is read on a lock screen either way — length is the whole discipline of the channel.
+_SMS_LIMIT = 320
+
+_SMS_SYSTEM = """You write a SHORT TEXT MESSAGE for a job seeker reaching a real person about a role.
+
+This is a phone. Not email, not LinkedIn. Everything about the register is different.
+
+Hard rules:
+- SAY WHO YOU ARE, FIRST. They do not have this number saved. An unidentified text is deleted
+  before it is read, and this is the single rule that separates a text from every other channel.
+  Open with the sender's first name and, in the same breath, why they have this number.
+- TWO OR THREE SENTENCES. Under 320 characters, total. Not a paragraph with line breaks.
+- NO LINKS. A URL from an unrecognised number is the strongest spam signal there is, and it will
+  cost the conversation. Anything worth linking gets sent after they reply.
+- No greeting line, no sign-off, no "Hope you're well". Nobody signs a text.
+- ONE question, and an easy one. "Is this a good number for you?" beats "Do you have 30 minutes
+  to discuss the role and my background?"
+- Give an explicit out. "No worries if not" / "happy to leave you alone" — a text is intrusive
+  and acknowledging that is what makes it land.
+- Contractions. Write how a person texts. But no slang, no emoji, no exclamation marks.
+- Never invent facts about the sender, and never attach years to a specific tool or framework.
+
+Return ONLY JSON: {"message": "..."}"""
+
+#: What each text is FOR. Position 0 is the first one — the only one where the sender is a
+#: stranger holding their number.
+_SMS_TOUCH_INTENT = {
+    0: ("FIRST text. They do not know this number. Identify the sender immediately, say in one "
+        "clause why they are being texted (applied for the role / spoke before / a shared "
+        "contact), ask if this is an okay way to reach them, and give an out."),
+    1: ("Second touch (~3 days later). They read the first and did not answer. Assume they are "
+        "busy, not uninterested. One short line, one new concrete thing, and an easy out."),
+    2: ("Final touch (~7 days later). LAST message on this channel — say so plainly and warmly. "
+        "No question that demands a reply. Close the loop and leave the door open."),
+}
+
+
+def draft_sms(profile: dict, job: dict, contact: dict, touch: int = 0,
+              style: str = "") -> dict:
+    """Draft a text message. `touch` 0 is the first one; 1+ are follow-ups.
+
+    Returns {"message": str}. NEVER sends — the operator copies this, opens Messages and
+    pastes. Driving a messaging app from outside is the mistake this codebase already made
+    twice with LinkedIn (§Lessons 3), and Apple gives no send API at all.
+
+    Deliberately no intro-deck link: `_intro_deck_url` is not consulted here. A URL from a
+    number you do not recognise is the single strongest spam signal, and unlike LinkedIn's
+    penalty this one costs the whole conversation rather than some reach.
+    """
+    role = job.get("title") or "the role"
+    company = contact.get("company") or job.get("company") or job.get("site") or "the company"
+    intent = _SMS_TOUCH_INTENT.get(max(0, min(touch, 2)), _SMS_TOUCH_INTENT[2])
+    directive = _resolve_style(profile, style)
+    emailed = bool((contact.get("sent_message_id") or "").strip())
+
+    user = (
+        f"SENDER: {_sender_name(profile)}\n"
+        f"TARGET: {contact.get('full_name', '')} — {contact.get('title', '')} at {company}\n"
+        f"ROLE APPLIED FOR: {role}\n"
+        # Whether an email already went out changes the opening line completely: with one, the
+        # text is a nudge on a thread they can look up; without, it is a cold contact who has
+        # to be told who this is from scratch.
+        + (f"An email was already sent to {contact.get('email') or 'them'} and went unanswered. "
+           "The text may refer to it briefly — but must still say who is texting.\n"
+           if emailed else "No email has been sent. This is the first contact of any kind.\n")
+        + f"\nTHIS MESSAGE: {intent}\n\n"
+        + (f"STYLE DIRECTION (follow closely):\n{directive}\n\n" if directive else "")
+        + f"Write the text message. Under {_SMS_LIMIT} characters. Return the JSON."
+    )
+
+    client = get_client("light")
+    raw = client.chat(
+        [{"role": "system", "content": _SMS_SYSTEM}, {"role": "user", "content": user}],
+        max_tokens=200, temperature=0.75,
+    )
+    data = extract_json(raw)
+    msg = sanitize_text(str(data.get("message", ""))).strip()
+    if not msg:
+        raise ValueError("empty SMS draft")
+    # A text is one block. Models reach for an email shape (greeting, paragraph, sign-off) even
+    # when told not to, and newlines are what make it look like one on a phone.
+    msg = " ".join(msg.split())
+    return {"message": _cap_linkedin(msg, _SMS_LIMIT)}
 
 
 def _cap_linkedin(note: str, limit: int = _LINKEDIN_LIMIT) -> str:

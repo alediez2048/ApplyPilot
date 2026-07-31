@@ -49,6 +49,11 @@ class Channel:
     ready: tuple[tuple[str, tuple[str, ...] | None], ...] = field(default=())
     can_autosend: bool = True          # LinkedIn is copy-paste only — CLAUDE.md §Lessons
     prefix: str = ""                   # payload key prefix, for the dashboard's field names
+    # How this channel names itself in operator-facing text ("LinkedIn sequence stopped").
+    # Email's is empty because it is the unmarked case — "sequence stopped" already means email.
+    # This is a field rather than a lookup because the dashboard had the last per-channel
+    # branch left in the codebase sitting on it: `"LinkedIn " if channel.name == "linkedin"`.
+    label: str = ""
 
 
 EMAIL = Channel(
@@ -73,9 +78,31 @@ LINKEDIN = Channel(
     ready=(("linkedin_url", None), ("dm_status", ("sent", "manual"))),
     can_autosend=False,
     prefix="li_",
+    label="LinkedIn ",
 )
 
-CHANNELS = (EMAIL, LINKEDIN)
+# Texting is the most intrusive channel here and the only one that arrives on a lock screen,
+# so it is the slowest and the shortest ladder: two touches, 3d then 7d. A text at 24h reads
+# as pressure from someone who is not yet owed a reply.
+#
+# `ready` requires BOTH a phone and proof one was actually sent. The phone alone is not enough
+# — it is entered by hand for anyone the operator might text, so keying readiness on it would
+# put a "follow-up due" badge on every contact with a number nobody has ever messaged. Email
+# proves itself with `emailed` and LinkedIn with `dm_status`; this is the same rule, and it is
+# the one thing the SMS channel in test_adding_a_channel_needs_no_schema_change gets wrong —
+# that test drives the ENGINE, and its illustrative config was never a shipping config.
+SMS = Channel(
+    name="sms",
+    env_var="SMS_FOLLOWUP_SCHEDULE",
+    default_schedule=(72, 168),              # 3d / 7d
+    start_field="sms_sent_at",
+    ready=(("phone", None), ("sms_sent_at", None)),
+    can_autosend=False,                      # copy → open Messages → you paste. §Lessons 3.
+    prefix="sms_",
+    label="text ",
+)
+
+CHANNELS = (EMAIL, LINKEDIN, SMS)
 
 
 def channel_by_name(name: str) -> Channel | None:
@@ -200,13 +227,25 @@ def followup_panel(contacts: list[dict], now: datetime | None = None,
                  "touch": c[f"{pre}followup_touch"], "due_in_h": c[f"{pre}followup_due_in_h"],
                  "state": c[f"{pre}followup_state"]} for c in items]
 
-    e, li = buckets[EMAIL.name], buckets[LINKEDIN.name]
-    return {
-        "due": brief(e["due"], EMAIL), "waiting": brief(e["waiting"], EMAIL),
-        "finished": brief(e["finished"], EMAIL), "stopped": brief(e["stopped"], EMAIL),
-        "due_count": len(e["due"]), "total_touches": len(schedules[EMAIL.name]),
-        "schedule": schedules[EMAIL.name],
-        "li_due": brief(li["due"], LINKEDIN), "li_waiting": brief(li["waiting"], LINKEDIN),
-        "li_due_count": len(li["due"]), "li_total_touches": len(schedules[LINKEDIN.name]),
-        "li_schedule": schedules[LINKEDIN.name],
-    }
+    # Built FROM `CHANNELS`, not from two named locals. The old version destructured
+    # `buckets[EMAIL.name], buckets[LINKEDIN.name]` and spelled out both key sets by hand, so a
+    # third channel reached this line having passed through every other part of the engine
+    # untouched — and then vanished, because nothing put it in the payload. The docstring
+    # promised one registry row; this is the line that made that false.
+    #
+    # The email prefix is "" and LinkedIn's is "li_", so this emits exactly the keys that
+    # already shipped. `li_finished` / `li_stopped` are new and additive — no consumer reads a
+    # key it did not before.
+    out: dict = {}
+    for channel in CHANNELS:
+        b, pre = buckets[channel.name], channel.prefix
+        out.update({
+            f"{pre}due": brief(b["due"], channel),
+            f"{pre}waiting": brief(b["waiting"], channel),
+            f"{pre}finished": brief(b["finished"], channel),
+            f"{pre}stopped": brief(b["stopped"], channel),
+            f"{pre}due_count": len(b["due"]),
+            f"{pre}total_touches": len(schedules[channel.name]),
+            f"{pre}schedule": schedules[channel.name],
+        })
+    return out

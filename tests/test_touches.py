@@ -138,50 +138,57 @@ def test_deleting_a_contact_takes_its_touches(db):
 # ── the acceptance test the ticket actually asks for ────────────────────────
 
 def test_adding_a_channel_needs_no_schema_change(db):
-    """"Adding SMS is one registry row + one prompt" — executed, not asserted in prose.
+    """"Adding a channel is one registry row + one prompt" — executed, not asserted in prose.
 
     This defines a channel that does not exist anywhere in the codebase and drives it
     end to end: storage, scheduling, terminal state. Nothing is registered, no table is
     altered, no branch is added. If a future change makes `touches` or the ladder engine
     channel-aware, this is the test that fails.
+
+    It used to use SMS. SMS shipped, which broke this in a way worth recording: the fake
+    channel declared `default_schedule=(24, 72)`, but `channel_schedule()` resolves through
+    the settings registry, and the moment SMS_FOLLOWUP_SCHEDULE became a REAL setting the
+    fake channel silently inherited the real [72, 168] and the arithmetic below stopped
+    holding. A test that proves "an unknown channel works" has to name one that is actually
+    unknown, so this is WhatsApp — which the codebase has never heard of.
     """
-    sms = Channel(
-        name="sms",
-        env_var="SMS_FOLLOWUP_SCHEDULE",
+    whatsapp = Channel(
+        name="whatsapp",
+        env_var="WHATSAPP_FOLLOWUP_SCHEDULE",   # deliberately NOT in settings.py
         default_schedule=(24, 72),
         start_field="submitted_at",
         ready=(("phone", None),),
         can_autosend=False,
-        prefix="sms_",
+        prefix="wa_",
     )
     cid = _contact(db, phone="+1 555 0100")
     contact = dict(store.get_contact(cid))
 
     # storage: same table, same functions, a value in a column
-    touches.set_draft(cid, sms.name, "", "quick nudge")
-    assert touches.ladder_state(cid, sms.name, db)["draft_body"] == "quick nudge"
-    assert touches.record_sent(cid, sms.name, conn=db) == 1
+    touches.set_draft(cid, whatsapp.name, "", "quick nudge")
+    assert touches.ladder_state(cid, whatsapp.name, db)["draft_body"] == "quick nudge"
+    assert touches.record_sent(cid, whatsapp.name, conn=db) == 1
 
     # scheduling: the same engine, no new code. `record_sent` stamps the real clock, so
     # the evaluation time has to be relative to it, not to this module's frozen NOW.
     later = datetime.now(timezone.utc) + timedelta(hours=73)
     contact["submitted_at"] = ago(days=10)
-    state, _ = touch_state(contact, sms, channel_schedule(sms), later,
-                           touches.ladder_state(cid, sms.name, db))
+    state, _ = touch_state(contact, whatsapp, channel_schedule(whatsapp), later,
+                           touches.ladder_state(cid, whatsapp.name, db))
     assert state == "due", "second SMS touch should be due 72h after the first"
 
     # terminal state: the same table
-    touches.set_sequence_status(cid, sms.name, "replied")
-    assert touch_state(contact, sms, channel_schedule(sms), later,
-                       touches.ladder_state(cid, sms.name, db))[0] == "replied"
+    touches.set_sequence_status(cid, whatsapp.name, "replied")
+    assert touch_state(contact, whatsapp, channel_schedule(whatsapp), later,
+                       touches.ladder_state(cid, whatsapp.name, db))[0] == "replied"
 
     # readiness is data: no phone, no ladder
-    assert touch_state({**contact, "phone": ""}, sms, channel_schedule(sms), later,
+    assert touch_state({**contact, "phone": ""}, whatsapp, channel_schedule(whatsapp), later,
                        EMPTY_LADDER)[0] == ""
 
     # and the schema never learned it exists
     cols = {r[1] for r in db.execute("PRAGMA table_info(touches)")}
-    assert not any("sms" in c for c in cols)
+    assert not any("whatsapp" in c for c in cols)
 
 
 def test_no_channel_specific_ladder_functions():
@@ -255,7 +262,11 @@ def test_a_migrated_database_has_no_ladder_columns_left(db):
     cols = {r[1] for r in db.execute("PRAGMA table_info(contacts)")}
     assert not [c for c in cols if "followup" in c or "followed_up" in c]
     assert "replied_at" in cols
-    assert len(cols) == 37, f"unexpected contacts columns: {sorted(cols)}"
+    # `sms_sent_at` is the ONE column the SMS channel added, and it is the same kind of fact as
+    # `dm_sent_at`: proof a first message went out on that channel. Everything after it is a
+    # `touches` row, which is why adding a whole channel cost one column and not ten.
+    assert "sms_sent_at" in cols
+    assert len(cols) == 38, f"unexpected contacts columns: {sorted(cols)}"
 
 
 def test_backfill_moves_state_and_verifies_clean(db):

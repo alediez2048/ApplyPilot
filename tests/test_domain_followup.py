@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from applypilot.domain import channel_schedule, followup_panel, job_checklist
-from applypilot.domain.followup import CHANNELS, EMAIL, EMPTY_LADDER, LINKEDIN, touch_state
+from applypilot.domain.followup import CHANNELS, EMAIL, EMPTY_LADDER, LINKEDIN, SMS, touch_state
 
 NOW = datetime(2026, 7, 28, 12, 0, tzinfo=timezone.utc)
 
@@ -46,14 +46,44 @@ def connected(**over) -> dict:
     return c
 
 
+def texted(**over) -> dict:
+    # A phone number ALONE must never start this ladder — `sms_sent_at` is the proof, and it is
+    # set by the operator clicking "✓ I sent it" because nothing can watch Messages.app.
+    c = {"id": "c3", "full_name": "Dana", "title": "Recruiter", "email": "",
+         "emailed": False, "linkedin_url": "", "dm_status": "",
+         "phone": "+1 555 0100", "sms_sent_at": ago(days=5)}
+    c.update(over)
+    return c
+
+
+#: One ready contact per channel. Adding a channel without adding its fixture makes
+#: `test_every_channel_uses_the_same_engine` fail rather than silently skip it.
+READY_FOR = {EMAIL.name: emailed, LINKEDIN.name: connected, SMS.name: texted}
+
+
 # ── the engine is one implementation, parameterised ─────────────────────────
 
-def test_both_channels_use_the_same_engine():
+def test_every_channel_uses_the_same_engine():
     """If this ever needs a branch per channel, ARCH-1/ARCH-3 have regressed."""
+    assert set(READY_FOR) == {c.name for c in CHANNELS}, \
+        "a channel was registered with no ready-contact fixture; it would be skipped, not tested"
     for ch in CHANNELS:
-        state, _ = touch_state(emailed() if ch is EMAIL else connected(),
-                               ch, channel_schedule(ch), NOW, ladder())
-        assert state == "due"
+        state, _ = touch_state(READY_FOR[ch.name](), ch, channel_schedule(ch), NOW, ladder())
+        assert state == "due", f"{ch.name} did not come due on the shared engine"
+
+
+def test_a_phone_number_alone_does_not_start_an_sms_ladder():
+    """The bug the shipping config avoids and the illustrative one in test_touches.py has.
+
+    `phone` is typed in by hand for anyone the operator MIGHT text. Keying readiness on it
+    puts "follow-up due" on people nobody has ever messaged — the same class of false
+    positive as §Lessons 35, where every job read "3/3 engaged" because our own action was
+    counted as theirs.
+    """
+    never_texted = texted(sms_sent_at="")
+    assert touch_state(never_texted, SMS, channel_schedule(SMS), NOW, ladder())[0] == ""
+    # and with the stamp, the very same contact is due
+    assert touch_state(texted(), SMS, channel_schedule(SMS), NOW, ladder())[0] == "due"
 
 
 def test_readiness_is_data_not_a_branch():

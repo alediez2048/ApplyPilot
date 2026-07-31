@@ -2180,7 +2180,7 @@ def _followup_action(data: dict) -> dict:
         return {"ok": False, "message": "contact not found"}
 
     channel, verb = _split_followup_action(raw_action)
-    name = "LinkedIn " if channel.name == "linkedin" else ""
+    name = channel.label
 
     if verb in _SEQUENCE_VERBS:
         status = _SEQUENCE_VERBS[verb]

@@ -12,7 +12,7 @@ campaign happens to be a job search** — see `docs/crm-prd.md` for where that g
 - **Packaging:** Hatchling, `src/` layout, single package `applypilot`
 - **Entry point:** `applypilot = "applypilot.cli:app"` (Typer CLI)
 - **License:** AGPL-3.0-only · **Version:** 0.4.0 (`pyproject.toml`)
-- **Tests:** 764 passing (`tests/`, 50 files) · ruff clean (line-length 120, py311) · ESLint clean
+- **Tests:** 812 passing (`tests/`, 51 files) · ruff clean (line-length 120, py311) · ESLint clean
 - **Schema version:** 1 (`applypilot migrate --status`) · **Settings:** 41 declared in `settings.py`
 
 ## Quick orientation
@@ -581,15 +581,28 @@ it cannot read a body. Two consequences shape the whole design: `q=` search is u
 threads are listed by id and never queried; and there is no snippet, so what a reply SAID is
 unknown.
 
-**CRM-4b can lift that, and is OFF.** `gmail.readonly` reads every message in the mailbox, so
-`CONTENT_SCOPE` is deliberately **not** in `SCOPES` — no future scope addition can drag it
-along, and a test pins that. Enabling it is `network --gmail-connect --with-content`, which
-prints the trade before the browser opens. With it on, only ~200-char snippets of replies to our
-own outreach are stored (`SNIPPET_MAX`, truncated **at the write**, never at the caller), and
-`domain/intent.py` labels them so a rejection offers *Mark rejected* rather than *draft a
-follow-up*. Revoking it stops adding content and **destroys nothing already stored** — which
-took real work, because `upsert_messages` is INSERT OR REPLACE and an hourly `tick` re-syncs
-every open thread.
+**CRM-4b lifts that, and `gmail.readonly` IS NOW GRANTED (2026-07-31).** `CONTENT_SCOPE` is
+still deliberately **not** in `SCOPES` — no future scope addition can drag it along, and a test
+pins that; it is added only by `network --gmail-connect --with-content`, which prints the trade
+before the browser opens.
+
+**Nothing is read automatically, ever.** The OAuth grant is all-or-nothing (Google has no
+per-thread scope), so the narrowing cannot live in what we are *allowed* to read — it lives in
+what we ever *do* read. `_sync_thread` stores **no message text at all**, whatever the token
+permits; the 5-minute poller and hourly `tick` sync headers only. Text arrives solely via
+`replies.fetch_thread_text()` behind the **⤓ Fetch from Gmail** button, one named thread per
+click, inbound messages only — or by the operator pasting it.
+
+`upsert_messages` preserving an existing snippet is therefore **load-bearing, not defensive**:
+the automatic path writes an empty snippet on every row, so without it every tick would erase
+exactly what the operator asked for. A test runs three polls after a fetch and checks it
+survives.
+
+Stored text is capped at `SNIPPET_MAX` (200) on the auto path / `PASTED_MAX` (2000) when pasted,
+truncated **at the write**, never at the caller. `cv.strip_quoted_tail()` drops the quoted
+original first — Gmail's snippet runs straight through the quote header, so a short reply can be
+a third our own email quoted back, reaching the drafter as something *they* said.
+`domain/intent.py` labels the result so a rejection offers *Mark rejected* rather than a nudge.
 
 **Bounces are not replies, and not non-answers.** A bounce arrives inside our own thread, so
 thread-id matching accepts it happily; counting it as a reply stops the ladder and inflates
@@ -735,6 +748,39 @@ What is actually open now, ordered by leverage:
    fabrication — it is unproven, not trusted.
 
 ---
+
+## Security posture (audited 2026-07-31)
+
+**The GitHub repo is a PUBLIC fork of `Pickle-Pixel/ApplyPilot` and cannot be made private** —
+GitHub refuses to change a fork's visibility, because it would let private history escape a
+public network. The routes are: ask Support to detach the fork, or migrate to a new private
+repo. Neither has been done; public was accepted deliberately.
+
+That is safe *today*, and this was verified rather than assumed:
+
+- **Nothing sensitive is tracked, and nothing sensitive was ever committed** — checked across
+  all branches with `git log --all --diff-filter=A`. The only match is `.env.example`.
+- **Every secret lives in `~/.applypilot/`, outside the repo directory.** A clone gets code and
+  docs. `.gitignore` (`*.db`, `profile.json`, `resume.txt`, `*.env`) is the second layer, not
+  the first.
+- **The dashboard binds `127.0.0.1` only** (confirmed with `lsof`, not just the source) and has
+  an Origin/CSRF guard against DNS rebinding.
+- **Granting `gmail.readonly` did NOT widen the apply agent's blast radius.** The agent runs
+  `bypassPermissions` on attacker-controlled careers pages, but is denied `Bash`, `Read`,
+  `Write`, `Edit`, `Glob`, `Grep`, `WebFetch`, `WebSearch` and `Task` — so it cannot read
+  `~/.applypilot/gmail_token.json`. Gmail read tools are denied twice (allowlist + deny-list).
+  This is the check to re-run before granting the agent anything new.
+
+**`.githooks/pre-commit` blocks a commit that would publish a secret** — credential-shaped
+filenames and secret-shaped content. Enable on a fresh clone with `sh scripts/install-hooks.sh`
+(`core.hooksPath` is local config, so it does NOT travel with the repo). 19 tests run the real
+hook, including 5 benign edits that must NOT be blocked — a noisy guard gets `--no-verify`d out
+of habit. It found a bug in itself on first use: the `PRIVATE KEY` pattern starts with `-`, so
+grep parsed it as an option and that check had never run.
+
+**What remains genuinely exposed:** the token is unencrypted on disk (`chmod 600` + FileVault
+is the whole protection, so anything running as this user can read it), and the DB now holds
+correspondence snippets. Kill switch: <https://myaccount.google.com/permissions>.
 
 ## Environment (this machine)
 

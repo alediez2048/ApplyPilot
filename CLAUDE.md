@@ -12,8 +12,8 @@ campaign happens to be a job search** — see `docs/crm-prd.md` for where that g
 - **Packaging:** Hatchling, `src/` layout, single package `applypilot`
 - **Entry point:** `applypilot = "applypilot.cli:app"` (Typer CLI)
 - **License:** AGPL-3.0-only · **Version:** 0.4.0 (`pyproject.toml`)
-- **Tests:** 812 passing (`tests/`, 51 files) · ruff clean (line-length 120, py311) · ESLint clean
-- **Schema version:** 1 (`applypilot migrate --status`) · **Settings:** 41 declared in `settings.py`
+- **Tests:** 874 passing (`tests/`, 53 files) · ruff clean (line-length 120, py311) · ESLint clean
+- **Schema version:** 2 (`applypilot migrate --status`) · **Settings:** 43 declared in `settings.py`
 
 ## Quick orientation
 
@@ -126,6 +126,9 @@ harness no longer has to import a web server to test scheduling.
 | `conversations.py` | Who is on a thread, who was just introduced, **who owes whom a reply** (`conversation_state`), and who a reply must reach (`reply_target` — the Cc is carried forward, never rebuilt). |
 | `intent.py` | CRM-4b. What a reply wants — rejection / not now / interested / introduction / question / auto-reply — from a ~200-char snippet. Rule-based and quick to say `unknown`. |
 | `metrics.py` | CRM-2 funnel + reply rates. Every rate carries its `n`; bounces leave the denominator. |
+| `deck.py` | Intro-deck links. `slugify`/`disambiguate` → `/intro/gina`, **not** `?v=<token>`. `relink()` rewrites an existing draft's link without regenerating the copy. |
+| `interactions.py` | What a contact has actually DONE, from several sources. Our own actions (an email sent, a LinkedIn invite) are context, never engagement. |
+| `intent.py` | What a reply wants — rejection / not now / interested / introduction / question / auto-reply. Rule-based and quick to say `unknown`. |
 
 **Adding a channel (e.g. SMS) is one `Channel` entry plus one prompt** — executed, not
 claimed: `test_adding_a_channel_needs_no_schema_change` defines an SMS channel that exists
@@ -164,12 +167,14 @@ incapable of touching a LinkedIn page. See §Lessons.
 | `sequences` | `networking/touches.py` | Terminal state per (contact, channel): `stopped` / `replied`. |
 | `connections` | `networking/connections.py` | Imported LinkedIn CSV. |
 | `messages` | `networking/messages.py` | **CRM-4 conversation memory.** Thread HEADERS only — no body/snippet column exists, and a test asserts it. Keyed by Gmail's message id, so re-syncing is a no-op. `rfc_message_id` is what lets a reply chain `References` across the whole thread. |
+| `interactions` | `networking/interactions_store.py` | Events with nowhere else to live: a detected booking, an operator-logged LinkedIn profile view. Derived facts are NOT copied here — they are computed at render time so they cannot drift. |
 | `job_events` | `database.py` | Per-job activity log. Append is best-effort, never raises. |
 
 | `schema_migrations` | `migrations/` | Version, status, `claimed_at` lease. See §Lessons on the 300s lease. |
 
-Live counts (2026-07-31): jobs 15, contacts 51 (**33 emailed, 2 replied, 1 bounced**),
-messages 36, connections 899, job_events 232, touches 10, sequences 13. Schema version 1.
+Live counts (2026-07-31, end of day): jobs 16, contacts 64 (**42 emailed, 2 replied, 1
+bounced**), messages 54, interactions 2, touches 11, sequences 13, job_events 318,
+connections 899. **Schema version 2** (migration 002 re-keyed `messages` per contact).
 
 **The second reply arrived on its own** — Gina Johnson at Salesforce, 2026-07-31, detected by
 the CRM-1 background poller with nobody watching. That is the whole point of the heartbeat:
@@ -191,6 +196,18 @@ operator(`phone,notes`) · verification(`confidence,verify_note`).
 
 Localhost-only (`127.0.0.1:8765`), Origin/CSRF-guarded. Restructured 2026-07-28 from four
 sibling accordions into:
+
+**Six tabs** (2026-07-31): People · Follow-ups · Materials · Activity · **Interactions** · **Job**.
+`Job` carries the posting's links in full — the table's `job` link is truncated and uncopyable,
+which is why the tab exists — with the description fetched on demand (the list payload holds a
+900-char excerpt; real ones run 4–10KB). `Interactions` answers "has anyone actually engaged?".
+
+**A contact who has REPLIED gets a conversation, not a form.** `emailed` used to open on an
+editable copy of an email delivered days earlier, with Copy/Regenerate, while the live exchange
+sat collapsed below it. A sent email cannot be edited: offering it as a form is offering an
+action that does not exist, and it pushed the only actionable thing off screen. `hasConversation()`
+is the single branch — timeline first, composer anchored under it, the sent outreach as one entry
+in that timeline. §Lessons 31.
 
 - **Status strip** (always visible, never a toggle) — a left-to-right path
   `✓ Found → ✓ Applied → ✓ Emailed 4/4 → ↻ Follow up 0/4 → · Reply`, first unfinished step
@@ -555,6 +572,54 @@ company `"Jobs"` — the same substring bug class, inside the function written t
     no matter what the question regex does, because `sounds good` matches `interested` and
     returns first — replacing the entire regex with a bare `\?` left every test green.
 
+31. **A feature that only runs from a scheduler nobody installed does not exist.** Booking
+    detection and deck-click pulling were both built as `applypilot tick` steps. `tick` is
+    scheduled by launchd and `schedule.installed()` was False — so neither had ever fired once,
+    while a manual "📅 They booked a call" button sat beside them looking like the intended
+    path. Both now ride the dashboard's existing 5-minute poller, which needs no system change
+    and no permission. Ask "what actually calls this?" before calling a detector automatic.
+
+32. **Never issue a link the site cannot serve.** Outreach was switched to `/intro/<name>` while
+    the Netlify rewrite serving those paths was still uncommitted — four recruiters were sent
+    emails whose deck link 404'd. `INTRO_DECK_PATHS` now gates the scheme and defaults OFF. A
+    personalised link that does not resolve is far worse than an un-attributed one that does:
+    it costs the conversation, which is the entire reason for sending it.
+
+33. **Ship the urgent fix ALONE.** The repair commit bundled the rewrite, two Netlify Functions
+    and an `@netlify/blobs` dependency. Netlify builds all-or-nothing, the build failed, and the
+    one urgent part went down with the two that could have waited. Reshipped as four lines of
+    `netlify.toml` — no install step, nothing to bundle — live in two minutes.
+    Diagnosis came from reading the LIVE bundle, not guessing: the previous commit's text was in
+    it and mine was not, which proved auto-deploy worked and my build had broken. Two wrong
+    theories were tested first (a `package-lock` mismatch — `npm ci` fails on the ORIGINAL
+    lockfile too, so npm was never the tool; and yarn's `--frozen-lockfile`, which passes).
+
+34. **A rejection is only as good as the thing it contradicts.** An Avathon job found three
+    people and dropped all three, the CEO included. The employer domain `avathongov.com` was
+    read off the careers-site HOST — an inference — while their real mail domain is
+    `@sparkcognition.com` (the company was SparkCognition before the rename). That guess was
+    then fed to a check whose docstring calls a mismatch "near-proof". An eval case had already
+    written the rule down — *"domain comes from Apollo, never guessed"* — and nothing enforced
+    it. Provenance is explicit now (`domain_source`): Apollo-derived domains still reject a
+    contradiction, guessed ones cannot.
+
+35. **The tab that answers its own question with "yes" is worth nothing.** The first Interactions
+    tab counted the LinkedIn invite as engagement and every job read "3/3 engaged", "5/5
+    engaged" — but `dm_status` is `sent`/`manual`, both meaning WE sent it, and no `accepted`
+    state exists anywhere in the schema. Reclassified as our own action; the honest number
+    across 14 jobs is 2 of 58.
+
+36. **`INSERT OR REPLACE` on a shared key silently reassigns ownership.** `messages` was keyed on
+    `message_id` alone, so "Pull all Gmail" on David moved all three Writer messages to him and
+    left Victoria's conversation EMPTY — measured on live data, 3 → 0, one click. One message
+    legitimately belongs to several contacts; the key is now `(message_id, contact_id)`
+    (migration 002).
+
+37. **The repair tool has to be reachable from the broken state.** The Gmail fetch button was
+    built inside `conversationView`, which only renders once an inbound message exists — so the
+    control for "my thread is missing" was hidden inside the thread that was missing. It lives
+    on the contact meta row now, which always renders.
+
 ---
 
 ## The CRM phase (2026-07-30, branch `crm-phase-1`)
@@ -583,48 +648,47 @@ unknown.
 
 **CRM-4b lifts that, and `gmail.readonly` IS NOW GRANTED (2026-07-31).** `CONTENT_SCOPE` is
 still deliberately **not** in `SCOPES` — no future scope addition can drag it along, and a test
-pins that; it is added only by `network --gmail-connect --with-content`, which prints the trade
-before the browser opens.
+pins that; it is added only by `network --gmail-connect --with-content`.
 
 **Nothing is read automatically, ever.** The OAuth grant is all-or-nothing (Google has no
 per-thread scope), so the narrowing cannot live in what we are *allowed* to read — it lives in
-what we ever *do* read. `_sync_thread` stores **no message text at all**, whatever the token
-permits; the 5-minute poller and hourly `tick` sync headers only. Text arrives solely via
-`replies.fetch_thread_text()` behind the **⤓ Fetch from Gmail** button, one named thread per
-click, inbound messages only — or by the operator pasting it.
+what we ever *do* read. `_sync_thread` stores **no message text at all**. Text arrives only via
+`replies.fetch_thread_text()` (⤓ Fetch from Gmail, one thread) or by the operator pasting it.
+`upsert_messages` preserving an existing snippet is therefore load-bearing, not defensive.
 
-`upsert_messages` preserving an existing snippet is therefore **load-bearing, not defensive**:
-the automatic path writes an empty snippet on every row, so without it every tick would erase
-exactly what the operator asked for. A test runs three polls after a fetch and checks it
-survives.
+**`replies.sync_all_with()` searches by ADDRESS**, so a thread the other side started, an email
+sent straight from Gmail, or one where they merely Cc'd you all arrive — the conversations the
+CRM's memory used to stop short of, because everything was looked up by a `thread_id` captured
+at send time. `q=` search needs `readonly`; metadata refuses it outright.
 
-Stored text is capped at `SNIPPET_MAX` (200) on the auto path / `PASTED_MAX` (2000) when pasted,
-truncated **at the write**, never at the caller. `cv.strip_quoted_tail()` drops the quoted
-original first — Gmail's snippet runs straight through the quote header, so a short reply can be
-a third our own email quoted back, reaching the drafter as something *they* said.
-`domain/intent.py` labels the result so a rejection offers *Mark rejected* rather than a nudge.
+Stored text is capped (`SNIPPET_MAX` 200 auto / `PASTED_MAX` 2000 pasted) **at the write**, and
+`cv.strip_quoted_tail()` drops the quoted original first — Gmail's snippet runs through the
+quote header, so a short reply can be a third our own email quoted back.
 
-**Bounces are not replies, and not non-answers.** A bounce arrives inside our own thread, so
-thread-id matching accepts it happily; counting it as a reply stops the ladder and inflates
-every rate. Detected separately, the address is marked `bounced`, and CRM-2 excludes it from
-every denominator — it never arrived, so "emailed, no reply" would be a lie.
+## Engagement signals — what is detectable, and what is not
 
-**Introductions are surfaced, never auto-created.** A contact created from a thread is one an
-automated ladder would then EMAIL, and threads collect schedulers, assistants and ATS robots.
-`conversations.is_robot()` filters the obvious ones; the operator confirms the rest.
+Established by LOOKING at the real mailbox, not by guessing:
 
-**Replying in-thread keeps the Cc** (`domain/conversations.reply_target()` → `send_reply()` →
-`/api/contact/reply`, 2026-07-31). It answers the **last inbound** message, not the last message
-overall — after we reply, the newest message is ours, and reading recipients off it loses anyone
-added since. `References` chains the whole thread. A thread with **no** inbound message returns
-`None` rather than falling back to the contact's address: that case is a *follow-up*, which has
-a ladder, a schedule and stop conditions, and quietly answering it as a "reply" bypasses all
-three. The endpoint takes recipients from the stored thread and ignores any `to` the browser
-sends; the operator may drop a Cc, never invent one. §Lessons 27.
+| Signal | How | Status |
+|---|---|---|
+| Replied | `messages` | automatic |
+| **Booked a call** | cal.com emails the host — verified (`hello@cal.com`, "30 Min Meeting between …") | automatic |
+| **Opened the intro deck** | first-party beacon on the sender's OWN site | needs the collector deployed |
+| **Viewed your LinkedIn profile** | **not detectable** — absent from the LinkedIn data export AND no notification email exists. Only LinkedIn's UI has it, and automating that was abandoned twice (§Lessons 3) | operator-logged, tagged `noted` |
 
-**`tick` never sends, never starts an apply, and never touches `apply.pause`.** Each is a test.
-An unattended apply would fill a form nobody is there to review and close whatever review
-browser is open; writing the pause flag would pause a live application.
+**Email OPEN tracking was rejected outright.** A pixel fires when Gmail proxies and caches the
+image, when Apple Mail pre-fetches it, and when a corporate gateway scans the message — it
+measures machines. A click does not.
+
+**Deck links are a NAMED PATH**: `/intro/gina`, never `?v=<token>`. Both identify the reader;
+only one looks like it, in the one message whose point is sounding personal. The slug is
+STORED (`contacts.deck_slug`) because it cannot be derived — two people are often called Gina —
+assigned once and never moved, since links are already in inboxes. A second Gina gets `gina-b`,
+not `gina-2f9c`. **Gated by `INTRO_DECK_PATHS`, default OFF** (§Lessons 32); the Netlify rewrite
+`/intro/* → /intro/index.html` (status 200, a REWRITE — a 301 would strip the name) must be live
+first. It is, and it is a wildcard: any name works, unlimited, no rebuild.
+`applypilot deck-relink` repoints existing drafts without regenerating them, and never touches a
+sent one — that draft is the only record of what went out.
 
 ## The human-in-the-loop apply model (2026-07-30)
 
@@ -665,14 +729,19 @@ application waits indefinitely — and the longer it waits, the likelier somethi
 deliberately narrowed — see its ticket.
 
 **The CRM set is complete and CLOSED** (`CRM-3a`, `CRM-1`, `CRM-2`, `CRM-3b`, `CRM-4a`,
-`CRM-4b` — 2026-07-30/31 on branch `crm-phase-1`). `CRM-4b` is **built and switched off**: it
-needs `gmail.readonly`, which reads the whole mailbox, so enabling it is a deliberate act
-(`network --gmail-connect --with-content`). Everything passes with it off, which is how this
-machine runs.
+`CRM-4b` — 2026-07-30/31). `gmail.readonly` is now GRANTED on this machine, but nothing reads
+automatically — see §Engagement signals.
 
-**Open:** `DISC-1` — discovery has produced **0** jobs; all 15 were pasted by hand. It is now
-the only open ticket, and by a wide margin the biggest gap: everything downstream of discovery
-works end to end, on jobs the operator has to find themselves.
+**Open:** `DISC-1` — discovery has produced **0** jobs; all 15 were pasted by hand. Still the
+biggest gap by a wide margin: everything downstream of it works end to end, on jobs the
+operator has to find themselves.
+
+**Half-finished, and the only thing in the product that is:** intro-deck click collection. The
+two Netlify Functions (`deploy/netlify/`) are written and tested but NOT deployed — they were
+pulled out of the site commit after the bundled deploy failed (§Lessons 33), and their build
+error has never been seen. The `/intro/*` rewrite IS live, so links work; nothing records the
+clicks. To finish: deploy the functions alone, set `DECK_HITS_TOKEN` both sides, then
+`INTRO_DECK_PATHS=1` and `applypilot deck-relink`.
 
 `CRM-1` (reply detection) is the one that changes what the app can *do*: 13 emails sent, 7
 follow-ups, **1 reply recorded — typed in by hand.** Everything it needs is already stored

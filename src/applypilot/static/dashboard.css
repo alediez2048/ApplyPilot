@@ -577,6 +577,24 @@
   /* Reply composer (CRM-4a). Sits INSIDE the conversation, because who a reply goes to is a
      fact about the thread — the Cc chips are the visible proof that an introduced person is
      still on it. */
+  /* Conversation timeline. Inbound and outbound are distinguished by SIDE and by ground, not
+     by a label you have to read — the one thing every mail client agrees on. */
+  .conv { margin:8px 0; }
+  .conv-turn { padding:7px 11px; border-radius:8px; font-size:12px; font-weight:600; margin-bottom:8px; }
+  .conv-turn.us { background:#fdf0e3; color:#92400e; border:1px solid #e6c9a8; }
+  .conv-turn.them { background:var(--surface2); color:var(--soft); border:1px solid var(--line); font-weight:400; }
+  .conv-msgs { display:flex; flex-direction:column; gap:8px; margin-bottom:10px; }
+  .cm { max-width:82%; padding:7px 11px; border-radius:10px; border:1px solid var(--line); }
+  .cm.in { align-self:flex-start; background:var(--surface2); border-bottom-left-radius:3px; }
+  .cm.out { align-self:flex-end; background:var(--surface); border-bottom-right-radius:3px; }
+  .cm-hdr { display:flex; gap:8px; align-items:baseline; font-size:11px; }
+  .cm-who { font-weight:700; }
+  .cm.in .cm-who { color:var(--green); }
+  .cm.out .cm-who { color:var(--muted); }
+  .cm-when { color:var(--faint); font-variant-numeric:tabular-nums; }
+  .cm-cc { font-size:10.5px; color:var(--faint); margin-top:2px; }
+  .cm-body { font-size:12.5px; margin-top:4px; white-space:pre-wrap; }
+  .cm-nobody { font-size:11.5px; color:var(--faint); font-style:italic; margin-top:4px; }
   .turn-us { color:#92400e; font-weight:700; }
   .turn-them { color:var(--faint); font-weight:400; }
   .reply-box { border-top:1px solid var(--line); padding:10px 12px; background:var(--surface); border-radius:0 0 8px 8px; }

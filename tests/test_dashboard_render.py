@@ -246,6 +246,66 @@ def test_the_reply_composer_shows_who_it_will_reach(tmp_path):
         "own ladder, schedule and stop conditions")
 
 
+@pytest.mark.skipif(not shutil.which("node"), reason="node not available")
+def test_a_contact_who_replied_gets_a_conversation_not_an_outreach_form(tmp_path):
+    """The reported bug, pinned.
+
+    "if i open gina's contact the first thing it shows is the email box we already sent."
+    It did: an EDITABLE form holding a message delivered five days earlier, with Copy and
+    Regenerate controls, expanded and dominating — while the live exchange sat collapsed to one
+    line. A sent email cannot be edited; presenting it as a form is offering an action that does
+    not exist, and it pushed the only actionable thing below the fold.
+
+    Once somebody replies the tab is a conversation: timeline first, composer anchored under it.
+    """
+    answered = _job()["contacts"][3]          # has an inbound message
+    never = _contact(id="c9", full_name="No Reply Yet", thread=[], reply_to=None)
+
+    script = tmp_path / "conv.mjs"
+    script.write_text(
+        _STUBS
+        + f"const SRC = {json.dumps(_page_js())};\n"
+        + f"const CASES = {json.dumps({'answered': answered, 'never': never})};\n"
+        + _REPLY_DRIVER
+    )
+    proc = subprocess.run(["node", str(script)], capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, f"node failed:\n{proc.stderr[:2000]}"
+    out = json.loads(proc.stdout.strip().splitlines()[-1])
+    html = out["answered"]
+
+    assert "conv-msgs" in html, "no conversation timeline for a contact who replied"
+    assert "d-subj" not in html and "Regenerate" not in html, (
+        "the already-sent outreach still renders as an EDITABLE form — it is delivered and "
+        "cannot be changed, and it buries the reply")
+    # Order is the whole point: the exchange, then the composer.
+    assert html.index("conv-msgs") < html.index("reply-box"), "composer above the conversation"
+    assert "replied" in html and "haven" in html, "nothing says they are waiting on you"
+
+    # A contact nobody has replied to keeps the outreach draft flow — chasing silence is the
+    # right action there, and this must not have been broken in the process.
+    assert "conv-msgs" not in out["never"]
+    assert "reply-box" not in out["never"]
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node not available")
+def test_a_message_with_no_stored_text_says_so_instead_of_rendering_blank(tmp_path):
+    """We hold headers for every message and TEXT only where it was pasted or the content scope
+    supplied it. An empty bubble leaves the operator unable to tell a blank message from an
+    unread one — the difference between "they sent nothing" and "we cannot see it"."""
+    c = _job()["contacts"][3]
+    script = tmp_path / "nobody.mjs"
+    script.write_text(
+        _STUBS
+        + f"const SRC = {json.dumps(_page_js())};\n"
+        + f"const CASES = {json.dumps({'x': c})};\n"
+        + _REPLY_DRIVER
+    )
+    proc = subprocess.run(["node", str(script)], capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, f"node failed:\n{proc.stderr[:2000]}"
+    html = json.loads(proc.stdout.strip().splitlines()[-1])["x"]
+    assert "cm-nobody" in html and "not stored" in html
+
+
 _NEXT_DRIVER = """
 const F = (new Function(SRC + `; return { nextAction, contactRow, CONTACT_OPEN };`))();
 const out = {};

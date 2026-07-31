@@ -527,42 +527,46 @@ function contactRow(c) {
 // No bodies are stored, so this deliberately shows structure rather than pretending to be an
 // email client: the point is "there is a live conversation here and somebody new is on it",
 // which a boolean `replied` threw away entirely.
-function threadView(c) {
+// The conversation, as the primary content of the Email tab. Timeline first, composer anchored
+// to the bottom of it — the shape Front/Missive/Superhuman all converge on, and the one this
+// panel had inverted.
+function conversationView(c) {
   const msgs = c.thread || [];
-  if (msgs.length < 2) return '';   // one outbound message is not a conversation
-  const rows = msgs.map(m => {
-    const who = m.direction === 'in' ? (m.from_name || m.from_addr) : 'You';
-    const cc = (m.cc_addrs || []).length ? ` <span class="th-cc">cc ${(m.cc_addrs||[]).map(esc).join(', ')}</span>` : '';
-    return `<div class="th-row ${m.direction}"><span class="th-who">${esc(who)}</span>` +
-           `<span class="th-when">${esc(shortDate(m.sent_at))}</span>${cc}</div>`;
-  }).join('');
+  const conv = c.conversation || {};
+  const banner = conv.state === 'awaiting_us'
+    ? `<div class="conv-turn us">⚠ ${esc(conv.who || 'They')} replied${conv.days >= 1 ? ` ${conv.days}d ago` : ' today'} — you haven’t answered</div>`
+    : conv.state === 'awaiting_them'
+      ? `<div class="conv-turn them">You answered${conv.days >= 1 ? ` ${conv.days}d ago` : ' today'} — waiting on them</div>`
+      : '';
   const intro = c.introduced_by
     ? `<div class="th-intro">👋 ${esc(c.introduced_by)} added them to this thread</div>` : '';
-  // Open by default when THEY are waiting on you. Collapsing the live conversation put the
-  // reply, the paste box and the Draft button behind a disclosure triangle, while the email
-  // you sent five days ago sat expanded below it — the dead artifact louder than the live one.
-  // A closed <details> is a promise that nothing important is inside.
-  const wantOpen = THREAD_OPEN.has(c.id)
-    || (!THREAD_SHUT.has(c.id) && (c.conversation || {}).state === 'awaiting_us');
-  const open = wantOpen ? ' open' : '';
-  // Whose turn it is, on the summary line — the thread is collapsed by default, so a state
-  // only visible once you expand it is a state nobody sees.
-  const conv = c.conversation || {};
-  const turn = conv.state === 'awaiting_us'
-    ? `<span class="turn-us">⚠ waiting on you${conv.days >= 1 ? ` · ${conv.days}d` : ''}</span>`
-    : conv.state === 'awaiting_them'
-      ? `<span class="turn-them">you answered${conv.days >= 1 ? ` · ${conv.days}d ago` : ''}</span>` : '';
-  return `<details class="thread"${open} ontoggle="onThreadToggle(this,'${esc(c.id)}')">` +
-         `<summary>💬 Conversation (${msgs.length}) ${turn}</summary>${intro}${rows}${replyBox(c)}</details>`;
+  return `<div class="conv">${banner}${intro}
+    <div class="conv-msgs">${msgs.map(m => convMessage(c, m)).join('')}</div>
+    ${replyBox(c)}
+  </div>`;
 }
-const THREAD_OPEN = new Set();
-// Deliberately shut BY THE OPERATOR. Without this, auto-open would fight them every 2.5s:
-// they collapse it, the refresh re-opens it, forever.
-const THREAD_SHUT = new Set();
-function onThreadToggle(el, cid) {
-  if (el.open) { THREAD_OPEN.add(cid); THREAD_SHUT.delete(cid); }
-  else { THREAD_OPEN.delete(cid); THREAD_SHUT.add(cid); }
+
+// One message. We hold HEADERS for everything and TEXT only where it was pasted or the content
+// scope filled it in, so this says which it is rather than rendering an empty bubble and
+// leaving the operator to wonder whether the message was blank or merely unread.
+function convMessage(c, m) {
+  const mine = m.direction !== 'in';
+  const who = mine ? 'You' : (m.from_name || m.from_addr || 'They');
+  const cc = (m.cc_addrs || []).length
+    ? `<div class="cm-cc">cc ${(m.cc_addrs || []).map(esc).join(', ')}</div>` : '';
+  // Our own sent text lives on the contact / touches, not in `messages` — the first outbound
+  // message is the outreach we still hold in full.
+  const body = m.snippet || (mine && m === (c.thread || [])[0] ? (c.outreach_message || '') : '');
+  const text = body
+    ? `<div class="cm-body">${esc(body)}</div>`
+    : (mine ? '' : `<div class="cm-nobody">Text not stored — paste it below and ApplyPilot can answer it.</div>`);
+  return `<div class="cm ${mine ? 'out' : 'in'}">
+    <div class="cm-hdr"><span class="cm-who">${esc(who)}</span>
+      <span class="cm-when">${esc(shortDate(m.sent_at))}</span></div>
+    ${cc}${text}</div>`;
 }
+// THREAD_OPEN / THREAD_SHUT / onThreadToggle are gone with the <details> they controlled. The
+// conversation is no longer something to expand — for a contact who replied it IS the tab.
 
 // What the operator typed, and any Cc they removed — held here rather than in the DOM because
 // the 2.5s refresh replaces #jobs wholesale. It skips while an input has FOCUS, which saves you
@@ -682,7 +686,6 @@ function openReply(url, cid) {
   TAB_OPEN.set(url, 'people');
   CONTACT_OPEN.add(cid);
   CHANNEL_TAB.set(cid, 'email');
-  THREAD_OPEN.add(cid);
   refresh();
   // The refresh replaces #jobs wholesale, so the textarea only exists after it has run.
   setTimeout(() => {
@@ -733,7 +736,6 @@ function contactPanel(c) {
         ${c.verify_note ? `<div class="verify-note ${esc(c.confidence)}">${c.confidence === 'high' ? '✓' : '?'} ${esc(c.verify_note)}</div>` : ''}
       </div>
       <div class="chan">${tab('email','✉ Email')}${tab('linkedin','🔗 LinkedIn')}${tab('phone','📇 Phone & notes')}</div>
-      ${threadView(c)}
       ${body}
       <div class="crow-del"><button class="link-danger" onclick="deleteContact('${esc(c.id)}', decodeURIComponent('${encodeURIComponent(c.full_name || '')}'), ${!!c.emailed})">🗑 Not at this company — remove</button></div>
     </div>`;
@@ -752,7 +754,22 @@ async function deleteContact(id, name, emailed) {
   if (cmdEl) cmdEl.textContent = r.message || '';
   refresh();
 }
+// Once somebody has REPLIED, the email tab is a conversation — not an outreach form that
+// happens to have a thread stapled above it.
+//
+// The old order put an editable copy of an email sent five days ago at the top of the panel,
+// expanded, with Copy/Regenerate controls, while the live exchange sat collapsed. That form is
+// a dead artifact: the message is already delivered and cannot be changed. Every CRM that does
+// this well (Front, Missive, Superhuman) leads with the timeline and anchors the composer to
+// the bottom of it; the sent message appears as one entry in that timeline, not as a form.
+//
+// A follow-up ladder still wins when there is no conversation — chasing silence is the right
+// action then. It never wins over an actual reply.
+function hasConversation(c) {
+  return ((c.thread || []).some(m => m.direction === 'in'));
+}
 function emailChannel(c) {
+  if (hasConversation(c)) return conversationView(c);
   // A due follow-up is the more urgent thing to write, so it takes the channel.
   if (c.followup_state === 'due' || (c.followup_message || '').trim())
     return followupCard(c, {touch: (c.followup_count || 0) + 1}, 3);

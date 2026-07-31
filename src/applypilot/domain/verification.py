@@ -72,8 +72,24 @@ def verify_contact(contact: dict, employer: str | None, employer_domain: str = "
         reasons.append(f"email is @{got}, not @{employer_domain}")
         verdict = REJECT
     if org is False:
-        reasons.append(f"Apollo lists them at {contact.get('company')!r}, not {employer!r}")
-        verdict = REJECT
+        # Apollo returning this person FOR the employer's own domain is corroboration that
+        # outranks a name mismatch: we did not find them by name, we found them by asking
+        # "who works at this domain?" and Apollo answered.
+        #
+        # A live Avathon Government job dropped all three candidates — including the CEO —
+        # because Apollo files avathongov.com people under the org name "Avathon", and
+        # "Avathon" != "Avathon Government" (Government is not a corporate descriptor). The
+        # people were right; the name comparison was the only thing that disagreed.
+        #
+        # This does NOT loosen name matching, which is why the pinned Writer Corporation cases
+        # still reject: those candidates came from a fuzzy NAME search, so nothing corroborates
+        # them and the org mismatch remains the only evidence there is.
+        if contact.get("from_domain_search") and dom is not False:
+            reasons.append(f"Apollo lists them at {contact.get('company')!r}, but returned them "
+                           f"for @{employer_domain} — treating as unconfirmed, not wrong")
+        else:
+            reasons.append(f"Apollo lists them at {contact.get('company')!r}, not {employer!r}")
+            verdict = REJECT
 
     if verdict != REJECT:
         if dom is True:

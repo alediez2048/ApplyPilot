@@ -74,6 +74,11 @@ def search(company: str | None, domain: str | None, role: str | None,
             # per-contact email check below is the remaining guard.
             log.info("Apollo: no organization confidently matches %r — falling back to keywords",
                      company)
+    # Whether we asked Apollo "who works at this DOMAIN?" rather than searching by name. That
+    # distinction is evidence downstream: a person Apollo returns for the employer's own domain
+    # is corroborated by Apollo itself, so a differing org NAME is ambiguity rather than proof
+    # they work somewhere else (see domain/verification.py — the Avathon Government case).
+    by_domain = bool(domain)
     cands = apollo.search_people(
         domains=[domain] if domain else None,
         organization_ids=org_ids or None,
@@ -99,6 +104,7 @@ def search(company: str | None, domain: str | None, role: str | None,
     for c in cands:
         c["key"] = c.get("apollo_id")
         c["employer_domain"] = domain or resolved_domain
+        c["from_domain_search"] = by_domain
     return cands
 
 

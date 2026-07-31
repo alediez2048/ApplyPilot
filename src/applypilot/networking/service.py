@@ -247,7 +247,8 @@ def find_contacts_for_job(
             # Self-check before this reaches the dashboard. Catches the contacts an org-name
             # filter alone misses — Apollo returns people with no email whose employer is
             # plainly someone else (a freelance resume writer on a "Writer" job).
-            v = verify.verify_contact({**contact, "company": c.get("company")},
+            v = verify.verify_contact({**contact, "company": c.get("company"),
+                                       "from_domain_search": c.get("from_domain_search")},
                                       company, c.get("employer_domain") or "")
             if v["verdict"] == verify.REJECT:
                 log.info("Dropping %s — %s", contact.get("full_name"), "; ".join(v["reasons"]))

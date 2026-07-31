@@ -133,6 +133,12 @@ def find_contacts_for_job(
     role = job.get("title")
     company = derive.derive_company(job)
     domain = derive.derive_domain(job, company)
+    # WHERE the domain came from decides how much it may be trusted later. A domain read off the
+    # careers-site host is an inference: avathongov.com hosts Avathon Government's postings, but
+    # its people email from @sparkcognition.com (the company was SparkCognition before the
+    # rename). Rejecting real employees for contradicting a GUESS is how that job found nobody.
+    # A domain Apollo corroborated is evidence and keeps its full weight.
+    domain_source = "url" if domain else ""
 
     from applypilot.networking import connections
     conns_at_company = connections.count_at_company(company)
@@ -167,6 +173,7 @@ def find_contacts_for_job(
         domain = providers.confirm_employer_domain(company, slug) or None
         if domain:
             result["employer_domain"] = domain
+            domain_source = "apollo"      # corroborated: people there report this employer
 
     titles = rank.role_to_person_titles(role)
 
@@ -248,7 +255,8 @@ def find_contacts_for_job(
             # filter alone misses — Apollo returns people with no email whose employer is
             # plainly someone else (a freelance resume writer on a "Writer" job).
             v = verify.verify_contact({**contact, "company": c.get("company"),
-                                       "from_domain_search": c.get("from_domain_search")},
+                                       "from_domain_search": c.get("from_domain_search"),
+                                       "domain_source": domain_source},
                                       company, c.get("employer_domain") or "")
             if v["verdict"] == verify.REJECT:
                 log.info("Dropping %s — %s", contact.get("full_name"), "; ".join(v["reasons"]))

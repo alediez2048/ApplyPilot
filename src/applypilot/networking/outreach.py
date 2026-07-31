@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 
 from applypilot.llm import get_client
 from applypilot.scoring.tailor import extract_json
@@ -422,11 +423,46 @@ Hard rules:
   If they asked about experience the ABOUT YOU block does not cover, do NOT manufacture a yes.
   Say what is actually true and adjacent, or offer to talk it through. A confident invented
   claim goes straight to the one person positioned to check it.
+- NEVER INVENT AN IDENTIFIER. No job IDs, requisition numbers, dates, ticket numbers or URLs
+  that are not given to you verbatim in THIS PROMPT. If they ask for one and it is not in the
+  JOB block below, do not produce a number — link the posting, or say you will send it across.
+  A recruiter can check a req ID in five seconds, and a wrong one is worse than no answer.
 - If they introduced a colleague, acknowledge it and address the new person naturally.
 - If they said no, be gracious and brief and do not argue or ask them to reconsider.
 
 Return ONLY JSON: {"subject": "...", "body": "..."}
 The subject MUST keep the thread's existing subject with a "Re: " prefix."""
+
+
+#: Requisition ids as ATS platforms actually mint them — Workday `JR349466`, Greenhouse/Lever
+#: numeric ids, `REQ-1234`. Extracted from the posting URL because a recruiter asking "which
+#: req?" is the single most common factual question a reply contains, and the answer is sitting
+#: in a field we already hold.
+_REQ_ID = re.compile(r"(?:^|[_/\-?&=])((?:JR|REQ|R)[-_]?\d{4,}|\d{6,})(?:[_/\-?&]|$)",
+                     re.IGNORECASE)
+
+
+def job_facts(job: dict) -> str:
+    """The checkable details of the posting, verbatim, for a prompt that must not invent them.
+
+    Written after a drafted reply answered "do you have the job ID?" with **7894521**, a number
+    that exists nowhere — while the real `JR349466` sat in the job URL the drafter was never
+    given. A fabricated identifier goes to the one person who can verify it in five seconds.
+    """
+    url = (job.get("url") or "").strip()
+    bits = []
+    if job.get("title"):
+        bits.append(f"Job title (exact): {job['title']}")
+    if url:
+        bits.append(f"Posting URL (the only link you may send): {url}")
+        m = _REQ_ID.search(url)
+        if m:
+            bits.append(f"Requisition ID from that URL: {m.group(1)}")
+    if not bits:
+        return "No posting details on file — do NOT invent a job ID, link or date."
+    bits.append("These are the ONLY job identifiers you may state. Anything else, say you will "
+                "send it across rather than guessing.")
+    return "\n".join(bits)
 
 
 def conversation_transcript(contact: dict, thread: list | None = None,
@@ -512,6 +548,8 @@ def draft_reply(profile: dict, job: dict, contact: dict, thread: list | None = N
         f"REPLYING TO: {who} — {contact.get('title', '')} at {company}\n"
         f"ROLE YOU APPLIED FOR: {role}\n"
         f"SUBJECT (reuse with 'Re: '): {subject or last.get('subject') or role}\n"
+        f"\nJOB (verbatim facts — never state an identifier that is not here):\n"
+        f"{job_facts(job)}\n"
         + (f"ALSO ON THE THREAD (they are reading too): {', '.join(others)}\n" if others else "")
         + (f"WHAT THEIR REPLY LOOKS LIKE: {label['label']} — {label['action']}\n"
            if label["label"] else "")

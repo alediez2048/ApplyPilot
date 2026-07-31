@@ -183,6 +183,34 @@ def timeline(messages: list[dict], me: str) -> list[dict]:
     return sorted(rows, key=lambda r: int(r["at"]) if str(r["at"]).isdigit() else 0)
 
 
+#: Where a reply stops being theirs and becomes a quote of ours. Gmail's snippet runs straight
+#: through the quote header, so ~a third of a short reply can be the beginning of our OWN email
+#: quoted back — which then reaches the drafter as something they said.
+_QUOTE_MARKERS = (
+    r"\nOn .{0,80}? wrote:", r"\bOn \w{3}, \w{3} \d{1,2}, \d{4} at \d{1,2}:\d{2}",
+    r"\n-{2,}\s*Original Message", r"\n_{5,}", r"\nFrom:\s", r"\nSent from my ",
+)
+
+
+def strip_quoted_tail(text: str | None) -> str:
+    """Drop the quoted-original tail from a reply snippet.
+
+    Conservative: it only cuts at a recognised quote header, and only when something is left
+    before it. Cutting too eagerly would discard the actual reply, which is far worse than
+    leaving a few words of quote in.
+    """
+    body = (text or "").strip()
+    if not body:
+        return ""
+    cut = len(body)
+    for pattern in _QUOTE_MARKERS:
+        m = re.search(pattern, body, re.IGNORECASE)
+        if m and m.start() > 0:
+            cut = min(cut, m.start())
+    trimmed = body[:cut].strip()
+    return trimmed or body
+
+
 def _strip_re(subject: str) -> str:
     """'Re: RE: Fwd: hi' -> 'hi'. Repeated prefixes accumulate on a long thread."""
     s = (subject or "").strip()

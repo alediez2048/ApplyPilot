@@ -198,6 +198,34 @@ def test_our_own_sent_text_is_never_stored_back(db, monkeypatch):
     assert rows[0]["direction"] == "out" and not rows[0]["snippet"]
 
 
+def test_the_quoted_original_is_trimmed_off_a_reply(db):
+    """Gmail's snippet runs straight through the quote header.
+
+    Gina's real reply was 194 chars and ended `...job ID you applied for? On Thu, Jul 30, 2026
+    at 12:57 PM <` — the last fifth being the beginning of Jorge's OWN email quoted back. Fed to
+    the drafter, that is our text arriving as something she said.
+    """
+    from applypilot.domain import conversations as cv
+
+    real = ("Hi Jorge great to hear from you!! I do not have any insight into these roles but I "
+            "am happy to pass along your info! Do you have the job ID you applied for? "
+            "On Thu, Jul 30, 2026 at 12:57 PM <")
+    out = cv.strip_quoted_tail(real)
+    assert out.endswith("job ID you applied for?")
+    assert "On Thu" not in out
+
+    for variant in ("Sure, sounds good.\nOn Mon, Jul 7, 2026 at 9:01 AM someone wrote:\nblah",
+                    "Yes please.\n-------- Original Message --------\nold stuff",
+                    "Works for me.\nFrom: Jorge\nquoted"):
+        assert cv.strip_quoted_tail(variant).count("\n") == 0, variant
+
+    # Conservative: never cut everything, and never touch a reply with no quote in it.
+    assert cv.strip_quoted_tail("On Thursday I am free") == "On Thursday I am free"
+    assert cv.strip_quoted_tail("Happy to chat Thursday.") == "Happy to chat Thursday."
+    assert cv.strip_quoted_tail("") == ""
+    assert cv.strip_quoted_tail(None) == ""
+
+
 def test_pasted_text_is_bounded_too(db):
     """A larger cap than the auto path, for a different reason rather than a looser one —
     nothing was harvested, the operator chose to hand over one message. Still bounded, because
@@ -554,6 +582,65 @@ def test_cold_outreach_and_replies_draw_on_the_same_background():
     bits = outreach.sender_background(profile)
     assert any("ABOUT" in b for b in bits)
     assert bits == outreach.sender_background(profile), "not deterministic"
+
+
+def test_the_real_requisition_id_reaches_the_drafter(db, monkeypatch):
+    """Caught on the FIRST live draft against Gina's real reply.
+
+    She asked "do you have the job ID you applied for?" and the draft answered **7894521** —
+    a number that exists nowhere — while the real `JR349466` sat in the job URL the drafter had
+    never been given. A recruiter checks a req ID in five seconds; a wrong one is worse than no
+    answer, and it is the sender's credibility that pays.
+    """
+    from applypilot import web_dashboard as wd
+    from applypilot.networking import outreach
+
+    monkeypatch.setattr(wd, "get_connection", lambda *a, **k: db)
+    seen = {}
+
+    class _Client:
+        def chat(self, messages, **kw):
+            seen["prompt"] = messages[-1]["content"]
+            seen["system"] = messages[0]["content"]
+            return '{"subject": "Re: role", "body": "ok"}'
+
+    monkeypatch.setattr(outreach, "get_client", lambda *a, **k: _Client())
+
+    url = ("https://salesforce.wd12.myworkdayjobs.com/External_Career_Site/job/"
+           "California---San-Francisco/Forward-Deployed-Engineer--All-Levels-_JR349466"
+           "?source=LinkedIn_Jobs")
+    from applypilot.repo import jobs as _jobs
+    _jobs.upsert({"url": url, "title": "Forward Deployed Engineer", "site": "Salesforce",
+                  "strategy": "manual"}, db) if hasattr(_jobs, "upsert") else None
+
+    cid = store.upsert_contact({"job_url": url, "full_name": "Gina", "email": "g@co.com",
+                                "sent_message_id": "m1"}, db)
+    msg_store.upsert_messages([{"message_id": "m1", "thread_id": "t", "contact_id": cid,
+                                "job_url": url, "direction": "in", "from_addr": "g@co.com",
+                                "subject": "Re: role", "sent_at": "2026-07-31T14:11:00+00:00",
+                                "snippet": "Do you have the job ID you applied for?"}], db)
+
+    wd._draft_reply({"contact_id": cid})
+    assert "JR349466" in seen["prompt"], "the drafter was asked for a req ID it was never given"
+    assert "never state an identifier that is not here" in seen["prompt"]
+    assert "NEVER INVENT AN IDENTIFIER" in seen["system"]
+
+
+def test_job_facts_extracts_real_ids_and_refuses_to_supply_absent_ones():
+    from applypilot.networking.outreach import job_facts
+
+    wd_url = ("https://salesforce.wd12.myworkdayjobs.com/External_Career_Site/job/"
+              "CA/Forward-Deployed-Engineer_JR349466?source=LinkedIn_Jobs")
+    out = job_facts({"url": wd_url, "title": "FDE"})
+    assert "JR349466" in out and wd_url in out
+
+    # Greenhouse-style numeric id.
+    assert "4683241005" in job_facts({"url": "https://x.com/careers?gh_jid=4683241005"})
+
+    # No identifier available: say so rather than leaving the model to fill the gap.
+    bare = job_facts({"url": "https://acme.com/careers/engineer", "title": "Eng"})
+    assert "do NOT invent" in bare or "send it across" in bare
+    assert "No posting details" in job_facts({})
 
 
 def test_the_reply_prompt_tells_the_model_to_answer_not_to_pitch(monkeypatch):

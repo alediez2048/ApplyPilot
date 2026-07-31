@@ -125,7 +125,10 @@ def fetch_thread_text(contact: dict, conn=None) -> dict:
     me = gmail_oauth.connected_email()
     rows, stored = [], 0
     for m in msgs:
-        text = (m.get("snippet") or "").strip()
+        # Trim the quoted original: Gmail's snippet runs through the quote header, so a short
+        # reply can be a third our own email quoted back — and that would reach the drafter as
+        # something they wrote.
+        text = cv.strip_quoted_tail(m.get("snippet"))
         if not text or cv.addr(m.get("from")) == cv.addr(me):
             continue
         rows.append({"message_id": m.get("id"), "thread_id": thread_id,

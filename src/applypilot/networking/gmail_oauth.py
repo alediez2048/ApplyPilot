@@ -154,7 +154,10 @@ def connect(with_content: bool = False) -> tuple[bool, str]:
         _lock_down(TOKEN_PATH)
     except Exception as e:  # noqa: BLE001
         return False, f"OAuth flow failed: {e}"
-    note = (" Reply content is ON — snippets of incoming replies will be stored."
+    # Precise about WHEN, not just whether. "snippets will be stored" implied a background
+    # process that does not exist: nothing is read until the operator asks for one thread.
+    note = (" Reply content is ON — nothing is read automatically; click “⤓ Fetch from Gmail” "
+            "on a conversation to read that one."
             if with_content else
             " Reply content is OFF (headers only). Add --with-content to enable it.")
     return True, f"Gmail connected. Token stored at {TOKEN_PATH}.{note}"

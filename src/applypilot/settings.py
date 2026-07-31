@@ -126,6 +126,10 @@ SETTINGS: tuple[Setting, ...] = (
     Setting("INTRO_DECK_PATH", "outreach", "path", "", "Path to the intro deck PDF."),
     Setting("INTRO_DECK_URL", "outreach", "str", "https://www.jorgealejandrodiez.com/intro/",
             "Intro-deck link offered in every outreach email (not LinkedIn notes)."),
+    Setting("INTRO_DECK_PATHS", "outreach", "bool", False,
+            "Personalise the deck link per contact (/intro/gina instead of /intro/). OFF until "
+            "the site actually serves those paths and the click collector is live — a link that "
+            "404s costs the conversation."),
     Setting("SCHEDULING_LINK", "outreach", "str", "", "Calendar link for the call-to-action."),
     # Deck-click pull. The click happens on the sender's own site; the dashboard is
     # localhost-only and cannot receive a webhook, so it POLLS. Empty = the feature is off and

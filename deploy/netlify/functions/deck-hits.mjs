@@ -11,7 +11,13 @@
 import { getStore } from "@netlify/blobs";
 
 export default async (req) => {
-  const expected = Netlify.env.get("DECK_HITS_TOKEN");
+  // `process.env` first, because it is what Netlify's own env-var docs use for Node functions.
+  // The `Netlify` global exists in Functions 2.0, but it is a BARE identifier reference — if it
+  // is absent this line is a ReferenceError and every call 500s, which ApplyPilot reports as a
+  // generic "could not reach the collector". Netlify's own runtime library does not assume it
+  // either: @netlify/runtime-utils does `Netlify?.env ?? Deno?.env ?? process.env`. Optional
+  // chaining on the fallback so the global is used where it exists and cannot throw where it does not.
+  const expected = process.env.DECK_HITS_TOKEN ?? globalThis.Netlify?.env?.get("DECK_HITS_TOKEN");
   if (!expected) {
     // Refuse rather than serve openly. A collector that answers everyone because its config is
     // missing is worse than one that is down: it looks like it is working.

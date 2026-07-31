@@ -158,6 +158,82 @@ def test_the_url_is_a_declared_setting_so_doctor_reports_it():
     assert "INTRO_DECK_URL" in names, "an undeclared env var is invisible to doctor --config"
 
 
+# ── INTRO_DECK_PATHS: the flag has to be in the registry too ─────────────────────────────
+
+def test_the_paths_flag_is_a_declared_boolean_defaulting_to_off():
+    """ARCH-6: every env var, one registry.
+
+    It was read through `_flag("INTRO_DECK_PATHS")` — an indirection the registry scanner
+    in test_settings.py cannot see, because it only matches literal `os.environ.get("X")`.
+    So the flag that decides whether four more recruiters get a 404 link was invisible to
+    `doctor --config` and `INTRO_DECK_PATHS=ture` failed silently as OFF.
+
+    Default OFF is load-bearing, not cosmetic (§Lessons 32).
+    """
+    from applypilot import settings
+    s = settings._BY_NAME.get("INTRO_DECK_PATHS")
+    assert s is not None, "an undeclared env var is invisible to doctor --config"
+    assert s.kind == "bool", f"declared as {s.kind!r}; a typo in a str is never rejected"
+    assert s.default is False, "named deck links must be OFF until the site can serve them"
+    assert s.group == "outreach"
+
+    values, problems = settings.resolve({})
+    assert not problems and values["INTRO_DECK_PATHS"] is False
+
+
+def test_a_typo_in_the_paths_flag_is_reported_instead_of_read_as_off():
+    """The silent-failure mode the registry exists to remove: `=ture` is not `=true`, and
+    `_flag()` alone would have quietly left the feature off with no way to tell."""
+    from applypilot import settings
+    problems = settings.validate({"INTRO_DECK_PATHS": "ture"})
+    assert problems, "a malformed boolean was accepted"
+    assert "INTRO_DECK_PATHS" in problems[0] and "boolean" in problems[0]
+
+
+def test_doctor_shows_the_paths_flag_and_where_the_value_came_from():
+    from applypilot import settings
+    row = next(r for r in settings.describe({"INTRO_DECK_PATHS": "1"})
+               if r["name"] == "INTRO_DECK_PATHS")
+    assert row["value"] == "True" and row["source"] != "default"
+    assert row["help"].strip(), "a blank help line ships into .env.example"
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("1", True), ("true", True), ("TRUE", True), ("yes", True), ("on", True), (" 1 ", True),
+    ("0", False), ("false", False), ("no", False), ("off", False), ("", False),
+])
+def test_the_call_site_and_the_registry_agree_on_every_spelling(monkeypatch, raw, expected):
+    """Two parsers for one variable is two behaviours. `_flag()` stays the call site (it is
+    how this module reads bools), so it has to answer exactly what `doctor --config` prints —
+    otherwise the report and the feature disagree and only one of them is visible.
+    """
+    from applypilot import settings
+    monkeypatch.setenv("INTRO_DECK_PATHS", raw)
+    assert outreach._flag("INTRO_DECK_PATHS") is expected
+    assert settings.resolve({"INTRO_DECK_PATHS": raw})[0]["INTRO_DECK_PATHS"] is expected
+
+
+def test_every_flag_read_indirectly_is_still_declared():
+    """The hole that let this one through: the registry scanner matches
+    `os.environ.get("X")` literals, and `_flag("X")` is neither. Any future flag added the
+    same way is caught here instead of a month later.
+    """
+    import pathlib
+    import re
+
+    import applypilot
+    from applypilot import settings
+
+    root = pathlib.Path(applypilot.__file__).parent
+    found = {m.group(1)
+             for path in root.rglob("*.py")
+             for m in re.finditer(r'_flag\(\s*["\']([A-Z][A-Z0-9_]*)["\']',
+                                  path.read_text(encoding="utf-8"))}
+    assert found, "the _flag() scan matched nothing — it is measuring nothing"
+    undeclared = sorted(found - set(settings._BY_NAME))
+    assert not undeclared, f"read via _flag() but missing from settings.SETTINGS: {undeclared}"
+
+
 @pytest.mark.parametrize("signoff", [
     "Thanks,\nAlejandro",
     "Alejandro",

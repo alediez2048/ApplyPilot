@@ -442,6 +442,9 @@
      made to look like the buttons beside it. */
   .draft .d-sms { width:100%; font-size:12px; padding:5px 6px; border:1px solid #d7e2ec; border-radius:5px; font-family:inherit; resize:vertical; }
   .draft .sms-to { font-weight:400; color:#8a97a2; text-transform:none; letter-spacing:0; margin-left:6px; }
+  .draft .sms-locked { font-size:11px; color:#9a6b00; background:var(--yellow-soft);
+    border-radius:5px; padding:5px 8px; margin:2px 0 4px; line-height:1.45; }
+  .draft .d-sms:disabled, .draft .d-style:disabled { background:#f6f8fa; color:#9aa7b2; }
   .draft .sms-hint { font-size:10.5px; color:var(--muted); margin-top:5px; line-height:1.45; }
   .draft .dbtns .btn-like {
     font-size:11px; padding:2px 9px; border-radius:5px; border:1px solid #d7e2ec;

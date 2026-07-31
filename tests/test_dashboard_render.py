@@ -735,9 +735,17 @@ def test_a_channel_tab_with_nothing_behind_it_is_not_offered(tmp_path):
     # phone number gets entered, so hiding it when there is no number hides the only way to add
     # one. It opens on a prompt with the fix attached rather than a dead "No phone number."
     assert "💬 Text" in out["email_only"], "the text/notes tab is always available"
-    assert "No phone number" in out["no_phone"], "the Text tab must say the number is missing"
+    # With no number the composer must still RENDER, disabled. The first version returned a
+    # one-line "add a number below" and the notes block — accurate, and reported twice as
+    # "I'm not seeing the text UI" by someone looking straight at it. A sentence describing a
+    # control you cannot see does not tell you the control exists.
+    assert "d-sms" in out["no_phone"], \
+        "the composer must render even with no number — describing it is not showing it"
+    assert "disabled" in out["no_phone"], "the composer must be disabled without a number"
     assert "c-phone" in out["no_phone"], \
         "it must ALSO render the field to add one — otherwise the only way in is hidden"
+    # And it must NOT offer a live sms: link with nothing to dial.
+    assert 'href="sms:"' not in out["no_phone"], "offered an empty sms: link"
 
     assert "No LinkedIn profile" not in out["stuck"], (
         "a stored preference for a channel this contact does not have was honoured, so the "

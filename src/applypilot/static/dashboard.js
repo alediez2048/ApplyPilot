@@ -465,12 +465,12 @@ function smsHref(phone) {
 
 function smsChannel(c) {
   const phone = (c.phone || '').trim();
-  // No number, no channel — but the notes block is exactly where a number gets added, so this
-  // is a prompt with the fix attached rather than a dead end.
-  if (!phone) {
-    return `<div class="pane-empty">No phone number for ${esc(c.full_name)} — add one below to text them.</div>`
-         + contactNotes(c);
-  }
+  // No number: render the composer anyway, DISABLED. The first version returned a one-line
+  // "add a number below" and the notes block, which was accurate and still read as "this tab
+  // is empty" — reported twice as "I'm not seeing the text UI" while looking straight at it.
+  // A disabled control shows what the channel does and that it is one step away; a sentence
+  // describing a control you cannot see does not.
+  const off = phone ? '' : ' disabled';
   const draft = c.sms_followup_message || '';
   const len = draft.length;
   const started = !!c.sms_sent_at;
@@ -492,22 +492,32 @@ function smsChannel(c) {
              : `<span class="muted">first text ${esc(when)}</span>`;
   }
 
+  // The compose control is an <a> when it can work and a disabled <button> when it cannot —
+  // an anchor has no disabled attribute, and a greyed-out link that still navigates is worse
+  // than no link.
+  const openBtn = phone
+    ? `<a class="btn-like send" href="${esc(smsHref(phone))}" onclick="copySmsFirst(this)"
+         title="Copies the text and opens Messages — then paste and send. Nothing sends itself.">Copy &amp; open Messages ↗</a>`
+    : `<button class="send" disabled title="Add a phone number below first">Copy &amp; open Messages ↗</button>`;
+
   return `<div class="draft">
       <div class="d-label">Text message
         <span class="d-count ${len > SMS_LIMIT ? 'over' : ''}"><span class="smscount">${len}</span>/${SMS_LIMIT}</span>
-        <span class="sms-to">to ${esc(phone)}</span>
+        <span class="sms-to">${phone ? 'to ' + esc(phone) : '— no number yet'}</span>
         ${ladder}
       </div>
-      <textarea class="d-sms" rows="3" oninput="updSmsCount(this)"
-        placeholder="${draft ? '' : 'No draft yet — click Regenerate'}">${esc(draft)}</textarea>
-      <input class="d-style" placeholder="✨ Tweak the vibe, then Regenerate — e.g. 'we met at the AITX hackathon'">
+      ${phone ? '' : `<div class="sms-locked">Add a phone number below and Save — then this
+        composer turns on. Apollo won't release direct dials to a local tool, so it is pasted
+        by hand.</div>`}
+      <textarea class="d-sms" rows="3" oninput="updSmsCount(this)"${off}
+        placeholder="${phone ? (draft ? '' : 'No draft yet — click Regenerate')
+                             : 'Your text to ' + esc(c.full_name) + ' appears here once they have a number.'}">${esc(draft)}</textarea>
+      <input class="d-style"${off} placeholder="✨ Tweak the vibe, then Regenerate — e.g. 'we met at the AITX hackathon'">
       <div class="dbtns">
-        <button onclick="saveSms('${esc(c.id)}', this)">Save</button>
-        <button class="secondary" onclick="regenSms('${esc(c.id)}', this)">Regenerate</button>
-        <a class="btn-like send" href="${esc(smsHref(phone))}"
-           onclick="copySmsFirst(this)"
-           title="Copies the text and opens Messages — then paste and send. Nothing sends itself.">Copy &amp; open Messages ↗</a>
-        ${smsSentButton(c)}
+        <button onclick="saveSms('${esc(c.id)}', this)"${off}>Save</button>
+        <button class="secondary" onclick="regenSms('${esc(c.id)}', this)"${off}>Regenerate</button>
+        ${openBtn}
+        ${smsSentButton(c, !phone)}
       </div>
       <div class="sms-hint">Written for a phone: no links (a URL from an unknown number is the
         strongest spam signal there is) and it says who you are, because they do not have your
@@ -518,9 +528,10 @@ function smsChannel(c) {
 // "I sent it" means two different things depending on where you are, and conflating them is
 // how a ladder loses its anchor: the FIRST text stamps sms_sent_at and starts the clock, and
 // every later one is a touch. Both are operator-asserted — nothing can watch Messages.app.
-function smsSentButton(c) {
+function smsSentButton(c, off) {
+  const d = off ? ' disabled' : '';
   if (!c.sms_sent_at)
-    return `<button class="secondary" onclick="fuAct('${esc(c.id)}','sms_connected',this)"
+    return `<button class="secondary" onclick="fuAct('${esc(c.id)}','sms_connected',this)"${d}
       title="Record that you sent the first text — starts the follow-up clock">✓ I sent it</button>`;
   const st = c.sms_followup_state || '';
   if (st === 'replied' || st === 'stopped' || st === 'finished') return '';

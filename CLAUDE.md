@@ -802,9 +802,12 @@ change still needs the `pip install` above — but that copy gives the file a ne
   Run the install alone, and verify with `python -c "import applypilot; print(applypilot.__version__)"`.
 - **Check for in-flight applies before ANY restart or reinstall.** The apply is a child of the
   dashboard, so it dies with the server. This happened three times on 2026-07-30 alone.
-- Working tree clean. `main` is at **`stable-e2e-20260730`** (full apply pipeline working end
-  to end, human in the loop); the CRM work lives on **`crm-phase-1`** — pushed, **unmerged**.
-  Tags: `stable-arch2/3/5/6` · `stable-e2e-20260730`.
-- **A tag restores CODE only.** `~/.applypilot/` — 15 jobs, 51 contacts, 33 sent emails, 35
+- Working tree clean. **`main` is at `stable-crm-20260731`** — the CRM phase is merged and
+  pushed. Tags: `stable-arch2/3/5/6` · `stable-e2e-20260730` · `stable-crm-20260731`.
+- **A tag restores CODE only.** `~/.applypilot/` — 15 jobs, 51 contacts, 33 sent emails, 36
   stored messages, 899 connections — is not in git and needs its own backup
-  (`~/.applypilot/backups/`). Nothing does this automatically.
+  (`~/.applypilot/backups/`). Nothing does this automatically. Latest:
+  `applypilot-20260731-crm-phase-closed.db`. Use the **sqlite3 backup API, not `cp`** — the WAL
+  routinely holds more than the main file does (4.1 MB against 688 KB once), so a file copy
+  silently loses everything recent. Still unprotected and not in git: `resume.txt` (the template
+  every tailored résumé derives from), `profile.json`, `.env`, `gmail_token.json`.

@@ -566,6 +566,74 @@ def deck_hits(
         console.print("  [dim]nothing to record[/dim]")
 
 
+@app.command("deck-relink")
+def deck_relink(
+    job: str = typer.Option(None, "--job", help="Only this job (substring of the URL or company)."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show what would change; write nothing."),
+) -> None:
+    """Point existing outreach drafts at the current intro-deck link.
+
+    For when the link scheme changes — the old `?v=<token>` links became `/intro/<name>` — and
+    drafts written earlier still carry the old one.
+
+    Deliberately NOT a regeneration. Regenerating is the obvious move and the wrong one: it
+    spends an LLM call and rewrites copy you may have already read and edited, in order to
+    change a URL. This swaps the link and leaves every other word alone.
+
+    **Sent messages are never touched.** Their draft is the only record of what actually went
+    out; editing it would make the history a lie about a message already sitting in somebody's
+    inbox.
+    """
+    from applypilot import config as _config
+    from applypilot.database import get_connection, init_db
+    from applypilot.domain import deck as _deck
+    from applypilot.networking import outreach as _outreach, store as _store
+
+    _config.load_env()
+    init_db()
+    conn = get_connection()
+    _store.init_contacts(conn)
+    profile = _config.load_profile()
+
+    rows = conn.execute(
+        "SELECT c.id, c.full_name, c.job_url, j.site, c.sent_message_id, "
+        "c.outreach_message, c.linkedin_message FROM contacts c "
+        "LEFT JOIN jobs j ON j.url = c.job_url").fetchall()
+
+    changed, skipped_sent, needle = 0, 0, (job or "").lower()
+    console.print(f"\n[bold]Re-linking drafts[/bold]{' [dim](dry run)[/dim]' if dry_run else ''}")
+    for r in rows:
+        cid, name, job_url, site, sent, email_body, li_body = r
+        if needle and needle not in (job_url or "").lower() and needle not in (site or "").lower():
+            continue
+        if not any("/intro" in (b or "") for b in (email_body, li_body)):
+            continue
+        if (sent or "").strip():
+            skipped_sent += 1
+            continue
+
+        contact = _store.get_contact(cid, conn)
+        new_url = _outreach._intro_deck_url(profile, contact)
+        if not new_url:
+            continue
+        new_email, n1 = _deck.relink(email_body, new_url)
+        new_li, n2 = _deck.relink(li_body, new_url)
+        if not (n1 or n2) or (new_email == email_body and new_li == li_body):
+            continue
+
+        console.print(f"  · {str(name):18} {str(site or ''):12} → [cyan]{new_url}[/cyan]")
+        if not dry_run:
+            conn.execute("UPDATE contacts SET outreach_message = ?, linkedin_message = ? "
+                         "WHERE id = ?", (new_email, new_li, cid))
+        changed += 1
+
+    if not dry_run:
+        conn.commit()
+    console.print(f"\n{changed} draft(s) {'would be ' if dry_run else ''}updated"
+                  + (f", {skipped_sent} skipped (already sent — that draft is the record of "
+                     f"what went out)" if skipped_sent else ""))
+
+
 @app.command()
 def schedule(
     install: bool = typer.Option(False, "--install", help="Install the hourly launchd job."),

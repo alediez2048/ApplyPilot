@@ -116,6 +116,40 @@ def slugs_in(text: str | None, known: set[str] | None = None) -> set[str]:
     return {s for s in found if s in known} if known is not None else found
 
 
+#: Any deck link, in either scheme: the old `?v=<hex>` token or a named path. The trailing
+#: lookahead is what keeps a sentence's full stop out of the match — the drafts really do end
+#: "…/intro/?v=4e49a7ad." and swallowing that period would rewrite the sentence, not the link.
+_ANY_DECK_LINK = re.compile(
+    r"https?://[^\s<>\"')]*?/intro/?(?:\?v=[0-9a-f]+|[A-Za-z0-9][A-Za-z0-9-]{0,38})?"
+    r"(?=[\s<>\"')]|[.,;!?](?:\s|$)|$)")
+
+
+def relink(text: str | None, new_url: str) -> tuple[str, int]:
+    """Point every deck link in `text` at `new_url`. Returns (text, replacements).
+
+    For updating drafts that were written under an older link scheme WITHOUT regenerating
+    them. Regeneration is the obvious move and the wrong one: it spends an LLM call, and it
+    rewrites copy the operator may have already read and edited, to change a URL. Swapping the
+    link preserves every other word.
+    """
+    if not text or not new_url:
+        return text or "", 0
+
+    # Only OUR deck. The host comes from `new_url`, so nothing has to be passed in and a link
+    # to somebody else's /intro/ page — a post, an article — is left alone. Without this the
+    # match is "any /intro/ URL anywhere", which is a rewrite waiting to mangle a real citation.
+    host = re.sub(r"^https?://", "", new_url).split("/")[0].lower()
+
+    def _swap(m: re.Match) -> str:
+        got = re.sub(r"^https?://", "", m.group(0)).split("/")[0].lower()
+        return new_url if got == host else m.group(0)
+
+    out = _ANY_DECK_LINK.sub(_swap, text)
+    n = sum(1 for m in _ANY_DECK_LINK.finditer(text)
+            if re.sub(r"^https?://", "", m.group(0)).split("/")[0].lower() == host)
+    return out, n
+
+
 def hits_from_payload(payload) -> list[dict]:
     """Normalise whatever the collector returned into [{slug, at}].
 

@@ -397,3 +397,56 @@ def test_no_issued_link_ever_looks_like_a_tracker(db, monkeypatch):
         tail = url.rsplit("/", 1)[-1]
         assert not _re.fullmatch(r"[0-9a-f]{6,}", tail), f"{url} ends in an opaque id"
         assert tail == deck.slugify(name) or tail.startswith(deck.slugify(name)), url
+
+
+# ── re-linking existing drafts ───────────────────────────────────────────────────────────
+
+NEW = "https://www.jorgealejandrodiez.com/intro/gina"
+
+
+def test_relink_swaps_the_link_and_nothing_else():
+    """Regenerating is the obvious move and the wrong one: it spends an LLM call and rewrites
+    copy the operator may already have read and edited, to change a URL."""
+    body = ("Hey Gina, long time without connecting!\n\n"
+            "Here's a good intro deck we could go over during the call: "
+            "https://www.jorgealejandrodiez.com/intro/?v=4e49a7ad. If you're open to a quick "
+            "chat, grab a time here: https://cal.com/jorge-alejandro-diez/30min.\n\n"
+            "Catch up soon!\nAlejandro")
+    out, n = deck.relink(body, NEW)
+    assert n == 1
+    assert NEW in out and "?v=" not in out
+    # The sentence's full stop survives — the real drafts end "…/intro/?v=4e49a7ad." and eating
+    # that period would rewrite the sentence rather than the link.
+    assert f"{NEW}. If you're open" in out
+    # Everything else is byte-identical, including the OTHER link.
+    assert "https://cal.com/jorge-alejandro-diez/30min." in out
+    assert out.replace(NEW, "https://www.jorgealejandrodiez.com/intro/?v=4e49a7ad") == body
+
+
+def test_relink_is_idempotent_and_handles_the_new_scheme():
+    once, n1 = deck.relink("see https://www.jorgealejandrodiez.com/intro/?v=abc12345 ok", NEW)
+    twice, n2 = deck.relink(once, NEW)
+    assert twice == once and n1 == 1 and n2 == 1
+
+
+def test_relink_leaves_text_with_no_deck_link_alone():
+    for body in ("no links here", "", None, "https://cal.com/jorge-alejandro-diez/30min"):
+        out, n = deck.relink(body, NEW)
+        assert n == 0 and out == (body or "")
+
+
+def test_relink_only_touches_OUR_deck():
+    """Somebody else's /intro/ page — an article, a post someone linked — is not our deck.
+
+    The host is taken from the replacement URL, so nothing extra has to be passed in. Without
+    it the pattern is "any /intro/ URL anywhere", which is a rewrite waiting to mangle a real
+    citation in a draft.
+    """
+    body = ("ours https://www.jorgealejandrodiez.com/intro/?v=abc12345 "
+            "theirs https://someoneelse.com/intro/x "
+            "and https://x.com/introduction/y")
+    out, n = deck.relink(body, NEW)
+    assert n == 1, "only our own deck link should be replaced"
+    assert "https://someoneelse.com/intro/x" in out, "another site's /intro/ was rewritten"
+    assert "https://x.com/introduction/y" in out, "an /introduction/ path was rewritten"
+    assert NEW in out

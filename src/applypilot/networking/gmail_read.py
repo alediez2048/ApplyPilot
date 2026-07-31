@@ -123,6 +123,25 @@ def thread_messages(thread_id: str, service=None) -> list[dict]:
     return out
 
 
+def search_threads(query: str, limit: int = 25, service=None) -> list[str]:
+    """Thread ids matching a Gmail search.
+
+    **Requires `gmail.readonly`.** Under `gmail.metadata` the API refuses `q=` entirely, which
+    is why every earlier feature listed threads by an id we already held and never searched.
+    That is also why ApplyPilot could only ever see conversations it had started itself: a
+    thread somebody else began, or one sent from Gmail directly, had no id to look up.
+    """
+    svc = service or _service()
+    if svc is None or not (query or "").strip():
+        return []
+    try:
+        res = svc.users().threads().list(userId="me", q=query, maxResults=limit).execute()
+    except Exception as e:  # noqa: BLE001
+        log.debug("Gmail thread search failed (%s): %s", query, e)
+        return []
+    return [t.get("id") for t in (res.get("threads") or []) if t.get("id")]
+
+
 def can_read_content() -> tuple[bool, str]:
     """May we look at what a reply SAYS? (CRM-4b)
 

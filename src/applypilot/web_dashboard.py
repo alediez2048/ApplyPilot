@@ -1584,6 +1584,34 @@ def _reply_target(thread: list) -> dict | None:
         return None
 
 
+def _sync_all_gmail(data: dict) -> dict:
+    """Pull every Gmail conversation with this contact, however it started.
+
+    Distinct from `_fetch_reply_text`, which reads the ONE thread ApplyPilot sent. This searches
+    by their address, so a thread they began, an email sent straight from Gmail, or one where
+    they merely CC'd you all arrive — the conversations the CRM's memory previously stopped
+    short of because it only knew thread ids it had captured at send time.
+    """
+    from applypilot.database import log_event
+    from applypilot.networking import replies as _replies, store as _store
+
+    cid = (data.get("contact_id") or "").strip()
+    if not cid:
+        return {"ok": False, "message": "contact_id required"}
+    conn = get_connection()
+    _store.init_contacts(conn)
+    contact = _store.get_contact(cid, conn)
+    if not contact:
+        return {"ok": False, "message": "contact not found"}
+
+    res = _replies.sync_all_with(contact, conn)
+    if res.get("ok") and res.get("messages"):
+        log_event(contact.get("job_url", ""), "outreach", "ok",
+                  f"Pulled {res['messages']} message(s) across {res['threads']} Gmail "
+                  f"conversation(s) with {contact.get('full_name') or cid}.", conn)
+    return res
+
+
 def _job_description(data: dict) -> dict:
     """The full posting text for ONE job, on demand.
 
@@ -2434,6 +2462,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/contact/fetch-reply":
                 _json_response(self, _fetch_reply_text(data))
+                return
+            if path == "/api/contact/sync-gmail":
+                _json_response(self, _sync_all_gmail(data))
                 return
             if path == "/api/job-description":
                 _json_response(self, _job_description(data))

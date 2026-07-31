@@ -198,6 +198,155 @@ def test_our_own_sent_text_is_never_stored_back(db, monkeypatch):
     assert rows[0]["direction"] == "out" and not rows[0]["snippet"]
 
 
+def test_pulling_all_gmail_finds_threads_applypilot_never_sent(db, monkeypatch):
+    """The CRM's memory used to stop at its own outbox.
+
+    `thread_id` is captured at SEND time and everything downstream looks a thread up by that id,
+    so a conversation the other side began, an email sent straight from Gmail, or one where they
+    merely CC'd you was invisible. Searching by ADDRESS is what fixes it — and search needs
+    `gmail.readonly`, because `gmail.metadata` refuses `q=` outright.
+    """
+    from applypilot.networking import gmail_oauth, gmail_read, replies
+
+    seen = {}
+
+    def fake_search(query, limit=25, service=None):
+        seen["query"] = query
+        return ["thread-we-never-sent"]
+
+    other = {"id": "m9", "thread_id": "thread-we-never-sent",
+             "from": "Sarah <sarah@writer.com>", "to": ME, "cc": "",
+             "subject": "intro", "internalDate": "1780000000000",
+             "rfc_message_id": "<z@w>", "snippet": "Looping you in with David.",
+             "labelIds": [], "auto_submitted": ""}
+
+    monkeypatch.setattr(gmail_read, "can_read_content", lambda: (True, "ok"))
+    monkeypatch.setattr(gmail_read, "search_threads", fake_search)
+    monkeypatch.setattr(gmail_read, "thread_messages", lambda tid, service=None: [other])
+    monkeypatch.setattr(gmail_oauth, "connected_email", lambda: ME)
+
+    contact = {"id": "c1", "job_url": "http://j/1", "email": "sarah@writer.com",
+               "full_name": "Sarah"}
+    res = replies.sync_all_with(contact, db)
+    assert res["ok"] is True and res["threads"] == 1 and res["messages"] == 1
+
+    # cc: matters — the Writer case was a thread where the contact only CC'd us.
+    for part in ("from:sarah@writer.com", "to:sarah@writer.com", "cc:sarah@writer.com"):
+        assert part in seen["query"], f"the search would miss {part}"
+
+    stored = msg_store.thread_for_contact("c1", db)
+    assert stored[0]["direction"] == "in"
+    assert stored[0]["snippet"].startswith("Looping you in")
+
+
+def test_syncing_one_contact_does_not_steal_a_shared_thread_from_another(db, monkeypatch):
+    """Measured on live data before it was fixed: clicking "Pull all Gmail" on David reassigned
+    all three Writer messages to him and left Victoria's conversation EMPTY (3 → 0, one click).
+
+    `message_id` was the primary key, so INSERT OR REPLACE moved ownership. But one Gmail
+    message legitimately belongs to several contacts — Victoria and David are both on that
+    thread, and each should keep their own view of it.
+    """
+    from applypilot.networking import gmail_oauth, gmail_read, replies
+
+    shared = {"id": "shared1", "thread_id": "t-shared", "from": "victoria@w.com",
+              "to": ME, "cc": "David <david@w.com>", "subject": "intro",
+              "internalDate": "1780000000000", "rfc_message_id": "<s@w>",
+              "snippet": "Looping in David.", "labelIds": [], "auto_submitted": ""}
+    monkeypatch.setattr(gmail_read, "can_read_content", lambda: (True, "ok"))
+    monkeypatch.setattr(gmail_read, "search_threads", lambda *a, **k: ["t-shared"])
+    monkeypatch.setattr(gmail_read, "thread_messages", lambda tid, service=None: [shared])
+    monkeypatch.setattr(gmail_oauth, "connected_email", lambda: ME)
+
+    victoria = {"id": "v1", "job_url": "http://j/1", "email": "victoria@w.com"}
+    david = {"id": "d1", "job_url": "http://j/1", "email": "david@w.com"}
+
+    replies.sync_all_with(victoria, db)
+    assert len(msg_store.thread_for_contact("v1", db)) == 1
+
+    replies.sync_all_with(david, db)
+    assert len(msg_store.thread_for_contact("d1", db)) == 1, "David did not get the thread"
+    assert len(msg_store.thread_for_contact("v1", db)) == 1, (
+        "syncing David emptied Victoria's conversation — the message was reassigned")
+
+    # ...and re-syncing either one is still a no-op for both.
+    assert replies.sync_all_with(victoria, db)["messages"] == 0
+    assert len(msg_store.thread_for_contact("d1", db)) == 1
+
+
+def test_the_messages_key_is_per_contact_not_per_message(db):
+    """The schema itself, so nobody restores a message_id primary key by hand."""
+    pk = [r[1] for r in db.execute("PRAGMA table_info(messages)").fetchall() if r[5]]
+    assert sorted(pk) == ["contact_id", "message_id"], f"primary key is {pk}"
+
+
+def test_pulling_all_gmail_needs_the_content_scope_and_an_address(db, monkeypatch):
+    from applypilot.networking import gmail_read, replies
+
+    monkeypatch.setattr(gmail_read, "can_read_content", lambda: (False, "content is off"))
+    assert replies.sync_all_with({"id": "c1", "email": "a@b.com"}, db)["ok"] is False
+
+    monkeypatch.setattr(gmail_read, "can_read_content", lambda: (True, "ok"))
+    res = replies.sync_all_with({"id": "c1", "email": ""}, db)
+    assert res["ok"] is False and "no email address" in res["message"]
+
+
+def test_pulling_all_gmail_does_not_overwrite_what_we_sent(db, monkeypatch):
+    """Our own text is recorded at send time, in full. Re-importing a truncated Gmail snippet
+    over it would be a downgrade — `upsert_messages` keeps the existing one when handed ""."""
+    from applypilot.networking import gmail_oauth, gmail_read, replies
+
+    contact = {"id": "c1", "job_url": "http://j/1", "email": "s@w.com", "thread_id": "t1"}
+    msg_store.record_outbound(contact, {"id": "mine", "thread_id": "t1",
+                                        "rfc_message_id": "<a@us>", "from_addr": ME},
+                              "s@w.com", [], "Re: x", db, body="THE FULL TEXT I WROTE")
+    assert msg_store.thread_for_contact("c1", db)[0]["snippet"] == "THE FULL TEXT I WROTE"
+
+    ours = {"id": "mine", "thread_id": "t1", "from": ME, "to": "s@w.com", "cc": "",
+            "subject": "Re: x", "internalDate": "1780000000000", "rfc_message_id": "<a@us>",
+            "snippet": "THE FULL TEXT I WR", "labelIds": [], "auto_submitted": ""}
+    monkeypatch.setattr(gmail_read, "can_read_content", lambda: (True, "ok"))
+    monkeypatch.setattr(gmail_read, "search_threads", lambda *a, **k: ["t1"])
+    monkeypatch.setattr(gmail_read, "thread_messages", lambda tid, service=None: [ours])
+    monkeypatch.setattr(gmail_oauth, "connected_email", lambda: ME)
+
+    replies.sync_all_with(contact, db)
+    assert msg_store.thread_for_contact("c1", db)[0]["snippet"] == "THE FULL TEXT I WROTE", (
+        "a truncated Gmail snippet overwrote the full text we had sent")
+
+
+def test_a_message_sent_from_gmail_directly_does_get_its_text(db, monkeypatch):
+    """The other half of that rule. An outbound message ApplyPilot never sent has no stored
+    text at all, and would otherwise render as a permanently blank row — which is exactly what
+    "Sent from ApplyPilot." looked like on a reply the operator had actually written."""
+    from applypilot.networking import gmail_oauth, gmail_read, replies
+
+    sent_elsewhere = {"id": "from-gmail", "thread_id": "t2", "from": ME, "to": "s@w.com",
+                      "cc": "", "subject": "hi", "internalDate": "1780000000000",
+                      "rfc_message_id": "<b@us>", "snippet": "I typed this in Gmail.",
+                      "labelIds": [], "auto_submitted": ""}
+    monkeypatch.setattr(gmail_read, "can_read_content", lambda: (True, "ok"))
+    monkeypatch.setattr(gmail_read, "search_threads", lambda *a, **k: ["t2"])
+    monkeypatch.setattr(gmail_read, "thread_messages", lambda tid, service=None: [sent_elsewhere])
+    monkeypatch.setattr(gmail_oauth, "connected_email", lambda: ME)
+
+    replies.sync_all_with({"id": "c2", "job_url": "http://j/1", "email": "s@w.com"}, db)
+    rows = msg_store.thread_for_contact("c2", db)
+    assert rows and rows[0]["direction"] == "out"
+    assert rows[0]["snippet"] == "I typed this in Gmail."
+
+
+def test_our_sent_reply_shows_what_we_actually_wrote(db):
+    """The thread showed "Sent from ApplyPilot." where the reply just written should be, which
+    reads as the message having been lost. It is our own text — no scope question at all."""
+    contact = {"id": "c1", "job_url": "http://j/1", "thread_id": "t1"}
+    msg_store.record_outbound(contact, {"id": "s1", "thread_id": "t1",
+                                        "rfc_message_id": "<n@us>", "from_addr": ME},
+                              "g@co.com", [], "Re: role", db,
+                              body="Thursday works. The job ID is JR349466.")
+    assert msg_store.thread_for_contact("c1", db)[0]["snippet"].startswith("Thursday works")
+
+
 def test_the_quoted_original_is_trimmed_off_a_reply(db):
     """Gmail's snippet runs straight through the quote header.
 

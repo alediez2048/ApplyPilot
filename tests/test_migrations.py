@@ -186,7 +186,10 @@ def test_migrations_are_discovered_in_numeric_order():
 
 def test_001_is_a_noop_on_a_fresh_database(dbpath):
     conn = database.init_db(dbpath)          # runs migrations as part of startup
-    assert migrations.current_version(conn) == 1
+    # Derived from what is on disk rather than hardcoded: pinning the literal made this fail
+    # the moment migration 002 was added, which says nothing about whether 001 is a no-op.
+    latest = max(v for v, _, _ in migrations.discover())
+    assert migrations.current_version(conn) == latest
     cols = {r[1] for r in conn.execute("PRAGMA table_info(contacts)")}
     assert not [c for c in cols if "followup" in c]
 

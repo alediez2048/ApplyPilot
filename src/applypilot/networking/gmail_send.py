@@ -467,7 +467,7 @@ def send_reply(contact_id: str, body: str, subject: str = "", cc: list[str] | No
 
     # Store it now rather than at the next poll: otherwise Send visibly does nothing.
     try:
-        msg_store.record_outbound(contact, sent, to_addr, cc_list, subject, conn)
+        msg_store.record_outbound(contact, sent, to_addr, cc_list, subject, conn, body=body)
     except Exception:  # noqa: BLE001
         log.debug("Could not record the sent reply", exc_info=True)
 

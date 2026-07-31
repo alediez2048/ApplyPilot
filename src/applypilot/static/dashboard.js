@@ -534,20 +534,33 @@ function contactRow(c) {
   // "They are waiting on you" outranks "they replied": both are true, but only one is a job.
   // Shown on the COLLAPSED row, because a state you must expand a contact to discover is a
   // state that goes unnoticed for days — which is the failure this whole ticket is about.
+  // THREE independent facts, three independent groups. They were one else-if chain, and
+  // inserting the deck pill into the middle of it detached the follow-up branches from the
+  // reply branch — so "✓ replied Jul 31" and the legacy "✓ replied" shim both fired at once.
+  // Chained conditions that mix unrelated signals break like this every time they are edited.
   const conv = c.conversation || {};
+
+  // 1. Whose turn. `replied_at` is authoritative (CRM-1 writes it); `followup_status` is the
+  //    ARCH-3 legacy shim and may ONLY speak when the real column is empty.
   if (conv.state === 'awaiting_us')
     pills.push(`<span class="pill due" title="They replied and nobody has answered">💬 your turn${conv.days >= 1 ? ` · ${conv.days}d` : ''}</span>`);
-  else if (c.replied_at) pills.push(`<span class="pill on">✓ replied ${esc(shortDate(c.replied_at))}</span>`);
-  // A deck click. Shown even when they also replied — "read the deck AND answered" is a
-  // different person from "answered without looking", and it is the strongest signal available
-  // short of a reply. Never an open: an open-tracking pixel fires for spam filters.
+  else if (c.replied_at)
+    pills.push(`<span class="pill on">✓ replied ${esc(shortDate(c.replied_at))}</span>`);
+  else if (c.followup_status === 'replied')
+    pills.push(`<span class="pill on">✓ replied</span>`);
+
+  // 2. The follow-up ladder — only meaningful while nobody has replied.
+  if (!c.replied_at && conv.state !== 'awaiting_us') {
+    if (c.followup_state === 'due')          pills.push(`<span class="pill due">↻ due</span>`);
+    else if (c.followup_state === 'waiting') pills.push(`<span class="pill off">↻ ${fuWhen(c.followup_due_in_h)}</span>`);
+  }
+
+  // 3. A deck click. Shown even when they also replied — "read the deck AND answered" is a
+  //    different person from "answered without looking".
   if (c.deck_viewed_at)
     pills.push(`<span class="pill deck" title="Clicked the intro deck link${
       c.deck_views > 1 ? ` — ${c.deck_views} times, last ${esc(shortDate(c.deck_last_at))}` : ''
     }">👁 opened the deck${c.deck_views > 1 ? ` ×${c.deck_views}` : ''}</span>`);
-  else if (c.followup_state === 'due')      pills.push(`<span class="pill due">↻ due</span>`);
-  else if (c.followup_status === 'replied') pills.push(`<span class="pill on">✓ replied</span>`);
-  else if (c.followup_state === 'waiting')  pills.push(`<span class="pill off">↻ ${fuWhen(c.followup_due_in_h)}</span>`);
   if (c.phone) pills.push(`<span class="pill on">📱</span>`);
   return `
     <div class="prow ${open ? 'is-open' : ''}" onclick="toggleContact('${esc(c.id)}')">
@@ -591,15 +604,18 @@ function agoPhrase(conv) {
 function conversationView(c) {
   const msgs = c.thread || [];
   const conv = c.conversation || {};
-  const first = (conv.who || 'They').split(/\s+/)[0];
+  // `conv.who` is the INBOUND sender, so it is empty in `awaiting_them` — the last message was
+  // ours. Falling back to the literal "They" produced "waiting on They."; the contact's own
+  // name is right there and is who we are waiting on.
+  const first = (conv.who || c.full_name || 'them').split(/\s+/)[0];
   // Urgency with the action attached. A banner that only accuses is a label to read; Superhuman's
   // whole point is that "needs a reply" is a bucket you act on.
   const banner = conv.state === 'awaiting_us'
     ? `<div class="conv-turn us"><span>⚠ Your turn — ${esc(first)} replied ${esc(agoPhrase(conv))}</span>
-         <span class="conv-acts"><button class="linklike" onclick="openReplyHere('${esc(c.id)}')">Answer now</button>${gmailLink(c, 'Open in Gmail ↗')}</span></div>`
+         <span class="conv-acts"><button class="linklike" onclick="openReplyHere('${esc(c.id)}')">Answer now</button>${syncGmailBtn(c)}${gmailLink(c, 'Open in Gmail ↗')}</span></div>`
     : conv.state === 'awaiting_them'
       ? `<div class="conv-turn them"><span>Answered ${esc(agoPhrase(conv))} — waiting on ${esc(first)}.</span>
-         <span class="conv-acts">${gmailLink(c, 'Open in Gmail ↗')}</span></div>`
+         <span class="conv-acts">${syncGmailBtn(c)}${gmailLink(c, 'Open in Gmail ↗')}</span></div>`
       : '';
   const intro = c.introduced_by
     ? `<div class="th-intro">👋 ${esc(c.introduced_by)} added them to this thread</div>` : '';
@@ -796,6 +812,24 @@ function openReply(url, cid) {
     if (el) { el.focus(); el.scrollIntoView({block: 'center', behavior: 'smooth'}); }
   }, 60);
 }
+// Pull EVERY Gmail conversation with this person — not just the thread ApplyPilot sent.
+// Until this existed the CRM's memory stopped at its own outbox: a thread they started, an
+// email sent straight from Gmail, or one where they only CC'd you was invisible, because
+// everything was looked up by a thread id captured at send time.
+function syncGmailBtn(c) {
+  if (!CONTENT_SCOPE || !c.email) return '';
+  return `<button class="linklike" title="Search Gmail for every conversation with ${esc(c.email)}"
+    onclick="syncGmail('${esc(c.id)}', this)">⟳ Pull all Gmail</button>`;
+}
+async function syncGmail(cid, btn) {
+  const label = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Searching Gmail…';
+  const r = await post('/api/contact/sync-gmail', {contact_id: cid});
+  setReplyMsg(cid, r.message || (r.ok ? 'Synced.' : 'Could not sync.'), !r.ok);
+  btn.disabled = false; btn.textContent = label;
+  refresh();
+}
+
 // Read THIS conversation's text from Gmail, because you asked for this one. Never automatic:
 // the poller and `tick` store no message text at all, whatever the token allows.
 async function fetchReplyText(cid, btn) {

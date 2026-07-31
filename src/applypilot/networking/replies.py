@@ -101,6 +101,76 @@ def _sync_thread(contact: dict, msgs: list[dict], me: str, conn) -> dict:
     return {"new_messages": new, "introductions": intro}
 
 
+def sync_all_with(contact: dict, conn=None, limit: int = 25) -> dict:
+    """Pull EVERY Gmail conversation with this person, not just the one ApplyPilot started.
+
+    Until now the system could only see threads it had sent itself: `thread_id` is captured at
+    send time, and everything downstream looks a thread up by that id. So a conversation the
+    other side began, an email sent straight from Gmail, or a thread where somebody CC'd you was
+    invisible — the CRM's memory stopped at its own outbox.
+
+    `gmail.readonly` lifts that, because it permits `q=` search (metadata does not, at all). We
+    search on their ADDRESS rather than a thread id, so every exchange with them lands, whoever
+    started it and wherever it was sent from.
+
+    Inbound message text is stored; ours is left alone here (the send path records what we typed
+    at the moment we typed it). Everything is keyed by Gmail's message id, so this is idempotent
+    and can be run as often as the operator likes.
+    """
+    ok, why = gmail_read.can_read_content()
+    if not ok:
+        return {"ok": False, "message": why, "threads": 0, "messages": 0}
+    email = (contact.get("email") or "").strip()
+    if not email:
+        return {"ok": False, "message": "no email address for this contact",
+                "threads": 0, "messages": 0}
+
+    me = gmail_oauth.connected_email()
+    # Both directions, and `from:`/`to:` alone would miss a thread where they were only CC'd —
+    # which is exactly the Writer case that prompted this.
+    thread_ids = gmail_read.search_threads(f"from:{email} OR to:{email} OR cc:{email}",
+                                           limit=limit)
+    if not thread_ids:
+        return {"ok": True, "threads": 0, "messages": 0,
+                "message": f"no Gmail conversations found with {email}"}
+
+    # What we already hold for this contact, so our own full sent text is never downgraded to
+    # Gmail's truncated snippet — but a message sent from Gmail directly, which we have no text
+    # for at all, still gets filled in.
+    have = {m.get("message_id"): (m.get("snippet") or "")
+            for m in msg_store.thread_for_contact(contact["id"], conn)}
+
+    total_new = 0
+    for tid in thread_ids:
+        msgs = gmail_read.thread_messages(tid)
+        if not msgs:
+            continue
+        rows = []
+        for m in cv.timeline(msgs, me):
+            raw = next((x for x in msgs if x.get("id") == m["id"]), {})
+            inbound = m["direction"] == "in"
+            rows.append({
+                "message_id": m["id"], "thread_id": tid,
+                "contact_id": contact["id"], "job_url": contact.get("job_url"),
+                "direction": m["direction"], "from_addr": m["from_addr"],
+                "from_name": m["from_name"], "to_addrs": m["to_addrs"],
+                "cc_addrs": m["cc_addrs"], "subject": m["subject"],
+                "sent_at": _iso(m["at"]), "rfc_message_id": m.get("rfc_message_id") or "",
+                # Inbound: take Gmail's text. Outbound: only when we hold NOTHING for it —
+                # a reply ApplyPilot sent was recorded in full at send time and must not be
+                # downgraded to a truncated snippet, but a message sent straight from Gmail
+                # has no stored text at all and would otherwise render as a blank row forever.
+                "snippet": (cv.strip_quoted_tail(raw.get("snippet")) if inbound
+                            else ("" if (have.get(m["id"]) or "").strip()
+                                  else cv.strip_quoted_tail(raw.get("snippet")))),
+            })
+        total_new += msg_store.upsert_messages(rows, conn)
+
+    return {"ok": True, "threads": len(thread_ids), "messages": total_new,
+            "message": (f"Found {len(thread_ids)} conversation(s) with {email}"
+                        f"{f', {total_new} new message(s)' if total_new else ' — nothing new'}.")}
+
+
 def fetch_thread_text(contact: dict, conn=None) -> dict:
     """Read ONE conversation's text, because the operator asked for this one.
 

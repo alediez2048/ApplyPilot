@@ -17,9 +17,13 @@ import sqlite3
 from applypilot.database import get_connection, schema_ready
 
 _MESSAGE_COLUMNS: dict[str, str] = {
-    "message_id": "TEXT PRIMARY KEY",   # Gmail's id — the natural dedupe key
+    # Gmail's id dedupes, but it is NOT the key on its own: one message legitimately belongs to
+    # several contacts. The Writer thread has both Victoria and David on it, and under a
+    # message_id primary key "Pull all Gmail" on David reassigned all three rows to him and
+    # emptied Victoria's conversation — measured, 3 → 0, on one click. See migration 002.
+    "message_id": "TEXT NOT NULL",
     "thread_id": "TEXT NOT NULL",
-    "contact_id": "TEXT",
+    "contact_id": "TEXT NOT NULL DEFAULT ''",
     "job_url": "TEXT",
     "direction": "TEXT",                # in | out
     "from_addr": "TEXT",
@@ -60,7 +64,8 @@ def init_messages(conn: sqlite3.Connection | None = None) -> sqlite3.Connection:
     if schema_ready(conn, "messages"):
         return conn
     cols = ", ".join(f"{n} {t}" for n, t in _MESSAGE_COLUMNS.items())
-    conn.execute(f"CREATE TABLE IF NOT EXISTS messages ({cols})")
+    conn.execute(f"CREATE TABLE IF NOT EXISTS messages ({cols}, "
+                 f"PRIMARY KEY (message_id, contact_id))")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(thread_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_contact ON messages(contact_id)")
     conn.commit()
@@ -91,19 +96,24 @@ def upsert_messages(rows: list[dict], conn: sqlite3.Connection | None = None) ->
     # exactly what happens the moment `gmail.readonly` is revoked — every poll would quietly
     # erase the content it had, instead of simply not adding more (the ticket's "degrade
     # cleanly", which only means anything if nothing is destroyed on the way down).
-    existing = {r[0]: (r[1] or "")
-                for r in conn.execute("SELECT message_id, snippet FROM messages").fetchall()}
+    # Keyed by (message, contact) to match the primary key. Keying on message_id alone made
+    # "already stored" mean "stored for SOMEBODY", so syncing a shared thread for a second
+    # contact reported 0 new while quietly reassigning the rows.
+    existing = {(r[0], r[1] or ""): (r[2] or "")
+                for r in conn.execute(
+                    "SELECT message_id, contact_id, snippet FROM messages").fetchall()}
     known = set(existing)
     new = 0
     for r in rows:
         mid = r.get("message_id") or r.get("id")
         if not mid:
             continue
-        if mid not in known:
+        key = (mid, r.get("contact_id") or "")
+        if key not in known:
             new += 1
         # Truncated HERE, at the write, not at the caller. A cap that lives in the caller is
         # one a future caller forgets; this one cannot be bypassed by any path into the table.
-        snippet = ((r.get("snippet") or "").strip() or existing.get(mid, ""))[:SNIPPET_MAX]
+        snippet = ((r.get("snippet") or "").strip() or existing.get(key, ""))[:SNIPPET_MAX]
         conn.execute(
             "INSERT OR REPLACE INTO messages (message_id, thread_id, contact_id, job_url, "
             "direction, from_addr, from_name, to_addrs, cc_addrs, subject, sent_at, synced_at, "
@@ -117,7 +127,7 @@ def upsert_messages(rows: list[dict], conn: sqlite3.Connection | None = None) ->
 
 
 def record_outbound(contact: dict, sent: dict, to_addr: str, cc: list[str], subject: str,
-                    conn: sqlite3.Connection | None = None) -> None:
+                    conn: sqlite3.Connection | None = None, body: str = "") -> None:
     """Store a message WE just sent, immediately.
 
     The alternative is waiting for the next Gmail poll, which means the operator clicks Send,
@@ -142,6 +152,10 @@ def record_outbound(contact: dict, sent: dict, to_addr: str, cc: list[str], subj
         "subject": subject,
         "sent_at": datetime.now(timezone.utc).isoformat(),
         "rfc_message_id": sent.get("rfc_message_id") or "",
+        # OUR OWN words. No scope question and no privacy trade — the operator typed this.
+        # Without it the thread showed "Sent from ApplyPilot." where the reply they had just
+        # written should be, which reads as the message having been lost.
+        "snippet": (body or "").strip()[:PASTED_MAX],
     }], conn)
 
 

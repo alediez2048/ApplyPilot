@@ -180,6 +180,11 @@ def followup_panel(contacts: list[dict], now: datetime | None = None,
             contact[f"{pre}followup_state"] = state
             contact[f"{pre}followup_due_in_h"] = due_in
             contact[f"{pre}followup_touch"] = (ladder.get("count") or 0) + 1
+            # The DENOMINATOR travels with the contact. Without it the per-contact card had to
+            # be handed a literal, and the dashboard passed `3` — so with any schedule that is
+            # not three entries the Email tab read "touch 2 of 3" while the Follow-ups tab read
+            # the real total for the same person, on the same screen.
+            contact[f"{pre}followup_total"] = len(schedules[channel.name])
             if state in buckets[channel.name]:
                 buckets[channel.name][state].append(contact)
             elif state in TERMINAL:

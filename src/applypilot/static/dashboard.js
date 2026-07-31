@@ -424,6 +424,16 @@ async function sendEmail(cid, verified, btn) {
     ? 'Send this outreach email now?'
     : '⚠ This email address is UNVERIFIED — it may bounce. Send anyway?';
   if (!confirm(first)) return;
+  // Save what is ON SCREEN first. The server sends its STORED copy, and `.d-subj`/`.d-body` are
+  // backed by no Map, so an edit you typed and did not explicitly Save was sent as the old text
+  // and then erased by the next refresh — wrong twice, and silently. `fuAct` has always done
+  // this for follow-ups; the cold-email path never did.
+  const card = btn.closest('.draft');
+  if (card) {
+    const subject = fieldVal(card, '.d-subj'), body = fieldVal(card, '.d-body');
+    if (subject !== undefined || body !== undefined)
+      await post('/api/outreach', {contact_id: cid, subject, body});
+  }
   btn.disabled = true; btn.textContent = 'Sending…';
   const r = await post('/api/outreach/send', {contact_id: cid, confirm_unverified: !verified});
   if (r.ok) { refresh(); }
@@ -753,8 +763,16 @@ async function sendReply(cid, btn) {
   refresh();
 }
 function contactPanel(c) {
-  const ch = CHANNEL_TAB.get(c.id) || (c.email ? 'email' : (c.linkedin_url ? 'linkedin' : 'phone'));
-  const tab = (k, label, on) => `<span class="${ch === k ? 'on' : ''}" onclick="event.stopPropagation();setChannel('${esc(c.id)}','${k}')">${label}${on || ''}</span>`;
+  // A tab with nothing behind it is not a choice. Offering all three regardless meant clicking
+  // "LinkedIn" on an email-only contact got you "No LinkedIn profile." — and setChannel wrote
+  // that dead choice into CHANNEL_TAB, so the contact reopened on the empty tab every time.
+  const usable = {email: !!c.email, linkedin: !!c.linkedin_url, phone: true};
+  const stored = CHANNEL_TAB.get(c.id);
+  const ch = (stored && usable[stored]) ? stored
+           : (c.email ? 'email' : (c.linkedin_url ? 'linkedin' : 'phone'));
+  const tab = (k, label, on) => usable[k]
+    ? `<span class="${ch === k ? 'on' : ''}" onclick="event.stopPropagation();setChannel('${esc(c.id)}','${k}')">${label}${on || ''}</span>`
+    : '';
   let body = '';
   if (ch === 'email')    body = c.email ? emailChannel(c) : `<div class="pane-empty">No email address for ${esc(c.full_name)}.</div>`;
   if (ch === 'linkedin') body = c.linkedin_url ? linkedinChannel(c) : `<div class="pane-empty">No LinkedIn profile.</div>`;
@@ -809,7 +827,7 @@ function emailChannel(c) {
   if (hasConversation(c)) return conversationView(c);
   // A due follow-up is the more urgent thing to write, so it takes the channel.
   if (c.followup_state === 'due' || (c.followup_message || '').trim())
-    return followupCard(c, {touch: (c.followup_count || 0) + 1}, 3);
+    return followupCard(c, {touch: (c.followup_count || 0) + 1}, c.followup_total);
   return draftBlock(c, true);
 }
 function linkedinChannel(c) { return draftBlock(c, false, true); }
@@ -983,7 +1001,11 @@ function renderMetrics(mx) {
 }
 
 async function refresh() {
-  if (isEditingJobs()) return;
+  // NOTE: this used to `return` here, aborting the WHOLE refresh — stats, progress, the apply
+  // log, the metrics panel and the (N) ⚠ tab badge all froze along with the jobs table. Leave
+  // the cursor in a notes field and switch tabs, and the badge CRM-3a exists to raise never
+  // appears. The guard belongs on the one write that would destroy what you are typing.
+  const editing = isEditingJobs();
   const data = await (await fetch('/api/status')).json();
   document.getElementById('appDir').textContent = data.app_dir;
   const s = data.stats || {};
@@ -1006,6 +1028,9 @@ async function refresh() {
     emptyEl.hidden = shown.length > 0;
     emptyEl.textContent = allJobs.length === 0 ? '' : `No applications in "${JOB_BUCKETS[JOB_FILTER].label}".`;
   }
+  // The one destructive write: replacing #jobs discards whatever is being typed inside it.
+  // Everything above has already run, so the header, badge and logs stay live while you type.
+  if (editing) return;
   document.getElementById('jobs').innerHTML = shown.map(j => {
     return `
     <tr>

@@ -402,6 +402,120 @@ def test_the_server_only_writes_fields_the_client_actually_sent(tmp_path, monkey
     assert store.get_contact(cid, conn)["outreach_message"] == ""
 
 
+_TABS_DRIVER = """
+const F = (new Function(SRC + `; return { contactPanel, CONTACT_OPEN, CHANNEL_TAB, setChannel };`))();
+const out = {};
+for (const [name, c] of Object.entries(CASES)) {
+  F.CONTACT_OPEN.add(c.id);
+  if (c._pick) F.CHANNEL_TAB.set(c.id, c._pick);
+  out[name] = F.contactPanel(c);
+}
+console.log(JSON.stringify(out));
+"""
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node not available")
+def test_a_channel_tab_with_nothing_behind_it_is_not_offered(tmp_path):
+    """A tab that can only say "No LinkedIn profile." is not a choice.
+
+    Worse, `setChannel` wrote that dead pick into CHANNEL_TAB, so the contact reopened on the
+    empty tab every single time until the operator clicked back.
+    """
+    email_only = _contact(id="e1", full_name="Email Only", linkedin_url="", phone="")
+    li_only = _contact(id="l1", full_name="LinkedIn Only", email="", linkedin_url="https://l/in/x")
+    # A stored preference for a channel this contact does not have must NOT be honoured.
+    stuck = _contact(id="s1", full_name="Stuck", linkedin_url="", phone="")
+    stuck["_pick"] = "linkedin"
+
+    script = tmp_path / "tabs.mjs"
+    script.write_text(
+        _STUBS
+        + f"const SRC = {json.dumps(_page_js())};\n"
+        + f"const CASES = {json.dumps({'email_only': email_only, 'li_only': li_only, 'stuck': stuck})};\n"
+        + _TABS_DRIVER
+    )
+    proc = subprocess.run(["node", str(script)], capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, f"node failed:\n{proc.stderr[:2000]}"
+    out = json.loads(proc.stdout.strip().splitlines()[-1])
+
+    assert "🔗 LinkedIn" not in out["email_only"], "offered a LinkedIn tab with no profile behind it"
+    assert "✉ Email" in out["email_only"]
+    assert "✉ Email" not in out["li_only"], "offered an Email tab with no address behind it"
+    assert "📇 Phone & notes" in out["email_only"], "notes are always available"
+
+    assert "No LinkedIn profile" not in out["stuck"], (
+        "a stored preference for a channel this contact does not have was honoured, so the "
+        "panel reopened on a dead tab")
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node not available")
+def test_typing_in_a_contact_field_does_not_freeze_the_rest_of_the_page(tmp_path):
+    """`refresh()` used to `return` on isEditingJobs(), aborting EVERYTHING — stats, progress,
+    the apply log, the metrics panel and the (N) ⚠ badge froze with the jobs table. Leave the
+    cursor in a notes field, switch tabs, and the badge CRM-3a exists to raise never appears.
+
+    Only the #jobs innerHTML write actually destroys what you are typing, so only that is held.
+    """
+    src = _page_js()
+    body = src[src.index("async function refresh()"):]
+    body = body[:body.index("\n}\n")]
+
+    # Nothing may bail out before the fetch. Asserting only on marker ORDER is not enough — it
+    # passes just as happily with an extra `if (isEditingJobs()) return;` restored at the top,
+    # which is exactly the regression this guards. Mutation testing caught that.
+    # Comments stripped first: the explanation above this guard contains the word "return", and
+    # matching prose rather than code made this fail on correct source.
+    preamble = "\n".join(ln for ln in body[:body.index("await fetch")].splitlines()
+                         if not ln.strip().startswith("//"))
+    assert "return" not in preamble, (
+        "refresh() bails out before fetching, so the whole page freezes while you type — not "
+        f"just the jobs table. Offending preamble:\n{preamble}")
+
+    guard = body.index("if (editing) return;")
+    for marker in ("updateNeedsYouBadge", "renderMetrics", "applyLog", "renderProgress"):
+        assert body.index(marker) < guard, (
+            f"{marker} runs after the edit guard, so it freezes while you type")
+    assert body.index("getElementById('jobs').innerHTML") > guard, (
+        "the jobs table is rewritten even while a field inside it has focus")
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node not available")
+def test_the_email_tab_uses_the_real_touch_total(tmp_path):
+    """It passed a literal `3`. With any FOLLOWUP_SCHEDULE that is not three entries the Email
+    tab said "touch 2 of 3" while the Follow-ups tab said the true total, for the same contact
+    on the same screen."""
+    src = _page_js()
+    assert "followupCard(c, {touch: (c.followup_count || 0) + 1}, 3)" not in src, (
+        "the touch denominator is still hardcoded")
+    assert "c.followup_total" in src
+
+
+def test_the_touch_total_travels_with_the_contact():
+    """Server side of the same fix: the denominator is annotated per contact, so the card does
+    not have to be told what it is.
+
+    `emailed` is present because that is the shape `_contact_payload` produces, and it is
+    load-bearing here rather than incidental: `normalize_for_ladder` returns a COPY when the
+    derived field is missing, so on a raw DB row the annotation lands on the copy and never
+    reaches the caller's dict. Same object-identity trap as §Lessons 21. The assertion below
+    pins that difference so nobody "simplifies" the fixture and quietly tests nothing.
+    """
+    from applypilot.domain.followup import EMAIL, LINKEDIN, channel_schedule, followup_panel
+
+    payload = {"id": "c1", "full_name": "X", "email": "a@b.com", "emailed": True,
+               "sent_message_id": "m1", "submitted_at": "2020-01-01T00:00:00+00:00"}
+    followup_panel([payload])
+    assert payload["followup_total"] == len(channel_schedule(EMAIL))
+    assert payload["li_followup_total"] == len(channel_schedule(LINKEDIN))
+
+    raw = {"id": "c2", "full_name": "Y", "email": "b@b.com", "sent_message_id": "m1",
+           "submitted_at": "2020-01-01T00:00:00+00:00"}
+    followup_panel([raw])
+    assert "followup_total" not in raw, (
+        "a raw row now receives the annotation too — if this ever passes, normalize_for_ladder "
+        "stopped copying and this guard is no longer testing the thing it was written for")
+
+
 _NEXT_DRIVER = """
 const F = (new Function(SRC + `; return { nextAction, contactRow, CONTACT_OPEN };`))();
 const out = {};

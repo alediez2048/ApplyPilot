@@ -1,6 +1,7 @@
 # CRM-4 — Conversations (memory, context, and replying from the dashboard)
 
-**Phase:** 2 · **Size:** L (~2d, split 4a / 4b) · **Depends on:** CRM-1 · **Status:** Todo
+**Phase:** 2 · **Size:** L (~2d, split 4a / 4b) · **Depends on:** CRM-1
+**Status:** 4a ✅ shipped 2026-07-31 (ladder-after-handoff still open) · 4b Todo
 **PRD:** `crm-prd.md` §6.1
 **Why:** CRM-1 made the system *notice* a reply. It still has no idea what the conversation is.
 
@@ -47,28 +48,44 @@ value**. The Victoria case is entirely solvable without new permissions.
 
 ---
 
-## 4a — Conversation memory (NO scope change)
+## 4a — Conversation memory (NO scope change) — ✅ SHIPPED 2026-07-31
 
-- [ ] **`messages` table** (new, own repository like `touches`): `thread_id`, `message_id`,
+- [x] **`messages` table** (new, own repository like `touches`): `thread_id`, `message_id`,
       `contact_id`, `job_url`, `direction` (in/out), `from_addr`, `to_addrs`, `cc_addrs`,
-      `subject`, `sent_at`. Headers only. **No bodies, no snippets** — the schema itself is the
-      guarantee, not a policy note.
-- [ ] **`gmail_read.thread_messages()`** already returns most of this; add `To` / `Cc` to the
+      `subject`, `sent_at`, `rfc_message_id`. Headers only. **No bodies, no snippets** — the
+      schema itself is the guarantee, not a policy note, and a test asserts it.
+- [x] **`gmail_read.thread_messages()`** already returned most of this; `To` / `Cc` added to the
       requested `metadataHeaders`.
-- [ ] **Handoff detection** — an address on the thread that is neither us nor the contact.
-      Surface as: *"Victoria introduced David Loveless (david@writer.com)"*.
-- [ ] **Introduced contacts** — offer to add them, with `source='introduction'` (distinct from
-      `apollo` / `connection`, and a far warmer lead than either). **Offer, do not auto-create**
-      — see Risks.
-- [ ] **Thread view in the dashboard**: a per-contact conversation timeline — who wrote, when,
-      who was added. This is the "memory".
-- [ ] **Reply from the dashboard**, threaded correctly: reuse `thread_id` + `rfc_message_id`
-      (already captured at send) and preserve the Cc list, so a reply reaches David too.
+- [x] **Handoff detection** — an address on the thread that is neither us nor the contact.
+- [x] **Introduced contacts** — offered with `source='introduction'`. **Offer, never auto-create.**
+- [x] **Thread view in the dashboard**: a per-contact conversation timeline.
+- [x] **Reply from the dashboard**, threaded, **Cc preserved** — `domain.conversations.reply_target()`
+      + `gmail_send.send_reply()` + `/api/contact/reply`. Answers the last **inbound** message,
+      chains `References` across the whole thread, and shows the Cc as removable chips so the
+      operator can *see* who it reaches before clicking Send.
 - [ ] **Ladder correctness after a handoff** — the original contact stays `replied`; the
-      introduced contact starts a fresh ladder. Today the job would read as finished.
-- [ ] **Structural suggestions only** (all that is honest without bodies):
+      introduced contact starts a fresh ladder. Still open (see Risks: pick the anchor
+      deliberately).
+- [ ] **Structural suggestions** (all that is honest without bodies):
       *"They introduced someone — email David"* · *"You replied 3 days ago, no answer — nudge?"*
-      · *"They replied and you never answered"* ← that last one is a real failure mode.
+      · *"They replied and you never answered"* ← that last one is a real failure mode. Not built.
+
+### What the reply work actually cost, and what it found
+
+The Cc is the whole feature and it is **invisible when wrong**: answering only the sender drops
+whoever they introduced, and the screen looks identical either way. So the recipients are
+computed from the stored thread, never from the browser (`/api/contact/reply` accepts a `cc`
+the operator edited, and ignores any `to` — a test posts `attacker@evil.com` and asserts it goes
+to Victoria anyway), and the composer renders the Cc as visible chips rather than trusting it
+silently. Twelve mutations were run against the domain function; all twelve were caught.
+
+**It also exposed a performance bug 4a itself had shipped.** `connected_email()` is an HTTP
+round-trip to Gmail, and CRM-4a called it once per job inside `/api/status` — a path that
+re-renders every 2.5s. Measured at **2.4 seconds per request with 15 jobs**: the dashboard was
+refreshing back-to-back and spending nearly all of it asking Gmail the same unchanging question.
+The statement budget could not see it because none of it was SQL. Cached on the token file's
+mtime (so reconnecting a different account still invalidates), **2.4s → 0.043s**, with a test
+that counts the profile fetches.
 
 ## 4b — Reply context (REQUIRES `gmail.readonly`, opt-in)
 
@@ -88,15 +105,17 @@ value**. The Victoria case is entirely solvable without new permissions.
 
 ## Acceptance criteria
 
-- [ ] The Writer thread renders in the dashboard with all three messages and both participants
-- [ ] David is surfaced as an introduced contact, on the Writer job, marked as an introduction
-- [ ] The Writer job stops reading as "finished" while a live conversation is open
-- [ ] A reply sent from the dashboard lands **in the same thread** and keeps the Cc
-- [ ] 4a works on `gmail.metadata` alone; **nothing** requests `readonly` without an explicit act
-- [ ] No message body is ever written to the database in 4a; no full body in 4b either
-- [ ] `/api/status` stays inside its query budget — thread data batched, never per contact
-- [ ] Tests: handoff detection, us-vs-them address matching, a Cc that is a mailing list or an
-      assistant, threading a reply, and a thread whose contact has since been deleted
+- [x] The Writer thread renders in the dashboard with all three messages and both participants
+- [x] David is surfaced as an introduced contact, on the Writer job, marked as an introduction
+- [x] The Writer job stops reading as "finished" while a live conversation is open
+- [x] A reply sent from the dashboard lands **in the same thread** and keeps the Cc —
+      verified live: `to=victoria.shearer@writer.com`, `cc=[David Loveless <david@writer.com>]`
+- [x] 4a works on `gmail.metadata` alone; **nothing** requests `readonly` without an explicit act
+- [x] No message body is ever written to the database in 4a; no full body in 4b either
+- [x] `/api/status` stays inside its query budget — thread data batched, never per contact
+      (and now inside a *network* budget too, which nothing was measuring)
+- [x] Tests: handoff detection, us-vs-them address matching, a robot Cc, threading a reply, a
+      reply target on a thread nobody answered, and a deleted contact's thread
 
 ## Risks / notes
 

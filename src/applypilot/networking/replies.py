@@ -85,7 +85,8 @@ def _sync_thread(contact: dict, msgs: list[dict], me: str, conn) -> dict:
                      "direction": m["direction"], "from_addr": m["from_addr"],
                      "from_name": m["from_name"], "to_addrs": m["to_addrs"],
                      "cc_addrs": m["cc_addrs"], "subject": m["subject"],
-                     "sent_at": _iso(m["at"])})
+                     "sent_at": _iso(m["at"]),
+                     "rfc_message_id": m.get("rfc_message_id") or ""})
     new = msg_store.upsert_messages(rows, conn)
     intro = cv.introductions(msgs, me, known=[contact.get("email")])
     return {"new_messages": new, "introductions": intro}

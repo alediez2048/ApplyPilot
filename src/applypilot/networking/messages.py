@@ -29,6 +29,10 @@ _MESSAGE_COLUMNS: dict[str, str] = {
     "subject": "TEXT",
     "sent_at": "TEXT",                  # ISO 8601
     "synced_at": "TEXT",
+    # The RFC Message-ID header — still a header, still not content. Without it a reply can
+    # only chain off our own FIRST email, so a mail client shows the answer as a new
+    # conversation next to the one it answers.
+    "rfc_message_id": "TEXT",
 }
 
 
@@ -74,14 +78,43 @@ def upsert_messages(rows: list[dict], conn: sqlite3.Connection | None = None) ->
             new += 1
         conn.execute(
             "INSERT OR REPLACE INTO messages (message_id, thread_id, contact_id, job_url, "
-            "direction, from_addr, from_name, to_addrs, cc_addrs, subject, sent_at, synced_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            "direction, from_addr, from_name, to_addrs, cc_addrs, subject, sent_at, synced_at, "
+            "rfc_message_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (mid, r.get("thread_id"), r.get("contact_id"), r.get("job_url"),
              r.get("direction"), r.get("from_addr"), r.get("from_name"),
              json.dumps(r.get("to_addrs") or []), json.dumps(r.get("cc_addrs") or []),
-             r.get("subject"), r.get("sent_at"), now))
+             r.get("subject"), r.get("sent_at"), now, r.get("rfc_message_id")))
     conn.commit()
     return new
+
+
+def record_outbound(contact: dict, sent: dict, to_addr: str, cc: list[str], subject: str,
+                    conn: sqlite3.Connection | None = None) -> None:
+    """Store a message WE just sent, immediately.
+
+    The alternative is waiting for the next Gmail poll, which means the operator clicks Send,
+    the thread does not change, and the only honest reading of the screen is that nothing
+    happened. Keyed by Gmail's message id like every other row, so the poll that eventually
+    covers this message overwrites it rather than duplicating it.
+    """
+    from datetime import datetime, timezone
+    mid = (sent or {}).get("id")
+    if not mid:
+        return  # nothing to key on; the next poll will pick it up
+    upsert_messages([{
+        "message_id": mid,
+        "thread_id": sent.get("thread_id") or contact.get("thread_id"),
+        "contact_id": contact.get("id"),
+        "job_url": contact.get("job_url"),
+        "direction": "out",
+        "from_addr": sent.get("from_addr") or "",
+        "from_name": "",
+        "to_addrs": [to_addr],
+        "cc_addrs": list(cc or []),
+        "subject": subject,
+        "sent_at": datetime.now(timezone.utc).isoformat(),
+        "rfc_message_id": sent.get("rfc_message_id") or "",
+    }], conn)
 
 
 def thread_for_contact(contact_id: str, conn: sqlite3.Connection | None = None) -> list[dict]:

@@ -1289,6 +1289,10 @@ def _contact_payload(c: dict, company: str | None = None, ladders: dict | None =
         # person to a thread, who did it — the handoff a boolean `replied` used to discard.
         "thread": thread or [],
         "introduced_by": _introduced_by(c, thread or []),
+        # Who a reply would go to, computed from the stored thread — no extra query and no
+        # extra round-trip, so the composer can open prefilled. None when nobody has written
+        # to us, which is how the UI knows to offer a follow-up instead of a reply.
+        "reply_to": _reply_target(thread or []),
         # HOT layer marker: found via your connections (vs cold Apollo). Either the stored source
         # or a live connection match makes it "hot".
         "hot": c.get("source") == "connection" or bool(conn_rec),
@@ -1495,6 +1499,63 @@ def _add_introduced_contact(data: dict) -> dict:
     return {"ok": True, "contact_id": cid,
             "message": f"Added {name}." + (" Draft ready." if drafted else
                                            " Use “Regenerate” to draft an email.")}
+
+
+def _reply_target(thread: list) -> dict | None:
+    """The recipients a reply would use, for the composer. Never raises.
+
+    Rendered on every 2.5s refresh, so a thread with an odd header must not be able to 500 the
+    whole dashboard — the same reason `_parse_ts` exists (§Lessons 6).
+    """
+    if not thread:
+        return None
+    try:
+        from applypilot.domain import conversations as cv
+        from applypilot.networking.gmail_send import _our_addresses
+        return cv.reply_target(thread, _our_addresses())
+    except Exception:  # noqa: BLE001
+        log.debug("Could not compute a reply target", exc_info=True)
+        return None
+
+
+def _send_reply(data: dict) -> dict:
+    """Answer a live conversation, in-thread, from the dashboard.
+
+    Thin on purpose: recipients are decided by `domain.conversations.reply_target()` from the
+    stored thread, NOT by anything the browser posts. The composer shows them and lets the
+    operator drop a Cc, but it cannot invent a recipient — an endpoint that accepted a `to`
+    would be an open relay pointed at whatever the page happened to hold.
+    """
+    from applypilot.database import log_event
+    from applypilot.networking import gmail_send, store as _store
+
+    cid = (data.get("contact_id") or "").strip()
+    body = (data.get("body") or "").strip()
+    if not cid:
+        return {"ok": False, "message": "contact_id required"}
+    if not body:
+        return {"ok": False, "message": "write a reply first"}
+
+    conn = get_connection()
+    _store.init_contacts(conn)
+    contact = _store.get_contact(cid, conn)
+    if not contact:
+        return {"ok": False, "message": "contact not found"}
+
+    # `cc` absent means "keep whatever the thread had"; an explicitly empty list means the
+    # operator removed everyone, which is a different instruction and must survive the trip.
+    cc = data.get("cc")
+    cc = None if cc is None else [str(c) for c in cc if str(c).strip()]
+
+    res = gmail_send.send_reply(cid, body, subject=(data.get("subject") or ""),
+                                cc=cc, conn=conn)
+    if res.get("ok"):
+        who = contact.get("full_name") or res.get("to", "")
+        also = res.get("cc") or []
+        log_event(contact.get("job_url", ""), "outreach", "ok",
+                  f"Replied to {who}" + (f" (cc {', '.join(also)})" if also else "")
+                  + " from the dashboard.", conn)
+    return res
 
 
 def _introduced_by(contact: dict, thread: list) -> str:
@@ -2172,6 +2233,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/contact/delete":
                 _json_response(self, _delete_contact(data.get("contact_id", "")))
+                return
+            if path == "/api/contact/reply":
+                _json_response(self, _send_reply(data))
                 return
             if path == "/api/followup":
                 _json_response(self, _followup_action(data))

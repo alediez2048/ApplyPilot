@@ -175,10 +175,91 @@ def timeline(messages: list[dict], me: str) -> list[dict]:
             "cc_addrs": split_parts(msg.get("cc")),
             "subject": msg.get("subject") or "",
             "at": msg.get("internalDate") or "",
+            # Carried through so a reply can chain References across the whole thread.
+            "rfc_message_id": msg.get("rfc_message_id") or "",
         })
     # internalDate is ms-since-epoch as a STRING; compare numerically or "9999" sorts after
     # "10000" (the same trap as domain.replies._ts).
     return sorted(rows, key=lambda r: int(r["at"]) if str(r["at"]).isdigit() else 0)
+
+
+def _strip_re(subject: str) -> str:
+    """'Re: RE: Fwd: hi' -> 'hi'. Repeated prefixes accumulate on a long thread."""
+    s = (subject or "").strip()
+    while True:
+        m = re.match(r"^\s*(re|fwd|fw)\s*(\[\d+\])?\s*:\s*", s, re.IGNORECASE)
+        if not m:
+            return s.strip()
+        s = s[m.end():]
+
+
+def reply_target(messages: list[dict], me: str | list[str]) -> dict | None:
+    """Who a reply should go to, and who must stay Cc'd.
+
+    **This is the whole point of CRM-4a.** Victoria answered by Cc'ing David — so a reply that
+    goes only to Victoria drops the person now actually handling the application, silently, and
+    looks perfectly normal on screen. The Cc list is carried forward rather than rebuilt.
+
+    Answers the LAST INBOUND message, not the last message overall: if we already replied and
+    are replying again, the addresses still belong to what THEY sent — ours are a copy of a copy.
+
+    Returns None when nobody has written to us. That is deliberate rather than a fallback to the
+    contact's address: a thread with no inbound message is a follow-up, which has its own ladder,
+    its own per-touch prompts and its own stop conditions. Silently turning "reply" into
+    "follow-up #4" would bypass all three.
+
+    `me` accepts several addresses because it genuinely can be several: sending may authenticate
+    as one account and set From to a verified alias (`OUTREACH_FROM_ADDRESS`). Both are us, and
+    an address of ours left in the Cc means every reply copies us on our own mail.
+
+    `messages` are STORED rows (`from_addr`, `to_addrs`/`cc_addrs` as raw fragment lists), i.e.
+    what `messages.thread_for_contact()` returns.
+    """
+    mine = {addr(x) for x in ([me] if isinstance(me, str) else (me or [])) if addr(x)}
+    inbound = [m for m in (messages or []) if (m.get("direction") or "") == "in"]
+    if not inbound:
+        return None
+    last = inbound[-1]
+
+    to_raw = _pick_from(last)
+    to_addr = addr(to_raw)
+    if not to_addr:
+        return None
+
+    # Everyone else who was on that message stays on the reply — minus us and minus the person
+    # we are addressing, or they receive it twice.
+    seen, cc = mine | {to_addr}, []
+    for one in (last.get("to_addrs") or []) + (last.get("cc_addrs") or []):
+        a = addr(one)
+        if not a or a in seen or is_robot(a):
+            continue
+        seen.add(a)
+        cc.append(one.strip())
+
+    # References chains the WHOLE thread, not just the message being answered — that is what
+    # keeps a mail client from splitting the conversation in two.
+    refs = [m["rfc_message_id"] for m in (messages or []) if (m.get("rfc_message_id") or "").strip()]
+    subject = _strip_re(last.get("subject") or "")
+    return {
+        "to": to_raw.strip(),
+        "to_addr": to_addr,
+        "cc": cc,
+        "subject": f"Re: {subject}" if subject else "",
+        "in_reply_to": (last.get("rfc_message_id") or "").strip(),
+        "references": " ".join(refs),
+        "thread_id": (last.get("thread_id") or "").strip(),
+        "answering": last.get("from_name") or to_addr,
+        "at": last.get("sent_at") or "",
+    }
+
+
+def _pick_from(msg: dict) -> str:
+    """The raw From fragment, display name intact where we have one."""
+    name = (msg.get("from_name") or "").strip()
+    address = (msg.get("from_addr") or "").strip()
+    if name and address:
+        return f"{name} <{address}>"
+    return address or name
 
 
 def pending_introductions(threads: dict, contact_emails: list[str], me: str) -> list[dict]:

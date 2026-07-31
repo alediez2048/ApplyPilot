@@ -122,6 +122,81 @@ def test_query_count_does_not_grow_with_contacts(db):
     )
 
 
+def test_status_does_not_ask_gmail_who_we_are_once_per_job(db, monkeypatch):
+    """SQL is not the only thing this path can do too often.
+
+    CRM-4a introduced `connected_email()` into the render path, once per job. It is an HTTP
+    round-trip to Gmail (~0.12s), so with 15 jobs `/api/status` measured **2.4s** against a
+    2.5s refresh — the dashboard was refreshing back-to-back and spending nearly all of it
+    asking Gmail the same unchanging question. The statement budget above could not see it,
+    because none of it was SQL.
+    """
+    from applypilot import web_dashboard as wd
+    from applypilot.networking import gmail_oauth
+
+    calls = {"n": 0}
+
+    class _Profile:
+        def execute(self):
+            calls["n"] += 1
+            return {"emailAddress": "me@example.com"}
+
+    class _Users:
+        def getProfile(self, userId=None):
+            return _Profile()
+
+    class _Svc:
+        def users(self):
+            return _Users()
+
+    gmail_oauth._EMAIL_CACHE.clear()
+    monkeypatch.setattr(gmail_oauth, "_load_creds", lambda: object())
+    monkeypatch.setattr(gmail_oauth, "_libs", lambda: (None, None, None,
+                                                       lambda *a, **k: _Svc()))
+
+    _seed(db, jobs=8, contacts_per_job=4)
+    wd._status_payload()
+    wd._status_payload()
+    assert calls["n"] <= 1, (
+        f"{calls['n']} Gmail profile fetches for 8 jobs across 2 renders — this is a network "
+        "call on a 2.5s loop; cache it rather than repeating it per job.")
+
+
+def test_reconnecting_a_different_account_is_not_served_from_the_cache(monkeypatch, tmp_path):
+    """A cache that outlives the thing it caches is how you email as the wrong person. Keyed on
+    the token file's mtime, so writing a new token invalidates it."""
+    from applypilot.networking import gmail_oauth
+
+    token = tmp_path / "gmail_token.json"
+    token.write_text("{}", encoding="utf-8")
+    who = {"addr": "first@example.com"}
+
+    class _Svc:
+        def users(self):
+            class _U:
+                def getProfile(self, userId=None):
+                    class _P:
+                        def execute(self):
+                            return {"emailAddress": who["addr"]}
+                    return _P()
+            return _U()
+
+    gmail_oauth._EMAIL_CACHE.clear()
+    monkeypatch.setattr(gmail_oauth, "TOKEN_PATH", token)
+    monkeypatch.setattr(gmail_oauth, "_load_creds", lambda: object())
+    monkeypatch.setattr(gmail_oauth, "_libs", lambda: (None, None, None, lambda *a, **k: _Svc()))
+
+    assert gmail_oauth.connected_email() == "first@example.com"
+    who["addr"] = "second@example.com"
+    assert gmail_oauth.connected_email() == "first@example.com", "not actually cached"
+
+    import os
+    st = token.stat()
+    os.utime(token, (st.st_atime + 10, st.st_mtime + 10))   # a new token was written
+    assert gmail_oauth.connected_email() == "second@example.com", (
+        "reconnecting a different Gmail account kept serving the old address")
+
+
 def test_schema_setup_does_not_repeat_on_every_call(db):
     """199 of the original 313 statements were CREATE/PRAGMA re-run per request."""
     from applypilot import web_dashboard as wd

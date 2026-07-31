@@ -212,22 +212,45 @@ def message_thread_info(message_id: str) -> dict:
             "subject": headers.get("subject", "")}
 
 
+#: (token mtime) -> address. Keyed on the token file so reconnecting a DIFFERENT account
+#: invalidates it, while an unchanged token costs nothing.
+_EMAIL_CACHE: dict[float, str] = {}
+
+
 def connected_email() -> str:
-    """The authenticated account's email address (empty if unavailable)."""
+    """The authenticated account's email address (empty if unavailable).
+
+    Cached, because this is an HTTP round-trip to Gmail and it is called from a RENDER path.
+    `/api/status` asks once per job, refreshes every 2.5s, and was measured at **2.4s per
+    request** with 15 jobs — the dashboard was refreshing back-to-back and spending most of it
+    asking Gmail the same unchanging question (§Lessons 11: idempotent is not free).
+    """
+    try:
+        key = TOKEN_PATH.stat().st_mtime
+    except OSError:
+        key = 0.0
+    if key in _EMAIL_CACHE:
+        return _EMAIL_CACHE[key]
+
     creds = _load_creds()
     if creds is None:
         return ""
     try:
         _R, _C, _F, build = _libs()
         service = build("gmail", "v1", credentials=creds, cache_discovery=False)
-        return service.users().getProfile(userId="me").execute().get("emailAddress", "")
+        email = service.users().getProfile(userId="me").execute().get("emailAddress", "")
     except Exception:  # noqa: BLE001
-        return ""
+        return ""  # not cached: a transient failure must not pin an empty address forever
+    if email:
+        _EMAIL_CACHE.clear()  # only ever one account connected at a time
+        _EMAIL_CACHE[key] = email
+    return email
 
 
 def send(to_addr: str, subject: str, body: str, from_addr: str,
          from_name: str = "", attachments: list[tuple[str, str]] | None = None,
-         thread_id: str | None = None, in_reply_to: str | None = None) -> dict:
+         thread_id: str | None = None, in_reply_to: str | None = None,
+         cc: list[str] | None = None, references: str | None = None) -> dict:
     """Send via the Gmail API. Raises on failure.
 
     Returns {"id", "thread_id", "rfc_message_id"} — the caller persists the last two so a
@@ -248,12 +271,18 @@ def send(to_addr: str, subject: str, body: str, from_addr: str,
     msg["To"] = to_addr
     msg["Reply-To"] = from_addr
     msg["Subject"] = subject
+    # Carried forward from the message being answered, not rebuilt: dropping a Cc drops the
+    # person the other side introduced, and does it silently (CRM-4a).
+    if cc:
+        msg["Cc"] = ", ".join(c for c in cc if c)
     rfc_id = make_msgid(domain=(from_addr.split("@")[-1] if "@" in from_addr else None))
     msg["Message-ID"] = rfc_id
     # Gmail groups by these headers; threadId alone is not enough for the RECIPIENT's client.
     if in_reply_to:
         msg["In-Reply-To"] = in_reply_to
-        msg["References"] = in_reply_to
+        # References chains the whole thread when we have it. Falling back to In-Reply-To alone
+        # still threads, just more fragilely in clients that walk the chain.
+        msg["References"] = references or in_reply_to
     msg.set_content(body)
     # Signature: Gmail only appends it in the web UI, so add it ourselves. Sent as an HTML
     # alternative alongside the plain text — the body stays verbatim in both parts.

@@ -532,7 +532,72 @@ function threadView(c) {
   }).join('');
   const intro = c.introduced_by
     ? `<div class="th-intro">👋 ${esc(c.introduced_by)} added them to this thread</div>` : '';
-  return `<details class="thread"><summary>💬 Conversation (${msgs.length})</summary>${intro}${rows}</details>`;
+  const open = THREAD_OPEN.has(c.id) ? ' open' : '';
+  return `<details class="thread"${open} ontoggle="onThreadToggle(this,'${esc(c.id)}')">` +
+         `<summary>💬 Conversation (${msgs.length})</summary>${intro}${rows}${replyBox(c)}</details>`;
+}
+const THREAD_OPEN = new Set();
+function onThreadToggle(el, cid) { if (el.open) THREAD_OPEN.add(cid); else THREAD_OPEN.delete(cid); }
+
+// What the operator typed, and any Cc they removed — held here rather than in the DOM because
+// the 2.5s refresh replaces #jobs wholesale. It skips while an input has FOCUS, which saves you
+// mid-sentence but not the moment you click away to read the thread above the box.
+const REPLY_DRAFT = new Map();   // contact id -> body
+const REPLY_DROP  = new Map();   // contact id -> Set of cc addresses removed
+
+// Replying, not following up. The distinction is real: a follow-up is a ladder step with a
+// schedule and a stop condition, a reply answers a person who wrote to us. `reply_to` is null
+// until somebody actually does, which is what keeps the two from blurring together.
+function replyBox(c) {
+  const t = c.reply_to;
+  if (!t || !t.to_addr) return '';
+  const dropped = REPLY_DROP.get(c.id) || new Set();
+  const cc = (t.cc || []).filter(x => !dropped.has(x));
+  // The Cc is the whole reason this exists: answering only the sender drops whoever they
+  // introduced, and nothing on screen would show that it happened.
+  const chips = (t.cc || []).map(x => {
+    const off = dropped.has(x);
+    return `<button class="cc-chip${off ? ' off' : ''}" title="${off ? 'Add back' : 'Remove from this reply'}"
+      onclick="toggleCc('${esc(c.id)}', decodeURIComponent('${encodeURIComponent(x)}'))">${esc(x)} ${off ? '＋' : '✕'}</button>`;
+  }).join('');
+  const body = REPLY_DRAFT.get(c.id) || '';
+  return `<div class="reply-box" data-cc="${esc(JSON.stringify(cc))}" data-to="${esc(t.to)}">
+    <div class="reply-hdr">↩ Reply to <strong>${esc(t.to)}</strong>${
+      cc.length ? ` · cc ${cc.length}` : (t.cc || []).length ? ' · <span class="cc-none">cc removed</span>' : ''}</div>
+    ${(t.cc || []).length ? `<div class="cc-row">${chips}</div>` : ''}
+    <div class="reply-subj">${esc(t.subject)}</div>
+    <textarea class="reply-body" rows="6" placeholder="Write your reply…"
+      oninput="REPLY_DRAFT.set('${esc(c.id)}', this.value)">${esc(body)}</textarea>
+    <div class="reply-actions">
+      <button class="primary" onclick="sendReply('${esc(c.id)}', this)">Send reply</button>
+      <span class="reply-hint">Goes into this thread. No attachments.</span>
+    </div>
+  </div>`;
+}
+function toggleCc(cid, address) {
+  const set = REPLY_DROP.get(cid) || new Set();
+  if (set.has(address)) set.delete(address); else set.add(address);
+  REPLY_DROP.set(cid, set);
+  refresh();
+}
+async function sendReply(cid, btn) {
+  const card = btn.closest('.reply-box');
+  const body = (REPLY_DRAFT.get(cid) || '').trim();
+  const say = m => { const el = document.getElementById('command'); if (el) el.textContent = m; };
+  if (!body) { say('Write a reply before sending.'); return; }
+  // The Cc travels as data, not as scraped chip text — the recipients of a real email are not
+  // something to re-derive from innerText.
+  let cc = [];
+  try { cc = JSON.parse(card.dataset.cc || '[]'); } catch { cc = []; }
+  const who = card.dataset.to || 'them';
+  const also = cc.length ? `\n\nAlso going to: ${cc.join(', ')}` : '\n\nNobody is Cc\'d.';
+  if (!confirm(`Send this reply to ${who}?${also}`)) return;
+  btn.disabled = true; btn.textContent = 'Sending…';
+  const r = await post('/api/contact/reply', {contact_id: cid, body, cc});
+  say(r.message || (r.ok ? 'Sent.' : 'Failed.'));
+  if (r.ok) { REPLY_DRAFT.delete(cid); REPLY_DROP.delete(cid); }
+  else { btn.disabled = false; btn.textContent = 'Send reply'; }
+  refresh();
 }
 function contactPanel(c) {
   const ch = CHANNEL_TAB.get(c.id) || (c.email ? 'email' : (c.linkedin_url ? 'linkedin' : 'phone'));

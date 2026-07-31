@@ -2242,8 +2242,14 @@ def _followup_action(data: dict) -> dict:
         state = touches.ladder_state(cid, channel.name, conn)
         touch = (state["count"] or 0) + 1
         try:
+            # A contact who has replied needs the exchange, not a template. Loaded only for
+            # the channel that reads it, so no other channel pays for the query.
+            from applypilot.networking import messages as _msgs
+            thread = (_msgs.thread_for_contact(cid, conn) if channel.name == "sms"
+                      and (contact.get("replied_at") or "").strip() else None)
             d = outreach.draft_for_channel(channel.name, profile, job, contact,
-                                           touch=touch, style=(data.get("style") or "").strip())
+                                           touch=touch, style=(data.get("style") or "").strip(),
+                                           thread=thread)
         except Exception as e:  # noqa: BLE001
             return {"ok": False, "message": f"draft failed: {e}"}
         touches.set_draft(cid, channel.name, d["subject"], d["body"])

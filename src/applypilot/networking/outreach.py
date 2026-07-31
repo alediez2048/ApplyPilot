@@ -423,7 +423,7 @@ _LI_TOUCH_INTENT = {
 
 
 def draft_for_channel(channel: str, profile: dict, job: dict, contact: dict,
-                      touch: int = 1, style: str = "") -> dict:
+                      touch: int = 1, style: str = "", thread: list | None = None) -> dict:
     """One entry point per channel, returning ONE shape: {"subject", "body"}.
 
     The drafters below return different keys for historical reasons (email has a subject
@@ -436,7 +436,7 @@ def draft_for_channel(channel: str, profile: dict, job: dict, contact: dict,
             profile, job, contact, touch=touch, style=style)["message"]}
     if channel == "sms":
         return {"subject": "", "body": draft_sms(
-            profile, job, contact, touch=touch, style=style)["message"]}
+            profile, job, contact, touch=touch, style=style, thread=thread)["message"]}
     return draft_followup(profile, job, contact, touch=touch, style=style)
 
 
@@ -663,42 +663,142 @@ def draft_linkedin_followup(profile: dict, job: dict, contact: dict, touch: int 
 #: text is read on a lock screen either way — length is the whole discipline of the channel.
 _SMS_LIMIT = 320
 
-_SMS_SYSTEM = """You write a SHORT TEXT MESSAGE for a job seeker reaching a real person about a role.
+_SMS_SYSTEM = """You write a SHORT TEXT MESSAGE for a job seeker reaching a recruiter or hiring
+manager about a role.
 
-This is a phone. Not email, not LinkedIn. Everything about the register is different.
+A text is the most intrusive channel there is. It arrives on a lock screen, at whatever hour it
+is sent, mixed in with messages from their family. Email waits to be opened; a text interrupts.
+Everything below follows from that one fact.
 
-Hard rules:
-- SAY WHO YOU ARE, FIRST. They do not have this number saved. An unidentified text is deleted
-  before it is read, and this is the single rule that separates a text from every other channel.
-  Open with the sender's first name and, in the same breath, why they have this number.
-- TWO OR THREE SENTENCES. Under 320 characters, total. Not a paragraph with line breaks.
-- NO LINKS. A URL from an unrecognised number is the strongest spam signal there is, and it will
-  cost the conversation. Anything worth linking gets sent after they reply.
-- No greeting line, no sign-off, no "Hope you're well". Nobody signs a text.
-- ONE question, and an easy one. "Is this a good number for you?" beats "Do you have 30 minutes
-  to discuss the role and my background?"
-- Give an explicit out. "No worries if not" / "happy to leave you alone" — a text is intrusive
-  and acknowledging that is what makes it land.
-- Contractions. Write how a person texts. But no slang, no emoji, no exclamation marks.
-- Never invent facts about the sender, and never attach years to a specific tool or framework.
+**The sender was not given permission to text.** In most cases the number came from a data tool,
+not from the recipient. That is the entire difficulty of this message, and pretending otherwise
+is what makes a text like this land badly. The message has to earn the channel in its first
+line, and the way it does that is by being SHORT, IDENTIFIED, and OBVIOUSLY EASY TO IGNORE.
+
+Hard rules, in priority order:
+
+1. SAY WHO YOU ARE FIRST. Full first name, in the opening clause. They do not have this number
+   saved; an unidentified text is deleted unread. This is the rule that separates a text from
+   every other channel.
+
+2. GIVE THE CONNECTIVE TISSUE IMMEDIATELY. In the same sentence or the next, name the real prior
+   touchpoint: applied for a specific role, emailed on a specific day, met somewhere, spoke
+   before. "I applied for the Applied AI Engineer role last week" is the sentence that turns a
+   stranger into a candidate they can place. Without it the message is a cold sales text.
+
+3. ACKNOWLEDGE THE CHANNEL AND OFFER A RETREAT. One short clause conceding that a text is a
+   liberty, and offering to continue somewhere less intrusive. This is what separates
+   respectful from presumptuous and it is the single most-skipped move.
+
+   PHRASE IT DIFFERENTLY EVERY TIME, IN YOUR OWN WORDS. Several people at the SAME company get
+   texted, and a stock sentence repeated across them is worse than omitting it — it proves the
+   message was generated. Do NOT use the wording "hope a text is okay" or "happy to move this
+   back to email"; those are the phrasings this instruction keeps producing and they are now
+   burned. Find your own, and vary the position — it does not have to be the second sentence.
+
+4. NEVER SAY WHERE THE NUMBER CAME FROM. Naming a data provider is worse than saying nothing —
+   it tells them they were looked up. Do not mention it, and do not invent a story either.
+
+5. ASK PERMISSION, NOT TIME. One yes/no a busy person can answer at a traffic light — whether
+   this is an okay way to reach them, or whether they mind receiving something here. Never ask
+   for a block of calendar time from someone who does not yet know who is asking. Vary this
+   too; do not ask "is this a good number to reach you" every time, and never phrase it so it
+   sounds like an automated number-verification check.
+
+6. MAKE IT EASY TO IGNORE, EXPLICITLY. "No worries if not" / "totally fine to ignore this."
+   Counter-intuitive and load-bearing: giving someone permission to say no is what makes them
+   comfortable enough to say yes.
+
+7. TWO TO FOUR SENTENCES. Under 320 characters TOTAL. One block, no line breaks, no paragraphs.
+
+8. NO LINKS. A URL from an unrecognised number is the strongest spam signal that exists, and
+   carriers filter on it. Anything worth linking is sent after they reply.
+
+9. NO PRESSURE OF ANY KIND. No deadlines, no "just following up before I move on", no other-offer
+   leverage, no urgency. Scarcity tactics from an unknown number read as a scam.
+
+10. No greeting line, no sign-off — nobody signs a text. Contractions, plain words, how a person
+    actually types. No emoji, no exclamation marks, no slang.
+
+11. Never invent facts about the sender, never attach years to a specific tool or framework, and
+    never invent a mutual contact or a prior meeting that is not stated below.
+
+12. NAME THE ROLE LIKE A PERSON WOULD. The role title below is a raw database field and is often
+    malformed — a scraper artifact, a tracking suffix, the word "uploaded", a requisition number.
+    Read it, and if it is not something a human would say out loud, describe the role naturally
+    instead ("the engineering role", "the role on your team") or lean on the company name. A
+    text that says "the Betterup uploaded job" tells the reader a machine wrote it. Never repair
+    a broken title by GUESSING what it was meant to say — drop it and stay vague.
 
 Return ONLY JSON: {"message": "..."}"""
 
 #: What each text is FOR. Position 0 is the first one — the only one where the sender is a
 #: stranger holding their number.
+#:
+#: The ladder is deliberately short and slow (3d / 7d, two touches). Chasing silence over text is
+#: how a candidate becomes a nuisance: the same three-touch cadence that is normal in email reads
+#: as harassment on a phone, because each one interrupts.
 _SMS_TOUCH_INTENT = {
-    0: ("FIRST text. They do not know this number. Identify the sender immediately, say in one "
-        "clause why they are being texted (applied for the role / spoke before / a shared "
-        "contact), ask if this is an okay way to reach them, and give an out."),
-    1: ("Second touch (~3 days later). They read the first and did not answer. Assume they are "
-        "busy, not uninterested. One short line, one new concrete thing, and an easy out."),
-    2: ("Final touch (~7 days later). LAST message on this channel — say so plainly and warmly. "
-        "No question that demands a reply. Close the loop and leave the door open."),
+    0: ("FIRST text — the one that has to earn the channel. Identify the sender, give the real "
+        "prior touchpoint, acknowledge that a text is a liberty and offer to move back to email, "
+        "ask ONE yes/no question, and make it explicitly fine to ignore."),
+    1: ("Second and SECOND-TO-LAST text (~3 days later). They saw the first and did not answer, "
+        "which is information: assume busy, never assume rude. Shorter than the first. Add ONE "
+        "new concrete thing — never a restatement. Do not express disappointment, do not say "
+        "'just following up', and do not re-introduce yourself beyond a two-word reminder."),
+    2: ("FINAL text (~7 days later). Say plainly and warmly that it is the last one, so they know "
+        "the channel is closing and feel no obligation. Ask NOTHING that demands a reply. Leave "
+        "the door genuinely open and thank them for their time without being effusive. This "
+        "message should be readable as a kindness, not a guilt trip."),
 }
+
+#: Used INSTEAD of the touch ladder when they have replied. Not a variant of it — a different
+#: message with a different job, which is why it replaces rather than appends.
+_SMS_CONTINUATION_INTENT = (
+    "This is a CONTINUATION of a live conversation, not outreach. They wrote back; the hard "
+    "part already worked. Do not earn the channel, do not re-introduce the sender beyond their "
+    "first name, do not name the role as though they might not know it, and above all NEVER ask "
+    "whether an earlier message arrived — it did, they answered it, and asking implies they did "
+    "not. Read what they last said and move exactly one thing forward: answer their question, "
+    "give the availability they asked for, or ask where the process stands. Two sentences. If a "
+    "text adds nothing over replying in the existing email thread, say the smaller thing.")
+
+#: How much standing the sender actually has to be texting at all, worst to best. This is the
+#: biggest single lever on the copy and it was previously reduced to "did we email them".
+def _sms_permission(contact: dict) -> str:
+    replied = bool((contact.get("replied_at") or "").strip())
+    emailed = bool((contact.get("sent_message_id") or "").strip())
+    invited = (contact.get("dm_status") or "") in ("sent", "manual")
+    if replied:
+        return ("STRONGEST FOOTING, AND A DIFFERENT MESSAGE ENTIRELY. They have already REPLIED. "
+                "A live conversation exists, so this is NOT outreach and NOT a nudge on silence — "
+                "writing it as one insults them by implying they never answered, which is the "
+                "single worst thing this message can do. Do not say 'following up on my email', "
+                "do not ask whether it arrived, and do not re-pitch. Pick up where the exchange "
+                "left off: answer or advance the thing they last raised. Still identify yourself "
+                "once, briefly — replying by email does not mean they saved this number.")
+    if emailed and invited:
+        return ("MODERATE. An email and a LinkedIn invite have both gone out unanswered. Two "
+                "channels of silence is a real signal: this text must be noticeably shorter and "
+                "gentler than either, and must NOT read as escalation. Do not enumerate the "
+                "attempts — 'I emailed and connected on LinkedIn' sounds like a list of "
+                "grievances. Name one, lightly.")
+    if emailed:
+        return ("MODERATE. An email went out and has not been answered. The text should reference "
+                "it in one clause so it lands as a nudge on something real, not a new front.")
+    if invited:
+        return ("WEAK. Only a LinkedIn invite has gone out, and there is no reply. Mention it in "
+                "one clause as the connective tissue, and lean harder on the out.")
+    return ("WEAKEST — TREAT WITH CARE. There has been NO prior contact of any kind: no email, no "
+            "LinkedIn, nothing. This person did not give out this number and has never heard from "
+            "the sender. The ONLY defensible framing is the job application itself, which must be "
+            "named specifically and early. Be the shortest of any version, apologise for the "
+            "channel in a few words without grovelling, and make ignoring it the easiest possible "
+            "response. Do not be charming. Do not sell. Ask one small yes/no question and stop.")
 
 
 def draft_sms(profile: dict, job: dict, contact: dict, touch: int = 0,
-              style: str = "") -> dict:
+              style: str = "", thread: list | None = None) -> dict:
     """Draft a text message. `touch` 0 is the first one; 1+ are follow-ups.
 
     Returns {"message": str}. NEVER sends — the operator copies this, opens Messages and
@@ -711,20 +811,63 @@ def draft_sms(profile: dict, job: dict, contact: dict, touch: int = 0,
     """
     role = job.get("title") or "the role"
     company = contact.get("company") or job.get("company") or job.get("site") or "the company"
-    intent = _SMS_TOUCH_INTENT.get(max(0, min(touch, 2)), _SMS_TOUCH_INTENT[2])
+    # The touch ladder describes COLD outreach — earn the channel, give the touchpoint, ask a
+    # yes/no. For someone who has already replied every one of those is wrong, and because it
+    # arrives under the heading "THIS MESSAGE:" it beat the permission block every time: the
+    # draft for a contact who had answered still asked whether the email had arrived. A
+    # contradiction in a prompt is not fixed by saying the other side louder.
+    if (contact.get("replied_at") or "").strip():
+        intent = _SMS_CONTINUATION_INTENT
+    else:
+        intent = _SMS_TOUCH_INTENT.get(max(0, min(touch, 2)), _SMS_TOUCH_INTENT[2])
     directive = _resolve_style(profile, style)
-    emailed = bool((contact.get("sent_message_id") or "").strip())
+    # Two different dates that are easy to conflate: the JOB was applied to on job.applied_at,
+    # and the outreach EMAIL went out on contact.submitted_at (which is what the email ladder
+    # anchors on). Handing the model the email date labelled "applied" puts a checkable factual
+    # error in a message to the one person positioned to check it.
+    applied_on = (job.get("applied_at") or "")[:10]
+    emailed_on = (contact.get("submitted_at") or "")[:10]
+    replied = bool((contact.get("replied_at") or "").strip())
+    # Only text we actually HOLD counts. `gmail.metadata` gives headers with no body, so a
+    # thread can exist with every snippet empty — which is indistinguishable from no thread
+    # for this purpose, and must be treated as such rather than as context.
+    #
+    # This is the REPLY TEXT, not a flag, because `conversation_transcript` uses the thread
+    # only for the replier's name and date — the words have to be handed to it separately as
+    # `their_reply`. Passing the thread alone renders the sender's own email and nothing else,
+    # and the model correctly answered "only Alejandro's initial email is shown" rather than
+    # inventing a continuation.
+    said = ""
+    if replied:
+        said = next((m.get("snippet") or "" for m in reversed(thread or [])
+                     if m.get("direction") == "in" and (m.get("snippet") or "").strip()), "")
+        said = said.strip()
 
     user = (
         f"SENDER: {_sender_name(profile)}\n"
         f"TARGET: {contact.get('full_name', '')} — {contact.get('title', '')} at {company}\n"
-        f"ROLE APPLIED FOR: {role}\n"
-        # Whether an email already went out changes the opening line completely: with one, the
-        # text is a nudge on a thread they can look up; without, it is a cold contact who has
-        # to be told who this is from scratch.
-        + (f"An email was already sent to {contact.get('email') or 'them'} and went unanswered. "
-           "The text may refer to it briefly — but must still say who is texting.\n"
-           if emailed else "No email has been sent. This is the first contact of any kind.\n")
+        f"ROLE APPLIED FOR: {role}"
+        + (f" (applied {applied_on})" if applied_on else "") + "\n\n"
+        # How much standing there is to be texting at all. This drives the opening line, the
+        # length, and how hard the message has to work to justify itself — it is a bigger lever
+        # on the copy than anything else in this prompt.
+        f"HOW MUCH STANDING THE SENDER HAS HERE:\n{_sms_permission(contact)}\n"
+        + (f"\nThe email that went unanswered was sent {emailed_on} to "
+           f"{contact.get('email') or 'them'}.\n"
+           if (contact.get("sent_message_id") or "").strip()
+           and not (contact.get("replied_at") or "").strip() else "")
+        # A contact who replied needs the actual exchange or the message cannot advance
+        # anything — and a "continuation" written with no context is just a follow-up on
+        # silence, addressed to someone who did not go silent. Same principle `_draft_reply`
+        # already enforces by refusing outright.
+        + (f"\nTHE CONVERSATION SO FAR — continue THIS, do not restart it:\n"
+           f"{conversation_transcript(contact, thread, their_reply=said)}\n" if said else "")
+        + ("\nYou do NOT have the text of their reply. Do not pretend to reference it, do not "
+           "guess what they said, and do not fall back to 'following up on my email' — they "
+           "answered. Acknowledge that you are already in touch, keep it to one or two lines, "
+           "and offer one concrete next step the sender can state without knowing their words "
+           "(availability to talk, or asking where the process stands).\n"
+           if replied and not said else "")
         + f"\nTHIS MESSAGE: {intent}\n\n"
         + (f"STYLE DIRECTION (follow closely):\n{directive}\n\n" if directive else "")
         + f"Write the text message. Under {_SMS_LIMIT} characters. Return the JSON."

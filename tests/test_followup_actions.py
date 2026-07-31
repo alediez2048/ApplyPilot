@@ -122,13 +122,16 @@ def test_draft_uses_the_channel_drafter_and_stores_the_result(db, cid, monkeypat
     from applypilot.networking import outreach
     seen = {}
 
-    def fake(channel, profile, job, contact, touch=1, style=""):
-        seen.update(channel=channel, touch=touch)
+    def fake(channel, profile, job, contact, touch=1, style="", thread=None):
+        seen.update(channel=channel, touch=touch, thread=thread)
         return {"subject": f"S{touch}", "body": f"B{touch}"}
     monkeypatch.setattr(outreach, "draft_for_channel", fake)
 
     r = act(contact_id=cid, action="li_draft")
     assert r["ok"] and seen["channel"] == "linkedin" and seen["touch"] == 1
+    # The conversation is loaded ONLY for the channel that reads it. A thread here would mean
+    # every LinkedIn and email draft pays for a messages query it never looks at.
+    assert seen["thread"] is None, "loaded a thread for a channel that does not use one"
     assert touches.ladder_state(cid, "linkedin", db)["draft_body"] == "B1"
 
     # touch number advances with the ladder, so the prompt differs per position

@@ -167,7 +167,10 @@ def test_the_frontend_sends_the_keys_the_backend_reads():
     for blob in posts:
         sent_keys |= {m for m in re.findall(r"(\w+)\s*:", blob)}
     # `body` is the object being built in fuAct, not a payload key there; both appear.
-    allowed = {"contact_id", "action", "subject", "body", "message"}
+    # `style` is the "tweak the vibe" directive on a regenerate — read by the draft verb at
+    # `data.get("style")`. It only reached this endpoint when SMS arrived; email and LinkedIn
+    # regenerate through /api/outreach, which is why the allowlist had never needed it.
+    allowed = {"contact_id", "action", "subject", "body", "message", "style"}
     assert sent_keys <= allowed, f"JS posts unexpected keys: {sent_keys - allowed}"
     assert "message" not in sent_keys, \
         "JS still posts `message`; ARCH-3 renamed it to `body` and the backend reads `body`"

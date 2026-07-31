@@ -447,6 +447,124 @@ async function sendEmail(cid, verified, btn) {
   if (r.ok) { refresh(); }
   else { btn.disabled = false; btn.textContent = 'Send email'; alert(r.message || 'Send failed'); }
 }
+// ── Text (iMessage/SMS) ─────────────────────────────────────────────────────
+//
+// Copy → open Messages → you paste → "✓ I sent it". The same shape as LinkedIn and for the
+// same reason: Apple exposes no send API, and driving a messaging app from outside is the
+// mistake this codebase already made twice (§Lessons 3). Nothing here auto-sends.
+//
+// The number is entered by hand (Apollo will not release a direct dial to a local tool), so
+// the notes block stays on this tab — enter the number, then write the text, in one place.
+const SMS_LIMIT = 320;
+
+//: `sms:` wants digits and a leading +, not the pretty form the operator pasted.
+function smsHref(phone) {
+  const clean = String(phone || '').replace(/[^\d+]/g, '');
+  return 'sms:' + clean;
+}
+
+function smsChannel(c) {
+  const phone = (c.phone || '').trim();
+  // No number, no channel — but the notes block is exactly where a number gets added, so this
+  // is a prompt with the fix attached rather than a dead end.
+  if (!phone) {
+    return `<div class="pane-empty">No phone number for ${esc(c.full_name)} — add one below to text them.</div>`
+         + contactNotes(c);
+  }
+  const draft = c.sms_followup_message || '';
+  const len = draft.length;
+  const started = !!c.sms_sent_at;
+  const touch = (c.sms_followup_count || 0) + 1;
+  const total = c.sms_followup_total || 2;
+  const st = c.sms_followup_state || '';
+
+  // Once the first text is recorded this is a LADDER, so say where you are in it. Before that
+  // it is just the first message and a touch count would be noise.
+  let ladder = '';
+  if (started) {
+    const when = String(c.sms_sent_at).slice(0, 10);
+    ladder = st === 'replied' ? `<span class="sent-tag">✓ replied — sequence stopped</span>`
+           : st === 'stopped' ? `<span class="muted">sequence stopped</span>`
+           : st === 'finished' ? `<span class="muted">ladder finished (${total} of ${total} sent)</span>`
+           : st === 'due' ? `<span class="fu-due">↻ follow-up ${touch} of ${total} due</span>`
+           : st === 'waiting' && c.sms_followup_due_in_h != null
+             ? `<span class="muted">next text in ${Math.round(c.sms_followup_due_in_h / 24)}d</span>`
+             : `<span class="muted">first text ${esc(when)}</span>`;
+  }
+
+  return `<div class="draft">
+      <div class="d-label">Text message
+        <span class="d-count ${len > SMS_LIMIT ? 'over' : ''}"><span class="smscount">${len}</span>/${SMS_LIMIT}</span>
+        <span class="sms-to">to ${esc(phone)}</span>
+        ${ladder}
+      </div>
+      <textarea class="d-sms" rows="3" oninput="updSmsCount(this)"
+        placeholder="${draft ? '' : 'No draft yet — click Regenerate'}">${esc(draft)}</textarea>
+      <input class="d-style" placeholder="✨ Tweak the vibe, then Regenerate — e.g. 'we met at the AITX hackathon'">
+      <div class="dbtns">
+        <button onclick="saveSms('${esc(c.id)}', this)">Save</button>
+        <button class="secondary" onclick="regenSms('${esc(c.id)}', this)">Regenerate</button>
+        <a class="btn-like send" href="${esc(smsHref(phone))}"
+           onclick="copySmsFirst(this)"
+           title="Copies the text and opens Messages — then paste and send. Nothing sends itself.">Copy &amp; open Messages ↗</a>
+        ${smsSentButton(c)}
+      </div>
+      <div class="sms-hint">Written for a phone: no links (a URL from an unknown number is the
+        strongest spam signal there is) and it says who you are, because they do not have your
+        number saved.</div>
+    </div>` + contactNotes(c);
+}
+
+// "I sent it" means two different things depending on where you are, and conflating them is
+// how a ladder loses its anchor: the FIRST text stamps sms_sent_at and starts the clock, and
+// every later one is a touch. Both are operator-asserted — nothing can watch Messages.app.
+function smsSentButton(c) {
+  if (!c.sms_sent_at)
+    return `<button class="secondary" onclick="fuAct('${esc(c.id)}','sms_connected',this)"
+      title="Record that you sent the first text — starts the follow-up clock">✓ I sent it</button>`;
+  const st = c.sms_followup_state || '';
+  if (st === 'replied' || st === 'stopped' || st === 'finished') return '';
+  return `<button class="secondary" onclick="fuAct('${esc(c.id)}','sms_sent',this)"
+    title="Record that you sent this follow-up text">✓ I sent it</button>`;
+}
+
+function updSmsCount(ta) {
+  const wrap = ta.closest('.draft');
+  const el = wrap.querySelector('.smscount');
+  const badge = wrap.querySelector('.d-count');
+  if (el) { el.textContent = ta.value.length; badge.classList.toggle('over', ta.value.length > SMS_LIMIT); }
+}
+
+// Copy, then let the browser follow the sms: href natively. Assigning location.href for a
+// custom scheme is unreliable and window.open gets popup-blocked; a real <a> is the one that
+// works. The copy has to happen synchronously inside the handler or the clipboard write is
+// dropped as untrusted once navigation starts.
+function copySmsFirst(a) {
+  const d = a.closest('.draft');
+  const ta = d ? d.querySelector('.d-sms') : null;
+  if (ta) navigator.clipboard.writeText(ta.value);
+  a.textContent = 'Copied ✓ — paste in Messages';
+  setTimeout(() => { a.innerHTML = 'Copy &amp; open Messages ↗'; }, 2500);
+}
+
+async function saveSms(cid, btn) {
+  const d = btn.closest('.draft');
+  const r = await post('/api/followup', {contact_id: cid, action: 'sms_save',
+    subject: '', body: fieldVal(d, '.d-sms')});
+  btn.textContent = r && r.ok === false ? 'Failed' : 'Saved ✓';
+  setTimeout(() => btn.textContent = 'Save', 1200);
+}
+
+async function regenSms(cid, btn) {
+  btn.disabled = true; btn.textContent = 'Writing…';
+  const d = btn.closest('.draft');
+  const r = await post('/api/followup', {contact_id: cid, action: 'sms_draft',
+    style: fieldVal(d, '.d-style')});
+  btn.disabled = false; btn.textContent = 'Regenerate';
+  if (r && r.ok === false) { alert(r.message || 'Could not draft that text.'); return; }
+  refresh();
+}
+
 function contactNotes(c) {
   // Apollo will not hand a direct dial to a local tool (reveal_phone_number is
   // webhook-only), so the number is copied out of the Apollo UI by hand and kept here.
@@ -914,7 +1032,7 @@ function contactPanel(c) {
   let body = '';
   if (ch === 'email')    body = c.email ? emailChannel(c) : `<div class="pane-empty">No email address for ${esc(c.full_name)}.</div>`;
   if (ch === 'linkedin') body = c.linkedin_url ? linkedinChannel(c) : `<div class="pane-empty">No LinkedIn profile.</div>`;
-  if (ch === 'phone')    body = contactNotes(c);
+  if (ch === 'phone')    body = smsChannel(c);
   return `<div class="pbody" onclick="event.stopPropagation()">
       <div class="cmeta">
         ${c.email ? `✉ <a href="mailto:${esc(c.email)}">${esc(c.email)}</a> ${emailBadge(c.email_status)}` : '✉ —'}
@@ -926,7 +1044,7 @@ function contactPanel(c) {
         ${c.verify_note ? `<div class="verify-note ${esc(c.confidence)}">${c.confidence === 'high' ? '✓' : '?'} ${esc(c.verify_note)}</div>` : ''}
         ${syncGmailBtn(c)}
       </div>
-      <div class="chan">${tab('email','✉ Email')}${tab('linkedin','🔗 LinkedIn')}${tab('phone','📇 Phone & notes')}</div>
+      <div class="chan">${tab('email','✉ Email')}${tab('linkedin','🔗 LinkedIn')}${tab('phone','💬 Text' + (c.sms_sent_at ? ' ✓' : ''))}</div>
       ${body}
       <div class="crow-del"><button class="link-danger" onclick="deleteContact('${esc(c.id)}', decodeURIComponent('${encodeURIComponent(c.full_name || '')}'), ${!!c.emailed})">🗑 Not at this company — remove</button></div>
     </div>`;

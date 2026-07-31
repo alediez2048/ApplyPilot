@@ -713,12 +713,15 @@ def test_a_channel_tab_with_nothing_behind_it_is_not_offered(tmp_path):
     # A stored preference for a channel this contact does not have must NOT be honoured.
     stuck = _contact(id="s1", full_name="Stuck", linkedin_url="", phone="")
     stuck["_pick"] = "linkedin"
+    # Opened ON the Text tab with no number: the pane must offer the field, not dead-end.
+    no_phone = _contact(id="p1", full_name="No Number", linkedin_url="", phone="")
+    no_phone["_pick"] = "phone"
 
     script = tmp_path / "tabs.mjs"
     script.write_text(
         _STUBS
         + f"const SRC = {json.dumps(_page_js())};\n"
-        + f"const CASES = {json.dumps({'email_only': email_only, 'li_only': li_only, 'stuck': stuck})};\n"
+        + f"const CASES = {json.dumps({'email_only': email_only, 'li_only': li_only, 'stuck': stuck, 'no_phone': no_phone})};\n"
         + _TABS_DRIVER
     )
     proc = subprocess.run(["node", str(script)], capture_output=True, text=True, timeout=60)
@@ -728,7 +731,13 @@ def test_a_channel_tab_with_nothing_behind_it_is_not_offered(tmp_path):
     assert "🔗 LinkedIn" not in out["email_only"], "offered a LinkedIn tab with no profile behind it"
     assert "✉ Email" in out["email_only"]
     assert "✉ Email" not in out["li_only"], "offered an Email tab with no address behind it"
-    assert "📇 Phone & notes" in out["email_only"], "notes are always available"
+    # The Text tab is ALWAYS offered, unlike the other two, and deliberately so: it is where a
+    # phone number gets entered, so hiding it when there is no number hides the only way to add
+    # one. It opens on a prompt with the fix attached rather than a dead "No phone number."
+    assert "💬 Text" in out["email_only"], "the text/notes tab is always available"
+    assert "No phone number" in out["no_phone"], "the Text tab must say the number is missing"
+    assert "c-phone" in out["no_phone"], \
+        "it must ALSO render the field to add one — otherwise the only way in is hidden"
 
     assert "No LinkedIn profile" not in out["stuck"], (
         "a stored preference for a channel this contact does not have was honoured, so the "

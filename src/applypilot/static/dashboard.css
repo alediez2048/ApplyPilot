@@ -436,6 +436,21 @@
   .draft .d-count { font-weight:400; color:#8a97a2; text-transform:none; letter-spacing:0; }
   .draft .d-count.over { color:#c0392b; font-weight:700; }
   .draft .d-linkedin { width:100%; font-size:12px; padding:5px 6px; border:1px solid #d7e2ec; border-radius:5px; font-family:inherit; resize:vertical; }
+  /* Text (iMessage/SMS). The compose box is an <a href="sms:…"> rather than a button, because
+     a real anchor is the only reliable way to hand a custom scheme to the OS — window.open
+     gets popup-blocked and assigning location.href for sms: is inconsistent. So it has to be
+     made to look like the buttons beside it. */
+  .draft .d-sms { width:100%; font-size:12px; padding:5px 6px; border:1px solid #d7e2ec; border-radius:5px; font-family:inherit; resize:vertical; }
+  .draft .sms-to { font-weight:400; color:#8a97a2; text-transform:none; letter-spacing:0; margin-left:6px; }
+  .draft .sms-hint { font-size:10.5px; color:var(--muted); margin-top:5px; line-height:1.45; }
+  .draft .dbtns .btn-like {
+    font-size:11px; padding:2px 9px; border-radius:5px; border:1px solid #d7e2ec;
+    background:#fff; color:var(--text); text-decoration:none; line-height:1.7;
+    display:inline-block; cursor:pointer;
+  }
+  .draft .dbtns .btn-like.send { background:linear-gradient(180deg,#eef7ff,#dcefff); border-color:#a9cdf0; color:#1a5aa0; font-weight:600; }
+  .draft .dbtns .btn-like:hover { border-color:#a9cdf0; }
+  .draft .fu-due { font-size:11px; color:#9a6b00; font-weight:600; text-transform:none; letter-spacing:0; margin-left:6px; }
   .badge {
     display:inline-flex; align-items:center; gap:4px; white-space:nowrap;
     padding:3px 10px;

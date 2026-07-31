@@ -1266,6 +1266,7 @@ def _contact_payload(c: dict, company: str | None = None, ladders: dict | None =
     # The payload keys stay as they were so the frontend is untouched by the storage move.
     email_l = ladders.get((cid, "email")) or EMPTY_LADDER
     li_l = ladders.get((cid, "linkedin")) or EMPTY_LADDER
+    sms_l = ladders.get((cid, "sms")) or EMPTY_LADDER
     return {
         "id": c.get("id") or "",
         "full_name": c.get("full_name") or "",
@@ -1302,6 +1303,12 @@ def _contact_payload(c: dict, company: str | None = None, ladders: dict | None =
         "li_followup_status": _legacy_followup_status(li_l),
         "li_followup_message": li_l["draft_body"],
         "dm_sent_at": c.get("dm_sent_at") or "",
+        # iMessage/SMS. `sms_sent_at` is the whole channel state — a phone number alone proves
+        # nothing, because it is typed in for anyone the operator MIGHT text.
+        "sms_sent_at": c.get("sms_sent_at") or "",
+        "sms_followup_count": sms_l["count"],
+        "sms_followup_status": _legacy_followup_status(sms_l),
+        "sms_followup_message": sms_l["draft_body"],
         # LinkedIn DM channel state + per-contact readiness (has note + profile, not sent).
         "dm_status": c.get("dm_status") or "none",
         "dm_error": c.get("dm_error") or "",
@@ -2193,10 +2200,25 @@ def _followup_action(data: dict) -> dict:
         return {"ok": True, "message": f"{name}sequence "
                 + ("reopened" if verb == "reopen" else "stopped")}
 
-    # Recording the invite is not a ladder action — it sets the anchor the clock runs from.
+    # Recording the FIRST message is not a ladder action — it sets the anchor the clock runs
+    # from. Keyed by channel rather than branched: LinkedIn stamps dm_sent_at, SMS stamps
+    # sms_sent_at, and email needs none because Gmail's send response proves itself.
+    #
+    # Both are operator-asserted, and for the same reason — we cannot watch LinkedIn or
+    # Messages.app. Both setters are idempotent, because the only evidence a text was sent is
+    # somebody clicking a button, which makes the double-click the obvious failure: a second
+    # stamp would move the anchor forward and silently push every touch later.
     if verb == "connected":
-        store.mark_connected_now(cid)
-        return {"ok": True, "message": "recorded — follow-up clock started"}
+        setter = {"linkedin": "mark_connected_now", "sms": "mark_sms_sent"}.get(channel.name)
+        if not setter:
+            return {"ok": False, "message": f"{channel.name} has no anchor to set"}
+        # `is False` deliberately, not falsiness: mark_connected_now returns None (it is
+        # idempotent in SQL via COALESCE but does not report), and treating that as "already
+        # recorded" would have changed what every LinkedIn click says. Only a setter that
+        # explicitly reports a no-op gets the second message.
+        first = getattr(store, setter)(cid)
+        return {"ok": True, "message": "already recorded" if first is False
+                else "recorded — follow-up clock started"}
 
     if verb == "save":
         touches.set_draft(cid, channel.name, data.get("subject", ""), data.get("body", ""))

@@ -118,6 +118,24 @@ def ladder_state(contact_id: str, channel: str,
     return ladder_states([contact_id], conn).get((contact_id, channel)) or _empty_state()
 
 
+def sent_touches(contact_id: str, channel: str = "email",
+                 conn: sqlite3.Connection | None = None) -> list[dict]:
+    """The follow-ups actually SENT to one contact, oldest first, with their text.
+
+    This is the missing middle of a conversation. The first email lives on `contacts`, the
+    reply lives in `messages`, and everything in between is here — so a reply drafted without
+    it can cheerfully repeat a point that was already made twice.
+    """
+    if conn is None:
+        conn = get_connection()
+    init_touches(conn)
+    rows = conn.execute(
+        "SELECT seq, subject, body, sent_at FROM touches "
+        "WHERE contact_id = ? AND channel = ? AND sent_at IS NOT NULL ORDER BY seq",
+        (contact_id, channel)).fetchall()
+    return [dict(zip(r.keys(), r)) for r in rows]
+
+
 def all_sent_touches(conn: sqlite3.Connection | None = None) -> list[dict]:
     """Every touch that was actually SENT — the input to by_touch() (CRM-2).
 

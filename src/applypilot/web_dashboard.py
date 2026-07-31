@@ -1576,14 +1576,19 @@ def _reply_target(thread: list) -> dict | None:
 
 
 def _draft_reply(data: dict) -> dict:
-    """Draft an answer to a live conversation (CRM-4b). Never sends.
+    """Draft an answer to a live conversation, from the whole sequence. Never sends.
 
-    Refuses cleanly without the content scope rather than producing something. A "contextual"
-    reply written without the context is a generic follow-up wearing a Re: subject line — the
-    exact automated-sounding message that kills a real exchange, and it would be indistinguish-
-    able from a working feature until the operator read it.
+    Two ways the reply text arrives and this does not prefer either: `their_reply` pasted by
+    the operator, or the stored snippet if `gmail.readonly` was granted. A paste is PERSISTED —
+    otherwise the sequence the CRM claims to remember has a hole exactly where the interesting
+    part is, and the operator re-pastes it on every redraft.
+
+    Refuses when there is no text at all, rather than producing something. A "contextual" reply
+    written with no context is a generic follow-up wearing a Re: subject line, and it would be
+    indistinguishable from a working feature until somebody read it.
     """
-    from applypilot.networking import messages as _msgs, store as _store
+    from applypilot.database import log_event
+    from applypilot.networking import messages as _msgs, store as _store, touches as _touches
 
     cid = (data.get("contact_id") or "").strip()
     if not cid:
@@ -1595,21 +1600,42 @@ def _draft_reply(data: dict) -> dict:
     if not contact:
         return {"ok": False, "message": "contact not found"}
 
+    pasted = (data.get("their_reply") or "").strip()
+    if pasted:
+        _msgs.set_reply_text(cid, pasted, conn)
+
     thread = _msgs.thread_for_contact(cid, conn)
-    if not any((m.get("snippet") or "").strip() for m in thread):
-        from applypilot.networking import gmail_read
-        _, why = gmail_read.can_read_content()
-        return {"ok": False, "message": f"Can't draft an answer — {why}"}
+    said = pasted or next((m.get("snippet") or "" for m in reversed(thread)
+                           if m.get("direction") == "in" and (m.get("snippet") or "").strip()), "")
+    if not said.strip():
+        return {"ok": False,
+                "message": "Paste what they wrote above and I'll answer it — or turn on reply "
+                           "content (`network --gmail-connect --with-content`) to read it "
+                           "automatically."}
 
     job = _jobs.get(contact.get("job_url", ""), conn) or {"url": contact.get("job_url", "")}
     try:
         from applypilot.config import load_profile
         from applypilot.networking import outreach
-        d = outreach.draft_reply(load_profile(), job, contact, thread=thread)
+        try:
+            profile = load_profile()
+        except Exception:  # noqa: BLE001
+            # Same fallback as `tick`: the profile supplies the sender's name and scheduling
+            # link, both optional. Refusing to answer a live human because a config file is
+            # missing is the wrong trade.
+            profile = {}
+        d = outreach.draft_reply(profile, job, contact, thread=thread,
+                                 style=(data.get("style") or ""), their_reply=said,
+                                 touches=_touches.sent_touches(cid, "email", conn))
     except Exception as e:  # noqa: BLE001
         log.debug("Reply draft failed", exc_info=True)
         return {"ok": False, "message": f"Draft failed: {e}"}
-    return {"ok": True, "subject": d["subject"], "body": d["body"],
+
+    log_event(contact.get("job_url", ""), "outreach", "ok",
+              f"Drafted a reply to {contact.get('full_name') or 'them'}"
+              + (f" ({d.get('intent')})" if d.get("intent") not in (None, "unknown") else "")
+              + ". Not sent.", conn)
+    return {"ok": True, "subject": d["subject"], "body": d["body"], "intent": d.get("intent"),
             "message": "Draft ready — read it before you send it."}
 
 

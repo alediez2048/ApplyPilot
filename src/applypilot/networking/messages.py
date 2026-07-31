@@ -43,7 +43,15 @@ _MESSAGE_COLUMNS: dict[str, str] = {
 #: Enough to draft a reply against, an order of magnitude less than a message body sitting in
 #: a plaintext SQLite file. Adding threads already changed what a leak of applypilot.db costs;
 #: full bodies would make it correspondence.
+#:
+#: This cap governs the AUTOMATIC path — text Gmail hands us because a scope was granted.
 SNIPPET_MAX = 200
+
+#: The cap when the OPERATOR pastes a reply in themselves. Larger on purpose, and the reasoning
+#: is different rather than looser: nothing was harvested. They had the message open, selected
+#: it and chose to hand it over, one contact at a time — the same act as typing into `notes`.
+#: Still bounded, because "paste your inbox into the CRM" is not a feature either.
+PASTED_MAX = 2000
 
 
 def init_messages(conn: sqlite3.Connection | None = None) -> sqlite3.Connection:
@@ -163,6 +171,31 @@ def threads_for_job(job_url: str, conn: sqlite3.Connection | None = None) -> dic
         d = _row(r)
         out.setdefault(d.get("contact_id") or "", []).append(d)
     return out
+
+
+def set_reply_text(contact_id: str, text: str, conn: sqlite3.Connection | None = None) -> bool:
+    """Record what they said, pasted by the operator, onto the newest INBOUND message.
+
+    A deliberately separate entry point from `upsert_messages`, not a parameter on it. The two
+    have different provenance — one is text Gmail handed us because a scope was granted, the
+    other is text a human chose to paste — and collapsing them would make the auto-ingest cap
+    depend on which caller happened to be running.
+
+    Attaches to the last inbound message so the sequence stays a sequence: the reply text lands
+    ON the reply, not in a field beside the conversation.
+    """
+    if conn is None:
+        conn = get_connection()
+    init_messages(conn)
+    row = conn.execute(
+        "SELECT message_id FROM messages WHERE contact_id = ? AND direction = 'in' "
+        "ORDER BY sent_at DESC LIMIT 1", (contact_id,)).fetchone()
+    if not row:
+        return False
+    conn.execute("UPDATE messages SET snippet = ? WHERE message_id = ?",
+                 ((text or "").strip()[:PASTED_MAX], row[0]))
+    conn.commit()
+    return True
 
 
 def threads_by_contact(conn: sqlite3.Connection | None = None) -> dict:

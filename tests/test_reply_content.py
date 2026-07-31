@@ -130,6 +130,30 @@ def test_our_own_sent_text_is_never_stored_back(db, monkeypatch):
     assert rows[0]["direction"] == "out" and not rows[0]["snippet"]
 
 
+def test_pasted_text_is_bounded_too(db):
+    """A larger cap than the auto path, for a different reason rather than a looser one —
+    nothing was harvested, the operator chose to hand over one message. Still bounded, because
+    "paste your whole inbox into the CRM" is not a feature either."""
+    msg_store.upsert_messages([{"message_id": "m1", "thread_id": "t", "contact_id": "c1",
+                                "job_url": "http://j/1", "direction": "in",
+                                "from_addr": "g@co.com", "subject": "s",
+                                "sent_at": "2026-07-30T10:00:00+00:00"}], db)
+    assert msg_store.set_reply_text("c1", "y" * 50_000, db) is True
+    assert len(msg_store.thread_for_contact("c1", db)[0]["snippet"]) == msg_store.PASTED_MAX
+    assert msg_store.PASTED_MAX <= 4000, "at some size this stops being a message and becomes a mailbox"
+
+
+def test_pasting_onto_a_thread_with_no_inbound_message_is_a_no_op(db):
+    """Nothing to attach it to. Reported rather than silently invented as a new row — a
+    fabricated inbound message would make the conversation claim they wrote when they did not."""
+    msg_store.upsert_messages([{"message_id": "m1", "thread_id": "t", "contact_id": "c1",
+                                "job_url": "http://j/1", "direction": "out",
+                                "from_addr": ME, "subject": "s",
+                                "sent_at": "2026-07-30T10:00:00+00:00"}], db)
+    assert msg_store.set_reply_text("c1", "they said this", db) is False
+    assert msg_store.thread_for_contact("c1", db)[0]["snippet"] == ""
+
+
 def test_a_long_snippet_is_truncated_at_the_write(db):
     """Capped in the store, not the caller — a cap a new caller can forget is not a cap."""
     msg_store.upsert_messages([{"message_id": "m1", "thread_id": "t", "contact_id": "c1",
@@ -233,7 +257,11 @@ def test_every_intent_offers_something_to_do_except_unknown():
 
 def test_drafting_refuses_rather_than_writing_a_generic_follow_up(db, monkeypatch):
     """A "contextual" reply written without the context is a generic follow-up wearing a Re:
-    subject line — and it would look like a working feature until somebody read it."""
+    subject line — and it would look like a working feature until somebody read it.
+
+    It refuses by naming BOTH ways out, because a dead end that only mentions the OAuth scope
+    reads as "grant this or the feature is off" when pasting works right now.
+    """
     from applypilot import web_dashboard as wd
     from applypilot.networking import gmail_read
 
@@ -246,13 +274,15 @@ def test_drafting_refuses_rather_than_writing_a_generic_follow_up(db, monkeypatc
                                 "from_addr": "gina@co.com", "subject": "Re: role",
                                 "sent_at": "2026-07-30T10:00:00+00:00"}], db)
     res = wd._draft_reply({"contact_id": cid})
-    assert res["ok"] is False and "content is off" in res["message"]
+    assert res["ok"] is False
+    assert "aste" in res["message"], "the refusal does not mention the way that works today"
+    assert "--with-content" in res["message"]
 
 
 def test_the_drafter_refuses_a_thread_with_no_readable_reply():
     from applypilot.networking import outreach
     thread = [{"direction": "in", "from_addr": "g@co.com", "snippet": "", "subject": "Re: x"}]
-    with pytest.raises(ValueError, match="no readable reply text"):
+    with pytest.raises(ValueError, match="no reply text"):
         outreach.draft_reply({}, {"title": "Eng"}, {"full_name": "Gina"}, thread=thread)
 
     with pytest.raises(ValueError, match="nothing to reply to"):
@@ -289,6 +319,168 @@ def test_a_drafted_reply_is_given_what_they_said_and_no_intro_deck(monkeypatch):
     assert "David Loveless" in seen["prompt"], "the drafter does not know who else is on the thread"
     assert "intro" not in out["body"].lower()
     assert "jorgealejandrodiez.com" not in out["body"]
+
+
+def test_a_pasted_reply_works_with_no_gmail_scope_at_all(db, monkeypatch):
+    """The operator has the email open. Pasting it is a deliberate hand-over of ONE message —
+    categorically different from granting read access to the whole mailbox, and it means the
+    feature works on a default install instead of being gated behind a privacy decision."""
+    from applypilot import web_dashboard as wd
+    from applypilot.networking import gmail_read, outreach
+
+    monkeypatch.setattr(wd, "get_connection", lambda *a, **k: db)
+    monkeypatch.setattr(gmail_read, "can_read_content", lambda: (False, "off"))
+    seen = {}
+
+    class _Client:
+        def chat(self, messages, **kw):
+            seen["prompt"] = messages[-1]["content"]
+            return '{"subject": "Re: role", "body": "Thursday works."}'
+
+    monkeypatch.setattr(outreach, "get_client", lambda *a, **k: _Client())
+
+    cid = store.upsert_contact({"job_url": "http://j/1", "full_name": "Gina",
+                                "email": "gina@co.com", "sent_message_id": "m1"}, db)
+    msg_store.upsert_messages([{"message_id": "m1", "thread_id": "t", "contact_id": cid,
+                                "job_url": "http://j/1", "direction": "in",
+                                "from_addr": "gina@co.com", "from_name": "Gina",
+                                "subject": "Re: role",
+                                "sent_at": "2026-07-31T14:11:00+00:00"}], db)
+
+    res = wd._draft_reply({"contact_id": cid,
+                           "their_reply": "Thanks! Are you free Thursday to chat?"})
+    assert res["ok"] is True, res.get("message")
+    assert "Thursday" in seen["prompt"]
+    # ...and it is PERSISTED, or the sequence has a hole exactly where the interesting part is
+    # and the operator re-pastes it on every redraft.
+    assert msg_store.thread_for_contact(cid, db)[0]["snippet"].startswith("Thanks!")
+
+
+def test_the_vibe_knob_reaches_the_prompt(db, monkeypatch):
+    """Same free-text control as cold outreach, resolved through the same `_resolve_style`, so
+    OUTREACH_STYLE and the profile default apply here too — one tone control, not a second one
+    that drifts away from the first."""
+    from applypilot import web_dashboard as wd
+    from applypilot.networking import outreach
+
+    monkeypatch.setattr(wd, "get_connection", lambda *a, **k: db)
+    seen = {}
+
+    class _Client:
+        def chat(self, messages, **kw):
+            seen["prompt"] = messages[-1]["content"]
+            return '{"subject": "Re: role", "body": "yep"}'
+
+    monkeypatch.setattr(outreach, "get_client", lambda *a, **k: _Client())
+    cid = store.upsert_contact({"job_url": "http://j/1", "full_name": "Gina",
+                                "email": "gina@co.com", "sent_message_id": "m1"}, db)
+    msg_store.upsert_messages([{"message_id": "m1", "thread_id": "t", "contact_id": cid,
+                                "job_url": "http://j/1", "direction": "in",
+                                "from_addr": "gina@co.com", "subject": "Re: role",
+                                "sent_at": "2026-07-31T14:11:00+00:00",
+                                "snippet": "Are you free Thursday?"}], db)
+
+    wd._draft_reply({"contact_id": cid, "style": "much warmer, mention I'm a Longhorn"})
+    assert "Longhorn" in seen["prompt"] and "STYLE DIRECTION" in seen["prompt"]
+
+
+def test_the_draft_sees_the_whole_sequence_not_just_the_reply(db, monkeypatch):
+    """The first email is on `contacts`, the follow-ups are in `touches`, the reply is in
+    `messages`. A draft written from any one of them repeats what the other two already said —
+    which is precisely how a reply starts sounding automated."""
+    from applypilot import web_dashboard as wd
+    from applypilot.networking import outreach, touches
+
+    monkeypatch.setattr(wd, "get_connection", lambda *a, **k: db)
+    seen = {}
+
+    class _Client:
+        def chat(self, messages, **kw):
+            seen["prompt"] = messages[-1]["content"]
+            return '{"subject": "Re: role", "body": "yep"}'
+
+    monkeypatch.setattr(outreach, "get_client", lambda *a, **k: _Client())
+    touches.init_touches(db)
+    cid = store.upsert_contact({"job_url": "http://j/1", "full_name": "Gina",
+                                "email": "gina@co.com", "sent_message_id": "m1",
+                                "outreach_subject": "quick q about the FDE role",
+                                "outreach_message": "MY-FIRST-EMAIL about forward deployed work",
+                                "submitted_at": "2026-07-20T10:00:00+00:00"}, db)
+    touches.set_draft(cid, "email", "Re: quick q", "MY-FOLLOWUP-ONE nudging politely", db)
+    touches.mark_sent(cid, "email", db) if hasattr(touches, "mark_sent") else None
+    db.execute("UPDATE touches SET sent_at = ? WHERE contact_id = ?",
+               ("2026-07-24T10:00:00+00:00", cid))
+    db.commit()
+    msg_store.upsert_messages([{"message_id": "m2", "thread_id": "t", "contact_id": cid,
+                                "job_url": "http://j/1", "direction": "in",
+                                "from_addr": "gina@co.com", "subject": "Re: quick q",
+                                "sent_at": "2026-07-31T14:11:00+00:00",
+                                "snippet": "THEIR-REPLY: are you free Thursday?"}], db)
+
+    wd._draft_reply({"contact_id": cid})
+    p = seen["prompt"]
+    assert "MY-FIRST-EMAIL" in p, "the drafter never saw the original email"
+    assert "MY-FOLLOWUP-ONE" in p, "the drafter never saw the follow-up already sent"
+    assert "THEIR-REPLY" in p
+    assert "Do not repeat" in p, "nothing tells the model that all of it is already in the inbox"
+    assert p.index("MY-FIRST-EMAIL") < p.index("MY-FOLLOWUP-ONE") < p.index("THEIR-REPLY"), (
+        "the conversation was not given in order")
+
+
+def test_the_draft_is_given_the_senders_REAL_background(db, monkeypatch):
+    """The highest-stakes fabrication risk in the product.
+
+    A recruiter asks "do you have experience deploying customer-facing LLM systems?" — with no
+    grounded background in the prompt the model answers with a confident, invented yes, in a
+    live conversation, to the one person positioned to check it. Caught on the first real draft
+    against Gina's actual reply (§Lessons 9, stakes raised).
+    """
+    from applypilot import web_dashboard as wd
+    from applypilot.networking import outreach
+
+    monkeypatch.setattr(wd, "get_connection", lambda *a, **k: db)
+    seen = {}
+
+    class _Client:
+        def chat(self, messages, **kw):
+            seen["prompt"] = messages[-1]["content"]
+            seen["system"] = messages[0]["content"]
+            return '{"subject": "Re: role", "body": "yep"}'
+
+    monkeypatch.setattr(outreach, "get_client", lambda *a, **k: _Client())
+    monkeypatch.setattr(wd, "_jobs", wd._jobs)
+    monkeypatch.setattr("applypilot.config.load_profile", lambda *a, **k: {
+        "personal": {"full_name": "Alejandro Diez"},
+        "linkedin": {"headline": "REAL-HEADLINE", "about": "REAL-ABOUT-TEXT",
+                     "roles": [{"title": "REAL-ROLE", "company": "T-Mobile", "dates": "2019-2024"}]},
+    })
+
+    cid = store.upsert_contact({"job_url": "http://j/1", "full_name": "Gina",
+                                "email": "gina@co.com", "sent_message_id": "m1"}, db)
+    msg_store.upsert_messages([{"message_id": "m1", "thread_id": "t", "contact_id": cid,
+                                "job_url": "http://j/1", "direction": "in",
+                                "from_addr": "gina@co.com", "subject": "Re: role",
+                                "sent_at": "2026-07-31T14:11:00+00:00",
+                                "snippet": "Do you have experience deploying LLM systems?"}], db)
+
+    wd._draft_reply({"contact_id": cid})
+    p, sysmsg = seen["prompt"], seen["system"]
+    assert "REAL-ABOUT-TEXT" in p and "REAL-ROLE" in p, (
+        "the drafter was asked about the sender's experience without being told what it is")
+    assert "ABOUT YOU" in p
+    assert "manufacture a yes" in sysmsg or "do NOT manufacture" in sysmsg
+
+
+def test_cold_outreach_and_replies_draw_on_the_same_background():
+    """One source. Two would drift, and the copy would start contradicting itself between the
+    first email and the answer to its reply."""
+    from applypilot.networking import outreach
+
+    profile = {"personal": {"full_name": "A B"},
+               "linkedin": {"about": "ABOUT", "roles": [{"title": "T", "company": "C"}]}}
+    bits = outreach.sender_background(profile)
+    assert any("ABOUT" in b for b in bits)
+    assert bits == outreach.sender_background(profile), "not deterministic"
 
 
 def test_the_reply_prompt_tells_the_model_to_answer_not_to_pitch(monkeypatch):

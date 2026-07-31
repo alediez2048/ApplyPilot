@@ -232,6 +232,15 @@ def test_the_reply_composer_shows_who_it_will_reach(tmp_path):
         "exists to prevent, and the operator would click Send without ever seeing him")
     assert "sendReply(" in html and "Send reply" in html
 
+    # The AI half. Both must be present on a DEFAULT install — no `last_reply` because the
+    # content scope is off, so the operator pastes what they said and still gets a draft.
+    assert "said-box" in html, "no way to tell it what they actually wrote"
+    assert "draftReply(" in html and "Draft an answer" in html, "no way to draft an answer"
+    # `class="r-style"` in full, not the bare substring: `"r-style" in html` also matches
+    # `r-style-anything`, which is §Lessons 1 committed inside its own test.
+    assert 'class="r-style"' in html, (
+        "no vibe control — cold outreach has one and a reply should too")
+
     assert "reply-box" not in out["unanswered"], (
         "offered a 'reply' on a thread nobody answered — that is a follow-up, and it has its "
         "own ladder, schedule and stop conditions")

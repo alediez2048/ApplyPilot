@@ -584,32 +584,61 @@ function replyBox(c) {
       oninput="REPLY_DRAFT.set('${esc(c.id)}', this.value)">${esc(body)}</textarea>
     <div class="reply-actions">
       <button class="primary" onclick="sendReply('${esc(c.id)}', this)">Send reply</button>
-      ${c.last_reply ? `<button onclick="draftReply('${esc(c.id)}', this)">✍ Draft an answer</button>` : ''}
+      <button class="secondary" onclick="draftReply('${esc(c.id)}', this)">✍ Draft an answer</button>
       <span class="reply-hint">Goes into this thread. No attachments.</span>
     </div>
+    <input class="r-style" placeholder="✨ Tweak the vibe, then Draft again — e.g. 'warmer', 'shorter', 'more direct'"
+      value="${esc(REPLY_STYLE.get(c.id) || '')}"
+      oninput="REPLY_STYLE.set('${esc(c.id)}', this.value)">
   </div>`;
 }
 
-// CRM-4b. What they actually said — present only when the token carries gmail.readonly, so
-// this whole card is absent on a default install and the composer just opens empty.
+// What they actually said. Stored automatically when gmail.readonly is on (CRM-4b); otherwise
+// the operator pastes it. The drafter does not care which — but SOMETHING has to be here, or
+// the "contextual" reply is a generic follow-up wearing a Re: subject line.
+const REPLY_SAID = new Map();    // contact id -> pasted text, survives the 2.5s refresh
+const REPLY_STYLE = new Map();   // contact id -> vibe directive
+const SAID_EDIT = new Set();     // contact ids whose paste box is deliberately open
+function editSaid(cid) { SAID_EDIT.add(cid); refresh(); }
+function doneSaid(cid) { SAID_EDIT.delete(cid); refresh(); }
+
 function lastReplyCard(c) {
   const r = c.last_reply;
-  if (!r) return '';
-  const tag = r.label ? `<span class="intent-chip ${esc(r.intent)}">${esc(r.label)}</span>` : '';
-  const act = r.action ? `<div class="intent-act">${esc(r.action)}</div>` : '';
+  const editing = SAID_EDIT.has(c.id) || !r;
+  if (!editing) {
+    const tag = r.label ? `<span class="intent-chip ${esc(r.intent)}">${esc(r.label)}</span>` : '';
+    const act = r.action ? `<div class="intent-act">${esc(r.action)}</div>` : '';
+    return `<div class="said">
+      <div class="said-hdr">${esc(r.from || 'They')} wrote ${tag}
+        <button class="linklike" onclick="editSaid('${esc(c.id)}')">✎ edit</button></div>
+      <div class="said-txt">“${esc(r.text)}”</div>${act}
+    </div>`;
+  }
+  const text = REPLY_SAID.has(c.id) ? REPLY_SAID.get(c.id) : (r ? r.text : '');
   return `<div class="said">
-    <div class="said-hdr">${esc(r.from || 'They')} wrote ${tag}</div>
-    <div class="said-txt">“${esc(r.text)}”</div>${act}
+    <div class="said-hdr">What they wrote
+      ${r ? `<button class="linklike" onclick="doneSaid('${esc(c.id)}')">done</button>`
+          : `<span class="said-why">paste it and the draft can actually answer it</span>`}</div>
+    <textarea class="said-box" rows="4" placeholder="Paste their reply here…"
+      oninput="REPLY_SAID.set('${esc(c.id)}', this.value)">${esc(text)}</textarea>
   </div>`;
 }
+
 async function draftReply(cid, btn) {
   const say = m => { const el = document.getElementById('command'); if (el) el.textContent = m; };
+  const card = btn.closest('.reply-box');
+  const box = card ? card.querySelector('.said-box') : null;
+  const said = box ? box.value.trim() : (REPLY_SAID.get(cid) || '');
   btn.disabled = true; btn.textContent = 'Drafting…';
-  const r = await post('/api/contact/draft-reply', {contact_id: cid});
+  const r = await post('/api/contact/draft-reply',
+                       {contact_id: cid, their_reply: said, style: REPLY_STYLE.get(cid) || ''});
   say(r.message || (r.ok ? 'Draft ready.' : 'Draft failed.'));
-  // Into the shared draft store, not straight into the DOM — the 2.5s refresh would wipe a
-  // value written only to the textarea.
-  if (r.ok && r.body) REPLY_DRAFT.set(cid, r.body);
+  if (r.ok && r.body) {
+    // Into the shared store, not straight into the DOM — the 2.5s refresh replaces #jobs
+    // wholesale and would wipe a value written only to the textarea.
+    REPLY_DRAFT.set(cid, r.body);
+    if (said) { REPLY_SAID.set(cid, said); SAID_EDIT.delete(cid); }
+  }
   btn.disabled = false; btn.textContent = '✍ Draft an answer';
   refresh();
 }

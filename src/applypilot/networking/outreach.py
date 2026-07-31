@@ -145,6 +145,48 @@ def _sender_name(profile: dict) -> str:
     return full.split()[0] if full else "there"
 
 
+def sender_background(profile: dict) -> list[str]:
+    """Real, groundable facts about the sender, for any prompt that makes claims about them.
+
+    Extracted so cold outreach and REPLIES draw on the same source. A reply is where this
+    matters most and where it was missing: answer a recruiter's "do you have experience with X?"
+    without the real background in the prompt and the model invents a plausible yes — a
+    fabricated claim, made directly to the person who can check it, in a live conversation
+    (§Lessons 9, with the stakes raised).
+
+    Prefers the LinkedIn-derived block: it is the accurate one, and it is what stops "10 years
+    of PyTorch" when that is the whole career length.
+    """
+    personal = (profile or {}).get("personal", {})
+    experience = (profile or {}).get("experience", {})
+    bits = [
+        f"Sender name: {personal.get('full_name', '')}",
+        f"Sender first name: {_sender_name(profile)}",
+    ]
+    li = (profile or {}).get("linkedin") or {}
+    if li.get("about") or li.get("roles"):
+        if li.get("headline"):
+            bits.append(f"Sender headline: {li['headline']}")
+        if li.get("about"):
+            bits.append(f"Sender background (LinkedIn About): {li['about']}")
+        roles = li.get("roles") or []
+        if roles:
+            recent = "; ".join(f"{r.get('title','')} at {r.get('company','')} ({r.get('dates','')})"
+                               for r in roles[:4])
+            bits.append(f"Recent roles: {recent}")
+        if li.get("positioning"):
+            bits.append(f"IMPORTANT framing (do not misstate): {li['positioning']}")
+    else:
+        # Fallback to the older fields only if no LinkedIn block is present.
+        skills = (profile or {}).get("skills_boundary", {})
+        bits += [
+            f"Sender target role: {experience.get('target_role', '')}",
+            f"Total years of experience: {experience.get('years_of_experience_total', '')}",
+            f"Sender skills: {', '.join((skills.get('frameworks') or []))[:200]}",
+        ]
+    return bits
+
+
 def draft_email(profile: dict, job: dict, contact: dict, style: str = "", warm: bool = False) -> dict:
     """Return {"subject": str, "body": str} for one contact. Raises on LLM/parse failure.
 
@@ -158,36 +200,7 @@ def draft_email(profile: dict, job: dict, contact: dict, style: str = "", warm: 
     """
     role = job.get("title") or "the role"
     company = contact.get("company") or job.get("company") or job.get("site") or "your company"
-    personal = (profile or {}).get("personal", {})
-    experience = (profile or {}).get("experience", {})
-
-    sender_bits = [
-        f"Sender name: {personal.get('full_name', '')}",
-        f"Sender first name: {_sender_name(profile)}",
-    ]
-    # Prefer the LinkedIn-derived background (accurate, from the real profile) over loose skill
-    # lists — this is what keeps the copy TRUE (no "10 years of PyTorch" when that's the total
-    # career length). The About + recent roles give the model real, groundable facts to draw on.
-    li = (profile or {}).get("linkedin") or {}
-    if li.get("about") or li.get("roles"):
-        if li.get("headline"):
-            sender_bits.append(f"Sender headline: {li['headline']}")
-        if li.get("about"):
-            sender_bits.append(f"Sender background (LinkedIn About): {li['about']}")
-        roles = li.get("roles") or []
-        if roles:
-            recent = "; ".join(f"{r.get('title','')} at {r.get('company','')} ({r.get('dates','')})" for r in roles[:4])
-            sender_bits.append(f"Recent roles: {recent}")
-        if li.get("positioning"):
-            sender_bits.append(f"IMPORTANT framing (do not misstate): {li['positioning']}")
-    else:
-        # Fallback to the older fields only if no LinkedIn block is present.
-        skills = (profile or {}).get("skills_boundary", {})
-        sender_bits += [
-            f"Sender target role: {experience.get('target_role', '')}",
-            f"Total years of experience: {experience.get('years_of_experience_total', '')}",
-            f"Sender skills: {', '.join((skills.get('frameworks') or []))[:200]}",
-        ]
+    sender_bits = sender_background(profile)
     jd = (job.get("full_description") or "")[:1200]
 
     directive = _resolve_style(profile, style)
@@ -406,6 +419,9 @@ Hard rules:
 - Never thank them for "taking the time" or open with "I hope this finds you well".
 - Match their register. A two-line reply gets a two-line answer, not a paragraph.
 - Never invent facts about the sender, and never attach years to a specific tool or framework.
+  If they asked about experience the ABOUT YOU block does not cover, do NOT manufacture a yes.
+  Say what is actually true and adjacent, or offer to talk it through. A confident invented
+  claim goes straight to the one person positioned to check it.
 - If they introduced a colleague, acknowledge it and address the new person naturally.
 - If they said no, be gracious and brief and do not argue or ask them to reconsider.
 
@@ -413,27 +429,67 @@ Return ONLY JSON: {"subject": "...", "body": "..."}
 The subject MUST keep the thread's existing subject with a "Re: " prefix."""
 
 
+def conversation_transcript(contact: dict, thread: list | None = None,
+                            touches: list | None = None, their_reply: str = "") -> str:
+    """The whole exchange, in order, as the model should read it.
+
+    Assembled from three separate stores, which is exactly why it is worth having in one
+    function: the first email lives on `contacts`, every follow-up lives in `touches`, and the
+    reply lives in `messages`. A draft written from any one of them repeats what the other two
+    already said — the specific way an automated-sounding reply gets written.
+    """
+    lines = []
+    first = (contact.get("outreach_message") or "").strip()
+    if first:
+        subj = (contact.get("outreach_subject") or "").strip()
+        when = (contact.get("submitted_at") or "")[:10]
+        lines.append(f"[1] YOU wrote{f' on {when}' if when else ''}"
+                     f"{f' — subject: {subj}' if subj else ''}:\n{first[:900]}")
+    n = len(lines) + 1
+    for t in (touches or []):
+        body = (t.get("body") or "").strip()
+        if not body:
+            continue
+        when = (t.get("sent_at") or "")[:10]
+        lines.append(f"[{n}] YOU followed up{f' on {when}' if when else ''}:\n{body[:600]}")
+        n += 1
+    if their_reply.strip():
+        who = _last_inbound(thread).get("from_name") or "THEY"
+        when = (_last_inbound(thread).get("sent_at") or "")[:10]
+        lines.append(f"[{n}] {who.upper()} REPLIED{f' on {when}' if when else ''}:\n"
+                     f"{their_reply.strip()}")
+    return "\n\n".join(lines)
+
+
+def _last_inbound(thread: list | None) -> dict:
+    inbound = [m for m in (thread or [])
+               if isinstance(m, dict) and (m.get("direction") or "") == "in"]
+    return inbound[-1] if inbound else {}
+
+
 def draft_reply(profile: dict, job: dict, contact: dict, thread: list | None = None,
-                subject: str = "", style: str = "") -> dict:
-    """Draft an answer to a live conversation (CRM-4b).
+                subject: str = "", style: str = "", their_reply: str = "",
+                touches: list | None = None) -> dict:
+    """Draft an answer to a live conversation, from the WHOLE sequence.
 
-    Needs the reply's TEXT to be worth anything, so it is gated on the content scope by its
-    callers. Without it the honest product is an empty box — a "contextual" draft written
-    without the context would be a generic follow-up wearing a reply's subject line, which is
-    exactly the automated-sounding message a real conversation cannot survive.
+    `their_reply` is what the other person actually said. Two ways it gets here and the
+    function does not care which: the stored snippet when `gmail.readonly` was granted
+    (CRM-4b), or text the operator pasted in. It refuses without it, deliberately — a
+    "contextual" reply written with no context is a generic follow-up wearing a `Re:` subject
+    line, and it would look like a working feature until somebody read it.
 
-    Only snippets are used, never full bodies — they are all that is stored (§SNIPPET_MAX).
+    `style` is the same free-text vibe knob as cold outreach ("more casual", "shorter", "add a
+    joke"), resolved through `_resolve_style` so OUTREACH_STYLE and the profile default apply
+    here too — one tone control for the whole product, not a second one that drifts.
     """
     from applypilot.domain import conversations as cv, intent as _intent
 
-    msgs = [m for m in (thread or []) if isinstance(m, dict)]
-    inbound = [m for m in msgs if (m.get("direction") or "") == "in"]
-    if not inbound:
+    last = _last_inbound(thread)
+    if not last:
         raise ValueError("nothing to reply to — no inbound message on this thread")
-    last = inbound[-1]
-    said = (last.get("snippet") or "").strip()
+    said = (their_reply or last.get("snippet") or "").strip()
     if not said:
-        raise ValueError("no readable reply text — enable reply content to draft an answer")
+        raise ValueError("no reply text — paste what they wrote, or enable reply content")
 
     role = job.get("title") or "the role"
     company = contact.get("company") or job.get("company") or job.get("site") or "the company"
@@ -443,23 +499,27 @@ def draft_reply(profile: dict, job: dict, contact: dict, thread: list | None = N
     link = _scheduling_link(profile)
 
     # Who else is on the thread, so the draft can acknowledge an introduction by name rather
-    # than writing to one person while two are reading.
+    # than writing to one person while two people are reading.
     others = [cv.display_name(x) or cv.addr(x)
               for x in (last.get("cc_addrs") or []) if cv.addr(x)]
+    transcript = conversation_transcript(contact, thread, touches, said)
 
     user = (
-        f"SENDER (you): {_sender_name(profile)}\n"
-        f"REPLYING TO: {who} at {company}\n"
-        f"ROLE: {role}\n"
+        # The sender's REAL background. Without it the model answers "do you have experience
+        # with X?" by inventing a confident yes — to the one person who can check it.
+        "ABOUT YOU (use ONLY these facts; if they do not cover the question, say so plainly "
+        "rather than inventing an answer):\n" + "\n".join(sender_background(profile)) + "\n\n"
+        f"REPLYING TO: {who} — {contact.get('title', '')} at {company}\n"
+        f"ROLE YOU APPLIED FOR: {role}\n"
         f"SUBJECT (reuse with 'Re: '): {subject or last.get('subject') or role}\n"
-        + (f"ALSO ON THE THREAD: {', '.join(others)}\n" if others else "")
-        + (f"WHAT THIS LOOKS LIKE: {label['label']}\n" if label["label"] else "")
-        + f"\nWHAT THEY WROTE (the opening of it — this is all that is stored):\n{said}\n\n"
-        + (f"YOUR ORIGINAL MESSAGE (context only, do NOT repeat it):\n"
-           f"{(contact.get('outreach_message') or '')[:400]}\n\n"
-           if contact.get("outreach_message") else "")
-        + (f"SCHEDULING LINK (use it if they want to talk): {link}\n\n" if link else "")
-        + (f"STYLE DIRECTION (follow closely):\n{directive}\n\n" if directive else "")
+        + (f"ALSO ON THE THREAD (they are reading too): {', '.join(others)}\n" if others else "")
+        + (f"WHAT THEIR REPLY LOOKS LIKE: {label['label']} — {label['action']}\n"
+           if label["label"] else "")
+        + f"\nTHE CONVERSATION SO FAR, in order:\n{transcript}\n\n"
+        + "Everything above marked YOU is already in their inbox. Do not repeat any of it.\n\n"
+        + (f"SCHEDULING LINK (use it only if they want to talk): {link}\n\n" if link else "")
+        + (f"STYLE DIRECTION (follow closely, it overrides the default voice):\n{directive}\n\n"
+           if directive else "")
         + "Write the reply. Answer what they said. Return the JSON."
     )
 
@@ -477,9 +537,9 @@ def draft_reply(profile: dict, job: dict, contact: dict, thread: list | None = N
     if not out_subject:
         out_subject = base if base.lower().startswith("re:") else f"Re: {base}"
     # Deliberately NO intro-deck sentence. That belongs to cold outreach and follow-ups, where
-    # the goal is to earn a reply. Bolting it onto an answer to a live conversation is the
+    # the goal is to earn a reply. Bolting it onto an answer inside a live conversation is the
     # marketing reflex that makes a real exchange read like a sequence.
-    return {"subject": out_subject, "body": body}
+    return {"subject": out_subject, "body": body, "intent": label["intent"]}
 
 
 def draft_linkedin_followup(profile: dict, job: dict, contact: dict, touch: int = 1,

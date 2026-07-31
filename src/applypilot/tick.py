@@ -196,13 +196,36 @@ def _step_unanswered(conn, dry_run: bool) -> dict:
             "detail": f"{len(waiting)} unanswered repl{'y' if len(waiting) == 1 else 'ies'}: {names}"}
 
 
+def _step_deck_clicks(conn, dry_run: bool) -> dict:
+    """Pull intro-deck clicks from the collector on the sender's own site.
+
+    Reads only. A click is the strongest engagement signal short of a reply, and unlike an
+    open-tracking pixel it means a human chose to look — so it belongs in the same heartbeat
+    that notices replies.
+    """
+    from applypilot.networking import deck_hits
+    ok, why = deck_hits.configured()
+    if not ok:
+        return {"skipped": True, "detail": why}
+    if dry_run:
+        hits, err = deck_hits.fetch()
+        return ({"error": err, "detail": err} if err
+                else {"would_record": len(hits), "detail": f"{len(hits)} click(s) waiting"})
+    res = deck_hits.poll(conn)
+    return {"recorded": res.get("recorded", 0), "new": res.get("new", 0),
+            "detail": res.get("note", "")}
+
+
 #: Order matters: release locks first so a stuck job is visible to everything after it, and
 #: poll replies BEFORE drafting so a contact who just answered never gets a follow-up drafted.
 #: `unanswered` runs after the poll so a reply that arrived this minute is already counted.
+#: `deck` sits before drafting too — knowing somebody read the deck changes what a follow-up
+#: should say, and a step that ran after the draft could not influence it.
 STEPS = (
     ("locks", _step_release_locks),
     ("replies", _step_poll_replies),
     ("unanswered", _step_unanswered),
+    ("deck", _step_deck_clicks),
     ("followups", _step_draft_followups),
 )
 

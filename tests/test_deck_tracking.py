@@ -170,6 +170,173 @@ def test_a_contact_with_no_id_still_gets_a_working_link(monkeypatch):
     assert outreach._intro_deck_url({}, {"full_name": "No Id"}) == BASE
 
 
+# ── the pull from the site ───────────────────────────────────────────────────────────────
+
+def test_the_pull_accepts_the_shapes_a_hand_rolled_endpoint_produces():
+    """The collector is something the OPERATOR deploys and edits. Rejecting their JSON over a
+    key name is a silly way to lose a click."""
+    tok = "9b83068a"
+    for payload in (
+        [tok],
+        {"hits": [tok]},
+        {"events": [{"v": tok, "at": "2026-07-31T10:00:00Z"}]},
+        {"data": [{"token": tok}]},
+        [{"id": tok, "ts": "2026-07-31T10:00:00Z"}],
+        [f"https://x.com/intro/?v={tok}"],          # a raw URL is a legitimate item too
+    ):
+        assert [h["token"] for h in deck.hits_from_payload(payload)] == [tok], payload
+
+
+def test_junk_from_the_collector_yields_nothing_rather_than_raising():
+    for payload in (None, "", 42, {"unexpected": 1}, [None, 7, {}], [{"v": "not-a-token"}]):
+        assert deck.hits_from_payload(payload) == []
+
+
+def test_the_pull_is_off_until_both_settings_are_present(monkeypatch):
+    from applypilot.networking import deck_hits
+
+    monkeypatch.delenv("DECK_HITS_URL", raising=False)
+    monkeypatch.delenv("DECK_HITS_TOKEN", raising=False)
+    ok, why = deck_hits.configured()
+    assert ok is False and "deck-hits" in why, "the refusal must name the manual fallback"
+
+    monkeypatch.setenv("DECK_HITS_URL", "https://x.com/api/deck-hits")
+    ok, why = deck_hits.configured()
+    assert ok is False and "TOKEN" in why, (
+        "a URL with no token would send an unauthenticated request forever and look like "
+        "'nobody clicked'")
+
+    monkeypatch.setenv("DECK_HITS_TOKEN", "s3cret")
+    assert deck_hits.configured()[0] is True
+
+
+def test_a_wrong_token_is_reported_as_a_wrong_token(monkeypatch):
+    """401 otherwise looks exactly like 'nobody has clicked' — the §Lessons 15 shape."""
+    import urllib.error
+
+    from applypilot.networking import deck_hits
+
+    monkeypatch.setenv("DECK_HITS_URL", "https://x.com/api/deck-hits")
+    monkeypatch.setenv("DECK_HITS_TOKEN", "wrong")
+
+    def boom(*a, **k):
+        raise urllib.error.HTTPError("u", 401, "no", {}, None)
+
+    monkeypatch.setattr(deck_hits.urllib.request, "urlopen", boom)
+    hits, err = deck_hits.fetch()
+    assert hits == [] and "DECK_HITS_TOKEN" in err
+
+
+def test_an_unreachable_collector_never_raises(monkeypatch):
+    from applypilot.networking import deck_hits
+
+    monkeypatch.setenv("DECK_HITS_URL", "https://x.com/api/deck-hits")
+    monkeypatch.setenv("DECK_HITS_TOKEN", "s")
+    monkeypatch.setattr(deck_hits.urllib.request, "urlopen",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("dns")))
+    hits, err = deck_hits.fetch()
+    assert hits == [] and "could not reach" in err
+
+
+def test_a_plain_text_log_response_still_works(monkeypatch):
+    """The endpoint is the operator's. If they serve a log file instead of JSON, scan it."""
+    import io
+
+    from applypilot.networking import deck_hits
+
+    monkeypatch.setenv("DECK_HITS_URL", "https://x.com/api/deck-hits")
+    monkeypatch.setenv("DECK_HITS_TOKEN", "s")
+
+    class _R(io.BytesIO):
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    monkeypatch.setattr(deck_hits.urllib.request, "urlopen",
+                        lambda *a, **k: _R(b"GET /intro/?v=9b83068a 200"))
+    hits, err = deck_hits.fetch()
+    assert err == "" and [h["token"] for h in hits] == ["9b83068a"]
+
+
+def test_polling_records_a_click_and_says_who(db, monkeypatch):
+    from applypilot import config
+    from applypilot.networking import deck_hits
+
+    cid = store.upsert_contact({"job_url": "http://j/1", "full_name": "Josh Guild",
+                                "email": "j@co.com"}, db)
+    monkeypatch.setattr(config, "install_secret", lambda: SECRET)
+    tok = deck.token_for(cid, SECRET)
+    monkeypatch.setattr(deck_hits, "fetch", lambda: ([{"token": tok, "at": ""}], ""))
+
+    first = deck_hits.poll(db)
+    assert first["new"] == 1 and first["names"] == ["Josh Guild"]
+    # Idempotent: the collector keeps a rolling window that we re-read every hour.
+    again = deck_hits.poll(db)
+    assert again["new"] == 0 and again["recorded"] == 1
+    assert store.get_contact(cid, db)["deck_views"] == 2
+
+
+def test_an_unknown_token_is_never_attributed_to_the_wrong_person(db, monkeypatch):
+    """The worst thing this feature could do.
+
+    A token from a deleted contact, a different install, or somebody sharing the link onward
+    must record against NOBODY. Attributing it to whichever contact happened to be first would
+    put "opened the deck" on a person who never saw it — and the operator would follow up on it.
+    """
+    from applypilot import config
+    from applypilot.networking import deck_hits
+
+    a = store.upsert_contact({"job_url": "http://j/1", "full_name": "Gina", "email": "g@co.com"}, db)
+    b = store.upsert_contact({"job_url": "http://j/1", "full_name": "Josh", "email": "j@co.com"}, db)
+    monkeypatch.setattr(config, "install_secret", lambda: SECRET)
+    monkeypatch.setattr(deck_hits, "fetch", lambda: ([{"token": "ffffffff", "at": ""}], ""))
+
+    res = deck_hits.poll(db)
+    assert res["recorded"] == 0 and res["new"] == 0
+    for cid in (a, b):
+        c = store.get_contact(cid, db)
+        assert not (c["deck_viewed_at"] or ""), f"{c['full_name']} was credited with a click"
+        assert not (c["deck_views"] or 0)
+
+
+def test_a_click_lands_on_the_right_person_when_several_exist(db, monkeypatch):
+    """The positive half: with two contacts, only the one whose token arrived is marked."""
+    from applypilot import config
+    from applypilot.networking import deck_hits
+
+    a = store.upsert_contact({"job_url": "http://j/1", "full_name": "Gina", "email": "g@co.com"}, db)
+    b = store.upsert_contact({"job_url": "http://j/1", "full_name": "Josh", "email": "j@co.com"}, db)
+    monkeypatch.setattr(config, "install_secret", lambda: SECRET)
+    monkeypatch.setattr(deck_hits, "fetch",
+                        lambda: ([{"token": deck.token_for(b, SECRET), "at": ""}], ""))
+
+    assert deck_hits.poll(db)["names"] == ["Josh"]
+    assert not (store.get_contact(a, db)["deck_viewed_at"] or "")
+    assert store.get_contact(b, db)["deck_viewed_at"]
+
+
+def test_tick_skips_the_deck_step_when_it_is_not_configured(db, monkeypatch):
+    from applypilot import tick
+
+    monkeypatch.delenv("DECK_HITS_URL", raising=False)
+    out = tick.run(conn=db)["steps"]["deck"]
+    assert out.get("skipped") is True
+    assert "deck-hits" in out["detail"], "the skip must name the manual fallback"
+
+
+def test_tick_never_makes_the_deck_step_fatal(db, monkeypatch):
+    """A dead collector must not stop the heartbeat that also polls replies."""
+    from applypilot import tick
+    from applypilot.networking import deck_hits
+
+    monkeypatch.setenv("DECK_HITS_URL", "https://x.com/api/deck-hits")
+    monkeypatch.setenv("DECK_HITS_TOKEN", "s")
+    monkeypatch.setattr(deck_hits, "poll",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("down")))
+    out = tick.run(conn=db)
+    assert "down" in out["steps"]["deck"]["detail"]
+    assert "followups" in out["steps"], "a broken deck step aborted the rest of the tick"
+
+
 def test_the_install_secret_is_stable_across_calls(tmp_path, monkeypatch):
     from applypilot import config
     monkeypatch.setattr(config, "APP_DIR", tmp_path)

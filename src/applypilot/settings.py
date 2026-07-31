@@ -127,6 +127,13 @@ SETTINGS: tuple[Setting, ...] = (
     Setting("INTRO_DECK_URL", "outreach", "str", "https://www.jorgealejandrodiez.com/intro/",
             "Intro-deck link offered in every outreach email (not LinkedIn notes)."),
     Setting("SCHEDULING_LINK", "outreach", "str", "", "Calendar link for the call-to-action."),
+    # Deck-click pull. The click happens on the sender's own site; the dashboard is
+    # localhost-only and cannot receive a webhook, so it POLLS. Empty = the feature is off and
+    # `deck-hits` stays a manual import.
+    Setting("DECK_HITS_URL", "outreach", "str", "",
+            "Endpoint that returns recorded intro-deck clicks (see deploy/netlify/)."),
+    Setting("DECK_HITS_TOKEN", "outreach", "str", "",
+            "Bearer token for DECK_HITS_URL.", secret=True),
     Setting("GMAIL_ADDRESS", "outreach", "str", "", "SMTP fallback address.", secret=False),
     Setting("GMAIL_APP_PASSWORD", "outreach", "str", "", "SMTP app password.", secret=True),
 

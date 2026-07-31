@@ -994,6 +994,16 @@ def doctor(
     except Exception:
         results.append(("Reply content", warn_mark, "probe failed"))
 
+    # Deck clicks. Optional and reported as such — the manual `deck-hits` import works without
+    # any of this, so an unconfigured pull is a choice, not a fault.
+    try:
+        from applypilot.networking import deck_hits as _dh
+        ok, why = _dh.configured()
+        results.append(("Deck clicks", ok_mark if ok else "[dim]off[/dim]",
+                        "on — pulled every tick" if ok else why))
+    except Exception:
+        results.append(("Deck clicks", warn_mark, "probe failed"))
+
     # Unattended schedule (CRM-3b). Optional: everything still works by hand without it.
     try:
         from applypilot import schedule as _sched

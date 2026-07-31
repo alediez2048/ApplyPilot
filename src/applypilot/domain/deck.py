@@ -86,6 +86,40 @@ def tokens_in(text: str | None) -> set[str]:
                                             text)}
 
 
+def hits_from_payload(payload) -> list[dict]:
+    """Normalise whatever the collector returned into [{token, at}].
+
+    Accepts the shapes a hand-rolled endpoint actually produces — a bare list of tokens, a list
+    of objects, or an object wrapping either under `hits`/`events`/`data` — because the endpoint
+    is something the operator deploys and edits, and rejecting their JSON on a key name is a
+    silly way to lose a click. Anything unrecognised yields [] rather than raising.
+    """
+    if isinstance(payload, dict):
+        for key in ("hits", "events", "data", "results"):
+            if key in payload:
+                payload = payload[key]
+                break
+    if not isinstance(payload, list):
+        return []
+    out = []
+    for item in payload:
+        if isinstance(item, str):
+            token, at = item, ""
+        elif isinstance(item, dict):
+            token = str(item.get("v") or item.get("token") or item.get("id") or "")
+            at = str(item.get("at") or item.get("ts") or item.get("time") or "")
+        else:
+            continue
+        # A raw URL is a legitimate item too — take the token out of it.
+        found = tokens_in(token)
+        if found:
+            token = next(iter(found))
+        token = token.strip().lower()
+        if _TOKEN_RE.fullmatch(token):
+            out.append({"token": token, "at": at})
+    return out
+
+
 def match_contacts(tokens: set[str], contacts: list[dict], secret: str) -> list[dict]:
     """Which contacts those tokens belong to.
 

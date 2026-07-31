@@ -90,18 +90,24 @@ def _intro_deck_url(profile: dict, contact: dict | None = None) -> str:
     Distinct from `INTRO_DECK_PATH`, which ATTACHES a PDF. Priority mirrors
     `_scheduling_link`: INTRO_DECK_URL env → profile['personal']['intro_deck_url'] → ''.
 
-    When a contact is supplied the link carries their token (`?v=…`), so a click on the deck —
-    hosted on the sender's own site — can be attributed to a person. That is the one engagement
-    signal worth trusting: an open-tracking pixel fires when a spam filter looks at the message,
-    a deck click means somebody chose to read it. See `domain/deck.py`.
+    When a contact is supplied the link carries their NAME as a path segment —
+    `/intro/gina`, not `/intro/?v=9b83068a`. Both identify the reader; only one looks like it.
+    A token in a query string is the shape people have been trained to distrust, and it
+    undercuts the warm tone of the one message where that tone is the whole point. See
+    `domain/deck.py`.
     """
     base = (os.environ.get("INTRO_DECK_URL", "").strip()
             or ((profile or {}).get("personal", {}).get("intro_deck_url") or "").strip())
     if not base or not contact or not contact.get("id"):
         return base
-    from applypilot.config import install_secret
     from applypilot.domain import deck
-    return deck.deck_url(base, deck.token_for(contact["id"], install_secret()))
+    from applypilot.networking.store import ensure_deck_slug
+    try:
+        slug = ensure_deck_slug(contact["id"], contact.get("full_name") or "")
+    except Exception:  # noqa: BLE001
+        log.debug("Could not assign a deck slug", exc_info=True)
+        return base          # a plain deck link still works; an un-attributed click is cheap
+    return deck.deck_url(base, slug)
 
 
 def ensure_intro_deck(body: str, url: str) -> str:

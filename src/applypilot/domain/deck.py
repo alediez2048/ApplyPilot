@@ -1,98 +1,127 @@
-"""Per-contact intro-deck links — the one engagement signal worth trusting.
+"""Per-person intro-deck links — the one engagement signal worth trusting.
 
 Email *open* tracking was considered and rejected. It needs a 1×1 pixel, and every layer between
-you and the reader now defeats it: Gmail proxies and caches every image on delivery, Apple Mail
-Privacy Protection pre-fetches all remote images by default, and corporate security gateways
-fetch everything to scan it. You would get "Gina opened your email" from her employer's spam
-filter and could not tell it from a real read. A confidently wrong signal is worse than none —
-it would drive follow-up decisions that the data cannot support.
+you and the reader defeats it: Gmail proxies and caches every image on delivery, Apple Mail
+Privacy Protection pre-fetches all remote images by default, and corporate gateways fetch
+everything to scan it. You would get "Gina opened your email" from her employer's spam filter
+and could not tell it from a real read.
 
-A **click** is different. Nobody's spam filter follows a link and reads a deck. Somebody chose
-to look. And because the deck is hosted on the sender's OWN site, the click can be counted
-without a tracking pixel, without third-party analytics, and without anything embedded in the
-message body beyond a link the recipient can see.
+A **click** is different. Nobody's spam filter follows a link and reads a deck. And because the
+deck is hosted on the sender's own site, the click can be counted with no pixel, no third-party
+analytics, and nothing in the message beyond a link the recipient can see.
 
-The token is derived, not stored-then-looked-up: `token_for()` is a pure function of the contact
-id plus a per-install secret, so the mapping survives a database restore and no lookup table can
-drift out of sync with it.
+**The link is a NAMED PATH, not a tracking parameter.**
+
+    https://www.jorgealejandrodiez.com/intro/gina        ← reads as "I made this for you"
+    https://www.jorgealejandrodiez.com/intro/?v=9b83068a ← reads as surveillance
+
+Both identify the reader; only one looks like it. The first version used an opaque token, and
+a token in a query string is exactly the shape people have been trained to distrust — it
+undercuts the warm, personal tone the email is trying to strike, in the one message where that
+tone is the whole point. A path segment carrying their first name looks deliberate, because it
+is: the deck really was sent to them.
+
+The honest trade, stated plainly: an opaque token means nothing to anyone who sees it, while a
+name is readable. If the link is forwarded, the new reader learns who it was for. That is a
+small cost, and personalisation is a real benefit rather than a disguise.
 """
 
 from __future__ import annotations
 
-import hashlib
-import hmac
 import re
+import unicodedata
 
-#: Short enough to look tidy in a URL, long enough that guessing one is pointless. 8 hex chars
-#: is 4 billion; the token grants nothing anyway — it identifies a click, it does not authorise.
-TOKEN_LEN = 8
+#: Reserved because they are (or could become) real pages under /intro/.
+_RESERVED = {"index", "assets", "static", "api", "admin", "deck", "slides", "intro"}
 
-#: The query parameter. `v` for "visitor" — short, and not obviously a tracker, because a URL
-#: that reads as instrumentation invites people not to click it.
-TOKEN_PARAM = "v"
-
-_TOKEN_RE = re.compile(rf"\b[0-9a-f]{{{TOKEN_LEN}}}\b")
+_SLUG_OK = re.compile(r"^[a-z0-9][a-z0-9-]{0,38}$")
 
 
-def token_for(contact_id: str, secret: str) -> str:
-    """Stable, opaque token for one contact.
+def slugify(name: str | None) -> str:
+    """A person's name as a clean URL segment: "Gina Johnson" -> "gina".
 
-    HMAC rather than a plain hash so the tokens cannot be enumerated by anyone who guesses the
-    id scheme — contact ids are a hash of (job, identity) and are therefore reproducible by
-    anyone who knows the inputs. `secret` is per-install.
-
-    Deliberately NOT random-and-stored: derived means a database restore, a re-discovered
-    contact, or a second machine all produce the same token, and there is no table to fall out
-    of step with the links already sitting in somebody's inbox.
+    First name only. A full name makes a long URL and reads like a database record; a first
+    name reads like it was written for them. Accents are folded rather than percent-encoded,
+    because "%C3%A9" in a link is exactly the ugliness this replaced.
     """
-    cid = (contact_id or "").strip()
-    if not cid:
+    raw = (name or "").strip()
+    if not raw:
         return ""
-    return hmac.new((secret or "").encode(), cid.encode(), hashlib.sha256).hexdigest()[:TOKEN_LEN]
+    first = raw.split()[0]
+    folded = unicodedata.normalize("NFKD", first).encode("ascii", "ignore").decode()
+    slug = re.sub(r"[^a-z0-9]+", "-", folded.lower()).strip("-")[:38]
+    return "" if not slug or slug in _RESERVED else slug
 
 
-def deck_url(base: str, token: str) -> str:
-    """Append the token to the deck link, preserving whatever query it already carries.
+def disambiguate(slug: str, taken: set[str], full_name: str | None = None) -> str:
+    """Keep a slug unique without making it ugly.
 
-    Returns `base` untouched when there is no token — a link that still works is better than a
-    malformed one, and an un-attributed click is a smaller loss than a broken deck.
+    Two Ginas is the normal case, not an edge case. The second gets a last initial
+    ("gina-j"), and only if that is also taken does it fall back to a number. Nobody looking
+    at `/intro/gina-j` thinks they are being tracked; `/intro/gina-2f9c` is where it starts
+    looking like a token again, which is the thing being fixed.
+    """
+    if not slug:
+        return ""
+    if slug not in taken:
+        return slug
+    parts = (full_name or "").split()
+    if len(parts) > 1:
+        initial = slugify(parts[-1])[:1]
+        if initial and f"{slug}-{initial}" not in taken:
+            return f"{slug}-{initial}"
+    n = 2
+    while f"{slug}-{n}" in taken:
+        n += 1
+    return f"{slug}-{n}"
+
+
+def deck_url(base: str, slug: str) -> str:
+    """The deck link for one person: base + /slug, query string untouched.
+
+    Returns `base` unchanged when there is no slug — an un-attributed click is a far smaller
+    loss than a broken deck link, and a link that 404s costs the actual conversation.
     """
     base = (base or "").strip()
-    if not base or not token:
+    if not base or not slug:
         return base
-    if f"{TOKEN_PARAM}=" in base:
-        return base
-    sep = "&" if "?" in base else "?"
-    return f"{base}{sep}{TOKEN_PARAM}={token}"
+    head, sep, query = base.partition("?")
+    return f"{head.rstrip('/')}/{slug}" + (sep + query if sep else "")
 
 
-def strip_token(url: str) -> str:
-    """The deck link without its token — for comparing two URLs that differ only by visitor."""
-    return re.sub(rf"[?&]{TOKEN_PARAM}=[0-9a-f]+", "", url or "").rstrip("?&")
+def strip_slug(url: str, slug: str) -> str:
+    """The deck link without the person — for comparing two URLs that differ only by reader."""
+    if not slug:
+        return url or ""
+    return re.sub(rf"/{re.escape(slug)}(/|$|\?)", r"\1", url or "")
 
 
-def tokens_in(text: str | None) -> set[str]:
-    """Every token-shaped string in a blob of text.
+def slugs_in(text: str | None, known: set[str] | None = None) -> set[str]:
+    """Every deck slug in a blob of text — an analytics export, a server log, a pasted list.
 
-    The import path: paste an analytics export, a server log, a Vercel/Cloudflare log — anything
-    containing the URLs that were hit. Scanning for the SHAPE rather than parsing one specific
-    format is what lets this accept all of them without a per-provider adapter.
+    Scans for the SHAPE (a path segment under /intro/) rather than parsing one provider's
+    format, which is what lets this accept Plausible, Vercel, Cloudflare and a hand-pasted list
+    without an adapter per source.
+
+    `known` narrows to slugs actually issued. Without it a log line for /intro/assets or a
+    genuine sub-page would be read as a visitor — the path is a much broader namespace than a
+    query parameter was, so this filter matters more than it did.
     """
     if not text:
         return set()
-    # Only tokens that appear as our query parameter, so a random 8-hex string elsewhere in a
-    # log line (a request id, a git sha) cannot be mistaken for a visitor.
-    return {m.group(1) for m in re.finditer(rf"[?&]{TOKEN_PARAM}=([0-9a-f]{{{TOKEN_LEN}}})\b",
-                                            text)}
+    found = {m.group(1).lower()
+             for m in re.finditer(r"/intro/([A-Za-z0-9][A-Za-z0-9-]{0,38})(?=[/?\s\"'&#]|$)",
+                                  text)}
+    found = {s for s in found if _SLUG_OK.match(s) and s not in _RESERVED}
+    return {s for s in found if s in known} if known is not None else found
 
 
 def hits_from_payload(payload) -> list[dict]:
-    """Normalise whatever the collector returned into [{token, at}].
+    """Normalise whatever the collector returned into [{slug, at}].
 
-    Accepts the shapes a hand-rolled endpoint actually produces — a bare list of tokens, a list
-    of objects, or an object wrapping either under `hits`/`events`/`data` — because the endpoint
-    is something the operator deploys and edits, and rejecting their JSON on a key name is a
-    silly way to lose a click. Anything unrecognised yields [] rather than raising.
+    Accepts the shapes a hand-rolled endpoint actually produces — a bare list, a list of
+    objects, or an object wrapping either — because the endpoint is something the operator
+    deploys and edits, and rejecting their JSON over a key name is a silly way to lose a click.
     """
     if isinstance(payload, dict):
         for key in ("hits", "events", "data", "results"):
@@ -104,30 +133,30 @@ def hits_from_payload(payload) -> list[dict]:
     out = []
     for item in payload:
         if isinstance(item, str):
-            token, at = item, ""
+            slug, at = item, ""
         elif isinstance(item, dict):
-            token = str(item.get("v") or item.get("token") or item.get("id") or "")
+            slug = str(item.get("slug") or item.get("v") or item.get("path") or
+                       item.get("id") or "")
             at = str(item.get("at") or item.get("ts") or item.get("time") or "")
         else:
             continue
-        # A raw URL is a legitimate item too — take the token out of it.
-        found = tokens_in(token)
+        found = slugs_in(slug)
         if found:
-            token = next(iter(found))
-        token = token.strip().lower()
-        if _TOKEN_RE.fullmatch(token):
-            out.append({"token": token, "at": at})
+            slug = next(iter(found))
+        slug = slug.strip().strip("/").lower()
+        if _SLUG_OK.match(slug) and slug not in _RESERVED:
+            out.append({"slug": slug, "at": at})
     return out
 
 
-def match_contacts(tokens: set[str], contacts: list[dict], secret: str) -> list[dict]:
-    """Which contacts those tokens belong to.
+def match_contacts(slugs: set[str], contacts: list[dict]) -> list[dict]:
+    """Which contacts those slugs belong to.
 
-    Returns the contact dicts, not ids, because the caller invariably wants the name to show.
-    A token with no matching contact is silently ignored — it is most likely a deleted contact
-    or a link from a different install, and neither is worth an error.
+    Reads the slug STORED on each contact. Unlike the old token it cannot be derived — two
+    people are often called Gina — so the assignment is recorded when the link is first made
+    and is the only thing that can resolve it afterwards.
     """
-    if not tokens:
+    if not slugs:
         return []
-    by_token = {token_for(c["id"], secret): c for c in contacts if c.get("id")}
-    return [by_token[t] for t in tokens if t in by_token]
+    by_slug = {(c.get("deck_slug") or "").lower(): c for c in contacts if c.get("deck_slug")}
+    return [by_slug[s] for s in slugs if s in by_slug]

@@ -5,33 +5,32 @@
 // image and when a corporate scanner opens the message, so it measures machines. This fires
 // when a browser loads the deck page — a person chose to look.
 //
-// It stores ONLY the opaque token from the URL. No IP, no user-agent, no referrer, no cookie.
-// The token means nothing to anyone without the ApplyPilot install secret, so this endpoint
-// leaks nothing even if the blob store is read.
+// It stores ONLY the name segment from the URL. No IP, no user-agent, no referrer, no cookie.
 
 import { getStore } from "@netlify/blobs";
 
-const TOKEN_RE = /^[0-9a-f]{8}$/;
+const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,38}$/;
 const KEY = "hits";
 const MAX = 500;   // rolling window; ApplyPilot re-reads the whole thing and dedupes.
 
 export default async (req) => {
   if (req.method !== "POST") return new Response("method not allowed", { status: 405 });
 
-  let token = "";
+  let slug = "";
   try {
     const body = await req.json();
-    token = String(body?.v ?? "").trim().toLowerCase();
+    slug = String(body?.slug ?? body?.v ?? "").trim().toLowerCase();
   } catch {
     return new Response("bad json", { status: 400 });
   }
-  // A hit with no valid token is a page view by someone who did not arrive from an email.
-  // 204, not 400: it is not an error, there is simply nothing to attribute.
-  if (!TOKEN_RE.test(token)) return new Response(null, { status: 204 });
+  // A hit with no valid slug is a page view by someone who did not arrive from an email —
+  // /intro/ itself, or a shared link with the name stripped. 204, not 400: it is not an
+  // error, there is simply nothing to attribute.
+  if (!SLUG_RE.test(slug)) return new Response(null, { status: 204 });
 
   const store = getStore("deck-hits");
   const existing = (await store.get(KEY, { type: "json" })) ?? [];
-  existing.push({ v: token, at: new Date().toISOString() });
+  existing.push({ slug, at: new Date().toISOString() });
 
   // Trim from the FRONT so the newest survive. An unbounded blob would grow forever on a page
   // that is meant to be shared.

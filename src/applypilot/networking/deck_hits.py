@@ -70,7 +70,7 @@ def fetch() -> tuple[list[dict], str]:
     except ValueError:
         # A plain text log is a legitimate response too — scan it like a pasted export.
         from applypilot.domain import deck
-        return [{"token": t, "at": ""} for t in deck.tokens_in(body)], ""
+        return [{"slug": s, "at": ""} for s in deck.slugs_in(body)], ""
 
     from applypilot.domain import deck
     return deck.hits_from_payload(payload), ""
@@ -78,9 +78,7 @@ def fetch() -> tuple[list[dict], str]:
 
 def poll(conn=None) -> dict:
     """Fetch clicks and record them. Idempotent; safe on an hourly timer."""
-    from applypilot import config
     from applypilot.database import log_event
-    from applypilot.domain import deck
     from applypilot.networking import store
 
     hits, err = fetch()
@@ -95,12 +93,11 @@ def poll(conn=None) -> dict:
     store.init_contacts(conn)
     contacts = [store.get_contact(c["id"], conn) for c in store.all_contacts_for_metrics(conn)]
     contacts = [c for c in contacts if c]
-    secret = config.install_secret()
 
-    by_token = {deck.token_for(c["id"], secret): c for c in contacts if c.get("id")}
+    by_slug = {(c.get("deck_slug") or "").lower(): c for c in contacts if c.get("deck_slug")}
     new_names, recorded = [], 0
     for hit in hits:
-        contact = by_token.get(hit["token"])
+        contact = by_slug.get((hit.get("slug") or "").lower())
         if not contact:
             continue                     # deleted contact, or a link from another install
         recorded += 1

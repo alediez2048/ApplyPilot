@@ -65,6 +65,11 @@ _CONTACT_COLUMNS: dict[str, str] = {
     # a deck, so unlike an open-tracking pixel this means a person chose to look. No token column
     # — the token is DERIVED from the contact id (`domain/deck.py`), so it survives a restore and
     # cannot drift from the links already sitting in somebody's inbox.
+    # The person's URL segment: /intro/gina. Assigned ONCE, when the first link is made, and
+    # never changed — links are already sitting in inboxes and a reassigned slug would credit
+    # the wrong person. Stored rather than derived because it cannot be derived: two contacts
+    # are often called Gina, so uniqueness needs to see the others.
+    "deck_slug": "TEXT",
     "deck_viewed_at": "TEXT",     # first click
     "deck_last_at": "TEXT",       # most recent click
     "deck_views": "INTEGER",      # how many times
@@ -247,6 +252,40 @@ def _contact_label(contact_id: str, conn: sqlite3.Connection | None = None) -> s
         return (row["full_name"] if row and row["full_name"] else contact_id) or contact_id
     except Exception:  # noqa: BLE001
         return contact_id
+
+
+def ensure_deck_slug(contact_id: str, full_name: str = "",
+                     conn: sqlite3.Connection | None = None) -> str:
+    """The contact's deck slug, assigning one on first use. Stable forever after.
+
+    Unique across the install, because the slug IS the identifier — two people called Gina
+    sharing /intro/gina would make every click ambiguous, and the older link is already out
+    there. `disambiguate` prefers a last initial ("gina-j") over a number, since a number is
+    where a friendly URL starts looking like a token again.
+    """
+    from applypilot.domain import deck as _deck
+
+    if conn is None:
+        conn = get_connection()
+    init_contacts(conn)
+    row = conn.execute("SELECT deck_slug, full_name FROM contacts WHERE id = ?",
+                       (contact_id,)).fetchone()
+    if row is None:
+        return ""
+    if (row[0] or "").strip():
+        return row[0].strip()
+
+    name = full_name or row[1] or ""
+    base = _deck.slugify(name)
+    if not base:
+        return ""
+    taken = {r[0] for r in conn.execute(
+        "SELECT deck_slug FROM contacts WHERE deck_slug IS NOT NULL AND deck_slug != ''"
+    ).fetchall()}
+    slug = _deck.disambiguate(base, taken, name)
+    conn.execute("UPDATE contacts SET deck_slug = ? WHERE id = ?", (slug, contact_id))
+    conn.commit()
+    return slug
 
 
 def mark_deck_viewed(contact_id: str, at: str = "",

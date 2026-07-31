@@ -13,10 +13,11 @@ and nothing in the message beyond a link the recipient can see.
 
 ## What gets stored
 
-Only the opaque 8-character token from the URL, plus a timestamp. **No IP, no user-agent, no
-referrer, no cookie.** The token is an HMAC of a contact id and your ApplyPilot install secret,
-so it means nothing to anyone who does not have that secret — including anyone who reads the
-blob store.
+Only the name segment from the URL (`gina`), plus a timestamp. **No IP, no user-agent, no
+referrer, no cookie.** The link is a named path — `/intro/gina`, not `/intro/?v=9b83068a`. Both identify the reader;
+only one looks like it, and this link goes in a message whose whole point is sounding personal.
+The honest trade: a name is readable, so a forwarded link tells the new reader who it was for.
+Personalisation is a real benefit rather than a disguise.
 
 ## Install (once, ~5 minutes)
 
@@ -29,17 +30,29 @@ netlify/functions/deck-hits.mjs     <- from functions/deck-hits.mjs
 
 Netlify Blobs needs no setup; it is available to functions on all plans.
 
-**2. Add the beacon to the deck page** (`/intro/`), before `</body>`:
+**2. Serve `/intro/<name>` from the same page.** In `netlify.toml`:
+
+```toml
+[[redirects]]
+  from = "/intro/*"
+  to = "/intro/index.html"
+  status = 200
+```
+
+`200` is a REWRITE, not a redirect: the browser keeps `/intro/gina` in the address bar, which is
+what lets the page read the name. A 301 would strip it before the page ever loaded.
+
+**3. Add the beacon to the deck page**, before `</body>` (or as a `useEffect` in the component):
 
 ```html
 <script>
   (function () {
-    var v = new URLSearchParams(location.search).get("v");
-    if (!v) return;                       // arrived without a link — nothing to attribute
+    var seg = location.pathname.replace(/\/+$/, "").split("/").pop();
+    if (!seg || seg === "intro" || !/^[a-z0-9][a-z0-9-]{0,38}$/.test(seg)) return;
+    var body = JSON.stringify({ slug: seg });
     navigator.sendBeacon
-      ? navigator.sendBeacon("/api/deck-hit", new Blob([JSON.stringify({ v: v })],
-          { type: "application/json" }))
-      : fetch("/api/deck-hit", { method: "POST", body: JSON.stringify({ v: v }),
+      ? navigator.sendBeacon("/api/deck-hit", new Blob([body], { type: "application/json" }))
+      : fetch("/api/deck-hit", { method: "POST", body: body,
           headers: { "content-type": "application/json" }, keepalive: true });
   })();
 </script>
@@ -48,7 +61,7 @@ Netlify Blobs needs no setup; it is available to functions on all plans.
 `sendBeacon` is used first because it survives the user navigating away immediately — which is
 exactly what someone skimming a deck does.
 
-**3. Set the shared secret** in Netlify → Site configuration → Environment variables:
+**4. Set the shared secret** in Netlify → Site configuration → Environment variables:
 
 ```
 DECK_HITS_TOKEN = <a long random string>
@@ -56,14 +69,14 @@ DECK_HITS_TOKEN = <a long random string>
 
 Generate one with: `python3 -c "import secrets; print(secrets.token_urlsafe(32))"`
 
-**4. Point ApplyPilot at it** — in `~/.applypilot/.env`:
+**5. Point ApplyPilot at it** — in `~/.applypilot/.env`:
 
 ```
 DECK_HITS_URL=https://www.jorgealejandrodiez.com/api/deck-hits
 DECK_HITS_TOKEN=<the same string>
 ```
 
-**5. Check it**
+**6. Check it**
 
 ```
 applypilot doctor            # shows "Deck clicks: on"

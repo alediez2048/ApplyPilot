@@ -530,26 +530,31 @@ def deck_hits(
 
     _config.load_env()
     text = Path(source).read_text(encoding="utf-8", errors="replace") if source else _sys.stdin.read()
-    tokens = _deck.tokens_in(text)
-    if not tokens:
-        console.print("[yellow]No deck tokens found in that input.[/yellow]")
-        console.print("  Expected URLs containing [cyan]?v=<8 hex chars>[/cyan] — the links "
-                      "ApplyPilot puts in outreach emails.")
-        raise typer.Exit(0)
 
     init_db()
     conn = get_connection()
     _store.init_contacts(conn)
-    contacts = [_store.get_contact(c["id"], conn) for c in _store.all_contacts_for_metrics(conn)]
-    hits = _deck.match_contacts(tokens, [c for c in contacts if c], _config.install_secret())
+    contacts = [c for c in (_store.get_contact(c["id"], conn)
+                            for c in _store.all_contacts_for_metrics(conn)) if c]
+    # Narrow to slugs we actually issued. A path is a far broader namespace than the old query
+    # parameter, so /intro/assets or a real sub-page would otherwise read as a visitor.
+    issued = {(c.get("deck_slug") or "").lower() for c in contacts if c.get("deck_slug")}
+    tokens = _deck.slugs_in(text, known=issued)
+    if not tokens:
+        console.print("[yellow]No deck visits found in that input.[/yellow]")
+        console.print("  Expected URLs like [cyan]/intro/<name>[/cyan] — the links ApplyPilot "
+                      "puts in outreach emails.")
+        raise typer.Exit(0)
 
-    console.print(f"\n[bold]{len(tokens)} token(s) in the input, "
+    hits = _deck.match_contacts(tokens, contacts)
+
+    console.print(f"\n[bold]{len(tokens)} visit(s) in the input, "
                   f"{len(hits)} matched a contact[/bold]"
                   f"{' [dim](dry run)[/dim]' if dry_run else ''}")
     if len(tokens) > len(hits):
         # Loud, because a silent mismatch reads as "nobody clicked" when it may mean the secret
         # changed or the contact was deleted (§Lessons 15).
-        console.print(f"  [yellow]{len(tokens) - len(hits)} token(s) matched nobody[/yellow] — "
+        console.print(f"  [yellow]{len(tokens) - len(hits)} visit(s) matched nobody[/yellow] — "
                       "deleted contacts, or links from a different install.")
     for c in hits:
         first = "already seen" if (c.get("deck_viewed_at") or "").strip() else "[green]NEW[/green]"

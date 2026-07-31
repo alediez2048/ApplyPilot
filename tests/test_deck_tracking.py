@@ -10,6 +10,12 @@ than none: it drives follow-up decisions the data cannot support.
 A click is different. No spam filter follows a link and reads a deck. And because the deck is on
 the sender's OWN site, it needs no pixel, no third-party analytics, and nothing hidden in the
 message beyond a link the recipient can see.
+
+**The link is a NAMED PATH, not a tracking parameter.** `/intro/gina`, not `/intro/?v=9b83068a`.
+Both identify the reader; only one looks like it. The first version used an opaque token, and a
+token in a query string is the shape people have been trained to distrust — in the one message
+whose whole point is sounding personal. A path segment with their first name looks deliberate,
+because it is.
 """
 
 from __future__ import annotations
@@ -24,85 +30,84 @@ SECRET = "test-install-secret"
 BASE = "https://www.jorgealejandrodiez.com/intro/"
 
 
-# ── the token ────────────────────────────────────────────────────────────────────────────
+# ── the slug ─────────────────────────────────────────────────────────────────────────────
 
-def test_a_token_is_stable_for_the_same_contact():
-    """Derived, not stored. A database restore, a re-discovered contact, or a second machine
-    must all reproduce the token — the links are already sitting in people's inboxes and there
-    is no lookup table that can fall out of step with them."""
-    assert deck.token_for("c1", SECRET) == deck.token_for("c1", SECRET)
-    assert deck.token_for("c1", SECRET) != deck.token_for("c2", SECRET)
-    assert len(deck.token_for("c1", SECRET)) == deck.TOKEN_LEN
-
-
-def test_the_secret_is_what_makes_tokens_unguessable():
-    """Contact ids are a hash of (job, identity) — reproducible by anyone who knows the inputs.
-    A bare hash of the id would let the whole token space be enumerated from a guess at the
-    scheme; the per-install secret is the only thing preventing that."""
-    assert deck.token_for("c1", "secret-a") != deck.token_for("c1", "secret-b")
+def test_a_name_becomes_a_clean_url_segment():
+    """The entire point: the URL has to look like it was written for them."""
+    assert deck.slugify("Gina Johnson") == "gina"
+    assert deck.slugify("gina") == "gina"
+    # Accents folded, not percent-encoded — "%C3%A9" in a link is the ugliness being fixed.
+    assert deck.slugify("Renée Dupont") == "renee"
+    assert deck.slugify("Jean-Luc Picard") == "jean-luc"
 
 
-def test_no_token_for_a_contact_with_no_id():
-    assert deck.token_for("", SECRET) == ""
-    assert deck.token_for(None, SECRET) == ""
+def test_a_slug_never_collides_with_a_real_page():
+    """`/intro/assets` and `/intro/index` are (or could become) real paths. A contact named
+    "Index" must not shadow one."""
+    for reserved in ("index", "assets", "api", "admin"):
+        assert deck.slugify(reserved) == ""
+    assert deck.slugify("") == "" and deck.slugify(None) == ""
 
 
-# ── the URL ──────────────────────────────────────────────────────────────────────────────
+def test_two_people_with_the_same_first_name_stay_distinct():
+    """Two Ginas is the normal case, not an edge case — and the older link is already in
+    somebody's inbox, so the second person must be the one who moves."""
+    assert deck.disambiguate("gina", set(), "Gina Johnson") == "gina"
+    assert deck.disambiguate("gina", {"gina"}, "Gina Bavagnoli") == "gina-b"
+    # A number only when a last initial cannot help — that is where a friendly URL starts
+    # looking like a token again, which is the thing this replaced.
+    assert deck.disambiguate("gina", {"gina", "gina-b"}, "Gina Bavagnoli") == "gina-2"
+    assert deck.disambiguate("gina", {"gina"}, "Gina") == "gina-2"
 
-def test_the_token_is_appended_without_breaking_an_existing_query():
-    assert deck.deck_url(BASE, "abc123de") == f"{BASE}?v=abc123de"
-    assert deck.deck_url("https://x.com/i?utm=li", "abc123de") == "https://x.com/i?utm=li&v=abc123de"
+
+def test_the_url_is_a_path_not_a_query():
+    assert deck.deck_url("https://x.com/intro/", "gina") == "https://x.com/intro/gina"
+    assert deck.deck_url("https://x.com/intro", "gina") == "https://x.com/intro/gina"
+    assert "?" not in deck.deck_url("https://x.com/intro/", "gina")
+    # An existing query (a utm tag, say) survives rather than being clobbered.
+    assert deck.deck_url("https://x.com/intro?utm=li", "gina") == "https://x.com/intro/gina?utm=li"
 
 
-def test_a_missing_token_leaves_the_link_working():
-    """An un-attributed click is a much smaller loss than a broken deck link."""
+def test_a_missing_slug_leaves_a_working_link():
+    """An un-attributed click is a far smaller loss than a 404 on the deck itself."""
     assert deck.deck_url(BASE, "") == BASE
-    assert deck.deck_url("", "abc123de") == ""
-
-
-def test_a_token_is_not_added_twice():
-    once = deck.deck_url(BASE, "abc123de")
-    assert deck.deck_url(once, "abc123de") == once
-
-
-def test_the_token_can_be_stripped_for_comparison():
-    assert deck.strip_token(f"{BASE}?v=abc123de") == BASE.rstrip("?&")
-    assert deck.strip_token(f"{BASE}?utm=li&v=abc123de") == f"{BASE}?utm=li"
+    assert deck.deck_url("", "gina") == ""
 
 
 # ── the import ───────────────────────────────────────────────────────────────────────────
 
-def test_tokens_are_found_in_any_log_format():
+def test_visits_are_found_in_any_log_format():
     """Scanning for the SHAPE rather than parsing one provider is what lets this accept a
     Plausible export, a Vercel log and a pasted list without a per-provider adapter."""
     blob = """
-    2026-07-31T10:00:00Z GET /intro/?v=aaaaaaaa 200
+    2026-07-31T10:00:00Z GET /intro/gina 200
     "path","visitors"
-    "/intro/?v=bbbbbbbb","3"
-    https://www.jorgealejandrodiez.com/intro/?utm_source=email&v=cccccccc
+    "/intro/victoria","3"
+    https://www.jorgealejandrodiez.com/intro/david-l?utm_source=email
     """
-    assert deck.tokens_in(blob) == {"aaaaaaaa", "bbbbbbbb", "cccccccc"}
+    assert deck.slugs_in(blob) == {"gina", "victoria", "david-l"}
 
 
-def test_a_random_hex_string_is_not_mistaken_for_a_visitor():
-    """Logs are full of 8-hex request ids and git shas. Only our query parameter counts."""
-    assert deck.tokens_in("commit deadbeef built in 4s, trace_id=abcdef12") == set()
-    assert deck.tokens_in("GET /other?id=aaaaaaaa") == set()
-    assert deck.tokens_in("") == set()
-    assert deck.tokens_in(None) == set()
+def test_a_real_subpage_is_not_mistaken_for_a_visitor():
+    """A path is a MUCH broader namespace than the old query parameter, so this filter matters
+    more than it did: /intro/assets is a directory, not a person."""
+    assert deck.slugs_in("GET /intro/assets/deck.png 200") == set()
+    assert deck.slugs_in("GET /other/gina 200") == set()
+    # And narrowing to slugs actually issued removes the rest.
+    assert deck.slugs_in("GET /intro/careers 200", known={"gina"}) == set()
+    assert deck.slugs_in("GET /intro/gina 200", known={"gina"}) == {"gina"}
+    assert deck.slugs_in("") == set() and deck.slugs_in(None) == set()
 
 
-def test_tokens_map_back_to_the_right_people():
-    contacts = [{"id": "c1", "full_name": "Gina"}, {"id": "c2", "full_name": "Victoria"}]
-    hits = deck.match_contacts({deck.token_for("c2", SECRET)}, contacts, SECRET)
-    assert [c["full_name"] for c in hits] == ["Victoria"]
+def test_slugs_map_back_to_the_right_people():
+    contacts = [{"id": "c1", "full_name": "Gina", "deck_slug": "gina"},
+                {"id": "c2", "full_name": "Victoria", "deck_slug": "victoria"}]
+    assert [c["full_name"] for c in deck.match_contacts({"victoria"}, contacts)] == ["Victoria"]
 
 
-def test_an_unknown_token_is_ignored_not_an_error():
-    """Most likely a deleted contact or a link from a different install. Neither is worth
-    failing an import over."""
-    contacts = [{"id": "c1", "full_name": "Gina"}]
-    assert deck.match_contacts({"ffffffff"}, contacts, SECRET) == []
+def test_an_unknown_slug_is_ignored_not_an_error():
+    """Most likely a deleted contact or a link from a different install."""
+    assert deck.match_contacts({"nobody"}, [{"id": "c1", "deck_slug": "gina"}]) == []
 
 
 # ── recording ────────────────────────────────────────────────────────────────────────────
@@ -149,25 +154,55 @@ def test_marking_an_unknown_contact_does_not_invent_one(db):
 
 # ── the link that actually goes out ──────────────────────────────────────────────────────
 
-def test_the_outreach_link_carries_the_contact_token(monkeypatch):
-    from applypilot import config
+def test_the_outreach_link_is_a_named_path(db, monkeypatch):
+    """What the recipient actually sees. This is the whole change: `/intro/gina` reads as
+    "I made this for you"; `/intro/?v=9b83068a` reads as surveillance."""
     from applypilot.networking import outreach
 
     monkeypatch.setenv("INTRO_DECK_URL", BASE)
-    monkeypatch.setattr(config, "install_secret", lambda: SECRET)
+    monkeypatch.setattr(outreach, "log", outreach.log)
+    cid = store.upsert_contact({"job_url": "http://j/1", "full_name": "Gina Johnson",
+                                "email": "g@co.com"}, db)
+    import applypilot.networking.store as _store_mod
+    monkeypatch.setattr(_store_mod, "get_connection", lambda *a, **k: db)
 
-    plain = outreach._intro_deck_url({}, None)
-    tagged = outreach._intro_deck_url({}, {"id": "c1"})
-    assert plain == BASE, "the un-attributed link must still be the plain deck URL"
-    assert tagged == f"{BASE}?v={deck.token_for('c1', SECRET)}"
-    # And it round-trips: the link we send is the link the import recognises.
-    assert deck.tokens_in(tagged) == {deck.token_for("c1", SECRET)}
+    url = outreach._intro_deck_url({}, {"id": cid, "full_name": "Gina Johnson"})
+    assert url == f"{BASE}gina", url
+    assert "?" not in url and "=" not in url, "the link still looks like a tracker"
+    # It round-trips: the link we send is the visit the import recognises.
+    assert deck.slugs_in(url) == {"gina"}
 
 
-def test_a_contact_with_no_id_still_gets_a_working_link(monkeypatch):
+def test_the_slug_is_assigned_once_and_never_moves(db):
+    """Links are already sitting in inboxes. A reassigned slug would credit the wrong person
+    for a click on a message sent last week."""
+    cid = store.upsert_contact({"job_url": "http://j/1", "full_name": "Gina Johnson",
+                                "email": "g@co.com"}, db)
+    first = store.ensure_deck_slug(cid, "Gina Johnson", db)
+    assert first == "gina"
+    # Even if the display name later changes, the issued link keeps working.
+    db.execute("UPDATE contacts SET full_name = ? WHERE id = ?", ("Regina Smith", cid))
+    db.commit()
+    assert store.ensure_deck_slug(cid, "Regina Smith", db) == "gina"
+
+
+def test_a_second_gina_gets_her_own_link(db):
+    a = store.upsert_contact({"job_url": "http://j/1", "full_name": "Gina Johnson",
+                              "email": "a@x.com"}, db)
+    b = store.upsert_contact({"job_url": "http://j/2", "full_name": "Gina Bavagnoli",
+                              "email": "b@x.com"}, db)
+    assert store.ensure_deck_slug(a, "Gina Johnson", db) == "gina"
+    assert store.ensure_deck_slug(b, "Gina Bavagnoli", db) == "gina-b"
+
+
+def test_a_contact_with_no_usable_name_still_gets_a_working_link(db, monkeypatch):
+    """A plain deck link beats a broken one — the conversation matters more than the metric."""
     from applypilot.networking import outreach
     monkeypatch.setenv("INTRO_DECK_URL", BASE)
-    assert outreach._intro_deck_url({}, {"full_name": "No Id"}) == BASE
+    cid = store.upsert_contact({"job_url": "http://j/1", "full_name": "", "email": "x@y.com"}, db)
+    import applypilot.networking.store as _store_mod
+    monkeypatch.setattr(_store_mod, "get_connection", lambda *a, **k: db)
+    assert outreach._intro_deck_url({}, {"id": cid, "full_name": ""}) == BASE
 
 
 # ── the pull from the site ───────────────────────────────────────────────────────────────
@@ -175,20 +210,20 @@ def test_a_contact_with_no_id_still_gets_a_working_link(monkeypatch):
 def test_the_pull_accepts_the_shapes_a_hand_rolled_endpoint_produces():
     """The collector is something the OPERATOR deploys and edits. Rejecting their JSON over a
     key name is a silly way to lose a click."""
-    tok = "9b83068a"
+    slug = "gina"
     for payload in (
-        [tok],
-        {"hits": [tok]},
-        {"events": [{"v": tok, "at": "2026-07-31T10:00:00Z"}]},
-        {"data": [{"token": tok}]},
-        [{"id": tok, "ts": "2026-07-31T10:00:00Z"}],
-        [f"https://x.com/intro/?v={tok}"],          # a raw URL is a legitimate item too
+        [slug],
+        {"hits": [slug]},
+        {"events": [{"slug": slug, "at": "2026-07-31T10:00:00Z"}]},
+        {"data": [{"path": f"/intro/{slug}"}]},
+        [{"id": slug, "ts": "2026-07-31T10:00:00Z"}],
+        [f"https://x.com/intro/{slug}"],           # a raw URL is a legitimate item too
     ):
-        assert [h["token"] for h in deck.hits_from_payload(payload)] == [tok], payload
+        assert [h["slug"] for h in deck.hits_from_payload(payload)] == [slug], payload
 
 
 def test_junk_from_the_collector_yields_nothing_rather_than_raising():
-    for payload in (None, "", 42, {"unexpected": 1}, [None, 7, {}], [{"v": "not-a-token"}]):
+    for payload in (None, "", 42, {"unexpected": 1}, [None, 7, {}], [{"slug": "///"}]):
         assert deck.hits_from_payload(payload) == []
 
 
@@ -252,20 +287,18 @@ def test_a_plain_text_log_response_still_works(monkeypatch):
         def __exit__(self, *a): return False
 
     monkeypatch.setattr(deck_hits.urllib.request, "urlopen",
-                        lambda *a, **k: _R(b"GET /intro/?v=9b83068a 200"))
+                        lambda *a, **k: _R(b"GET /intro/gina 200"))
     hits, err = deck_hits.fetch()
-    assert err == "" and [h["token"] for h in hits] == ["9b83068a"]
+    assert err == "" and [h["slug"] for h in hits] == ["gina"]
 
 
 def test_polling_records_a_click_and_says_who(db, monkeypatch):
-    from applypilot import config
     from applypilot.networking import deck_hits
 
     cid = store.upsert_contact({"job_url": "http://j/1", "full_name": "Josh Guild",
                                 "email": "j@co.com"}, db)
-    monkeypatch.setattr(config, "install_secret", lambda: SECRET)
-    tok = deck.token_for(cid, SECRET)
-    monkeypatch.setattr(deck_hits, "fetch", lambda: ([{"token": tok, "at": ""}], ""))
+    slug = store.ensure_deck_slug(cid, "Josh Guild", db)
+    monkeypatch.setattr(deck_hits, "fetch", lambda: ([{"slug": slug, "at": ""}], ""))
 
     first = deck_hits.poll(db)
     assert first["new"] == 1 and first["names"] == ["Josh Guild"]
@@ -282,13 +315,11 @@ def test_an_unknown_token_is_never_attributed_to_the_wrong_person(db, monkeypatc
     must record against NOBODY. Attributing it to whichever contact happened to be first would
     put "opened the deck" on a person who never saw it — and the operator would follow up on it.
     """
-    from applypilot import config
     from applypilot.networking import deck_hits
 
     a = store.upsert_contact({"job_url": "http://j/1", "full_name": "Gina", "email": "g@co.com"}, db)
     b = store.upsert_contact({"job_url": "http://j/1", "full_name": "Josh", "email": "j@co.com"}, db)
-    monkeypatch.setattr(config, "install_secret", lambda: SECRET)
-    monkeypatch.setattr(deck_hits, "fetch", lambda: ([{"token": "ffffffff", "at": ""}], ""))
+    monkeypatch.setattr(deck_hits, "fetch", lambda: ([{"slug": "nobody", "at": ""}], ""))
 
     res = deck_hits.poll(db)
     assert res["recorded"] == 0 and res["new"] == 0
@@ -300,14 +331,13 @@ def test_an_unknown_token_is_never_attributed_to_the_wrong_person(db, monkeypatc
 
 def test_a_click_lands_on_the_right_person_when_several_exist(db, monkeypatch):
     """The positive half: with two contacts, only the one whose token arrived is marked."""
-    from applypilot import config
     from applypilot.networking import deck_hits
 
     a = store.upsert_contact({"job_url": "http://j/1", "full_name": "Gina", "email": "g@co.com"}, db)
     b = store.upsert_contact({"job_url": "http://j/1", "full_name": "Josh", "email": "j@co.com"}, db)
-    monkeypatch.setattr(config, "install_secret", lambda: SECRET)
-    monkeypatch.setattr(deck_hits, "fetch",
-                        lambda: ([{"token": deck.token_for(b, SECRET), "at": ""}], ""))
+    store.ensure_deck_slug(a, "Gina", db)
+    slug_b = store.ensure_deck_slug(b, "Josh", db)
+    monkeypatch.setattr(deck_hits, "fetch", lambda: ([{"slug": slug_b, "at": ""}], ""))
 
     assert deck_hits.poll(db)["names"] == ["Josh"]
     assert not (store.get_contact(a, db)["deck_viewed_at"] or "")
@@ -337,11 +367,33 @@ def test_tick_never_makes_the_deck_step_fatal(db, monkeypatch):
     assert "followups" in out["steps"], "a broken deck step aborted the rest of the tick"
 
 
-def test_the_install_secret_is_stable_across_calls(tmp_path, monkeypatch):
-    from applypilot import config
-    monkeypatch.setattr(config, "APP_DIR", tmp_path)
-    first = config.install_secret()
-    assert first and config.install_secret() == first
-    assert (tmp_path / "install_secret").exists()
-    import os
-    assert oct(os.stat(tmp_path / "install_secret").st_mode)[-3:] == "600"
+# ── the shape of the link is the feature ─────────────────────────────────────────────────
+
+def test_no_issued_link_ever_looks_like_a_tracker(db, monkeypatch):
+    """The requirement, stated as a test: "i no longer want to do the tracking id route, it
+    does not look good to be sending urls with weird urls".
+
+    A query parameter, a hex blob, or an opaque id is the shape people have been trained to
+    distrust — in the one message whose whole point is sounding personal. This asserts on what
+    the RECIPIENT sees, so a future change that reintroduces a token fails here rather than
+    passing quietly because the plumbing still works.
+    """
+    import re as _re
+
+    from applypilot.networking import outreach
+    import applypilot.networking.store as _store_mod
+
+    monkeypatch.setenv("INTRO_DECK_URL", BASE)
+    monkeypatch.setattr(_store_mod, "get_connection", lambda *a, **k: db)
+
+    for name in ("Gina Johnson", "Renée Dupont", "Jean-Luc Picard", "CJ", "Ali Coppinger"):
+        cid = store.upsert_contact({"job_url": "http://j/1", "full_name": name,
+                                    "email": f"{name.split()[0].lower()}@x.com"}, db)
+        url = outreach._intro_deck_url({}, {"id": cid, "full_name": name})
+        assert "?" not in url, f"{url} carries a query string"
+        assert "=" not in url, f"{url} carries a parameter"
+        assert "%" not in url, f"{url} is percent-encoded"
+        # No hex blob masquerading as a name.
+        tail = url.rsplit("/", 1)[-1]
+        assert not _re.fullmatch(r"[0-9a-f]{6,}", tail), f"{url} ends in an opaque id"
+        assert tail == deck.slugify(name) or tail.startswith(deck.slugify(name)), url

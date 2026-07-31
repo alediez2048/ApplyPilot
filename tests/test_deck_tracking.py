@@ -160,7 +160,8 @@ def test_the_outreach_link_is_a_named_path(db, monkeypatch):
     from applypilot.networking import outreach
 
     monkeypatch.setenv("INTRO_DECK_URL", BASE)
-    monkeypatch.setattr(outreach, "log", outreach.log)
+    # The scheme is gated: a named link is only issued once the site can serve /intro/<name>.
+    monkeypatch.setenv("INTRO_DECK_PATHS", "1")
     cid = store.upsert_contact({"job_url": "http://j/1", "full_name": "Gina Johnson",
                                 "email": "g@co.com"}, db)
     import applypilot.networking.store as _store_mod
@@ -384,6 +385,7 @@ def test_no_issued_link_ever_looks_like_a_tracker(db, monkeypatch):
     import applypilot.networking.store as _store_mod
 
     monkeypatch.setenv("INTRO_DECK_URL", BASE)
+    monkeypatch.setenv("INTRO_DECK_PATHS", "1")
     monkeypatch.setattr(_store_mod, "get_connection", lambda *a, **k: db)
 
     for name in ("Gina Johnson", "Renée Dupont", "Jean-Luc Picard", "CJ", "Ali Coppinger"):
@@ -450,3 +452,28 @@ def test_relink_only_touches_OUR_deck():
     assert "https://someoneelse.com/intro/x" in out, "another site's /intro/ was rewritten"
     assert "https://x.com/introduction/y" in out, "an /introduction/ path was rewritten"
     assert NEW in out
+
+
+def test_named_links_are_OFF_until_the_site_can_serve_them(db, monkeypatch):
+    """The bug that reached four real recruiters.
+
+    The link scheme was switched to /intro/<name> while the Netlify rewrite serving those paths
+    was still uncommitted, so Lizzie, Alex, Dinara and Isaac were sent emails whose deck link
+    404'd. A personalised link that does not resolve is far worse than an un-attributed one
+    that does — it costs the conversation, which is the whole reason for sending it.
+    """
+    from applypilot.networking import outreach
+    import applypilot.networking.store as _store_mod
+
+    monkeypatch.setenv("INTRO_DECK_URL", BASE)
+    monkeypatch.delenv("INTRO_DECK_PATHS", raising=False)
+    monkeypatch.setattr(_store_mod, "get_connection", lambda *a, **k: db)
+    cid = store.upsert_contact({"job_url": "http://j/1", "full_name": "Gina Johnson",
+                                "email": "g@co.com"}, db)
+
+    off = outreach._intro_deck_url({}, {"id": cid, "full_name": "Gina Johnson"})
+    assert off == BASE, "a named link was issued with the feature off"
+
+    monkeypatch.setenv("INTRO_DECK_PATHS", "1")
+    on = outreach._intro_deck_url({}, {"id": cid, "full_name": "Gina Johnson"})
+    assert on == f"{BASE}gina"

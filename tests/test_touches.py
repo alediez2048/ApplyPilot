@@ -234,15 +234,20 @@ def _legacy_contact(conn, name, **cols) -> str:
 
 
 def test_a_migrated_database_has_no_ladder_columns_left(db):
-    """The acceptance criterion, pinned: 42 columns down to 32, and they stay gone.
+    """The acceptance criterion, pinned: 42 columns down to 32, and the ten stay gone.
 
     `ensure_contacts_columns` re-adds anything still listed in `_CONTACT_COLUMNS`, so
     leaving one behind there would silently resurrect all ten on the next startup.
+
+    The total is pinned too, so a new column is a DELIBERATE edit here rather than something
+    that drifts in. 33 since CRM-1 added `replied_at` — which is a date for the UI and for
+    time_to_reply, NOT ladder state: the halt still goes through `sequences`.
     """
     store.init_contacts(db)
     cols = {r[1] for r in db.execute("PRAGMA table_info(contacts)")}
     assert not [c for c in cols if "followup" in c or "followed_up" in c]
-    assert len(cols) == 32
+    assert "replied_at" in cols
+    assert len(cols) == 33, f"unexpected contacts columns: {sorted(cols)}"
 
 
 def test_backfill_moves_state_and_verifies_clean(db):

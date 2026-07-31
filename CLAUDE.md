@@ -12,7 +12,7 @@ campaign happens to be a job search** — see `docs/crm-prd.md` for where that g
 - **Packaging:** Hatchling, `src/` layout, single package `applypilot`
 - **Entry point:** `applypilot = "applypilot.cli:app"` (Typer CLI)
 - **License:** AGPL-3.0-only · **Version:** 0.4.0 (`pyproject.toml`)
-- **Tests:** 562 passing (`tests/`, 41 files) · ruff clean (line-length 120, py311) · ESLint clean
+- **Tests:** 764 passing (`tests/`, 50 files) · ruff clean (line-length 120, py311) · ESLint clean
 - **Schema version:** 1 (`applypilot migrate --status`) · **Settings:** 41 declared in `settings.py`
 
 ## Quick orientation
@@ -54,7 +54,7 @@ stops the moment a job hands over — see §Lessons 8, which cost two filled app
 | `database.py` | SQLite layer. Owns `jobs` + `job_events`. Thread-local WAL, additive column pass, then numbered migrations. `get_connection()` returns a subclass carrying a per-connection schema memo — see §Lessons 11. |
 | `llm.py` | Multi-provider client (round-robin + failover: OpenAI/Gemini/Anthropic/local). |
 | `view.py` | Static HTML results export. |
-| `web_dashboard.py` | **The operator dashboard.** 2,096 lines, **zero SQL** — data access goes through `repo/` and `store.py` (ARCH-4). |
+| `web_dashboard.py` | **The operator dashboard.** 2,362 lines, **zero SQL** — data access goes through `repo/` and `store.py` (ARCH-4). |
 | `repo/jobs.py` | Every `jobs` query as a named function. Owns `QUEUE_SQL` (what counts as an operator-added job). |
 | `scoring/resume_sections.py` | Parses the BASE résumé into its own sections. The base résumé is the template; tailoring rewrites content inside it. |
 | `settings.py` | **Every env var, one registry.** Types, defaults, validators, secret flags. Malformed values fail at startup naming the variable. `.env.example` is generated from it. |
@@ -123,6 +123,9 @@ harness no longer has to import a web server to test scheduling.
 | `verification.py` | `verify_contact()` — moved from `networking/` (it never was a networking concern). `networking/verify.py` is a re-export shim. |
 | `company.py` | `companies_match()` — shared by connections, Apollo org resolution, and verification, which must all agree. |
 | `timeutil.py` | `parse_ts()` — one implementation of the naive/aware guard. |
+| `conversations.py` | Who is on a thread, who was just introduced, **who owes whom a reply** (`conversation_state`), and who a reply must reach (`reply_target` — the Cc is carried forward, never rebuilt). |
+| `intent.py` | CRM-4b. What a reply wants — rejection / not now / interested / introduction / question / auto-reply — from a ~200-char snippet. Rule-based and quick to say `unknown`. |
+| `metrics.py` | CRM-2 funnel + reply rates. Every rate carries its `n`; bounces leave the denominator. |
 
 **Adding a channel (e.g. SMS) is one `Channel` entry plus one prompt** — executed, not
 claimed: `test_adding_a_channel_needs_no_schema_change` defines an SMS channel that exists
@@ -160,12 +163,17 @@ incapable of touching a LinkedIn page. See §Lessons.
 | `touches` | `networking/touches.py` | One follow-up touch per row, ANY channel. `seq` is per (contact, channel). |
 | `sequences` | `networking/touches.py` | Terminal state per (contact, channel): `stopped` / `replied`. |
 | `connections` | `networking/connections.py` | Imported LinkedIn CSV. |
+| `messages` | `networking/messages.py` | **CRM-4 conversation memory.** Thread HEADERS only — no body/snippet column exists, and a test asserts it. Keyed by Gmail's message id, so re-syncing is a no-op. `rfc_message_id` is what lets a reply chain `References` across the whole thread. |
 | `job_events` | `database.py` | Per-job activity log. Append is best-effort, never raises. |
 
 | `schema_migrations` | `migrations/` | Version, status, `claimed_at` lease. See §Lessons on the 300s lease. |
 
-Live counts (2026-07-30): jobs 13, contacts 50 (**33 emailed**), connections 899,
-job_events 201, touches 7, sequences 10. Schema version 1.
+Live counts (2026-07-31): jobs 15, contacts 51 (**33 emailed, 2 replied, 1 bounced**),
+messages 36, connections 899, job_events 232, touches 10, sequences 13. Schema version 1.
+
+**The second reply arrived on its own** — Gina Johnson at Salesforce, 2026-07-31, detected by
+the CRM-1 background poller with nobody watching. That is the whole point of the heartbeat:
+before CRM-1 the only recorded reply in the database had been typed in by hand.
 
 **`jobs` columns by stage:** discover(`title,salary,description,location,site,strategy`) →
 enrich(`full_description,application_url,detail_error`) → score(`fit_score,score_reasoning`) →
@@ -208,6 +216,11 @@ subtree has focus** — otherwise it eats what you're typing.
 `/api/status` costs **50 SQL statements** (was 313 before ARCH-4 measured it — 199 of those
 were `CREATE TABLE IF NOT EXISTS` re-run every request). `tests/test_query_budget.py` holds
 the line and fails on a per-contact N+1. Batch a new query; don't raise the budget.
+
+**That budget counts SQL and nothing else**, which is exactly how CRM-4a slipped a Gmail HTTP
+call per job onto this path and took the endpoint to **2.4s against a 2.5s refresh** — see
+§Lessons 26. Now **0.043s**, with a test that counts network round-trips too. Anything you add
+here that touches the network needs the same treatment.
 
 ---
 
@@ -470,7 +483,135 @@ company `"Jobs"` — the same substring bug class, inside the function written t
     addressed to nobody; `acme.breezy.hr` resolved to **"Hr"**. The employer is the tenant, not
     the vendor — match the *only* meaningful host label, and keep one shared TLD list.
 
+21. **A derived field is not a column, and the gap is silent.** `emailed` is computed by the
+    dashboard in `_contact_payload`; it does not exist in `contacts`. So `applypilot tick`,
+    passing raw DB rows, saw every email ladder as "never used" and reported **0 follow-ups due
+    while the dashboard showed 3**. Fixed at the ONE shared entry point
+    (`followup_panel` normalises) so the two cannot drift. Same session, same class: reading
+    `ladder.get("body")` when the key is `draft_body` made the idempotence check never fire —
+    an hourly tick would have re-drafted and re-PAID for the same follow-up forever.
+
+22. **Idempotence has to be tested by running it twice, not by reasoning.** A bounced contact
+    stayed in the reply-polling pool, so every poll re-detected the same failure and appended
+    another log line — an afternoon of ticks produced **11 identical BOUNCED entries** for one
+    address. Terminal states must leave the pool.
+
+23. **The pool you exclude from is as important as the one you poll.** Reply detection excluded
+    anyone who had already replied — which is exactly BACKWARDS for conversation memory, since
+    a replied contact is the one with a LIVE thread. Victoria's thread stopped being read the
+    moment she answered, so the handoff could never be seen. Widen the read, gate the WRITE.
+
+24. **A regex cannot split an email header.** `,(?![^<]*>)` breaks on a comma inside a quoted
+    name: `"Loveless, David" <david@writer.com>` became two recipients, one of them the garbage
+    address `"loveless`. Scan with quote/angle state instead. Related: storing bare addresses
+    destroys the display name permanently — "David Loveless" degrades to "David", because the
+    only fallback left is the local part.
+
+25. **A test heuristic that matches the wrong thing pushes real code onto an allowlist.** The
+    SQL-boundary test flagged `gmail_read.py` because it matched the string `.execute(` — which
+    the Google API client also uses. That false positive is why `gmail_oauth.py` had been sitting
+    on the exemption list for a rule it never broke. Detect SQL, not a method name.
+
+26. **A query budget only counts queries.** `connected_email()` is an HTTP round-trip to Gmail
+    (~0.12s), and CRM-4a called it **once per job** inside `/api/status` — which re-renders
+    every 2.5 seconds. Measured at **2.4s per request with 15 jobs**: the dashboard was
+    refreshing back-to-back and spending nearly all of it asking Gmail the same unchanging
+    question. `tests/test_query_budget.py` passed the whole time, because none of it was SQL.
+    Cached on the token file's mtime (a new token invalidates it, so reconnecting a different
+    account cannot serve the old address) — **2.4s → 0.043s**. Lesson 11 with a different unit:
+    the hot path is hot for *everything*, not just the thing you happened to instrument.
+
+27. **Everything chased people who said NOTHING; nothing noticed the ones who answered.**
+    Follow-up ladders, touch schedules, LinkedIn nudges — every signal in the system was built
+    around silence. The opposite case is rarer and much worse: somebody replied and it sat
+    there. It was live while CRM-4a was being finished — Gina Johnson at Salesforce replied and
+    the row still read "1 follow-up due". An unanswered reply now outranks every ladder, and the
+    pill is on the COLLAPSED row: a state you must expand a contact to discover is a state
+    nobody sees for days.
+
+28. **Measure the bug before fixing the bug the ticket describes.** CRM-4 said the introduced
+    contact would have no ladder anchor and would "silently never follow up", and prescribed
+    back-dating one to the introduction date. Checking the live Writer job showed the failure
+    does not happen — no `sent_message_id` means the email ladder correctly does not apply (you
+    cannot follow up on an email you never sent), and the checklist already counts him under
+    `emailed 2/3` so the job reads *partial*, not finished. **Implementing the prescribed fix
+    would have told the ladder we had emailed somebody we had not.** Two CRM tickets had already
+    shipped factually wrong instructions; a ticket is a hypothesis.
+
+29. **The dangerous half of a feature is the half that looks identical when it is wrong.**
+    Replying in-thread either reaches David or it does not, and both outcomes render the same
+    screen and log the same success. So the recipients are computed from the stored thread
+    rather than posted by the browser, and the Cc is drawn as visible chips — the operator has
+    to be shown who a message reaches before they can meaningfully click Send. A bare
+    `"david@writer.com" in html` assertion passed with the chips deleted entirely, because the
+    address was also sitting in a hidden `data-cc` attribute; only matching the rendered chip
+    caught it. Mutation testing found that, not review.
+
+30. **A mutation harness that reports SURVIVED without running anything is worse than none.**
+    Eleven mutations came back clean in one batch; all eleven ran zero tests, because zsh does
+    **not** word-split an unquoted `$VAR`, so `pytest $TESTS` got one bogus path. It printed
+    exactly what a perfectly-tested codebase prints. The harness now fails loudly on "no tests
+    ran". Same session, third vacuous-test find: `classify("Sounds good?") != QUESTION` passes
+    no matter what the question regex does, because `sounds good` matches `interested` and
+    returns first — replacing the entire regex with a bare `\?` left every test green.
+
 ---
+
+## The CRM phase (2026-07-30, branch `crm-phase-1`)
+
+Shipped in one session, in this order: **CRM-3a → CRM-1 → CRM-2 → CRM-3b → CRM-4a.**
+Tickets in `docs/tickets/CRM-*.md`; two of them had instructions that were factually wrong
+before being revised (they told you to write `followup_status`, removed by ARCH-3).
+
+| | What it does | Where |
+|---|---|---|
+| **3a** | `(2) ⚠ ApplyPilot` tab badge. Counts what is NEW since you last looked — a badge that counts every actionable row is permanently lit and trains you to ignore it. | `dashboard.js` |
+| **1** | Reply detection. Gmail poll every 5 min + `📥 Check replies`. | `networking/replies.py`, `gmail_read.py`, `domain/replies.py` |
+| **2** | Outcome metrics: funnel, reply rates, time-to-reply. | `domain/metrics.py`, `stats --outreach` |
+| **3b** | `applypilot tick` — unattended heartbeat, `schedule --install` for launchd. | `tick.py`, `schedule.py` |
+| **4a** | Conversation memory: thread view, handoff detection, add an introduced contact. | `domain/conversations.py`, `networking/messages.py` |
+
+**It paid for itself on the first live poll.** CRM-1 found a **real reply nobody knew about**
+(Writer, Jul 29) and an address that had been **bouncing silently since Jul 16** — follow-ups
+were still scheduled against it. CRM-4a then found what that reply actually was: an
+**introduction**. Victoria CC'd a colleague, and the system had recorded a boolean.
+
+**Everything runs on `gmail.metadata`, never `readonly`** — headers, threads and participants;
+it cannot read a body. Two consequences shape the whole design: `q=` search is unavailable, so
+threads are listed by id and never queried; and there is no snippet, so what a reply SAID is
+unknown.
+
+**CRM-4b can lift that, and is OFF.** `gmail.readonly` reads every message in the mailbox, so
+`CONTENT_SCOPE` is deliberately **not** in `SCOPES` — no future scope addition can drag it
+along, and a test pins that. Enabling it is `network --gmail-connect --with-content`, which
+prints the trade before the browser opens. With it on, only ~200-char snippets of replies to our
+own outreach are stored (`SNIPPET_MAX`, truncated **at the write**, never at the caller), and
+`domain/intent.py` labels them so a rejection offers *Mark rejected* rather than *draft a
+follow-up*. Revoking it stops adding content and **destroys nothing already stored** — which
+took real work, because `upsert_messages` is INSERT OR REPLACE and an hourly `tick` re-syncs
+every open thread.
+
+**Bounces are not replies, and not non-answers.** A bounce arrives inside our own thread, so
+thread-id matching accepts it happily; counting it as a reply stops the ladder and inflates
+every rate. Detected separately, the address is marked `bounced`, and CRM-2 excludes it from
+every denominator — it never arrived, so "emailed, no reply" would be a lie.
+
+**Introductions are surfaced, never auto-created.** A contact created from a thread is one an
+automated ladder would then EMAIL, and threads collect schedulers, assistants and ATS robots.
+`conversations.is_robot()` filters the obvious ones; the operator confirms the rest.
+
+**Replying in-thread keeps the Cc** (`domain/conversations.reply_target()` → `send_reply()` →
+`/api/contact/reply`, 2026-07-31). It answers the **last inbound** message, not the last message
+overall — after we reply, the newest message is ours, and reading recipients off it loses anyone
+added since. `References` chains the whole thread. A thread with **no** inbound message returns
+`None` rather than falling back to the contact's address: that case is a *follow-up*, which has
+a ladder, a schedule and stop conditions, and quietly answering it as a "reply" bypasses all
+three. The endpoint takes recipients from the stored thread and ignores any `to` the browser
+sends; the operator may drop a Cc, never invent one. §Lessons 27.
+
+**`tick` never sends, never starts an apply, and never touches `apply.pause`.** Each is a test.
+An unattended apply would fill a form nobody is there to review and close whatever review
+browser is open; writing the pause flag would pause a live application.
 
 ## The human-in-the-loop apply model (2026-07-30)
 
@@ -510,7 +651,15 @@ application waits indefinitely — and the longer it waits, the likelier somethi
 **The ARCH set is complete** (`ARCH-1` … `ARCH-6`, all ✅ 2026-07-28/29). `ARCH-4` was
 deliberately narrowed — see its ticket.
 
-**Next, in the order agreed 2026-07-28:** `CRM-1` → `DISC-1` → `CRM-2` → `CRM-3`.
+**The CRM set is complete and CLOSED** (`CRM-3a`, `CRM-1`, `CRM-2`, `CRM-3b`, `CRM-4a`,
+`CRM-4b` — 2026-07-30/31 on branch `crm-phase-1`). `CRM-4b` is **built and switched off**: it
+needs `gmail.readonly`, which reads the whole mailbox, so enabling it is a deliberate act
+(`network --gmail-connect --with-content`). Everything passes with it off, which is how this
+machine runs.
+
+**Open:** `DISC-1` — discovery has produced **0** jobs; all 15 were pasted by hand. It is now
+the only open ticket, and by a wide margin the biggest gap: everything downstream of discovery
+works end to end, on jobs the operator has to find themselves.
 
 `CRM-1` (reply detection) is the one that changes what the app can *do*: 13 emails sent, 7
 follow-ups, **1 reply recorded — typed in by hand.** Everything it needs is already stored
@@ -545,12 +694,15 @@ What is actually open now, ordered by leverage:
    batch from closing a pending review. Making it a real background task is the actual fix and
    is still open. **Check for `in_progress` before restarting the dashboard** (§Dev workflow).
 
-2. **The system is blind to replies.** **33 emails sent** across 50 contacts as of 2026-07-30,
+2. ~~**The system is blind to replies.**~~ **CLOSED 2026-07-30 by CRM-1.** Kept for the
+   lesson: it was the highest-value gap in the repo for two days, and the first poll after
+   shipping found a real reply and a silent bounce. The old text read: **33 emails sent** across 50 contacts as of 2026-07-30,
    and still exactly one reply — recorded by hand. Follow-ups nudge people who may have replied
    days ago, and no funnel metric is possible. This gets worse with every send: it was 13
    emails this morning. `CRM-1`, and by some distance the highest-value thing left.
 
-2a. **Nothing tells the operator an application is waiting.** Co-pilot ends by handing over a
+2a. ~~**Nothing tells the operator an application is waiting.**~~ **CLOSED by CRM-3a** (tab
+   badge). Desktop notifications are still not built. The old text read: Co-pilot ends by handing over a
    browser, the queue stays paused until they act, and the dashboard has **no notification of
    any kind** — no sound, no desktop notification, no tab-title badge. It only self-refreshes
    every 2.5s, which helps only if you are looking at it. A filled form left sitting is a form
@@ -567,7 +719,7 @@ What is actually open now, ordered by leverage:
    `test_sql_lives_only_in_the_data_layer` names the remainder in an allowlist, so the list can
    only shrink and no NEW module can join it. Deliberately deferred; see ARCH-4's ticket.
 
-5. **`web_dashboard.py` is 2,096 lines**, all Python, zero SQL. ~430 lines are pipeline
+5. **`web_dashboard.py` is 2,362 lines**, all Python, zero SQL. ~430 lines are pipeline
    orchestration (`run_dashboard_prepare/apply/fill_one/restart/continue`) that are not HTTP
    concerns. Extracting them is the natural companion to debt item 1.
 
@@ -650,8 +802,9 @@ change still needs the `pip install` above — but that copy gives the file a ne
   Run the install alone, and verify with `python -c "import applypilot; print(applypilot.__version__)"`.
 - **Check for in-flight applies before ANY restart or reinstall.** The apply is a child of the
   dashboard, so it dies with the server. This happened three times on 2026-07-30 alone.
-- Working tree clean; `origin/main` is at **`stable-e2e-20260730`** (2026-07-30 — full pipeline
-  working end to end, human in the loop). Tags: `stable-arch2/3/5/6` · `stable-e2e-20260730`.
-  A tag restores **CODE only** — `~/.applypilot/` (13 jobs, 50 contacts, 33 sent emails, 899
-  connections) needs its own backup.
-  A tag restores CODE only — the database needs its own backup from `~/.applypilot/backups/`.
+- Working tree clean. `main` is at **`stable-e2e-20260730`** (full apply pipeline working end
+  to end, human in the loop); the CRM work lives on **`crm-phase-1`** — pushed, **unmerged**.
+  Tags: `stable-arch2/3/5/6` · `stable-e2e-20260730`.
+- **A tag restores CODE only.** `~/.applypilot/` — 15 jobs, 51 contacts, 33 sent emails, 35
+  stored messages, 899 connections — is not in git and needs its own backup
+  (`~/.applypilot/backups/`). Nothing does this automatically.

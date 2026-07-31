@@ -64,6 +64,22 @@ def _from_address() -> str:
     return os.environ.get("OUTREACH_FROM_ADDRESS", "") or os.environ.get("GMAIL_ADDRESS", "")
 
 
+def _our_addresses() -> list[str]:
+    """Every address that is us — the alias we send AS, and the account we authenticate as.
+
+    Both matter when deciding who to keep on a reply's Cc: leaving either one in means every
+    reply copies us on our own mail, and `_from_address()` alone is empty on an OAuth-only
+    setup, so it cannot be the single source.
+    """
+    out = [os.environ.get("OUTREACH_FROM_ADDRESS", ""), os.environ.get("GMAIL_ADDRESS", "")]
+    try:
+        from applypilot.networking import gmail_oauth
+        out.append(gmail_oauth.connected_email())
+    except Exception:  # noqa: BLE001
+        pass
+    return list(dict.fromkeys(a for a in out if a))   # ordered, deduped
+
+
 def configured() -> bool:
     return transport() is not None
 
@@ -223,19 +239,25 @@ def attach_pdfs(msg: EmailMessage, attachments: list[tuple[str, str]] | None) ->
 
 def _smtp_send(to_addr: str, subject: str, body: str, message_id: str,
                attachments: list[tuple[str, str]] | None = None,
-               in_reply_to: str | None = None) -> None:
-    """Send one email over SMTP_SSL. `body` is sent verbatim."""
+               in_reply_to: str | None = None, cc: list[str] | None = None,
+               references: str | None = None) -> None:
+    """Send one email over SMTP_SSL. `body` is sent verbatim.
+
+    `send_message` derives the envelope from To/Cc, so a Cc'd person really is delivered to.
+    """
     addr, pw = _creds()
     from_name = os.environ.get("OUTREACH_FROM_NAME", "")
     msg = EmailMessage()
     msg["From"] = formataddr((from_name, addr)) if from_name else addr
     msg["To"] = to_addr
+    if cc:
+        msg["Cc"] = ", ".join(c for c in cc if c)
     msg["Reply-To"] = addr
     msg["Subject"] = subject
     msg["Message-ID"] = message_id
     if in_reply_to:
         msg["In-Reply-To"] = in_reply_to
-        msg["References"] = in_reply_to
+        msg["References"] = references or in_reply_to
     msg.set_content(body)
     sig = signature_html(addr)
     if sig:
@@ -373,6 +395,85 @@ def send_followup(contact_id: str, dry_run: bool = False) -> dict:
     return {"ok": True, "touch": n,
             "message": f"follow-up #{n} sent to {to_addr}"
                        + ("" if threaded else " (as a new email — the original predates threading)")}
+
+
+def send_reply(contact_id: str, body: str, subject: str = "", cc: list[str] | None = None,
+               dry_run: bool = False, conn=None) -> dict:
+    """Answer a live conversation from the dashboard, in-thread, keeping the Cc.
+
+    Separate from `send_followup` for a reason that is not stylistic: a follow-up is a ladder
+    step — it has a touch number, a schedule, a stop condition and a per-position prompt. A
+    reply is none of those. It answers a person who wrote to us, so it is bounded by the
+    conversation rather than by `FOLLOWUP_SCHEDULE`, and sending one must not consume a touch.
+
+    The recipients come from `domain.conversations.reply_target()` — from the LAST INBOUND
+    message, not from the contact row. That is what carries the Cc forward, which is the entire
+    point: Victoria answered by Cc'ing David, and a reply addressed only to the contact drops
+    the person now handling the application without any visible sign that it did.
+
+    No attachments: the résumé went with email #1, and re-attaching it to a live conversation
+    reads as automated.
+    """
+    from applypilot.domain import conversations as cv
+    from applypilot.networking import messages as msg_store
+
+    body = (body or "").strip()
+    if not body:
+        return {"ok": False, "message": "nothing to send — write a reply first"}
+
+    contact = store.get_contact(contact_id, conn)
+    if not contact:
+        return {"ok": False, "message": "contact not found"}
+
+    thread = msg_store.thread_for_contact(contact_id, conn)
+    target = cv.reply_target(thread, _our_addresses())
+    if not target:
+        return {"ok": False,
+                "message": "no inbound message to reply to — use a follow-up instead"}
+
+    to_addr = target["to_addr"]
+    # An operator-supplied Cc wins (they can drop someone from the composer); `None` means
+    # "unchanged", which is NOT the same as an empty list meaning "send to nobody else".
+    cc_list = list(target["cc"]) if cc is None else [c for c in cc if (c or "").strip()]
+    subject = (subject or target["subject"] or "").strip()
+
+    if store.sent_today() >= _DAILY_LIMIT:
+        return {"ok": False, "message": f"daily send limit reached ({_DAILY_LIMIT})"}
+    if dry_run:
+        return {"ok": True, "message": f"dry-run: would reply to {to_addr}"
+                                       + (f", cc {', '.join(cc_list)}" if cc_list else "")}
+
+    mode = transport()
+    from_name = os.environ.get("OUTREACH_FROM_NAME", "")
+    try:
+        if mode == "oauth":
+            from applypilot.networking import gmail_oauth
+            from_addr = _from_address() or gmail_oauth.connected_email()
+            sent = gmail_oauth.send(to_addr, subject, body, from_addr, from_name,
+                                    thread_id=target["thread_id"] or contact.get("thread_id"),
+                                    in_reply_to=target["in_reply_to"] or None,
+                                    cc=cc_list, references=target["references"] or None)
+            sent["from_addr"] = from_addr
+        else:
+            addr, _ = _creds()
+            mid = make_msgid(domain=(addr.split("@")[-1] if "@" in addr else None))
+            _smtp_send(to_addr, subject, body, mid, in_reply_to=target["in_reply_to"] or None,
+                       cc=cc_list, references=target["references"] or None)
+            sent = {"id": mid, "rfc_message_id": mid,
+                    "thread_id": contact.get("thread_id") or "", "from_addr": addr}
+    except Exception as e:  # noqa: BLE001
+        log.warning("Reply to %s failed: %s", to_addr, e)
+        return {"ok": False, "message": f"reply failed: {e}"}
+
+    # Store it now rather than at the next poll: otherwise Send visibly does nothing.
+    try:
+        msg_store.record_outbound(contact, sent, to_addr, cc_list, subject, conn)
+    except Exception:  # noqa: BLE001
+        log.debug("Could not record the sent reply", exc_info=True)
+
+    also = f" (cc {', '.join(cc_list)})" if cc_list else ""
+    return {"ok": True, "message": f"replied to {to_addr}{also}",
+            "to": to_addr, "cc": cc_list}
 
 
 def backfill_thread_ids(limit: int = 200) -> dict:

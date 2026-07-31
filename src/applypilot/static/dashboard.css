@@ -540,3 +540,71 @@
   .crow-del .link-danger { background:none; border:none; box-shadow:none; padding:2px 0;
     color:var(--muted); font-size:11px; cursor:pointer; }
   .crow-del .link-danger:hover { color:var(--red); text-decoration:underline; }
+  /* CRM-2 Outcomes panel. Collapsed by default — it informs, it does not need acting on, so it
+     must not compete with the job rows for attention. */
+  .metrics-panel { background:var(--surface); border:1px solid var(--line); border-radius:10px; padding:14px 18px; }
+  .metrics-panel > summary { list-style:none; cursor:pointer; display:flex; align-items:baseline; gap:12px; }
+  .metrics-panel > summary::-webkit-details-marker { display:none; }
+  .m-title { font-size:16px; font-weight:600; }
+  .m-headline { font-size:13px; color:var(--muted); }
+  .m-body { margin-top:14px; display:grid; gap:16px; }
+  .m-funnel { display:flex; gap:6px; flex-wrap:wrap; align-items:stretch; }
+  .m-step { flex:1 1 90px; background:var(--surface2); border:1px solid var(--line); border-radius:8px; padding:8px 10px; }
+  .m-step strong { display:block; font-size:20px; line-height:1.1; }
+  .m-step span { font-size:11px; color:var(--muted); }
+  .m-step.leak { background:var(--red-soft); border-color:#e7b9b9; }
+  .m-cuts { display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:14px; }
+  .m-cut h4 { margin:0 0 6px; font-size:12px; font-weight:600; color:var(--soft); }
+  .m-rate { display:flex; justify-content:space-between; gap:10px; font-size:12px; padding:3px 0; border-bottom:1px solid var(--line); }
+  .m-rate:last-child { border-bottom:none; }
+  .m-rate .v { font-variant-numeric:tabular-nums; font-weight:600; }
+  /* Not enough data to be a rate. Shown, never hidden — "1 of 3" is useful, "33%" is not. */
+  .m-rate.thin .v { color:var(--faint); font-weight:400; }
+  .m-note { font-size:11px; color:var(--muted); line-height:1.45; }
+  .m-rate .m-n { color:var(--faint); font-weight:400; font-size:11px; }
+  /* CRM-4 conversation view. Structure only — no bodies are stored, so this shows who spoke
+     and when rather than pretending to be a mail client. */
+  .thread { margin:8px 0; border:1px solid var(--line); border-radius:8px; background:var(--surface2); }
+  .thread > summary { list-style:none; cursor:pointer; padding:6px 10px; font-size:12px; color:var(--soft); font-weight:600; }
+  .thread > summary::-webkit-details-marker { display:none; }
+  .th-row { display:flex; gap:8px; align-items:baseline; padding:4px 12px; font-size:11.5px; border-top:1px solid var(--line); }
+  .th-row.in .th-who { color:var(--green); font-weight:600; }
+  .th-row.out .th-who { color:var(--muted); }
+  .th-who { min-width:120px; }
+  .th-when { color:var(--faint); font-variant-numeric:tabular-nums; }
+  .th-cc { color:var(--faint); }
+  .th-intro { padding:6px 12px; font-size:11.5px; background:var(--green-soft); color:#046c3c; border-top:1px solid var(--line); }
+  /* Reply composer (CRM-4a). Sits INSIDE the conversation, because who a reply goes to is a
+     fact about the thread — the Cc chips are the visible proof that an introduced person is
+     still on it. */
+  .turn-us { color:#92400e; font-weight:700; }
+  .turn-them { color:var(--faint); font-weight:400; }
+  .reply-box { border-top:1px solid var(--line); padding:10px 12px; background:var(--surface); border-radius:0 0 8px 8px; }
+  .reply-hdr { font-size:12px; color:var(--soft); margin-bottom:6px; }
+  /* CRM-4b. Quoted, indented and visually secondary — it is THEIR words, and it should never
+     be mistakable for something ApplyPilot wrote. */
+  .said { border-left:3px solid var(--line); padding:6px 10px; margin:0 0 8px;
+    background:var(--surface2); border-radius:0 6px 6px 0; }
+  .said-hdr { font-size:11px; color:var(--faint); display:flex; align-items:center; gap:6px; }
+  .said-txt { font-size:12px; font-style:italic; color:var(--soft); margin-top:3px; }
+  .intent-act { font-size:11px; color:var(--soft); margin-top:4px; font-weight:600; }
+  .intent-chip { font-size:10px; padding:1px 7px; border-radius:999px; border:1px solid var(--line);
+    background:var(--surface); font-style:normal; }
+  .intent-chip.rejection, .intent-chip.not_now { color:#92400e; border-color:#e6c9a8; }
+  .intent-chip.interested, .intent-chip.introduction { color:#046c3c; border-color:#b6e0c8; }
+  .cc-none { color:var(--amber-ink, #92400e); }
+  .cc-row { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:6px; }
+  .cc-chip { font-size:11px; padding:2px 8px; border-radius:999px; border:1px solid var(--line);
+    background:var(--surface2); color:var(--soft); cursor:pointer; }
+  .cc-chip.off { opacity:.5; text-decoration:line-through; }
+  .reply-subj { font-size:12px; font-weight:600; margin-bottom:6px; }
+  .reply-body { width:100%; font:inherit; font-size:12.5px; padding:8px; border-radius:6px;
+    border:1px solid var(--line); background:var(--surface2); color:inherit; resize:vertical; }
+  .reply-actions { display:flex; align-items:center; gap:10px; margin-top:6px; }
+  .reply-hint { font-size:11px; color:var(--faint); }
+  /* CRM-4 handoff banner. Green, not amber: an introduction is GOOD news — the warmest lead
+     the system can produce — and should not read like a blocker. */
+  .intro-bar { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin:0 0 10px;
+    padding:9px 11px; border-radius:8px; background:var(--green-soft);
+    border:1px solid #b6e0c8; font-size:12px; color:#04603a; }
+  .intro-bar button { font-size:12px; padding:4px 12px; }

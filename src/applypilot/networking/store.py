@@ -58,6 +58,9 @@ _CONTACT_COLUMNS: dict[str, str] = {
     # actually works at the employer? high|medium|low, plus the reasoning shown in the UI.
     "confidence": "TEXT",
     "verify_note": "TEXT",
+    # CRM-1. Set when an inbound message is matched to this contact. The email ladder halts via
+    # `sequences` (ARCH-3) — this column is the DATE, for the UI and for time_to_reply (CRM-2).
+    "replied_at": "TEXT",
     "discovered_at": "TEXT",
     "updated_at": "TEXT",
 }
@@ -525,7 +528,7 @@ def mark_connected_now(contact_id: str, conn: sqlite3.Connection | None = None) 
 def delete_contact(contact_id: str, conn: sqlite3.Connection | None = None) -> bool:
     """Remove a contact AND its follow-up state. Returns True if a contact row was deleted.
 
-    `touches` and `sequences` are keyed by contact_id with no foreign key, so deleting only the
+    `touches`, `sequences` and `messages` are keyed by contact_id with no foreign key, so deleting only the
     contact leaves a live follow-up ladder pointing at somebody who no longer exists — due
     counts that can never be cleared, and a `sequences` row that would silently re-attach if
     the same contact id were ever minted again (ids are a hash of job + identity, so
@@ -533,7 +536,7 @@ def delete_contact(contact_id: str, conn: sqlite3.Connection | None = None) -> b
     """
     if conn is None:
         conn = get_connection()
-    for table in ("touches", "sequences"):
+    for table in ("touches", "sequences", "messages"):
         try:
             conn.execute(f"DELETE FROM {table} WHERE contact_id = ?", (contact_id,))
         except sqlite3.OperationalError:
@@ -571,6 +574,68 @@ def contact_ref(contact_id: str, conn: sqlite3.Connection | None = None) -> dict
     init_contacts(conn)
     row = conn.execute("SELECT id, job_url FROM contacts WHERE id = ?", (contact_id,)).fetchone()
     return dict(zip(row.keys(), row)) if row else None
+
+
+def all_contacts_for_metrics(conn: sqlite3.Connection | None = None) -> list[dict]:
+    """Every contact, with only the columns metrics reads (CRM-2).
+
+    A narrow projection on purpose: the panel runs on every /api/status, and `SELECT *` over a
+    33-column table 50 rows deep every 2.5 seconds is exactly the kind of cost the query budget
+    exists to catch.
+    """
+    if conn is None:
+        conn = get_connection()
+    init_contacts(conn)
+    rows = conn.execute(
+        "SELECT id, job_url, company, source, confidence, email_status, "
+        "sent_message_id, submitted_at, replied_at FROM contacts"
+    ).fetchall()
+    return [dict(zip(r.keys(), r)) for r in rows]
+
+
+def contacts_with_threads(conn: sqlite3.Connection | None = None) -> list[dict]:
+    """Every contact whose conversation is worth re-reading (CRM-4).
+
+    Wider than `contacts_awaiting_reply` on purpose, and the difference matters: that pool
+    excludes anyone who already replied, which is exactly BACKWARDS for conversation memory —
+    a replied contact is the one with a LIVE thread. Excluding them meant the Writer handoff
+    (Victoria introducing a colleague) could never be seen, because her thread stopped being
+    read the moment she answered.
+
+    Bounced addresses are still excluded: that mail never arrived and never will.
+    """
+    if conn is None:
+        conn = get_connection()
+    init_contacts(conn)
+    rows = conn.execute(
+        "SELECT id, job_url, full_name, email, thread_id, rfc_message_id, submitted_at, "
+        "replied_at FROM contacts WHERE thread_id IS NOT NULL AND thread_id != '' "
+        "AND COALESCE(email_status, '') != 'bounced'"
+    ).fetchall()
+    return [dict(zip(r.keys(), r)) for r in rows]
+
+
+def contacts_awaiting_reply(conn: sqlite3.Connection | None = None) -> list[dict]:
+    """Contacts we emailed who have not yet been recorded as replying (CRM-1).
+
+    Only these can receive a reply, and excluding the already-replied matters: re-marking one
+    would overwrite `replied_at` with a LATER message in the same thread, losing when the
+    conversation actually turned — which is exactly what time_to_reply (CRM-2) measures.
+    """
+    if conn is None:
+        conn = get_connection()
+    init_contacts(conn)
+    # Excludes BOUNCED addresses too. A bounce is terminal — that mail will never arrive and
+    # the person can never answer — so leaving them in meant every poll re-detected the same
+    # failure and appended another "BOUNCED" line to the activity log. `applypilot tick` running
+    # hourly turned that into 11 identical entries for one address in a single afternoon.
+    rows = conn.execute(
+        "SELECT id, job_url, full_name, email, thread_id, rfc_message_id, submitted_at "
+        "FROM contacts WHERE sent_message_id IS NOT NULL "
+        "AND (replied_at IS NULL OR replied_at = '') "
+        "AND COALESCE(email_status, '') != 'bounced'"
+    ).fetchall()
+    return [dict(zip(r.keys(), r)) for r in rows]
 
 
 def contact_for_delete(contact_id: str, conn: sqlite3.Connection | None = None) -> dict | None:

@@ -199,6 +199,17 @@ function toggleAdvanced() {
 async function stopCommand() { await post('/api/stop', {}); refresh(); }
 // Pause is NOT Stop. Stop killpg's the run, which reaches Chrome and loses a part-filled form.
 // Pause stops only the agent and leaves the browser up for you to finish in.
+// Manual poke at the same poller the background thread uses — for when you know a reply just
+// landed and do not want to wait out the 5-minute cycle.
+async function checkReplies(btn) {
+  const was = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Checking…';
+  const r = await post('/api/check-replies', {});
+  const cmdEl = document.getElementById('command');
+  if (cmdEl) cmdEl.textContent = r.message || '';
+  btn.disabled = false; btn.textContent = was;
+  refresh();
+}
 async function pauseApply() {
   const cmdEl = document.getElementById('command');
   const r = await post('/api/pause-apply', {});
@@ -440,14 +451,46 @@ const CONTACT_OPEN = new Set();
 const CHANNEL_TAB = new Map();
 function toggleContact(cid) { if (CONTACT_OPEN.has(cid)) CONTACT_OPEN.delete(cid); else CONTACT_OPEN.add(cid); refresh(); }
 function setChannel(cid, ch) { CHANNEL_TAB.set(cid, ch); CONTACT_OPEN.add(cid); refresh(); }
+// CRM-4. Someone the OTHER side added to a thread — a recruiter looping in a hiring manager
+// is the single most valuable event in a job-search conversation, and a boolean `replied` threw
+// it away. Surfaced as an offer, never auto-created: a contact added here is one an automated
+// follow-up ladder would then email, and threads collect schedulers and ATS robots.
+function introBanner(j) {
+  const intros = j.introductions || [];
+  if (!intros.length) return '';
+  return intros.map(i => {
+    const args = [i.email, i.name || '', i.introduced_by || ''].map(v => `decodeURIComponent('${encodeURIComponent(v)}')`).join(', ');
+    const u = `decodeURIComponent('${encodeURIComponent(j.url)}')`;
+    return `<div class="intro-bar">
+      <span>👋 <strong>${esc(i.introduced_by || 'Someone')}</strong> added <strong>${esc(i.name || i.email)}</strong> (${esc(i.email)}) to the thread — they may be handling this now.</span>
+      <button class="primary" onclick="addIntroduced(${u}, ${args}, this)">+ Add as contact</button>
+    </div>`;
+  }).join('');
+}
+async function addIntroduced(url, email, name, by, btn) {
+  btn.disabled = true; btn.textContent = 'Adding…';
+  const r = await post('/api/contact/add-introduced', {job_url: url, email, name, introduced_by: by});
+  const cmdEl = document.getElementById('command');
+  if (cmdEl) cmdEl.textContent = r.message || '';
+  if (!r.ok) { btn.disabled = false; btn.textContent = '+ Add as contact'; }
+  refresh();
+}
 function peopleList(j) {
   const cs = j.contacts || [];
-  if (!cs.length) return `<div class="pane-empty">No contacts yet. ${findContactsPrompt(j)}</div>`;
+  const intro = introBanner(j);
+  if (!cs.length) return intro + `<div class="pane-empty">No contacts yet. ${findContactsPrompt(j)}</div>`;
   const hot = cs.filter(c => c.hot), cold = cs.filter(c => !c.hot);
-  let out = bulkBar(j);
+  let out = intro + bulkBar(j);
   if (hot.length)  out += `<div class="ppl-group hot">🔥 People you know here <span class="ppl-g-n">${hot.length}</span></div>` + hot.map(c => contactRow(c)).join('');
   if (cold.length) out += `<div class="ppl-group cold">🧊 New contacts <span class="ppl-g-n">${cold.length}</span></div>` + cold.map(c => contactRow(c)).join('');
   return `<div class="plist">${out}</div>`;
+}
+// "Jul 28" from an ISO timestamp, without dragging in a formatter.
+function shortDate(iso) {
+  try {
+    const d = new Date(iso);
+    return isNaN(d) ? '' : d.toLocaleDateString([], {month:'short', day:'numeric'});
+  } catch { return ''; }
 }
 function contactRow(c) {
   const open = CONTACT_OPEN.has(c.id);
@@ -456,7 +499,16 @@ function contactRow(c) {
     : (c.email ? `<span class="pill off">✉ draft</span>` : `<span class="pill off">✉ no email</span>`));
   pills.push((c.dm_status === 'sent' || c.dm_status === 'manual') ? `<span class="pill on">🔗 connected</span>`
     : (c.linkedin_url ? `<span class="pill off">🔗 —</span>` : ''));
-  if (c.followup_state === 'due')      pills.push(`<span class="pill due">↻ due</span>`);
+  // `replied_at` is authoritative (CRM-1 writes it); `followup_status` is the ARCH-3 legacy
+  // shim and stays as a fallback for rows recorded before reply detection existed.
+  // "They are waiting on you" outranks "they replied": both are true, but only one is a job.
+  // Shown on the COLLAPSED row, because a state you must expand a contact to discover is a
+  // state that goes unnoticed for days — which is the failure this whole ticket is about.
+  const conv = c.conversation || {};
+  if (conv.state === 'awaiting_us')
+    pills.push(`<span class="pill due" title="They replied and nobody has answered">💬 your turn${conv.days >= 1 ? ` · ${conv.days}d` : ''}</span>`);
+  else if (c.replied_at) pills.push(`<span class="pill on">✓ replied ${esc(shortDate(c.replied_at))}</span>`);
+  else if (c.followup_state === 'due')      pills.push(`<span class="pill due">↻ due</span>`);
   else if (c.followup_status === 'replied') pills.push(`<span class="pill on">✓ replied</span>`);
   else if (c.followup_state === 'waiting')  pills.push(`<span class="pill off">↻ ${fuWhen(c.followup_due_in_h)}</span>`);
   if (c.phone) pills.push(`<span class="pill on">📱</span>`);
@@ -471,6 +523,139 @@ function contactRow(c) {
 }
 // Channels become tabs inside the open contact, so the email draft, the LinkedIn note and
 // the phone field stop competing for the same vertical space.
+// CRM-4. The conversation, from stored HEADERS only — who wrote, when, and who was added.
+// No bodies are stored, so this deliberately shows structure rather than pretending to be an
+// email client: the point is "there is a live conversation here and somebody new is on it",
+// which a boolean `replied` threw away entirely.
+function threadView(c) {
+  const msgs = c.thread || [];
+  if (msgs.length < 2) return '';   // one outbound message is not a conversation
+  const rows = msgs.map(m => {
+    const who = m.direction === 'in' ? (m.from_name || m.from_addr) : 'You';
+    const cc = (m.cc_addrs || []).length ? ` <span class="th-cc">cc ${(m.cc_addrs||[]).map(esc).join(', ')}</span>` : '';
+    return `<div class="th-row ${m.direction}"><span class="th-who">${esc(who)}</span>` +
+           `<span class="th-when">${esc(shortDate(m.sent_at))}</span>${cc}</div>`;
+  }).join('');
+  const intro = c.introduced_by
+    ? `<div class="th-intro">👋 ${esc(c.introduced_by)} added them to this thread</div>` : '';
+  const open = THREAD_OPEN.has(c.id) ? ' open' : '';
+  // Whose turn it is, on the summary line — the thread is collapsed by default, so a state
+  // only visible once you expand it is a state nobody sees.
+  const conv = c.conversation || {};
+  const turn = conv.state === 'awaiting_us'
+    ? `<span class="turn-us">⚠ waiting on you${conv.days >= 1 ? ` · ${conv.days}d` : ''}</span>`
+    : conv.state === 'awaiting_them'
+      ? `<span class="turn-them">you answered${conv.days >= 1 ? ` · ${conv.days}d ago` : ''}</span>` : '';
+  return `<details class="thread"${open} ontoggle="onThreadToggle(this,'${esc(c.id)}')">` +
+         `<summary>💬 Conversation (${msgs.length}) ${turn}</summary>${intro}${rows}${replyBox(c)}</details>`;
+}
+const THREAD_OPEN = new Set();
+function onThreadToggle(el, cid) { if (el.open) THREAD_OPEN.add(cid); else THREAD_OPEN.delete(cid); }
+
+// What the operator typed, and any Cc they removed — held here rather than in the DOM because
+// the 2.5s refresh replaces #jobs wholesale. It skips while an input has FOCUS, which saves you
+// mid-sentence but not the moment you click away to read the thread above the box.
+const REPLY_DRAFT = new Map();   // contact id -> body
+const REPLY_DROP  = new Map();   // contact id -> Set of cc addresses removed
+
+// Replying, not following up. The distinction is real: a follow-up is a ladder step with a
+// schedule and a stop condition, a reply answers a person who wrote to us. `reply_to` is null
+// until somebody actually does, which is what keeps the two from blurring together.
+function replyBox(c) {
+  const t = c.reply_to;
+  if (!t || !t.to_addr) return '';
+  const dropped = REPLY_DROP.get(c.id) || new Set();
+  const cc = (t.cc || []).filter(x => !dropped.has(x));
+  // The Cc is the whole reason this exists: answering only the sender drops whoever they
+  // introduced, and nothing on screen would show that it happened.
+  const chips = (t.cc || []).map(x => {
+    const off = dropped.has(x);
+    return `<button class="cc-chip${off ? ' off' : ''}" title="${off ? 'Add back' : 'Remove from this reply'}"
+      onclick="toggleCc('${esc(c.id)}', decodeURIComponent('${encodeURIComponent(x)}'))">${esc(x)} ${off ? '＋' : '✕'}</button>`;
+  }).join('');
+  const body = REPLY_DRAFT.get(c.id) || '';
+  return `<div class="reply-box" data-reply-for="${esc(c.id)}" data-cc="${esc(JSON.stringify(cc))}" data-to="${esc(t.to)}">
+    <div class="reply-hdr">↩ Reply to <strong>${esc(t.to)}</strong>${
+      cc.length ? ` · cc ${cc.length}` : (t.cc || []).length ? ' · <span class="cc-none">cc removed</span>' : ''}</div>
+    ${(t.cc || []).length ? `<div class="cc-row">${chips}</div>` : ''}
+    ${lastReplyCard(c)}
+    <div class="reply-subj">${esc(t.subject)}</div>
+    <textarea class="reply-body" rows="6" placeholder="Write your reply…"
+      oninput="REPLY_DRAFT.set('${esc(c.id)}', this.value)">${esc(body)}</textarea>
+    <div class="reply-actions">
+      <button class="primary" onclick="sendReply('${esc(c.id)}', this)">Send reply</button>
+      ${c.last_reply ? `<button onclick="draftReply('${esc(c.id)}', this)">✍ Draft an answer</button>` : ''}
+      <span class="reply-hint">Goes into this thread. No attachments.</span>
+    </div>
+  </div>`;
+}
+
+// CRM-4b. What they actually said — present only when the token carries gmail.readonly, so
+// this whole card is absent on a default install and the composer just opens empty.
+function lastReplyCard(c) {
+  const r = c.last_reply;
+  if (!r) return '';
+  const tag = r.label ? `<span class="intent-chip ${esc(r.intent)}">${esc(r.label)}</span>` : '';
+  const act = r.action ? `<div class="intent-act">${esc(r.action)}</div>` : '';
+  return `<div class="said">
+    <div class="said-hdr">${esc(r.from || 'They')} wrote ${tag}</div>
+    <div class="said-txt">“${esc(r.text)}”</div>${act}
+  </div>`;
+}
+async function draftReply(cid, btn) {
+  const say = m => { const el = document.getElementById('command'); if (el) el.textContent = m; };
+  btn.disabled = true; btn.textContent = 'Drafting…';
+  const r = await post('/api/contact/draft-reply', {contact_id: cid});
+  say(r.message || (r.ok ? 'Draft ready.' : 'Draft failed.'));
+  // Into the shared draft store, not straight into the DOM — the 2.5s refresh would wipe a
+  // value written only to the textarea.
+  if (r.ok && r.body) REPLY_DRAFT.set(cid, r.body);
+  btn.disabled = false; btn.textContent = '✍ Draft an answer';
+  refresh();
+}
+function firstName(name) { return String(name || '').trim().split(/\s+/)[0] || 'them'; }
+
+// Jump straight from the row's Next action into the composer: open the panel, the People tab,
+// the contact, their email channel and the conversation. Anything less leaves the operator to
+// find the thread themselves, which is how a reply ends up unanswered for a week.
+function openReply(url, cid) {
+  PANEL_OPEN.add(url);
+  TAB_OPEN.set(url, 'people');
+  CONTACT_OPEN.add(cid);
+  CHANNEL_TAB.set(cid, 'email');
+  THREAD_OPEN.add(cid);
+  refresh();
+  // The refresh replaces #jobs wholesale, so the textarea only exists after it has run.
+  setTimeout(() => {
+    const el = document.querySelector(`[data-reply-for="${cid}"] .reply-body`);
+    if (el) { el.focus(); el.scrollIntoView({block: 'center', behavior: 'smooth'}); }
+  }, 60);
+}
+function toggleCc(cid, address) {
+  const set = REPLY_DROP.get(cid) || new Set();
+  if (set.has(address)) set.delete(address); else set.add(address);
+  REPLY_DROP.set(cid, set);
+  refresh();
+}
+async function sendReply(cid, btn) {
+  const card = btn.closest('.reply-box');
+  const body = (REPLY_DRAFT.get(cid) || '').trim();
+  const say = m => { const el = document.getElementById('command'); if (el) el.textContent = m; };
+  if (!body) { say('Write a reply before sending.'); return; }
+  // The Cc travels as data, not as scraped chip text — the recipients of a real email are not
+  // something to re-derive from innerText.
+  let cc = [];
+  try { cc = JSON.parse(card.dataset.cc || '[]'); } catch { cc = []; }
+  const who = card.dataset.to || 'them';
+  const also = cc.length ? `\n\nAlso going to: ${cc.join(', ')}` : '\n\nNobody is Cc\'d.';
+  if (!confirm(`Send this reply to ${who}?${also}`)) return;
+  btn.disabled = true; btn.textContent = 'Sending…';
+  const r = await post('/api/contact/reply', {contact_id: cid, body, cc});
+  say(r.message || (r.ok ? 'Sent.' : 'Failed.'));
+  if (r.ok) { REPLY_DRAFT.delete(cid); REPLY_DROP.delete(cid); }
+  else { btn.disabled = false; btn.textContent = 'Send reply'; }
+  refresh();
+}
 function contactPanel(c) {
   const ch = CHANNEL_TAB.get(c.id) || (c.email ? 'email' : (c.linkedin_url ? 'linkedin' : 'phone'));
   const tab = (k, label, on) => `<span class="${ch === k ? 'on' : ''}" onclick="event.stopPropagation();setChannel('${esc(c.id)}','${k}')">${label}${on || ''}</span>`;
@@ -489,6 +674,7 @@ function contactPanel(c) {
         ${c.verify_note ? `<div class="verify-note ${esc(c.confidence)}">${c.confidence === 'high' ? '✓' : '?'} ${esc(c.verify_note)}</div>` : ''}
       </div>
       <div class="chan">${tab('email','✉ Email')}${tab('linkedin','🔗 LinkedIn')}${tab('phone','📇 Phone & notes')}</div>
+      ${threadView(c)}
       ${body}
       <div class="crow-del"><button class="link-danger" onclick="deleteContact('${esc(c.id)}', decodeURIComponent('${encodeURIComponent(c.full_name || '')}'), ${!!c.emailed})">🗑 Not at this company — remove</button></div>
     </div>`;
@@ -599,6 +785,87 @@ function isEditingJobs() {
   const el = document.activeElement;
   return !!(el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') && el.closest('#jobs'));
 }
+const BASE_TITLE = 'ApplyPilot Operator';
+// Jobs already acknowledged by looking at the tab. A badge that counts EVERY actionable row
+// would be permanently lit — two stale needs_human rows would show "(2)" forever and train you
+// to ignore it. The badge is for what is NEW since you last looked.
+const NEEDS_SEEN = new Set();
+
+// What "needs you" means, and it is exactly what the row's own Next action offers:
+// a filled form waiting to be submitted, a blocker only a human can clear, or follow-ups due.
+function needsYou(j) {
+  if (j.status === 'ready_to_submit' || j.status === 'needs_human') return true;
+  const f = j.followups || {};
+  return ((f.due_count || 0) + (f.li_due_count || 0)) > 0;
+}
+
+// Co-pilot apply ENDS by waiting for the operator, and the queue stays paused until they act.
+// Nothing pulled them back to the tab — no sound, no notification, no badge — so a filled
+// application sat until someone happened to look, and a restart eventually closed it.
+function updateNeedsYouBadge(jobs) {
+  const actionable = (jobs || []).filter(needsYou).map(j => j.url);
+  const focused = typeof document.hasFocus === 'function' ? document.hasFocus() : true;
+  if (focused) {
+    // Looking at it counts as seeing it. Marks the CURRENT set, so a job that becomes
+    // actionable later still raises the badge.
+    actionable.forEach(u => NEEDS_SEEN.add(u));
+  }
+  for (const u of [...NEEDS_SEEN]) if (!actionable.includes(u)) NEEDS_SEEN.delete(u);
+  const unseen = actionable.filter(u => !NEEDS_SEEN.has(u)).length;
+  document.title = unseen ? `(${unseen}) \u26a0 ${BASE_TITLE}` : BASE_TITLE;
+  return unseen;
+}
+
+// CRM-2. Every rate renders WITH its n, and a rate below the meaningful threshold shows the
+// raw counts instead of a percentage — "1 of 3" is information, "33%" from the same three is a
+// lie with a decimal point.
+function rateRow(r) {
+  const thin = !r.meaningful;
+  const value = thin ? `${r.hits} of ${r.n}` : `${r.pct}% <span class="m-n">(${r.hits}/${r.n})</span>`;
+  return `<div class="m-rate ${thin ? 'thin' : ''}"><span>${esc(r.label || '')}</span><span class="v">${value}</span></div>`;
+}
+function cut(title, rates) {
+  if (!rates || !rates.length) return '';
+  return `<div class="m-cut"><h4>${esc(title)}</h4>${rates.map(rateRow).join('')}</div>`;
+}
+function renderMetrics(mx) {
+  const panel = document.getElementById('metricsPanel');
+  if (!panel) return;
+  if (!mx || !mx.funnel) { panel.hidden = true; return; }
+  panel.hidden = false;
+  const f = mx.funnel, o = mx.overall || {};
+
+  const head = document.getElementById('metricsHeadline');
+  if (head) {
+    head.textContent = o.n
+      ? (o.meaningful ? `${o.pct}% reply rate (${o.hits}/${o.n})`
+                      : `${o.hits} repl${o.hits === 1 ? 'y' : 'ies'} from ${o.n} delivered`)
+      : 'nothing sent yet';
+  }
+
+  const steps = (f.steps || []).map(s =>
+    `<div class="m-step"><strong>${s.n}</strong><span>${esc(s.label)}</span></div>`).join('');
+  // A bounce is a real leak in the funnel, not a non-answer: the mail never arrived. Shown
+  // beside the stages so "emailed 33, replied 1" cannot quietly include sends that failed.
+  const leak = f.bounced
+    ? `<div class="m-step leak"><strong>${f.bounced}</strong><span>bounced</span></div>` : '';
+
+  const ttr = mx.median_hours_to_reply;
+  const notes = [];
+  if (ttr != null) notes.push(`Median time to reply: <strong>${ttr}h</strong>.`);
+  if (f.bounced) notes.push(`${f.bounced} email(s) never arrived — those addresses are excluded from every rate above.`);
+  notes.push(`Rates need n\u2265${mx.min_meaningful_n} to be shown as a percentage.`);
+
+  document.getElementById('metricsBody').innerHTML = `
+    <div class="m-funnel">${steps}${leak}</div>
+    <div class="m-cuts">
+      ${cut('Warm vs cold', mx.by_layer)}
+      ${cut('By verification confidence', mx.by_confidence)}
+      ${cut('By follow-ups sent', mx.by_touch)}
+    </div>
+    <div class="m-note">${notes.join(' ')}</div>`;
+}
+
 async function refresh() {
   if (isEditingJobs()) return;
   const data = await (await fetch('/api/status')).json();
@@ -611,6 +878,8 @@ async function refresh() {
   document.getElementById('command').textContent = c.running ? `Running: ${c.name}` : (c.name ? `Last: ${c.name}, exit ${c.returncode}` : 'Idle');
   document.getElementById('cmdLog').textContent = (c.log || []).join('\n');
   document.getElementById('applyLog').textContent = [...(data.worker_log || []), '', ...(data.claude_log || [])].join('\n');
+  updateNeedsYouBadge(data.jobs);
+  renderMetrics(data.metrics);
   NET_AVAIL = !!data.networking_available;
   GMAIL_AVAIL = !!data.gmail_available;
   const allJobs = data.jobs || [];
@@ -727,6 +996,15 @@ function nextAction(j) {
     return `<button class="secondary" onclick="restartJob(${u}, this, false)">🔄 Restart end-to-end</button>`;
   if (!cs.length)
     return NET_AVAIL ? `<button onclick="findContacts(${u})">Find contacts</button>` : '';
+  // A human who wrote to you outranks every ladder. Follow-ups chase people who said nothing;
+  // this one already answered, and leaving them waiting wastes the only thing outreach is for.
+  const waiting = j.awaiting_reply || [];
+  if (waiting.length) {
+    const w = waiting[0];
+    const ago = w.days >= 1 ? `${w.days}d` : `${w.hours || 0}h`;
+    const more = waiting.length > 1 ? ` +${waiting.length - 1}` : '';
+    return `<button class="primary" onclick="openReply(${u},'${esc(w.id)}')">💬 Answer ${esc(firstName(w.full_name))} (${ago})${more}</button>`;
+  }
   const dueN = (f.due_count || 0) + (f.li_due_count || 0);
   if (dueN)
     return `<button class="amber" onclick="openTab(${u},'followups')">↻ ${dueN} follow-up${dueN>1?'s':''} due</button>`;

@@ -34,6 +34,13 @@ SEND_SCOPE = "https://www.googleapis.com/auth/gmail.send"
 # noticing that a reply arrived), at a fraction of the blast radius if the token leaks.
 READ_SCOPE = "https://www.googleapis.com/auth/gmail.metadata"
 SETTINGS_SCOPE = "https://www.googleapis.com/auth/gmail.settings.basic"
+
+# CRM-4b, OPT-IN ONLY. Reading what a reply SAYS needs `gmail.readonly`, which can read every
+# message in the mailbox — a categorically wider grant than everything above it. It is
+# deliberately NOT in SCOPES, so the ordinary connect flow can never request it by accident and
+# no future scope addition drags it along. Turning it on is `--with-content`, an explicit act.
+CONTENT_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
+
 SCOPES = [SEND_SCOPE, READ_SCOPE, SETTINGS_SCOPE]
 CLIENT_SECRET_PATH = config.APP_DIR / "gmail_oauth_client.json"
 TOKEN_PATH = config.APP_DIR / "gmail_token.json"
@@ -117,22 +124,40 @@ def available() -> bool:
     return _load_creds() is not None
 
 
-def connect() -> tuple[bool, str]:
-    """Run the one-time OAuth flow (opens a browser). Stores the token. Returns (ok, msg)."""
+def can_read_content() -> bool:
+    """True when the stored token carries `gmail.readonly` (CRM-4b).
+
+    Everything else in this module works on `gmail.metadata`. This is the ONE gate that decides
+    whether the system may look at what a message actually says.
+    """
+    return has_scope(CONTENT_SCOPE)
+
+
+def connect(with_content: bool = False) -> tuple[bool, str]:
+    """Run the one-time OAuth flow (opens a browser). Stores the token. Returns (ok, msg).
+
+    `with_content` adds `gmail.readonly` — the CRM-4b opt-in. It must be passed explicitly by
+    something the operator typed; nothing in the codebase defaults it to True, and a test pins
+    that the ordinary flow requests only SCOPES.
+    """
     if not CLIENT_SECRET_PATH.exists():
         return False, _SETUP_HELP
     try:
         _Request, _Credentials, InstalledAppFlow, _build = _libs()
     except ImportError:
         return False, "Install deps: pip install google-api-python-client google-auth-oauthlib"
+    scopes = list(SCOPES) + ([CONTENT_SCOPE] if with_content else [])
     try:
-        flow = InstalledAppFlow.from_client_secrets_file(str(CLIENT_SECRET_PATH), SCOPES)
+        flow = InstalledAppFlow.from_client_secrets_file(str(CLIENT_SECRET_PATH), scopes)
         creds = flow.run_local_server(port=0)
         TOKEN_PATH.write_text(creds.to_json(), encoding="utf-8")
         _lock_down(TOKEN_PATH)
     except Exception as e:  # noqa: BLE001
         return False, f"OAuth flow failed: {e}"
-    return True, f"Gmail connected. Token stored at {TOKEN_PATH}"
+    note = (" Reply content is ON — snippets of incoming replies will be stored."
+            if with_content else
+            " Reply content is OFF (headers only). Add --with-content to enable it.")
+    return True, f"Gmail connected. Token stored at {TOKEN_PATH}.{note}"
 
 
 def probe() -> tuple[bool, str]:
@@ -212,22 +237,45 @@ def message_thread_info(message_id: str) -> dict:
             "subject": headers.get("subject", "")}
 
 
+#: (token mtime) -> address. Keyed on the token file so reconnecting a DIFFERENT account
+#: invalidates it, while an unchanged token costs nothing.
+_EMAIL_CACHE: dict[float, str] = {}
+
+
 def connected_email() -> str:
-    """The authenticated account's email address (empty if unavailable)."""
+    """The authenticated account's email address (empty if unavailable).
+
+    Cached, because this is an HTTP round-trip to Gmail and it is called from a RENDER path.
+    `/api/status` asks once per job, refreshes every 2.5s, and was measured at **2.4s per
+    request** with 15 jobs — the dashboard was refreshing back-to-back and spending most of it
+    asking Gmail the same unchanging question (§Lessons 11: idempotent is not free).
+    """
+    try:
+        key = TOKEN_PATH.stat().st_mtime
+    except OSError:
+        key = 0.0
+    if key in _EMAIL_CACHE:
+        return _EMAIL_CACHE[key]
+
     creds = _load_creds()
     if creds is None:
         return ""
     try:
         _R, _C, _F, build = _libs()
         service = build("gmail", "v1", credentials=creds, cache_discovery=False)
-        return service.users().getProfile(userId="me").execute().get("emailAddress", "")
+        email = service.users().getProfile(userId="me").execute().get("emailAddress", "")
     except Exception:  # noqa: BLE001
-        return ""
+        return ""  # not cached: a transient failure must not pin an empty address forever
+    if email:
+        _EMAIL_CACHE.clear()  # only ever one account connected at a time
+        _EMAIL_CACHE[key] = email
+    return email
 
 
 def send(to_addr: str, subject: str, body: str, from_addr: str,
          from_name: str = "", attachments: list[tuple[str, str]] | None = None,
-         thread_id: str | None = None, in_reply_to: str | None = None) -> dict:
+         thread_id: str | None = None, in_reply_to: str | None = None,
+         cc: list[str] | None = None, references: str | None = None) -> dict:
     """Send via the Gmail API. Raises on failure.
 
     Returns {"id", "thread_id", "rfc_message_id"} — the caller persists the last two so a
@@ -248,12 +296,18 @@ def send(to_addr: str, subject: str, body: str, from_addr: str,
     msg["To"] = to_addr
     msg["Reply-To"] = from_addr
     msg["Subject"] = subject
+    # Carried forward from the message being answered, not rebuilt: dropping a Cc drops the
+    # person the other side introduced, and does it silently (CRM-4a).
+    if cc:
+        msg["Cc"] = ", ".join(c for c in cc if c)
     rfc_id = make_msgid(domain=(from_addr.split("@")[-1] if "@" in from_addr else None))
     msg["Message-ID"] = rfc_id
     # Gmail groups by these headers; threadId alone is not enough for the RECIPIENT's client.
     if in_reply_to:
         msg["In-Reply-To"] = in_reply_to
-        msg["References"] = in_reply_to
+        # References chains the whole thread when we have it. Falling back to In-Reply-To alone
+        # still threads, just more fragilely in clients that walk the chain.
+        msg["References"] = references or in_reply_to
     msg.set_content(body)
     # Signature: Gmail only appends it in the web UI, so add it ourselves. Sent as an HTML
     # alternative alongside the plain text — the body stays verbatim in both parts.

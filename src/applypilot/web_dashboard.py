@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import logging
 import mimetypes
 import os
 import re
@@ -32,6 +33,7 @@ from rich.console import Console
 from applypilot import __version__, config
 from applypilot.database import get_connection, init_db
 from applypilot.networking import store as _store
+from applypilot.networking import touches as _touches
 from applypilot.repo import jobs as _jobs
 
 console = Console()
@@ -746,6 +748,60 @@ def _finish_signin(job_url: str, fill: bool = False) -> dict:
     return {"ok": True, "message": "Closed. You are signed in for next time."}
 
 
+log = logging.getLogger(__name__)
+
+#: Background reply polling. Gmail is the slow part, so it never runs inside a request — a
+#: 2.5s dashboard refresh cannot wait on a mailbox round-trip.
+class ReplyPoller:
+    """Polls Gmail for replies on a timer while the dashboard is up.
+
+    Unattended polling with the dashboard CLOSED is CRM-3b (`applypilot tick`), deliberately not
+    this. The point of keeping it in-process here is that it costs nothing when idle: with a
+    watermark, a poll that finds no new mail is one `history.list` call and reads no threads.
+    """
+
+    def __init__(self, interval_s: int = 300) -> None:
+        self._lock = threading.Lock()
+        self._interval = interval_s
+        self._last: dict = {}
+        self._running = False
+
+    def status(self) -> dict:
+        with self._lock:
+            return dict(self._last)
+
+    def poll_now(self, force_full: bool = False) -> dict:
+        from applypilot.networking import replies as reply_svc
+        with self._lock:
+            if self._running:
+                return {"ok": False, "note": "a poll is already running"}
+            self._running = True
+        try:
+            res = reply_svc.poll(force_full=force_full)
+        except Exception as exc:  # noqa: BLE001
+            # Reply detection must never take the dashboard down with it.
+            log.debug("Reply poll failed", exc_info=True)
+            res = {"ok": False, "note": f"poll failed: {exc}", "checked": 0, "replied": 0}
+        finally:
+            with self._lock:
+                self._running = False
+                self._last = {**res, "at": time.time()}
+        return res
+
+    def start(self) -> None:
+        def loop() -> None:
+            while True:
+                try:
+                    self.poll_now()
+                except Exception:  # noqa: BLE001
+                    log.debug("Reply poll loop error", exc_info=True)
+                time.sleep(self._interval)
+        threading.Thread(target=loop, name="reply-poller", daemon=True).start()
+
+
+_replies = ReplyPoller()
+
+
 def _pause_apply() -> dict:
     """Ask the running apply to stop and hand its browser over.
 
@@ -1164,7 +1220,7 @@ def _legacy_followup_status(ladder: dict) -> str:
 
 
 def _contact_payload(c: dict, company: str | None = None, ladders: dict | None = None,
-                     conn_matches: dict | None = None) -> dict:
+                     conn_matches: dict | None = None, thread: list | None = None) -> dict:
     from applypilot.domain.followup import EMPTY_LADDER
     from applypilot.networking import connections
     # Prebuilt by the caller in one query when rendering a whole job; falls back to a
@@ -1228,6 +1284,20 @@ def _contact_payload(c: dict, company: str | None = None, ladders: dict | None =
         "connection_company": (conn_rec or {}).get("company", "") or "",
         "confidence": c.get("confidence") or "",
         "verify_note": c.get("verify_note") or "",
+        "replied_at": c.get("replied_at") or "",
+        # CRM-4: the stored conversation (headers only) and, when the other side added this
+        # person to a thread, who did it — the handoff a boolean `replied` used to discard.
+        "thread": thread or [],
+        "introduced_by": _introduced_by(c, thread or []),
+        # Who a reply would go to, computed from the stored thread — no extra query and no
+        # extra round-trip, so the composer can open prefilled. None when nobody has written
+        # to us, which is how the UI knows to offer a follow-up instead of a reply.
+        "reply_to": _reply_target(thread or []),
+        # Whose turn it is. `awaiting_us` means they wrote and nobody answered — the worst
+        # outcome the system can produce, since it paid for the reply and then dropped it.
+        "conversation": _conversation_state(thread or []),
+        # CRM-4b. Empty on every metadata-only install, which is the default.
+        "last_reply": _last_reply(thread or []),
         # HOT layer marker: found via your connections (vs cold Apollo). Either the stored source
         # or a live connection match makes it "hot".
         "hot": c.get("source") == "connection" or bool(conn_rec),
@@ -1298,7 +1368,9 @@ def _status_payload() -> dict:
         job_ladders = _ladder_states([c.get("id") for c in raw_contacts if c.get("id")])
         job_matches = _conns.match_many([c.get("full_name") for c in raw_contacts],
                                         contact_company, conn)
-        contacts = [_contact_payload(c, contact_company, job_ladders, job_matches)
+        job_threads = _conversations_for_job(row["url"], conn)
+        contacts = [_contact_payload(c, contact_company, job_ladders, job_matches,
+                                     thread=job_threads.get(c.get("id")) or [])
                     for c in raw_contacts]
         net_task = _net_tasks.get(row["url"], {})
         jobs.append({
@@ -1323,6 +1395,9 @@ def _status_payload() -> dict:
             "contacts": contacts,
             "checklist": _job_checklist(status, row["applied_at"] or "", contacts),
             "followups": _followup_panel(contacts, job_ladders),
+            "conversations": job_threads,
+            "awaiting_reply": _awaiting_us(contacts),
+            "introductions": _pending_introductions(job_threads, raw_contacts),
             "activity": _job_activity(row["url"], conn),
             "network_running": bool(net_task.get("running")),
             "network_note": net_task.get("note") or "",
@@ -1348,10 +1423,293 @@ def _status_payload() -> dict:
         "claude_log": claude_log,
         "app_dir": str(config.APP_DIR),
         "networking_available": _networking_available(),
+        "metrics": _metrics_payload(rows, conn),
+        "replies": _replies.status(),
         "gmail_available": _gmail_available(),
         # Mutual shared token for the LinkedIn extension — operator pastes it into the popup once.
         "ext_token": _ext_token(),
     }
+
+
+def _pending_introductions(job_threads: dict, raw_contacts: list) -> list[dict]:
+    """People the other side added to a thread who are not contacts yet (CRM-4).
+
+    Computed from STORED messages, so it costs no Gmail call on a 2.5s refresh.
+    """
+    try:
+        from applypilot.domain import conversations as cv
+        from applypilot.networking import gmail_oauth
+        emails = [c.get("email") for c in raw_contacts if c.get("email")]
+        return cv.pending_introductions(job_threads, emails, gmail_oauth.connected_email())
+    except Exception:  # noqa: BLE001
+        log.debug("Pending-introduction scan failed", exc_info=True)
+        return []
+
+
+def _add_introduced_contact(data: dict) -> dict:
+    """Add someone who was introduced on a thread, as a real contact.
+
+    Kept behind an explicit click rather than created automatically: threads collect
+    schedulers, assistants and ATS robots, and a contact created here is one an automated
+    follow-up ladder would then EMAIL.
+
+    `source='introduction'` is deliberately distinct from apollo/connection — this is the
+    warmest lead the system can produce (a human at the company handed you to them), and
+    CRM-2's by_layer() should eventually be able to prove that.
+    """
+    from applypilot.database import log_event
+    from applypilot.networking.store import init_contacts, upsert_contact
+
+    job_url = (data.get("job_url") or "").strip()
+    email = (data.get("email") or "").strip().lower()
+    if not job_url or not email:
+        return {"ok": False, "message": "job_url and email required"}
+
+    init_db()
+    conn = get_connection()
+    init_contacts(conn)
+    row = _jobs.find_by_any_url(job_url, conn)
+    if not row:
+        return {"ok": False, "message": "job not found"}
+    job = dict(row)
+
+    name = (data.get("name") or "").strip() or email.split("@")[0].replace(".", " ").title()
+    by = (data.get("introduced_by") or "").strip()
+    cid = upsert_contact({
+        "job_url": job["url"],
+        "full_name": name,
+        "email": email,
+        "email_status": "verified",   # it came off a real thread they were Cc'd on
+        "company": job.get("company"),
+        "source": "introduction",
+        "match_reason": f"introduced by {by}" if by else "introduced on the thread",
+        "confidence": "high",
+        "verify_note": f"{by} added them to a live thread" if by else "added to a live thread",
+        "outreach_status": "none",
+    }, conn)
+
+    log_event(job["url"], "outreach", "ok",
+              f"Added {name} ({email}) as a contact — introduced by {by or 'the thread'}.", conn)
+
+    drafted = False
+    try:
+        from applypilot.config import load_profile
+        from applypilot.networking import service
+        contact = _store.get_contact(cid, conn)
+        service._draft_and_store(load_profile(), job, contact, warm=False)
+        drafted = True
+    except Exception:  # noqa: BLE001
+        # A missing draft is recoverable from the UI; a failed add is not.
+        log.debug("Draft for introduced contact failed", exc_info=True)
+
+    return {"ok": True, "contact_id": cid,
+            "message": f"Added {name}." + (" Draft ready." if drafted else
+                                           " Use “Regenerate” to draft an email.")}
+
+
+def _last_reply(thread: list) -> dict | None:
+    """The newest inbound message's stored snippet, and what it looks like they want (CRM-4b).
+
+    Returns None when there is no snippet — which is every install that never granted
+    `gmail.readonly`, and the reason 4b can ship without changing anything for them.
+    """
+    try:
+        inbound = [m for m in thread if isinstance(m, dict) and m.get("direction") == "in"]
+        if not inbound:
+            return None
+        last = inbound[-1]
+        text = (last.get("snippet") or "").strip()
+        if not text:
+            return None
+        from applypilot.domain import intent as _intent
+        return {"text": text, "at": last.get("sent_at") or "",
+                "from": last.get("from_name") or last.get("from_addr") or "",
+                **_intent.suggestion(_intent.classify(text))}
+    except Exception:  # noqa: BLE001
+        log.debug("Could not summarise the last reply", exc_info=True)
+        return None
+
+
+def _awaiting_us(contacts: list[dict]) -> list[dict]:
+    """Contacts who wrote to us and are still waiting, newest silence last.
+
+    Rolled up per job so the row can rank answering a real human above every follow-up:
+    somebody who replied outranks somebody who did not, and no ladder should be able to
+    outshout them.
+    """
+    out = []
+    for c in contacts:
+        conv = c.get("conversation") or {}
+        if conv.get("state") == "awaiting_us":
+            out.append({"id": c.get("id"), "full_name": c.get("full_name", ""),
+                        "days": conv.get("days"), "hours": conv.get("hours")})
+    return sorted(out, key=lambda r: -(r["hours"] or 0))
+
+
+def _conversation_state(thread: list) -> dict | None:
+    """Whose turn it is on this thread. Never raises — see `_reply_target`."""
+    if not thread:
+        return None
+    try:
+        from applypilot.domain import conversations as cv
+        return cv.conversation_state(thread)
+    except Exception:  # noqa: BLE001
+        log.debug("Could not compute a conversation state", exc_info=True)
+        return None
+
+
+def _reply_target(thread: list) -> dict | None:
+    """The recipients a reply would use, for the composer. Never raises.
+
+    Rendered on every 2.5s refresh, so a thread with an odd header must not be able to 500 the
+    whole dashboard — the same reason `_parse_ts` exists (§Lessons 6).
+    """
+    if not thread:
+        return None
+    try:
+        from applypilot.domain import conversations as cv
+        from applypilot.networking.gmail_send import _our_addresses
+        return cv.reply_target(thread, _our_addresses())
+    except Exception:  # noqa: BLE001
+        log.debug("Could not compute a reply target", exc_info=True)
+        return None
+
+
+def _draft_reply(data: dict) -> dict:
+    """Draft an answer to a live conversation (CRM-4b). Never sends.
+
+    Refuses cleanly without the content scope rather than producing something. A "contextual"
+    reply written without the context is a generic follow-up wearing a Re: subject line — the
+    exact automated-sounding message that kills a real exchange, and it would be indistinguish-
+    able from a working feature until the operator read it.
+    """
+    from applypilot.networking import messages as _msgs, store as _store
+
+    cid = (data.get("contact_id") or "").strip()
+    if not cid:
+        return {"ok": False, "message": "contact_id required"}
+
+    conn = get_connection()
+    _store.init_contacts(conn)
+    contact = _store.get_contact(cid, conn)
+    if not contact:
+        return {"ok": False, "message": "contact not found"}
+
+    thread = _msgs.thread_for_contact(cid, conn)
+    if not any((m.get("snippet") or "").strip() for m in thread):
+        from applypilot.networking import gmail_read
+        _, why = gmail_read.can_read_content()
+        return {"ok": False, "message": f"Can't draft an answer — {why}"}
+
+    job = _jobs.get(contact.get("job_url", ""), conn) or {"url": contact.get("job_url", "")}
+    try:
+        from applypilot.config import load_profile
+        from applypilot.networking import outreach
+        d = outreach.draft_reply(load_profile(), job, contact, thread=thread)
+    except Exception as e:  # noqa: BLE001
+        log.debug("Reply draft failed", exc_info=True)
+        return {"ok": False, "message": f"Draft failed: {e}"}
+    return {"ok": True, "subject": d["subject"], "body": d["body"],
+            "message": "Draft ready — read it before you send it."}
+
+
+def _send_reply(data: dict) -> dict:
+    """Answer a live conversation, in-thread, from the dashboard.
+
+    Thin on purpose: recipients are decided by `domain.conversations.reply_target()` from the
+    stored thread, NOT by anything the browser posts. The composer shows them and lets the
+    operator drop a Cc, but it cannot invent a recipient — an endpoint that accepted a `to`
+    would be an open relay pointed at whatever the page happened to hold.
+    """
+    from applypilot.database import log_event
+    from applypilot.networking import gmail_send, store as _store
+
+    cid = (data.get("contact_id") or "").strip()
+    body = (data.get("body") or "").strip()
+    if not cid:
+        return {"ok": False, "message": "contact_id required"}
+    if not body:
+        return {"ok": False, "message": "write a reply first"}
+
+    conn = get_connection()
+    _store.init_contacts(conn)
+    contact = _store.get_contact(cid, conn)
+    if not contact:
+        return {"ok": False, "message": "contact not found"}
+
+    # `cc` absent means "keep whatever the thread had"; an explicitly empty list means the
+    # operator removed everyone, which is a different instruction and must survive the trip.
+    cc = data.get("cc")
+    cc = None if cc is None else [str(c) for c in cc if str(c).strip()]
+
+    res = gmail_send.send_reply(cid, body, subject=(data.get("subject") or ""),
+                                cc=cc, conn=conn)
+    if res.get("ok"):
+        who = contact.get("full_name") or res.get("to", "")
+        also = res.get("cc") or []
+        log_event(contact.get("job_url", ""), "outreach", "ok",
+                  f"Replied to {who}" + (f" (cc {', '.join(also)})" if also else "")
+                  + " from the dashboard.", conn)
+    return res
+
+
+def _introduced_by(contact: dict, thread: list) -> str:
+    """Who added this contact to the conversation, if anybody did.
+
+    Only meaningful for someone who first appears as a Cc on a message WE did not send — that
+    is the shape of a handoff ("Victoria introduced David"). A contact we emailed directly was
+    introduced by nobody.
+    """
+    if not thread:
+        return ""
+    email = (contact.get("email") or "").strip().lower()
+    if not email:
+        return ""
+    for msg in thread:
+        if msg.get("direction") != "in":
+            continue
+        # cc_addrs holds RAW fragments ("David Loveless <david@writer.com>"), so compare on
+        # the extracted address rather than the whole string.
+        from applypilot.domain.conversations import addr as _addr
+        if email in [_addr(a) for a in (msg.get("cc_addrs") or [])]:
+            return msg.get("from_name") or msg.get("from_addr") or ""
+    return ""
+
+
+def _conversations_for_job(job_url: str, conn) -> dict:
+    """contact_id -> stored thread (CRM-4). One query per JOB, never one per contact.
+
+    Degrades to {} rather than raising: conversation memory is additive, and a job row must
+    still render if the messages table is missing or unreadable.
+    """
+    try:
+        from applypilot.networking import messages as _messages
+        return _messages.threads_for_job(job_url, conn)
+    except Exception:  # noqa: BLE001
+        log.debug("Conversation load failed for %s", job_url, exc_info=True)
+        return {}
+
+
+def _metrics_payload(job_rows: list, conn) -> dict:
+    """CRM-2 aggregates for the dashboard panel.
+
+    Three narrow reads and one pass of pure aggregation — `domain.metrics` does the arithmetic,
+    so the same numbers back `applypilot stats --outreach` and are unit-testable against
+    fixtures. Kept cheap deliberately: this runs on every /api/status, which the query budget
+    holds at 50 statements.
+    """
+    from applypilot.domain import metrics as metrics_mod
+    from applypilot.domain.timeutil import parse_ts
+
+    try:
+        contacts = _store.all_contacts_for_metrics(conn)
+        touch_rows = _touches.all_sent_touches(conn)
+        jobs = [dict(zip(r.keys(), r)) if not isinstance(r, dict) else r for r in job_rows]
+        return metrics_mod.summary(jobs, contacts, touch_rows, parse_ts)
+    except Exception:  # noqa: BLE001
+        # A metrics panel must never be able to take the dashboard down with it.
+        log.debug("Metrics payload failed", exc_info=True)
+        return {}
 
 
 def _progress_payload(stats: dict, jobs: list[dict], command_status: dict) -> dict:
@@ -1965,8 +2323,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if path == "/api/contact/details":
                 _json_response(self, _save_contact_details(data))
                 return
+            if path == "/api/contact/add-introduced":
+                _json_response(self, _add_introduced_contact(data))
+                return
             if path == "/api/contact/delete":
                 _json_response(self, _delete_contact(data.get("contact_id", "")))
+                return
+            if path == "/api/contact/reply":
+                _json_response(self, _send_reply(data))
+                return
+            if path == "/api/contact/draft-reply":
+                _json_response(self, _draft_reply(data))
                 return
             if path == "/api/followup":
                 _json_response(self, _followup_action(data))
@@ -2071,6 +2438,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if path == "/api/pause-apply":
                 _json_response(self, _pause_apply())
                 return
+            if path == "/api/check-replies":
+                res = _replies.poll_now(force_full=bool(data.get("full")))
+                msg = (f"Checked {res.get('checked', 0)} thread(s) — "
+                       f"{res.get('replied', 0)} new repl"
+                       f"{'y' if res.get('replied') == 1 else 'ies'}."
+                       if res.get("ok") else res.get("note", "could not check"))
+                _json_response(self, {"ok": bool(res.get("ok")), "message": msg, **res})
+                return
             if path == "/api/signin":
                 url = (data.get("url") or "").strip()
                 if not url:
@@ -2111,6 +2486,21 @@ def serve_dashboard(host: str = "127.0.0.1", port: int = 8765, open_browser: boo
     # Generate the extension token up front so the operator can read it before any request
     # (the guard short-circuits on a missing header, so it would never be created lazily).
     ext_token = _ext_token()
+
+    # Reply polling runs on its own thread from start-up. Never inside a request: a 2.5s
+    # dashboard refresh cannot wait on a Gmail round-trip. Unattended polling with the
+    # dashboard CLOSED is CRM-3b (`applypilot tick`), not this.
+    _ok, _why = (False, "")
+    try:
+        from applypilot.networking import gmail_read
+        _ok, _why = gmail_read.available()
+    except Exception:  # noqa: BLE001
+        _why = "reply detection unavailable"
+    if _ok:
+        _replies.start()
+        console.print("[dim]Reply detection:[/dim] on (polling every 5 min)")
+    else:
+        console.print(f"[dim]Reply detection:[/dim] off — {_why}")
 
     server = ThreadingHTTPServer((host, port), DashboardHandler)
     url = f"http://{host}:{port}/"

@@ -277,6 +277,7 @@ def network(
     no_linkedin: bool = typer.Option(False, "--no-linkedin", help="Apollo only (skip LinkedIn fallback)."),
     linkedin_login: bool = typer.Option(False, "--linkedin-login", help="One-time: open Chrome to log into LinkedIn (for the fallback)."),
     gmail_connect: bool = typer.Option(False, "--gmail-connect", help="One-time: connect Gmail via OAuth for sending outreach."),
+    with_content: bool = typer.Option(False, "--with-content", help="With --gmail-connect: also grant gmail.readonly so ApplyPilot can read what replies SAY (CRM-4b). Off by default."),
     fix_threads: bool = typer.Option(False, "--fix-threads", help="Recover Gmail thread ids so follow-ups reply in the original conversation."),
     import_connections: Optional[str] = typer.Option(None, "--import-connections", help="Import your LinkedIn Connections.csv (to flag existing connections)."),
     dm_login: bool = typer.Option(False, "--dm-login", help="One-time: open a browser to log into LinkedIn for the DM sender (agent-browser)."),
@@ -323,7 +324,19 @@ def network(
         from applypilot.networking import gmail_oauth
         console.print("[cyan]Connecting Gmail (opens a browser)…[/cyan]")
         console.print("  Requesting: send · read (thread follow-ups) · settings (your signature)")
-        ok, msg = gmail_oauth.connect()
+        if with_content:
+            # Spelled out before the browser opens, not after. This is the one scope that can
+            # read every message in the mailbox, and the operator should see that sentence
+            # while they can still press Ctrl+C.
+            console.print("  [yellow]· PLUS gmail.readonly — lets ApplyPilot read what replies "
+                          "SAY, so it can draft answers.[/yellow]")
+            console.print("  [yellow]  That scope can read EVERY message in this mailbox. Only "
+                          "~200-char snippets of replies\n    to your own outreach are ever "
+                          "stored; no message body is written to disk.[/yellow]")
+        else:
+            console.print("  [dim]· reply CONTENT is off — add --with-content to let ApplyPilot "
+                          "read what replies say.[/dim]")
+        ok, msg = gmail_oauth.connect(with_content=with_content)
         console.print(f"[green]{msg}[/green]" if ok else f"[red]{msg}[/red]")
         if ok:
             # Recover thread ids for anything sent before they were persisted, so those
@@ -461,6 +474,109 @@ def network(
                           f"[dim]{c.get('match_reason') or ''}[/dim]  {badge} {c.get('email') or ''}")
 
     console.print(f"\n[bold]Total:[/bold] {total_found} contacts, {total_revealed} with email\n")
+
+
+@app.command()
+def tick(
+    dry_run: bool = typer.Option(False, "--dry-run", help="Print what it would do; change nothing."),
+) -> None:
+    """One unattended heartbeat: poll replies, free stale locks, draft what came due.
+
+    Idempotent and safe to run repeatedly — this is what the schedule calls. It NEVER sends
+    anything and NEVER starts an apply; both stay a human action.
+    """
+    from applypilot import tick as tick_mod
+
+    out = tick_mod.run(dry_run=dry_run)
+    console.print(f"\n[bold]tick[/bold]{' [dim](dry run)[/dim]' if dry_run else ''}")
+    for name, res in out["steps"].items():
+        mark = "[red]✗[/red]" if res.get("error") else "[green]✓[/green]"
+        console.print(f"  {mark} {name:<11} {res.get('detail', '')}")
+
+
+@app.command()
+def schedule(
+    install: bool = typer.Option(False, "--install", help="Install the hourly launchd job."),
+    uninstall: bool = typer.Option(False, "--uninstall", help="Remove it."),
+) -> None:
+    """Install or remove the macOS schedule that runs `tick` hourly."""
+    from applypilot import schedule as sched
+
+    if install and uninstall:
+        console.print("[red]Pick one of --install / --uninstall.[/red]")
+        raise typer.Exit(1)
+    if install:
+        ok, msg = sched.install()
+    elif uninstall:
+        ok, msg = sched.uninstall()
+    else:
+        state = "installed" if sched.installed() else "not installed"
+        console.print(f"Schedule: [bold]{state}[/bold]  ({sched.plist_path()})")
+        return
+    console.print(f"[{'green' if ok else 'red'}]{msg}[/]")
+    raise typer.Exit(0 if ok else 1)
+
+
+@app.command()
+def stats(
+    outreach: bool = typer.Option(False, "--outreach", help="Reply rates and the outreach funnel."),
+) -> None:
+    """Outcome metrics — what actually worked (CRM-2).
+
+    The same numbers the dashboard's Outcomes panel shows, from the same pure aggregation, so
+    the two can never disagree.
+    """
+    _bootstrap()
+    from applypilot.database import get_connection
+    from applypilot.domain import metrics as metrics_mod
+    from applypilot.domain.timeutil import parse_ts
+    from applypilot.networking import store as _store
+    from applypilot.networking import touches as _touches
+    from applypilot.repo import jobs as _jobs
+
+    if not outreach:
+        console.print("Nothing else to show yet — try [bold]applypilot stats --outreach[/bold]")
+        return
+
+    conn = get_connection()
+    rows = _jobs.dashboard_rows(conn=conn)
+    jobs = [dict(zip(r.keys(), r)) if not isinstance(r, dict) else r for r in rows]
+    mx = metrics_mod.summary(jobs, _store.all_contacts_for_metrics(conn),
+                             _touches.all_sent_touches(conn), parse_ts)
+
+    f = mx["funnel"]
+    console.print("\n[bold]Outreach funnel[/bold]")
+    for step in f["steps"]:
+        console.print(f"  {step['label']:<16} {step['n']}")
+    if f["bounced"]:
+        console.print(f"  [red]{'bounced':<16} {f['bounced']}[/red]  "
+                      f"[dim](never arrived — excluded from every rate below)[/dim]")
+
+    def _rates(title, rates):
+        if not rates:
+            return
+        console.print(f"\n[bold]{title}[/bold]")
+        for r in rates:
+            # Below the threshold we print the raw counts, never a percentage: a rate from a
+            # handful of sends is arithmetic dressed up as evidence.
+            value = f"{r['pct']}% ({r['hits']}/{r['n']})" if r["meaningful"] \
+                else f"[dim]{r['hits']} of {r['n']} — too few to rate[/dim]"
+            console.print(f"  {r['label']:<28} {value}")
+
+    _rates("Overall", [mx["overall"]])
+    _rates("Warm vs cold", mx["by_layer"])
+    _rates("By verification confidence", mx["by_confidence"])
+    _rates("By follow-ups sent", mx["by_touch"])
+
+    if mx["median_hours_to_reply"] is not None:
+        console.print(f"\n[bold]Median time to reply:[/bold] {mx['median_hours_to_reply']}h")
+
+    quiet = [r for r in mx["by_company"] if not r["replied"]]
+    if quiet:
+        console.print("\n[bold]Companies that have never replied[/bold]")
+        for r in quiet[:10]:
+            extra = f", {r['bounced']} bounced" if r["bounced"] else ""
+            console.print(f"  {r['company']:<28} {r['emailed']} emailed{extra}")
 
 
 @app.command()
@@ -778,6 +894,48 @@ def doctor(
                             "Run `applypilot network --gmail-connect` (OAuth) to send outreach"))
     except Exception:
         results.append(("Gmail outreach send", warn_mark, "probe failed"))
+
+    # Reply detection (CRM-1). Reported separately from sending: it degrades on its own — a
+    # token without gmail.metadata still sends perfectly well, it just cannot see answers.
+    try:
+        from applypilot.networking import gmail_read
+        ok, why = gmail_read.available()
+        if ok:
+            wm = gmail_read.load_watermark()
+            last = (wm.get("checked_at") or "")[:16].replace("T", " ")
+            results.append(("Reply detection", ok_mark,
+                            f"on — last checked {last}" if last else "on — never polled yet"))
+        else:
+            results.append(("Reply detection", warn_mark, why))
+    except Exception:
+        results.append(("Reply detection", warn_mark, "probe failed"))
+
+    # Reply CONTENT (CRM-4b). Reported as a deliberate OFF rather than a missing feature: not
+    # granting this is a legitimate choice, and `doctor` should describe the trade, never nag.
+    try:
+        from applypilot.networking import gmail_read as _gr
+        can, why = _gr.can_read_content()
+        if can:
+            results.append(("Reply content", ok_mark,
+                            "on (gmail.readonly) — ~200-char snippets stored, never full bodies"))
+        else:
+            results.append(("Reply content", "[dim]off[/dim]",
+                            why if "not connected" in why else
+                            "off — headers only. `network --gmail-connect --with-content` "
+                            "grants gmail.readonly (reads the WHOLE mailbox) to draft answers"))
+    except Exception:
+        results.append(("Reply content", warn_mark, "probe failed"))
+
+    # Unattended schedule (CRM-3b). Optional: everything still works by hand without it.
+    try:
+        from applypilot import schedule as _sched
+        if _sched.installed():
+            results.append(("Unattended tick", ok_mark, f"scheduled ({_sched.plist_path().name})"))
+        else:
+            results.append(("Unattended tick", "[dim]optional[/dim]",
+                            "not scheduled — run `applypilot schedule --install`"))
+    except Exception:
+        results.append(("Unattended tick", warn_mark, "probe failed"))
 
     # CapSolver (optional)
     capsolver = os.environ.get("CAPSOLVER_API_KEY")

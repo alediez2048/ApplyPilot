@@ -1579,6 +1579,27 @@ def _reply_target(thread: list) -> dict | None:
         return None
 
 
+def _job_description(data: dict) -> dict:
+    """The full posting text for ONE job, on demand.
+
+    `/api/status` carries a 900-char excerpt. Descriptions run 4–8KB, so shipping them for every
+    job on a 2.5s refresh — to fill a pane that is usually closed — would multiply the payload
+    for nothing. Fetched once per job when the operator expands it.
+    """
+    url = (data.get("url") or "").strip()
+    if not url:
+        return {"ok": False, "message": "url required"}
+    init_db()
+    row = _jobs.find_by_any_url(url, get_connection())
+    if not row:
+        return {"ok": False, "message": "job not found"}
+    job = dict(row)
+    desc = (job.get("full_description") or "").strip()
+    if desc.lower() == "null":          # scrapers write the string "null" (§enrichment)
+        desc = ""
+    return {"ok": True, "description": desc}
+
+
 def _content_scope() -> bool:
     """Does the stored token allow reading message text? Never raises."""
     try:
@@ -2408,6 +2429,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/contact/fetch-reply":
                 _json_response(self, _fetch_reply_text(data))
+                return
+            if path == "/api/job-description":
+                _json_response(self, _job_description(data))
                 return
             if path == "/api/followup":
                 _json_response(self, _followup_action(data))

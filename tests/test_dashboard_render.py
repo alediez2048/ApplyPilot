@@ -531,6 +531,95 @@ def test_the_row_where_someone_joined_says_so(tmp_path):
     assert "David Loveless" in html
 
 
+_JOB_DRIVER = """
+const F = (new Function(SRC + `; return { jobTabs, jobPane, TAB_OPEN, PANEL_OPEN };`))();
+F.PANEL_OPEN.add(J.url);
+F.TAB_OPEN.set(J.url, 'job');
+console.log(JSON.stringify({tabs: F.jobTabs(J), pane: F.jobPane(J)}));
+"""
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node not available")
+def test_the_job_tab_shows_the_posting_and_its_links(tmp_path):
+    """The URL is why this tab exists. A job row shows a truncated `job` link in the table; the
+    operator needs the full address to copy, plus the facts that decide whether the posting is
+    worth more effort."""
+    j = _job(url="https://acme.wd12.myworkdayjobs.com/ext/job/SF/Engineer_JR349466",
+             application_url="https://acme.wd12.myworkdayjobs.com/apply/JR349466",
+             location="San Francisco", salary="$180k-$220k", fit_score=9,
+             reasoning="Strong match on deployment work.",
+             description="x" * 900)
+    script = tmp_path / "job.mjs"
+    script.write_text(_STUBS + f"const SRC = {json.dumps(_page_js())};\n"
+                      + f"const J = {json.dumps(j)};\n" + _JOB_DRIVER)
+    proc = subprocess.run(["node", str(script)], capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, f"node failed:\n{proc.stderr[:2000]}"
+    out = json.loads(proc.stdout.strip().splitlines()[-1])
+
+    assert ">Job<" in out["tabs"] or "'job'" in out["tabs"], "no Job tab was rendered"
+    pane = out["pane"]
+    assert "JR349466" in pane, "the posting URL is not shown in full"
+    assert "Open the posting" in pane
+    assert "Application page" in pane, "a distinct apply URL was not surfaced"
+    assert "San Francisco" in pane and "$180k" in pane
+    assert "9/10" in pane and "Strong match" in pane
+    # A 900-char excerpt means there is more; it must offer the rest rather than silently
+    # truncating, which would read as "this is the whole posting".
+    assert "Show the full description" in pane
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node not available")
+def test_the_job_tab_does_not_offer_a_duplicate_apply_link(tmp_path):
+    """Most jobs have application_url == url. Two identical buttons is noise pretending to be
+    a choice."""
+    j = _job(url="https://acme.com/careers/eng", application_url="https://acme.com/careers/eng",
+             description="short")
+    script = tmp_path / "job2.mjs"
+    script.write_text(_STUBS + f"const SRC = {json.dumps(_page_js())};\n"
+                      + f"const J = {json.dumps(j)};\n" + _JOB_DRIVER)
+    proc = subprocess.run(["node", str(script)], capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, f"node failed:\n{proc.stderr[:2000]}"
+    pane = json.loads(proc.stdout.strip().splitlines()[-1])["pane"]
+    assert "Application page" not in pane
+    assert pane.count("Apply URL") == 0
+    # A short description is complete, so it must NOT claim there is more to load.
+    assert "Show the full description" not in pane
+
+
+def test_the_full_description_endpoint_returns_the_whole_posting(tmp_path, monkeypatch):
+    """The list payload carries 900 chars. Descriptions run 4-8KB, and shipping them for every
+    job on a 2.5s refresh to fill a usually-closed pane would multiply the payload for nothing.
+    """
+    import applypilot.database as database
+    from applypilot import web_dashboard as wd
+
+    path = tmp_path / "t.db"
+    monkeypatch.setattr(database, "DB_PATH", path)
+    database.close_connection(path)
+    database.init_db(path)
+    conn = database.get_connection(path)
+    monkeypatch.setattr(wd, "get_connection", lambda *a, **k: conn)
+
+    from applypilot.repo import jobs as _jobs
+    url = "http://j/1"
+    conn.execute("INSERT INTO jobs (url, title, strategy, full_description) VALUES (?,?,?,?)",
+                 (url, "Eng", "manual", "FULL " + "y" * 5000))
+    conn.commit()
+
+    out = wd._job_description({"url": url})
+    assert out["ok"] is True
+    assert out["description"].startswith("FULL") and len(out["description"]) > 900
+
+    assert wd._job_description({"url": ""})["ok"] is False
+    assert wd._job_description({"url": "http://nope"})["ok"] is False
+
+    # Scrapers write the literal string "null"; it must not reach the pane as text.
+    conn.execute("UPDATE jobs SET full_description = 'null' WHERE url = ?", (url,))
+    conn.commit()
+    assert wd._job_description({"url": url})["description"] == ""
+    assert _jobs is not None
+
+
 _TABS_DRIVER = """
 const F = (new Function(SRC + `; return { contactPanel, CONTACT_OPEN, CHANNEL_TAB, setChannel };`))();
 const out = {};

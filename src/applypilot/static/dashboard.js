@@ -1251,13 +1251,80 @@ function jobTabs(j) {
       !!(f.due_count || f.li_due_count)],
     ['materials', 'Materials',  (j.materials || []).length, false],
     ['activity',  'Activity',   (j.activity || []).length, false],
+    ['job',       'Job',        0, false],
   ];
   return `<div class="tabs">` + defs.map(([k, label, n, due]) =>
     `<button class="tab ${cur === k ? 'on' : ''}" onclick="openTab(${u},'${k}')">${label}${n ? ` <span class="n ${due?'due':''}">${n}</span>` : ''}</button>`
   ).join('') + `</div>`;
 }
+// The posting itself: the links, and the facts that decide whether it is worth the effort.
+// Everything here is already on the payload except the full description, which is fetched on
+// demand — the list carries a 900-char excerpt, and shipping 8KB × every job on a 2.5s refresh
+// to render a pane that is usually closed would be pure waste.
+const JOB_DESC = new Map();     // job url -> full description, fetched once per session
+const JOB_DESC_OPEN = new Set();
+
+function jobDetail(j) {
+  const link = (href, label, cls) => href
+    ? `<a class="${cls}" href="${esc(href)}" target="_blank" rel="noopener">${label} ↗</a>` : '';
+  const row = (label, value) => value
+    ? `<div class="jd-row"><span class="jd-k">${esc(label)}</span><span class="jd-v">${value}</span></div>` : '';
+
+  const applyDiffers = j.application_url && j.application_url !== j.url;
+  const links = `<div class="jd-links">
+      ${link(j.url, 'Open the posting', 'primary-link')}
+      ${applyDiffers ? link(j.application_url, 'Application page', '') : ''}
+    </div>`;
+
+  // The URL in full, selectable. A truncated link you cannot copy is the reason this tab exists.
+  const urls = row('Posting URL', `<code class="jd-url">${esc(j.url)}</code>`)
+             + (applyDiffers ? row('Apply URL', `<code class="jd-url">${esc(j.application_url)}</code>`) : '');
+
+  const score = j.fit_score != null
+    ? `${j.fit_score}/10${j.reasoning ? ` <span class="jd-why">— ${esc(j.reasoning)}</span>` : ''}` : '';
+
+  const open = JOB_DESC_OPEN.has(j.url);
+  const full = JOB_DESC.get(j.url);
+  const excerpt = (j.description || '').trim();
+  const desc = !excerpt
+    ? `<div class="pane-empty">No description scraped. Run Enrich, or open the posting above.</div>`
+    : `<div class="jd-desc">${esc(open && full ? full : excerpt)}${
+        !open && excerpt.length >= 900 ? '…' : ''}</div>
+       ${excerpt.length >= 900 ? `<button class="linklike" onclick="toggleJobDesc(${
+         `decodeURIComponent('${encodeURIComponent(j.url)}')`}, this)">${
+         open ? 'Show less' : 'Show the full description'}</button>` : ''}`;
+
+  return `<div class="jd">
+    ${links}
+    <div class="jd-facts">
+      ${row('Title', esc(j.title))}
+      ${row('Company', esc(j.company || j.contact_company))}
+      ${row('Location', esc(j.location))}
+      ${row('Salary', esc(j.salary))}
+      ${row('Fit', score)}
+      ${row('Status', esc(j.status) + (j.applied_at ? ` · applied ${esc(fmtDate(j.applied_at))}` : ''))}
+      ${row('Attempts', j.apply_attempts ? String(j.apply_attempts) : '')}
+      ${urls}
+    </div>
+    <div class="jd-label">Description</div>
+    ${desc}
+  </div>`;
+}
+async function toggleJobDesc(url, btn) {
+  if (JOB_DESC_OPEN.has(url)) { JOB_DESC_OPEN.delete(url); refresh(); return; }
+  if (!JOB_DESC.has(url)) {
+    btn.disabled = true; btn.textContent = 'Loading…';
+    const r = await post('/api/job-description', {url});
+    if (r.ok) JOB_DESC.set(url, r.description || '');
+    btn.disabled = false;
+  }
+  JOB_DESC_OPEN.add(url);
+  refresh();
+}
+
 function jobPane(j) {
   const t = activeTab(j);
+  if (t === 'job')       return jobDetail(j);
   if (t === 'activity')  return `<div class="timeline">${activityHtml(j.activity)}</div>`;
   if (t === 'materials') return materialLinks(j.materials) || `<div class="pane-empty">No materials generated yet.</div>`;
   if (t === 'followups') return j.followups ? followupBody(j, j.followups)

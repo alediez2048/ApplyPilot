@@ -1865,15 +1865,18 @@ def _save_or_regen_draft(data: dict) -> dict:
         return {"ok": True, "subject": draft["subject"], "body": draft["body"],
                 "linkedin": draft.get("linkedin_note", "")}
 
-    # Save an edit
-    fields = {
-        "id": cid, "job_url": row["job_url"],
-        "outreach_subject": data.get("subject", ""),
-        "outreach_message": data.get("body", ""),
-        "outreach_status": "drafted",
-    }
-    if "linkedin" in data:
-        fields["linkedin_message"] = data.get("linkedin", "")
+    # Save an edit. Only fields the client actually SENT are written — the channel tabs each
+    # render half the form, so a Save from the LinkedIn tab carries no subject/body and a
+    # Save from the Email tab carries no note. Defaulting a missing field to "" would have the
+    # LinkedIn tab silently blank the outreach email (and vice versa): the absent key means
+    # "this tab never showed it", not "the user cleared it".
+    fields = {"id": cid, "job_url": row["job_url"], "outreach_status": "drafted"}
+    for key, column in (("subject", "outreach_subject"), ("body", "outreach_message"),
+                        ("linkedin", "linkedin_message")):
+        if key in data:
+            fields[column] = data.get(key) or ""
+    if len(fields) == 3:
+        return {"ok": False, "message": "nothing to save"}
     upsert_contact(fields)
     return {"ok": True, "message": "saved"}
 

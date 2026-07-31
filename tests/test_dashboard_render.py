@@ -306,6 +306,102 @@ def test_a_message_with_no_stored_text_says_so_instead_of_rendering_blank(tmp_pa
     assert "cm-nobody" in html and "not stored" in html
 
 
+_SAVE_DRIVER = """
+const F = (new Function(SRC + `; return { draftBlock, fieldVal };`))();
+// A minimal DOM stand-in: only the fields the tab actually rendered exist, which is the whole
+// point — querySelector returns null for the rest, exactly as in the browser.
+function fakeCard(html) {
+  return { querySelector: sel => html.includes(sel.slice(1)) ? {value: 'typed-' + sel.slice(1)} : null };
+}
+const c = {id:'c1', full_name:'X', email:'a@b.com', linkedin_url:'https://l/in/x', emailed:false,
+           outreach_subject:'S', outreach_message:'B', linkedin_message:'N', email_status:'verified'};
+const emailTab = F.draftBlock(c, true), liTab = F.draftBlock(c, false, true);
+const payload = (html, keys) => {
+  const d = fakeCard(html), out = {};
+  for (const [k, sel] of keys) out[k] = F.fieldVal(d, sel);
+  return JSON.parse(JSON.stringify(out));   // drops undefined, exactly like fetch's JSON.stringify
+};
+console.log(JSON.stringify({
+  emailTabHasLinkedinField: emailTab.includes('d-linkedin'),
+  liTabHasSubjectField: liTab.includes('d-subj'),
+  emailSave: payload(emailTab, [['subject','.d-subj'],['body','.d-body'],['linkedin','.d-linkedin']]),
+  liSave:    payload(liTab,    [['subject','.d-subj'],['body','.d-body'],['linkedin','.d-linkedin']]),
+}));
+"""
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node not available")
+def test_save_reads_only_the_fields_its_own_tab_rendered(tmp_path):
+    """Both Save buttons were DEAD, silently, for every contact.
+
+    The channel tabs each render half the form: `draftBlock(c, true)` emits no `.d-linkedin`,
+    `draftBlock(c, false, true)` emits no `.d-subj`/`.d-body`. Both handlers read all three with
+    a bare `.value`, so each threw a TypeError on its own tab. An exception inside an `onclick`
+    is swallowed by the browser — no POST, no error, the label never even reached "Saved ✓".
+    `regenDraft` was hardened against exactly this and these two were missed.
+
+    The payload assertions matter as much as the null-safety: a missing field must be ABSENT
+    from the JSON, not "". `_save_or_regen_draft` writes what it is given, so sending
+    `subject: ""` from the LinkedIn tab would blank the outreach email — turning a dead button
+    into a destructive one.
+    """
+    script = tmp_path / "save.mjs"
+    script.write_text(_STUBS + f"const SRC = {json.dumps(_page_js())};\n" + _SAVE_DRIVER)
+    proc = subprocess.run(["node", str(script)], capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, f"node failed:\n{proc.stderr[:2000]}"
+    out = json.loads(proc.stdout.strip().splitlines()[-1])
+
+    # The precondition. If these ever become true the bug is gone and this test is vacuous.
+    assert out["emailTabHasLinkedinField"] is False
+    assert out["liTabHasSubjectField"] is False
+
+    assert set(out["emailSave"]) == {"subject", "body"}, (
+        "the Email tab's Save sent a linkedin key it never rendered")
+    assert set(out["liSave"]) == {"linkedin"}, (
+        "the LinkedIn tab's Save sent subject/body it never rendered — those would overwrite "
+        "the outreach email with empty strings")
+
+
+def test_the_server_only_writes_fields_the_client_actually_sent(tmp_path, monkeypatch):
+    """The other half of the same bug, and the dangerous half.
+
+    `subject`/`body` used to default to "", so a Save from the LinkedIn tab (which sends
+    neither) would blank the outreach subject and body. It was masked only because the client
+    threw before it could POST.
+    """
+    import applypilot.database as database
+    from applypilot import web_dashboard as wd
+    from applypilot.networking import store
+
+    path = tmp_path / "t.db"
+    monkeypatch.setattr(database, "DB_PATH", path)
+    database.close_connection(path)
+    database.init_db(path)
+    conn = database.get_connection(path)
+    store.init_contacts(conn)
+    monkeypatch.setattr(wd, "get_connection", lambda *a, **k: conn)
+
+    cid = store.upsert_contact({"job_url": "http://j/1", "full_name": "X", "email": "a@b.com",
+                                "outreach_subject": "KEEP-SUBJECT",
+                                "outreach_message": "KEEP-BODY",
+                                "linkedin_message": "KEEP-NOTE"}, conn)
+
+    wd._save_or_regen_draft({"contact_id": cid, "linkedin": "NEW-NOTE"})
+    c = store.get_contact(cid, conn)
+    assert c["outreach_subject"] == "KEEP-SUBJECT", "saving a LinkedIn note blanked the email"
+    assert c["outreach_message"] == "KEEP-BODY"
+    assert c["linkedin_message"] == "NEW-NOTE"
+
+    wd._save_or_regen_draft({"contact_id": cid, "subject": "NEW-SUBJECT", "body": "NEW-BODY"})
+    c = store.get_contact(cid, conn)
+    assert c["linkedin_message"] == "NEW-NOTE", "saving the email blanked the LinkedIn note"
+    assert c["outreach_subject"] == "NEW-SUBJECT"
+
+    # An explicit empty string IS a clear — that is a real edit, not an absent field.
+    wd._save_or_regen_draft({"contact_id": cid, "body": ""})
+    assert store.get_contact(cid, conn)["outreach_message"] == ""
+
+
 _NEXT_DRIVER = """
 const F = (new Function(SRC + `; return { nextAction, contactRow, CONTACT_OPEN };`))();
 const out = {};

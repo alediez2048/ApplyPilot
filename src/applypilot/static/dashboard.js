@@ -396,12 +396,23 @@ function updCount(ta) {
   const badge = wrap.querySelector('.d-count');
   if (el) { el.textContent = ta.value.length; badge.classList.toggle('over', ta.value.length > 300); }
 }
+// Read a field that may not be on THIS tab. `draftBlock(c, true)` emits no `.d-linkedin` and
+// `draftBlock(c, false, true)` emits no `.d-subj`/`.d-body`, so a bare `.value` throws — and an
+// exception inside an onclick is swallowed by the browser, so the POST never fires and the
+// button just sits there. Both Save buttons were dead this way. `regenDraft` was hardened
+// against exactly this and the two save paths were missed.
+function fieldVal(d, sel) {
+  const el = d ? d.querySelector(sel) : null;
+  return el ? el.value : undefined;      // undefined, not '' — the server must not be told to
+}                                        // blank a field that this tab never showed.
+
 async function saveLinkedin(cid, btn) {
   const d = btn.closest('.draft');
-  await post('/api/outreach', {contact_id: cid,
-    subject: d.querySelector('.d-subj').value, body: d.querySelector('.d-body').value,
-    linkedin: d.querySelector('.d-linkedin').value});
-  btn.textContent = 'Saved ✓'; setTimeout(()=>btn.textContent='Save note', 1200);
+  const r = await post('/api/outreach', {contact_id: cid,
+    subject: fieldVal(d, '.d-subj'), body: fieldVal(d, '.d-body'),
+    linkedin: fieldVal(d, '.d-linkedin')});
+  btn.textContent = r && r.ok === false ? 'Failed' : 'Saved ✓';
+  setTimeout(()=>btn.textContent='Save note', 1200);
 }
 function copyLinkedin(btn) {
   const d = btn.closest('.draft');
@@ -472,7 +483,13 @@ async function addIntroduced(url, email, name, by, btn) {
   const r = await post('/api/contact/add-introduced', {job_url: url, email, name, introduced_by: by});
   const cmdEl = document.getElementById('command');
   if (cmdEl) cmdEl.textContent = r.message || '';
-  if (!r.ok) { btn.disabled = false; btn.textContent = '+ Add as contact'; }
+  // #command sits above the whole jobs table, often screens away from the banner that was
+  // clicked. Success is self-evident (the person appears in the list); a FAILURE that only
+  // shows up there reads as a button that did nothing.
+  if (!r.ok) {
+    alert(r.message || 'Could not add them as a contact.');
+    btn.disabled = false; btn.textContent = '+ Add as contact';
+  }
   refresh();
 }
 function peopleList(j) {
@@ -579,7 +596,16 @@ const REPLY_DROP  = new Map();   // contact id -> Set of cc addresses removed
 // until somebody actually does, which is what keeps the two from blurring together.
 function replyBox(c) {
   const t = c.reply_to;
-  if (!t || !t.to_addr) return '';
+  // `_reply_target()` swallows every exception and returns None, so a thread we KNOW has an
+  // inbound message can arrive with no reply target. Returning '' here rendered a conversation
+  // with no composer, no explanation and no error — while the row still said "your turn".
+  // A zero must be as loud as a failure (§Lessons 15); the log.debug is invisible from here.
+  if (!t || !t.to_addr) {
+    return hasConversation(c)
+      ? `<div class="reply-box"><div class="reply-msg bad">Couldn’t work out who to reply to on
+         this thread. Reply in Gmail, or use “📥 Check replies” to re-read it.</div></div>`
+      : '';
+  }
   const dropped = REPLY_DROP.get(c.id) || new Set();
   const cc = (t.cc || []).filter(x => !dropped.has(x));
   // The Cc is the whole reason this exists: answering only the sender drops whoever they
@@ -714,7 +740,15 @@ async function sendReply(cid, btn) {
   btn.disabled = true; btn.textContent = 'Sending…';
   const r = await post('/api/contact/reply', {contact_id: cid, body, cc});
   setReplyMsg(cid, r.message || (r.ok ? 'Sent.' : 'Failed.'), !r.ok);
-  if (r.ok) { REPLY_DRAFT.delete(cid); REPLY_DROP.delete(cid); REPLY_SAID.delete(cid); }
+  if (r.ok) {
+    // Clear ALL of it. REPLY_STYLE and REPLY_MSG were missed: the previous reply's vibe
+    // directive would pre-fill the next one, and the green "replied to …" banner would stay
+    // pinned under the composer for the rest of the session — reopening the contact an hour
+    // later still showed it, indistinguishable from a fresh confirmation.
+    REPLY_DRAFT.delete(cid); REPLY_DROP.delete(cid); REPLY_SAID.delete(cid);
+    REPLY_STYLE.delete(cid);
+    setTimeout(() => { REPLY_MSG.delete(cid); }, 6000);
+  }
   else { btn.disabled = false; btn.textContent = 'Send reply'; }
   refresh();
 }
@@ -752,6 +786,9 @@ async function deleteContact(id, name, emailed) {
   const r = await post('/api/contact/delete', {contact_id: id});
   const cmdEl = document.getElementById('command');
   if (cmdEl) cmdEl.textContent = r.message || '';
+  // On success the row vanishes, which is the feedback. A failure leaves the contact sitting
+  // there looking exactly as it did before the click.
+  if (!r.ok) alert(r.message || 'Could not remove that contact.');
   refresh();
 }
 // Once somebody has REPLIED, the email tab is a conversation — not an outreach form that
@@ -814,9 +851,12 @@ async function sendAllEmails(url, btn) {
 function cssEsc(s){ return (window.CSS && CSS.escape) ? CSS.escape(s) : s.replace(/["\\\]]/g,'\\$&'); }
 async function saveDraft(cid, btn) {
   const d = btn.closest('.draft');
-  await post('/api/outreach', {contact_id: cid, subject: d.querySelector('.d-subj').value,
-    body: d.querySelector('.d-body').value, linkedin: d.querySelector('.d-linkedin').value});
-  btn.textContent = 'Saved ✓'; setTimeout(()=>btn.textContent='Save', 1200);
+  const r = await post('/api/outreach', {contact_id: cid, subject: fieldVal(d, '.d-subj'),
+    body: fieldVal(d, '.d-body'), linkedin: fieldVal(d, '.d-linkedin')});
+  // Checking r.ok matters: `_save_or_regen_draft` returns ok:false for an unknown contact, and
+  // this said "Saved ✓" to that too.
+  btn.textContent = r && r.ok === false ? 'Failed' : 'Saved ✓';
+  setTimeout(()=>btn.textContent='Save', 1200);
 }
 async function regenDraft(cid, btn) {
   const d = btn.closest('.draft');

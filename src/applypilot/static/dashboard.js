@@ -538,7 +538,13 @@ function threadView(c) {
   }).join('');
   const intro = c.introduced_by
     ? `<div class="th-intro">👋 ${esc(c.introduced_by)} added them to this thread</div>` : '';
-  const open = THREAD_OPEN.has(c.id) ? ' open' : '';
+  // Open by default when THEY are waiting on you. Collapsing the live conversation put the
+  // reply, the paste box and the Draft button behind a disclosure triangle, while the email
+  // you sent five days ago sat expanded below it — the dead artifact louder than the live one.
+  // A closed <details> is a promise that nothing important is inside.
+  const wantOpen = THREAD_OPEN.has(c.id)
+    || (!THREAD_SHUT.has(c.id) && (c.conversation || {}).state === 'awaiting_us');
+  const open = wantOpen ? ' open' : '';
   // Whose turn it is, on the summary line — the thread is collapsed by default, so a state
   // only visible once you expand it is a state nobody sees.
   const conv = c.conversation || {};
@@ -550,7 +556,13 @@ function threadView(c) {
          `<summary>💬 Conversation (${msgs.length}) ${turn}</summary>${intro}${rows}${replyBox(c)}</details>`;
 }
 const THREAD_OPEN = new Set();
-function onThreadToggle(el, cid) { if (el.open) THREAD_OPEN.add(cid); else THREAD_OPEN.delete(cid); }
+// Deliberately shut BY THE OPERATOR. Without this, auto-open would fight them every 2.5s:
+// they collapse it, the refresh re-opens it, forever.
+const THREAD_SHUT = new Set();
+function onThreadToggle(el, cid) {
+  if (el.open) { THREAD_OPEN.add(cid); THREAD_SHUT.delete(cid); }
+  else { THREAD_OPEN.delete(cid); THREAD_SHUT.add(cid); }
+}
 
 // What the operator typed, and any Cc they removed — held here rather than in the DOM because
 // the 2.5s refresh replaces #jobs wholesale. It skips while an input has FOCUS, which saves you
@@ -583,10 +595,11 @@ function replyBox(c) {
     <textarea class="reply-body" rows="6" placeholder="Write your reply…"
       oninput="REPLY_DRAFT.set('${esc(c.id)}', this.value)">${esc(body)}</textarea>
     <div class="reply-actions">
-      <button class="primary" onclick="sendReply('${esc(c.id)}', this)">Send reply</button>
       <button class="secondary" onclick="draftReply('${esc(c.id)}', this)">✍ Draft an answer</button>
+      <button class="primary" onclick="sendReply('${esc(c.id)}', this)">Send reply</button>
       <span class="reply-hint">Goes into this thread. No attachments.</span>
     </div>
+    ${replyMsg(c.id)}
     <input class="r-style" placeholder="✨ Tweak the vibe, then Draft again — e.g. 'warmer', 'shorter', 'more direct'"
       value="${esc(REPLY_STYLE.get(c.id) || '')}"
       oninput="REPLY_STYLE.set('${esc(c.id)}', this.value)">
@@ -624,20 +637,37 @@ function lastReplyCard(c) {
   </div>`;
 }
 
+// Feedback belongs NEXT TO THE BUTTON. Both of these used to write to #command at the very top
+// of the page: with no reply text stored, clicking Draft returned a perfectly clear "paste what
+// they wrote first" that rendered a full screen away from the click — reported, reasonably, as
+// "the draft an answer button is not working".
+const REPLY_MSG = new Map();     // contact id -> {text, bad} — survives the 2.5s refresh
+function replyMsg(cid) {
+  const m = REPLY_MSG.get(cid);
+  return m ? `<div class="reply-msg ${m.bad ? 'bad' : 'good'}">${esc(m.text)}</div>` : '';
+}
+function setReplyMsg(cid, text, bad) {
+  if (text) REPLY_MSG.set(cid, {text, bad: !!bad}); else REPLY_MSG.delete(cid);
+}
+
 async function draftReply(cid, btn) {
-  const say = m => { const el = document.getElementById('command'); if (el) el.textContent = m; };
   const card = btn.closest('.reply-box');
   const box = card ? card.querySelector('.said-box') : null;
   const said = box ? box.value.trim() : (REPLY_SAID.get(cid) || '');
   btn.disabled = true; btn.textContent = 'Drafting…';
+  setReplyMsg(cid, 'Reading the conversation and writing an answer…', false);
+  const live = card ? card.querySelector('.reply-msg') : null;
+  if (live) { live.textContent = 'Reading the conversation and writing an answer…'; live.className = 'reply-msg good'; }
   const r = await post('/api/contact/draft-reply',
                        {contact_id: cid, their_reply: said, style: REPLY_STYLE.get(cid) || ''});
-  say(r.message || (r.ok ? 'Draft ready.' : 'Draft failed.'));
   if (r.ok && r.body) {
     // Into the shared store, not straight into the DOM — the 2.5s refresh replaces #jobs
     // wholesale and would wipe a value written only to the textarea.
     REPLY_DRAFT.set(cid, r.body);
     if (said) { REPLY_SAID.set(cid, said); SAID_EDIT.delete(cid); }
+    setReplyMsg(cid, r.message || 'Draft ready — read it before you send it.', false);
+  } else {
+    setReplyMsg(cid, r.message || 'Draft failed.', true);
   }
   btn.disabled = false; btn.textContent = '✍ Draft an answer';
   refresh();
@@ -669,8 +699,8 @@ function toggleCc(cid, address) {
 async function sendReply(cid, btn) {
   const card = btn.closest('.reply-box');
   const body = (REPLY_DRAFT.get(cid) || '').trim();
-  const say = m => { const el = document.getElementById('command'); if (el) el.textContent = m; };
-  if (!body) { say('Write a reply before sending.'); return; }
+  const say = (m, bad) => { setReplyMsg(cid, m, bad); refresh(); };
+  if (!body) { say('Write a reply before sending — or click “Draft an answer”.', true); return; }
   // The Cc travels as data, not as scraped chip text — the recipients of a real email are not
   // something to re-derive from innerText.
   let cc = [];
@@ -680,8 +710,8 @@ async function sendReply(cid, btn) {
   if (!confirm(`Send this reply to ${who}?${also}`)) return;
   btn.disabled = true; btn.textContent = 'Sending…';
   const r = await post('/api/contact/reply', {contact_id: cid, body, cc});
-  say(r.message || (r.ok ? 'Sent.' : 'Failed.'));
-  if (r.ok) { REPLY_DRAFT.delete(cid); REPLY_DROP.delete(cid); }
+  setReplyMsg(cid, r.message || (r.ok ? 'Sent.' : 'Failed.'), !r.ok);
+  if (r.ok) { REPLY_DRAFT.delete(cid); REPLY_DROP.delete(cid); REPLY_SAID.delete(cid); }
   else { btn.disabled = false; btn.textContent = 'Send reply'; }
   refresh();
 }

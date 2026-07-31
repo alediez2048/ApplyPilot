@@ -608,6 +608,9 @@
     border:1px solid var(--line); background:var(--surface2); color:inherit; resize:vertical; }
   .reply-actions { display:flex; align-items:center; gap:10px; margin-top:6px; }
   .reply-hint { font-size:11px; color:var(--faint); }
+  .reply-msg { margin-top:6px; font-size:11.5px; padding:6px 9px; border-radius:6px; }
+  .reply-msg.good { background:var(--green-soft); color:#046c3c; }
+  .reply-msg.bad { background:#fdf0e3; color:#92400e; }
   /* CRM-4 handoff banner. Green, not amber: an introduction is GOOD news — the warmest lead
      the system can produce — and should not read like a blocker. */
   .intro-bar { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin:0 0 10px;

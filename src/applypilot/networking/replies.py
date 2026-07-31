@@ -16,7 +16,7 @@ import logging
 from datetime import datetime, timezone
 
 from applypilot.database import get_connection, log_event
-from applypilot.domain import replies as domain_replies
+from applypilot.domain import conversations as cv, replies as domain_replies
 from applypilot.networking import gmail_oauth, gmail_read, messages as msg_store
 from applypilot.networking import store, touches
 
@@ -78,11 +78,11 @@ def _sync_thread(contact: dict, msgs: list[dict], me: str, conn) -> dict:
     """
     from applypilot.domain import conversations as cv
 
-    # CRM-4b: one gate, checked once per thread rather than per message. False on every
-    # metadata-only install, which is the default and stays the default.
-    store_content, _ = gmail_read.can_read_content()
-    by_id = {m.get("id"): m for m in msgs or []}
-
+    # CRM-4b: the automatic poll stores NO message text, ever, even when `gmail.readonly` is
+    # granted. Content arrives only when the operator asks for one conversation by name
+    # (`fetch_thread_text`) or pastes it. The OAuth grant is all-or-nothing — Google has no
+    # per-thread scope — so this is the only place the narrowing can actually be expressed:
+    # not in what we are ALLOWED to read, but in what we ever DO read.
     rows = []
     for m in cv.timeline(msgs, me):
         rows.append({"message_id": m["id"], "thread_id": contact.get("thread_id"),
@@ -92,14 +92,57 @@ def _sync_thread(contact: dict, msgs: list[dict], me: str, conn) -> dict:
                      "cc_addrs": m["cc_addrs"], "subject": m["subject"],
                      "sent_at": _iso(m["at"]),
                      "rfc_message_id": m.get("rfc_message_id") or "",
-                     # Only INBOUND snippets, and only with the scope. Our own sent text is
-                     # already ours — storing it back would double the content in the database
-                     # for nothing.
-                     "snippet": ((by_id.get(m["id"], {}).get("snippet") or "")
-                                 if (store_content and m["direction"] == "in") else "")})
+                     # Never on the automatic path. `upsert_messages` preserves an existing
+                     # snippet when handed an empty one, so a poll cannot erase text the
+                     # operator fetched or pasted earlier.
+                     "snippet": ""})
     new = msg_store.upsert_messages(rows, conn)
     intro = cv.introductions(msgs, me, known=[contact.get("email")])
     return {"new_messages": new, "introductions": intro}
+
+
+def fetch_thread_text(contact: dict, conn=None) -> dict:
+    """Read ONE conversation's text, because the operator asked for this one.
+
+    The scope is all-or-nothing, so this cannot narrow what we are permitted to read. What it
+    narrows is what we ever actually read: one thread, on a click, instead of every open thread
+    on every poll forever. That distinction is worth having even though the grant is identical —
+    it is the difference between a tool that can read your mail and a tool that is reading it.
+
+    Inbound messages only. Our own sent text is already ours.
+    """
+    ok, why = gmail_read.can_read_content()
+    if not ok:
+        return {"ok": False, "message": why, "stored": 0}
+    thread_id = (contact.get("thread_id") or "").strip()
+    if not thread_id:
+        return {"ok": False, "message": "no Gmail thread recorded for this contact", "stored": 0}
+
+    msgs = gmail_read.thread_messages(thread_id)
+    if not msgs:
+        return {"ok": False, "message": "Gmail returned nothing for this thread", "stored": 0}
+
+    me = gmail_oauth.connected_email()
+    rows, stored = [], 0
+    for m in msgs:
+        text = (m.get("snippet") or "").strip()
+        if not text or cv.addr(m.get("from")) == cv.addr(me):
+            continue
+        rows.append({"message_id": m.get("id"), "thread_id": thread_id,
+                     "contact_id": contact["id"], "job_url": contact.get("job_url"),
+                     "direction": "in", "from_addr": cv.addr(m.get("from")),
+                     "from_name": cv.display_name(m.get("from")),
+                     "to_addrs": cv.split_parts(m.get("to")),
+                     "cc_addrs": cv.split_parts(m.get("cc")),
+                     "subject": m.get("subject") or "", "sent_at": _iso(m.get("internalDate", "")),
+                     "rfc_message_id": m.get("rfc_message_id") or "", "snippet": text})
+        stored += 1
+    if not rows:
+        return {"ok": False, "stored": 0,
+                "message": "nothing readable in this thread — Gmail returned no text"}
+    msg_store.upsert_messages(rows, conn)
+    return {"ok": True, "stored": stored,
+            "message": f"Read {stored} message{'s' if stored != 1 else ''} from this thread."}
 
 
 def note_introductions(contact: dict, intros: list[dict], conn) -> None:

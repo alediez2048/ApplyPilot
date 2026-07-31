@@ -1426,6 +1426,10 @@ def _status_payload() -> dict:
         "metrics": _metrics_payload(rows, conn),
         "replies": _replies.status(),
         "gmail_available": _gmail_available(),
+        # Whether the token carries gmail.readonly, so the UI can offer "Fetch from Gmail"
+        # instead of only a paste box. Cached inside gmail_oauth (keyed on the token file's
+        # mtime), so this costs nothing on a 2.5s refresh.
+        "content_scope": _content_scope(),
         # Mutual shared token for the LinkedIn extension — operator pastes it into the popup once.
         "ext_token": _ext_token(),
     }
@@ -1573,6 +1577,44 @@ def _reply_target(thread: list) -> dict | None:
     except Exception:  # noqa: BLE001
         log.debug("Could not compute a reply target", exc_info=True)
         return None
+
+
+def _content_scope() -> bool:
+    """Does the stored token allow reading message text? Never raises."""
+    try:
+        from applypilot.networking import gmail_oauth
+        return bool(gmail_oauth.can_read_content())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _fetch_reply_text(data: dict) -> dict:
+    """Read ONE conversation's text from Gmail, on an explicit click. Never automatic.
+
+    The scope is all-or-nothing, so this does not narrow what ApplyPilot is permitted to read.
+    It narrows what it ever does read — one named thread when asked, rather than every open
+    thread on every poll. The refusal path says which is missing, because "nothing happened" is
+    the one answer that leaves the operator unable to act (§Lessons 15).
+    """
+    from applypilot.database import log_event
+    from applypilot.networking import replies as _replies, store as _store
+
+    cid = (data.get("contact_id") or "").strip()
+    if not cid:
+        return {"ok": False, "message": "contact_id required"}
+    conn = get_connection()
+    _store.init_contacts(conn)
+    contact = _store.get_contact(cid, conn)
+    if not contact:
+        return {"ok": False, "message": "contact not found"}
+
+    res = _replies.fetch_thread_text(contact, conn)
+    if res.get("ok"):
+        log_event(contact.get("job_url", ""), "outreach", "ok",
+                  f"Read this conversation's text from Gmail on request "
+                  f"({res.get('stored', 0)} message(s)) — {contact.get('full_name') or cid}.",
+                  conn)
+    return res
 
 
 def _draft_reply(data: dict) -> dict:
@@ -2363,6 +2405,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/contact/draft-reply":
                 _json_response(self, _draft_reply(data))
+                return
+            if path == "/api/contact/fetch-reply":
+                _json_response(self, _fetch_reply_text(data))
                 return
             if path == "/api/followup":
                 _json_response(self, _followup_action(data))

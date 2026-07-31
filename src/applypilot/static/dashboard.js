@@ -296,6 +296,9 @@ function emailBadge(s) {
   return '<span class="ebadge none">no email</span>';
 }
 let GMAIL_AVAIL = false;
+// gmail.readonly granted? Decides whether we can offer "⤓ Fetch from Gmail" at all. False on a
+// default install, where pasting is the only path.
+let CONTENT_SCOPE = false;
 // `wantEmail` / `wantLi` select ONE channel — the contact panel shows them as tabs now, so
 // rendering both at once is what made every contact card ~200px tall. Omit both to get the
 // old stacked behaviour.
@@ -641,6 +644,7 @@ function convMessage(c, m, prevCc) {
     // reads as data loss rather than a scope we chose.
     : (mine ? `<div class="cm-nobody">Sent from ApplyPilot.</div>`
             : `<div class="cm-nobody">ApplyPilot stores who and when, not what.
+                 ${CONTENT_SCOPE ? `<button class="linklike" onclick="fetchReplyText('${esc(c.id)}', this)">⤓ Fetch from Gmail</button>` : ''}
                  ${gmailLink(c, 'Read it in Gmail ↗')}
                  <button class="linklike" onclick="editSaid('${esc(c.id)}')">Paste it here</button></div>`);
   return `<div class="cm ${mine ? 'out' : 'in'}">
@@ -784,6 +788,15 @@ function openReply(url, cid) {
     const el = document.querySelector(`[data-reply-for="${cid}"] .reply-body`);
     if (el) { el.focus(); el.scrollIntoView({block: 'center', behavior: 'smooth'}); }
   }, 60);
+}
+// Read THIS conversation's text from Gmail, because you asked for this one. Never automatic:
+// the poller and `tick` store no message text at all, whatever the token allows.
+async function fetchReplyText(cid, btn) {
+  btn.disabled = true; btn.textContent = 'Reading…';
+  const r = await post('/api/contact/fetch-reply', {contact_id: cid});
+  setReplyMsg(cid, r.message || (r.ok ? 'Read.' : 'Could not read it.'), !r.ok);
+  btn.disabled = false; btn.textContent = '⤓ Fetch from Gmail';
+  refresh();
 }
 // From the banner: put the cursor in the composer. The contact is already open when the banner
 // is visible, so this is a focus, not a navigation.
@@ -1082,6 +1095,7 @@ async function refresh() {
   renderMetrics(data.metrics);
   NET_AVAIL = !!data.networking_available;
   GMAIL_AVAIL = !!data.gmail_available;
+  CONTENT_SCOPE = !!data.content_scope;
   const allJobs = data.jobs || [];
   renderJobFilters(allJobs);
   const shown = allJobs.filter(j => jobInBucket(j, JOB_FILTER));

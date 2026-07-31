@@ -330,9 +330,16 @@ def network(
             # while they can still press Ctrl+C.
             console.print("  [yellow]· PLUS gmail.readonly — lets ApplyPilot read what replies "
                           "SAY, so it can draft answers.[/yellow]")
-            console.print("  [yellow]  That scope can read EVERY message in this mailbox. Only "
-                          "~200-char snippets of replies\n    to your own outreach are ever "
-                          "stored; no message body is written to disk.[/yellow]")
+            console.print("  [yellow]  That scope can read EVERY message in this mailbox. Google "
+                          "has no per-thread scope,\n    so this is all-or-nothing.[/yellow]")
+            console.print("  [dim]  What ApplyPilot then does with it is narrower, and that part "
+                          "is enforced in code:\n"
+                          "    · nothing is read automatically — the poller and `tick` store no "
+                          "message text at all\n"
+                          "    · text arrives only when you click “⤓ Fetch from Gmail” on one "
+                          "conversation\n"
+                          "    · at most ~200 chars per message; no column exists that can hold "
+                          "a full body[/dim]")
         else:
             console.print("  [dim]· reply CONTENT is off — add --with-content to let ApplyPilot "
                           "read what replies say.[/dim]")
@@ -917,7 +924,8 @@ def doctor(
         can, why = _gr.can_read_content()
         if can:
             results.append(("Reply content", ok_mark,
-                            "on (gmail.readonly) — ~200-char snippets stored, never full bodies"))
+                            "on (gmail.readonly) — fetched per conversation on request only; "
+                            "nothing is read automatically"))
         else:
             results.append(("Reply content", "[dim]off[/dim]",
                             why if "not connected" in why else

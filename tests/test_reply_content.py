@@ -105,7 +105,14 @@ def test_no_snippet_is_stored_when_the_scope_is_off(db, monkeypatch):
         "a message snippet was stored without the content scope")
 
 
-def test_the_snippet_is_stored_when_the_scope_is_on(db, monkeypatch):
+def test_the_automatic_poll_stores_no_text_EVEN_WITH_the_scope(db, monkeypatch):
+    """The whole point of the per-conversation model.
+
+    The OAuth grant is all-or-nothing — Google has no per-thread scope — so the narrowing cannot
+    live in what we are ALLOWED to read. It has to live in what we ever DO read. The poller and
+    `tick` therefore store no message text at all, whatever the token permits; content arrives
+    only when the operator names one conversation.
+    """
     from applypilot.networking import gmail_read, replies
 
     monkeypatch.setattr(gmail_read, "can_read_content", lambda: (True, "ok"))
@@ -113,7 +120,68 @@ def test_the_snippet_is_stored_when_the_scope_is_on(db, monkeypatch):
     replies._sync_thread(contact, [_thread_msg("Happy to chat — are you free Thursday?")], ME, db)
 
     rows = msg_store.thread_for_contact("c1", db)
-    assert rows[0]["snippet"].startswith("Happy to chat")
+    assert rows, "the thread headers should still be synced"
+    assert all(not (r.get("snippet") or "") for r in rows), (
+        "the automatic poll stored message text — it must never do that, scope or no scope")
+
+
+def test_fetching_one_conversation_stores_its_text(db, monkeypatch):
+    """...and the explicit path does what the automatic one refuses to."""
+    from applypilot.networking import gmail_oauth, gmail_read, replies
+
+    monkeypatch.setattr(gmail_read, "can_read_content", lambda: (True, "ok"))
+    monkeypatch.setattr(gmail_read, "thread_messages",
+                        lambda tid, service=None: [_thread_msg("Happy to chat Thursday?")])
+    monkeypatch.setattr(gmail_oauth, "connected_email", lambda: ME)
+
+    contact = {"id": "c1", "job_url": "http://j/1", "thread_id": "t1", "email": "gina@co.com"}
+    res = replies.fetch_thread_text(contact, db)
+    assert res["ok"] is True and res["stored"] == 1
+    assert msg_store.thread_for_contact("c1", db)[0]["snippet"].startswith("Happy to chat")
+
+
+def test_fetching_refuses_without_the_scope_and_says_why(db, monkeypatch):
+    from applypilot.networking import gmail_read, replies
+
+    monkeypatch.setattr(gmail_read, "can_read_content",
+                        lambda: (False, "reply content is off — enable with --with-content"))
+    res = replies.fetch_thread_text({"id": "c1", "job_url": "http://j/1", "thread_id": "t1"}, db)
+    assert res["ok"] is False and "--with-content" in res["message"]
+    assert res["stored"] == 0
+
+
+def test_fetching_never_stores_our_own_messages_as_theirs(db, monkeypatch):
+    """Our sent text is already ours, and mislabelling it inbound would make the conversation
+    claim they wrote something we did."""
+    from applypilot.networking import gmail_oauth, gmail_read, replies
+
+    ours = dict(_thread_msg("what I wrote to them"), **{"from": ME})
+    monkeypatch.setattr(gmail_read, "can_read_content", lambda: (True, "ok"))
+    monkeypatch.setattr(gmail_read, "thread_messages", lambda tid, service=None: [ours])
+    monkeypatch.setattr(gmail_oauth, "connected_email", lambda: ME)
+
+    res = replies.fetch_thread_text({"id": "c1", "job_url": "http://j/1", "thread_id": "t1"}, db)
+    assert res["ok"] is False and res["stored"] == 0
+    assert msg_store.thread_for_contact("c1", db) == []
+
+
+def test_a_later_poll_does_not_erase_what_was_fetched(db, monkeypatch):
+    """The poll writes an empty snippet on every row. `upsert_messages` preserves an existing
+    one, and that is now load-bearing rather than defensive: without it, the automatic path
+    would delete on every tick exactly what the operator explicitly asked for."""
+    from applypilot.networking import gmail_oauth, gmail_read, replies
+
+    monkeypatch.setattr(gmail_read, "can_read_content", lambda: (True, "ok"))
+    monkeypatch.setattr(gmail_read, "thread_messages",
+                        lambda tid, service=None: [_thread_msg("Happy to chat Thursday?")])
+    monkeypatch.setattr(gmail_oauth, "connected_email", lambda: ME)
+    contact = {"id": "c1", "job_url": "http://j/1", "thread_id": "t1", "email": "gina@co.com"}
+    replies.fetch_thread_text(contact, db)
+
+    for _ in range(3):
+        replies._sync_thread(contact, [_thread_msg("")], ME, db)
+    assert msg_store.thread_for_contact("c1", db)[0]["snippet"].startswith("Happy to chat"), (
+        "an automatic poll erased text the operator had explicitly fetched")
 
 
 def test_our_own_sent_text_is_never_stored_back(db, monkeypatch):
@@ -171,11 +239,16 @@ def test_revoking_the_scope_does_not_erase_what_was_already_stored(db, monkeypat
     `upsert_messages` is INSERT OR REPLACE, so a re-sync carrying no snippet would blank one
     already there — and `tick` re-syncs every open thread hourly, forever.
     """
-    from applypilot.networking import gmail_read, replies
+    from applypilot.networking import gmail_oauth, gmail_read, replies
 
     contact = {"id": "c1", "job_url": "http://j/1", "thread_id": "t1", "email": "gina@co.com"}
+    # Seeded through the EXPLICIT fetch, because that is now the only way text ever arrives —
+    # `_sync_thread` stores none, scope or no scope.
     monkeypatch.setattr(gmail_read, "can_read_content", lambda: (True, "ok"))
-    replies._sync_thread(contact, [_thread_msg("Happy to chat Thursday")], ME, db)
+    monkeypatch.setattr(gmail_read, "thread_messages",
+                        lambda tid, service=None: [_thread_msg("Happy to chat Thursday")])
+    monkeypatch.setattr(gmail_oauth, "connected_email", lambda: ME)
+    replies.fetch_thread_text(contact, db)
     assert msg_store.thread_for_contact("c1", db)[0]["snippet"]
 
     monkeypatch.setattr(gmail_read, "can_read_content", lambda: (False, "revoked"))

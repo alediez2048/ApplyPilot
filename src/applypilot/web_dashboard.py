@@ -763,6 +763,7 @@ class ReplyPoller:
     def __init__(self, interval_s: int = 300) -> None:
         self._lock = threading.Lock()
         self._interval = interval_s
+        self.interval_s = interval_s
         self._last: dict = {}
         self._running = False
 
@@ -782,11 +783,43 @@ class ReplyPoller:
             # Reply detection must never take the dashboard down with it.
             log.debug("Reply poll failed", exc_info=True)
             res = {"ok": False, "note": f"poll failed: {exc}", "checked": 0, "replied": 0}
-        finally:
-            with self._lock:
-                self._running = False
-                self._last = {**res, "at": time.time()}
+        # Bookings and deck clicks ride the SAME timer. They were built for `applypilot tick`,
+        # which is not installed on this machine (`schedule.installed()` is False) — so the two
+        # "automatic" signals were, in practice, never running at all, and the manual buttons
+        # beside them were the only thing that worked. A feature that only fires from a
+        # scheduler nobody installed is a feature that does not exist.
+        #
+        # Each is isolated: a dead cal.com search must not stop reply detection, which is the
+        # one people notice.
+        for name, fn in (("bookings", self._poll_bookings), ("deck", self._poll_deck)):
+            try:
+                res[name] = fn()
+            except Exception:  # noqa: BLE001
+                log.debug("%s poll failed", name, exc_info=True)
+        with self._lock:
+            self._running = False
+            self._last = {**res, "at": time.time()}
         return res
+
+    @staticmethod
+    def _poll_bookings() -> dict:
+        """Detected from the scheduler's confirmation email — cal.com mails the host."""
+        from applypilot.networking import bookings, gmail_read
+        ok, _ = gmail_read.can_read_content()
+        if not ok:
+            return {"skipped": True}
+        r = bookings.poll()
+        return {"found": r.get("found", 0), "new": r.get("new", 0)}
+
+    @staticmethod
+    def _poll_deck() -> dict:
+        """Pulled from the collector on the sender's own site, when one is configured."""
+        from applypilot.networking import deck_hits
+        ok, _ = deck_hits.configured()
+        if not ok:
+            return {"skipped": True}
+        r = deck_hits.poll()
+        return {"recorded": r.get("recorded", 0), "new": r.get("new", 0)}
 
     def start(self) -> None:
         def loop() -> None:
@@ -796,7 +829,7 @@ class ReplyPoller:
                 except Exception:  # noqa: BLE001
                     log.debug("Reply poll loop error", exc_info=True)
                 time.sleep(self._interval)
-        threading.Thread(target=loop, name="reply-poller", daemon=True).start()
+        threading.Thread(target=loop, name="signal-poller", daemon=True).start()
 
 
 _replies = ReplyPoller()
@@ -1436,6 +1469,9 @@ def _status_payload() -> dict:
         # instead of only a paste box. Cached inside gmail_oauth (keyed on the token file's
         # mtime), so this costs nothing on a 2.5s refresh.
         "content_scope": _content_scope(),
+        # The real poller cadence, so the UI states it rather than hardcoding a guess
+        # that silently becomes wrong the moment the interval changes.
+        "poll_every_s": _replies.interval_s,
         # Mutual shared token for the LinkedIn extension — operator pastes it into the popup once.
         "ext_token": _ext_token(),
     }

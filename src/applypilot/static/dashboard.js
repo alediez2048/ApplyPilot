@@ -301,6 +301,9 @@ let GMAIL_AVAIL = false;
 let CONTENT_SCOPE = false;
 //: The most recent /api/status jobs array, for click handlers that run after render.
 let LAST_JOBS = [];
+//: How often the dashboard's background poller runs, mirrored from the server so the
+//: Interactions tab can state the real cadence instead of a hardcoded guess.
+let POLL_EVERY_S = 300;
 // `wantEmail` / `wantLi` select ONE channel — the contact panel shows them as tabs now, so
 // rendering both at once is what made every contact card ~200px tall. Omit both to get the
 // old stacked behaviour.
@@ -1184,6 +1187,7 @@ async function refresh() {
   NET_AVAIL = !!data.networking_available;
   GMAIL_AVAIL = !!data.gmail_available;
   CONTENT_SCOPE = !!data.content_scope;
+  if (data.poll_every_s) POLL_EVERY_S = data.poll_every_s;
   const allJobs = data.jobs || [];
   // Kept for handlers that need the payload AFTER a click rather than during render — the
   // bulk Gmail fetch has to know which contacts a job has, and an inline onclick cannot be
@@ -1448,18 +1452,25 @@ function interactionsPane(j) {
           <span class="ix-title">${esc(p.title)}</span>${badge}</div>
         ${rows || `<div class="ix-row empty">Nothing recorded.</div>`}
         <div class="ix-log">
-          <button class="linklike" onclick="logInteraction('${esc(p.id)}','profile_view')">🔗 They viewed my LinkedIn</button>
-          <button class="linklike" onclick="logInteraction('${esc(p.id)}','booked')">📅 They booked a call</button>
+          <button class="linklike" onclick="logInteraction('${esc(p.id)}','profile_view')">🔗 Note: they viewed my LinkedIn</button>
         </div>
       </div>`;
   }).join('');
 
   // Said once, at the bottom, rather than beside every button: LinkedIn profile views are not
   // in the data export and generate no notification email, so there is nothing to detect from.
+  // Say what runs by itself and what does not. Offering a "they booked a call" BUTTON next to
+  // an automatic detector is what made this look manual-first — the affordance contradicted
+  // the design. Bookings are detected; only the undetectable one is a button.
   return `${head}${body}
-    <div class="ix-note">Deck opens and booked calls are detected automatically.
-      LinkedIn profile views have to be noted by hand — LinkedIn does not put them in the data
-      export or send an email about them.</div>`;
+    <div class="ix-note">
+      <strong>Detected automatically</strong>, every ${Math.round((POLL_EVERY_S || 300) / 60)} minutes while this dashboard is open:
+      replies, booked calls (from the scheduler's confirmation email), and intro-deck opens
+      (once the collector is deployed).<br>
+      <strong>LinkedIn profile views are the exception</strong> — LinkedIn does not put them in
+      the data export and sends no email about them, so there is nothing to read. Note those by
+      hand; they are tagged <span class="ix-manual">noted</span> so they never read as detected.
+    </div>`;
 }
 async function logInteraction(cid, kind) {
   const detail = kind === 'profile_view'

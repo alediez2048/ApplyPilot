@@ -557,36 +557,92 @@ function contactRow(c) {
 // The conversation, as the primary content of the Email tab. Timeline first, composer anchored
 // to the bottom of it — the shape Front/Missive/Superhuman all converge on, and the one this
 // panel had inverted.
+// Gmail can always show what we cannot. Under the metadata scope the honest answer to "where is
+// her reply?" is "one click away, and here is the link" — an href, no backend, no scope change.
+function gmailThreadUrl(c) {
+  const tid = (c.reply_to || {}).thread_id || '';
+  return tid ? `https://mail.google.com/mail/u/0/#all/${encodeURIComponent(tid)}` : '';
+}
+function gmailLink(c, label) {
+  const u = gmailThreadUrl(c);
+  return u ? `<a class="gm-link" href="${esc(u)}" target="_blank" rel="noopener">${label}</a>` : '';
+}
+// "5 days ago" / "6 hours ago" / "just now". `days >= 1 ? Nd : 'today'` called a reply from
+// 20 hours ago "today" when it had landed yesterday evening.
+function agoPhrase(conv) {
+  const h = conv.hours;
+  if (h == null) return '';
+  if (h < 1) return 'just now';
+  if (h < 24) return `${Math.round(h)} hour${Math.round(h) === 1 ? '' : 's'} ago`;
+  const d = conv.days || Math.floor(h / 24);
+  return `${d} day${d === 1 ? '' : 's'} ago`;
+}
+
 function conversationView(c) {
   const msgs = c.thread || [];
   const conv = c.conversation || {};
+  const first = (conv.who || 'They').split(/\s+/)[0];
+  // Urgency with the action attached. A banner that only accuses is a label to read; Superhuman's
+  // whole point is that "needs a reply" is a bucket you act on.
   const banner = conv.state === 'awaiting_us'
-    ? `<div class="conv-turn us">⚠ ${esc(conv.who || 'They')} replied${conv.days >= 1 ? ` ${conv.days}d ago` : ' today'} — you haven’t answered</div>`
+    ? `<div class="conv-turn us"><span>⚠ Your turn — ${esc(first)} replied ${esc(agoPhrase(conv))}</span>
+         <span class="conv-acts"><button class="linklike" onclick="openReplyHere('${esc(c.id)}')">Answer now</button>${gmailLink(c, 'Open in Gmail ↗')}</span></div>`
     : conv.state === 'awaiting_them'
-      ? `<div class="conv-turn them">You answered${conv.days >= 1 ? ` ${conv.days}d ago` : ' today'} — waiting on them</div>`
+      ? `<div class="conv-turn them"><span>Answered ${esc(agoPhrase(conv))} — waiting on ${esc(first)}.</span>
+         <span class="conv-acts">${gmailLink(c, 'Open in Gmail ↗')}</span></div>`
       : '';
   const intro = c.introduced_by
     ? `<div class="th-intro">👋 ${esc(c.introduced_by)} added them to this thread</div>` : '';
+  // Long threads collapse in the middle. This block is re-rendered every 2.5s and an
+  // unbounded list pushes the composer — the only thing you came here to use — off screen.
+  const shown = msgs.length > 6
+    ? [msgs[0], {_gap: msgs.length - 3}, ...msgs.slice(-2)]
+    : msgs;
+  let seenCc = [];
+  const rows = shown.map(m => {
+    if (m._gap) return `<div class="cm-gap">· ${m._gap} earlier messages ·</div>`;
+    const html = convMessage(c, m, seenCc);
+    seenCc = (m.cc_addrs || []).map(x => addrOf(x));
+    return html;
+  }).join('');
   return `<div class="conv">${banner}${intro}
-    <div class="conv-msgs">${msgs.map(m => convMessage(c, m)).join('')}</div>
+    <div class="conv-msgs">${rows}</div>
     ${replyBox(c)}
   </div>`;
+}
+function addrOf(raw) {
+  const m = /<([^>]+)>/.exec(String(raw || ''));
+  return (m ? m[1] : String(raw || '')).trim().toLowerCase();
 }
 
 // One message. We hold HEADERS for everything and TEXT only where it was pasted or the content
 // scope filled it in, so this says which it is rather than rendering an empty bubble and
 // leaving the operator to wonder whether the message was blank or merely unread.
-function convMessage(c, m) {
+function convMessage(c, m, prevCc) {
   const mine = m.direction !== 'in';
   const who = mine ? 'You' : (m.from_name || m.from_addr || 'They');
-  const cc = (m.cc_addrs || []).length
-    ? `<div class="cm-cc">cc ${(m.cc_addrs || []).map(esc).join(', ')}</div>` : '';
-  // Our own sent text lives on the contact / touches, not in `messages` — the first outbound
-  // message is the outreach we still hold in full.
-  const body = m.snippet || (mine && m === (c.thread || [])[0] ? (c.outreach_message || '') : '');
+  // The one thing headers are uniquely good at: WHERE somebody joined. Printing the identical
+  // full Cc list on every row buries it — the join is the signal, the repetition is noise.
+  const nowCc = (m.cc_addrs || []).map(addrOf);
+  const joined = (m.cc_addrs || []).filter(x => !(prevCc || []).includes(addrOf(x)));
+  const cc = (prevCc && joined.length)
+    ? `<div class="cm-join">👋 ${joined.map(esc).join(', ')} joined</div>`
+    : (nowCc.length && !prevCc ? `<div class="cm-cc">cc ${(m.cc_addrs || []).map(esc).join(', ')}</div>` : '');
+  // Our own outreach body lives on the contact, not in `messages`. Match the first OUTBOUND
+  // message by index — `m === c.thread[0]` was an object-identity check against position zero,
+  // so every later outbound row rendered blank (including the reply you had just sent), and a
+  // thread we were looped into starts inbound so the outreach never rendered at all.
+  const firstOutIdx = (c.thread || []).findIndex(x => (x.direction || '') !== 'in');
+  const isFirstOut = mine && (c.thread || []).indexOf(m) === firstOutIdx;
+  const body = m.snippet || (isFirstOut ? (c.outreach_message || '') : '');
   const text = body
     ? `<div class="cm-body">${esc(body)}</div>`
-    : (mine ? '' : `<div class="cm-nobody">Text not stored — paste it below and ApplyPilot can answer it.</div>`);
+    // Never the "not stored" line on our OWN message — saying that about something we sent
+    // reads as data loss rather than a scope we chose.
+    : (mine ? `<div class="cm-nobody">Sent from ApplyPilot.</div>`
+            : `<div class="cm-nobody">ApplyPilot stores who and when, not what.
+                 ${gmailLink(c, 'Read it in Gmail ↗')}
+                 <button class="linklike" onclick="editSaid('${esc(c.id)}')">Paste it here</button></div>`);
   return `<div class="cm ${mine ? 'out' : 'in'}">
     <div class="cm-hdr"><span class="cm-who">${esc(who)}</span>
       <span class="cm-when">${esc(shortDate(m.sent_at))}</span></div>
@@ -728,6 +784,12 @@ function openReply(url, cid) {
     const el = document.querySelector(`[data-reply-for="${cid}"] .reply-body`);
     if (el) { el.focus(); el.scrollIntoView({block: 'center', behavior: 'smooth'}); }
   }, 60);
+}
+// From the banner: put the cursor in the composer. The contact is already open when the banner
+// is visible, so this is a focus, not a navigation.
+function openReplyHere(cid) {
+  const el = document.querySelector(`[data-reply-for="${cid}"] .reply-body`);
+  if (el) { el.focus(); el.scrollIntoView({block: 'center', behavior: 'smooth'}); }
 }
 function toggleCc(cid, address) {
   const set = REPLY_DROP.get(cid) || new Set();

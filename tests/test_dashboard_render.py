@@ -279,7 +279,8 @@ def test_a_contact_who_replied_gets_a_conversation_not_an_outreach_form(tmp_path
         "cannot be changed, and it buries the reply")
     # Order is the whole point: the exchange, then the composer.
     assert html.index("conv-msgs") < html.index("reply-box"), "composer above the conversation"
-    assert "replied" in html and "haven" in html, "nothing says they are waiting on you"
+    assert "Your turn" in html, "nothing says they are waiting on you"
+    assert "Answer now" in html, "the banner states urgency but offers no action to take"
 
     # A contact nobody has replied to keeps the outreach draft flow — chasing silence is the
     # right action there, and this must not have been broken in the process.
@@ -303,7 +304,14 @@ def test_a_message_with_no_stored_text_says_so_instead_of_rendering_blank(tmp_pa
     proc = subprocess.run(["node", str(script)], capture_output=True, text=True, timeout=60)
     assert proc.returncode == 0, f"node failed:\n{proc.stderr[:2000]}"
     html = json.loads(proc.stdout.strip().splitlines()[-1])["x"]
-    assert "cm-nobody" in html and "not stored" in html
+    assert "cm-nobody" in html
+    # It must name the reason AND both ways out. "paste it below" was an instruction pointing at
+    # a control the operator then had to hunt for — the same failure as feedback in #command:
+    # correct information delivered somewhere the eye is not. If the copy names an action, the
+    # copy is the button.
+    assert "who and when, not what" in html, "does not explain WHY there is no text"
+    assert "Paste it here" in html, "no control attached to the instruction"
+    assert "mail.google.com" in html, "no link to the one place the text can actually be read"
 
 
 _SAVE_DRIVER = """
@@ -400,6 +408,127 @@ def test_the_server_only_writes_fields_the_client_actually_sent(tmp_path, monkey
     # An explicit empty string IS a clear — that is a real edit, not an absent field.
     wd._save_or_regen_draft({"contact_id": cid, "body": ""})
     assert store.get_contact(cid, conn)["outreach_message"] == ""
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node not available")
+def test_every_outbound_message_renders_its_text_not_just_the_first(tmp_path):
+    """`m === c.thread[0]` was an object-identity check against position zero.
+
+    Every later outbound row fell through and rendered as a header with nothing under it —
+    including the reply you had just sent, so the moment you answered, your own message appeared
+    as an empty bubble. And "first message" is not "first outbound message": a thread we were
+    looped into starts inbound, so the outreach body never rendered anywhere at all.
+    """
+    c = _contact(id="c1", full_name="Gina", outreach_message="MY-ORIGINAL-EMAIL",
+                 conversation={"state": "awaiting_them", "days": 1, "hours": 30, "who": "Gina"},
+                 reply_to={"to": "Gina <g@co.com>", "to_addr": "g@co.com", "cc": [],
+                           "subject": "Re: x", "thread_id": "t1"},
+                 thread=[
+                     {"direction": "out", "from_addr": "me@x.com", "cc_addrs": [],
+                      "sent_at": "2026-07-28T10:00:00+00:00"},
+                     {"direction": "in", "from_addr": "g@co.com", "from_name": "Gina",
+                      "cc_addrs": [], "sent_at": "2026-07-29T10:00:00+00:00",
+                      "snippet": "HER-REPLY-TEXT"},
+                     {"direction": "out", "from_addr": "me@x.com", "cc_addrs": [],
+                      "sent_at": "2026-07-30T10:00:00+00:00"},
+                 ])
+    script = tmp_path / "out.mjs"
+    script.write_text(_STUBS + f"const SRC = {json.dumps(_page_js())};\n"
+                      + f"const CASES = {json.dumps({'x': c})};\n" + _REPLY_DRIVER)
+    proc = subprocess.run(["node", str(script)], capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, f"node failed:\n{proc.stderr[:2000]}"
+    html = json.loads(proc.stdout.strip().splitlines()[-1])["x"]
+
+    assert "MY-ORIGINAL-EMAIL" in html
+    assert "HER-REPLY-TEXT" in html
+    # The third row is our own later reply. It must say something rather than nothing — and
+    # NOT the "not stored" line, which about our own message reads as data loss.
+    assert html.count("cm-hdr") == 3, "a message row went missing"
+    assert "Sent from ApplyPilot" in html, "a later outbound message rendered completely blank"
+    assert "who and when, not what" not in html.split("HER-REPLY-TEXT")[1], (
+        "our own sent message claims its text was not stored")
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node not available")
+def test_the_outreach_body_renders_on_a_thread_that_starts_INBOUND(tmp_path):
+    """"First message" is not "first outbound message".
+
+    A thread we were looped into — someone introduced us, or a recruiter wrote first — begins
+    with an inbound message. `m === c.thread[0]` is then never true for any of our messages, so
+    the outreach body rendered NOWHERE. This is the case the index-based match exists for, and
+    the previous test cannot see it because its fixture happens to start outbound: both
+    expressions agree there, which is exactly why that mutation survived.
+    """
+    c = _contact(id="c1", full_name="Gina", outreach_message="MY-ORIGINAL-EMAIL",
+                 conversation={"state": "awaiting_us", "days": 0, "hours": 2, "who": "Gina"},
+                 reply_to={"to": "Gina <g@co.com>", "to_addr": "g@co.com", "cc": [],
+                           "subject": "Re: x", "thread_id": "t1"},
+                 thread=[
+                     {"direction": "in", "from_addr": "g@co.com", "from_name": "Gina",
+                      "cc_addrs": [], "sent_at": "2026-07-27T10:00:00+00:00",
+                      "snippet": "THEY-WROTE-FIRST"},
+                     {"direction": "out", "from_addr": "me@x.com", "cc_addrs": [],
+                      "sent_at": "2026-07-28T10:00:00+00:00"},
+                     {"direction": "in", "from_addr": "g@co.com", "from_name": "Gina",
+                      "cc_addrs": [], "sent_at": "2026-07-29T10:00:00+00:00",
+                      "snippet": "AND-AGAIN"},
+                 ])
+    script = tmp_path / "inbound_first.mjs"
+    script.write_text(_STUBS + f"const SRC = {json.dumps(_page_js())};\n"
+                      + f"const CASES = {json.dumps({'x': c})};\n" + _REPLY_DRIVER)
+    proc = subprocess.run(["node", str(script)], capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, f"node failed:\n{proc.stderr[:2000]}"
+    html = json.loads(proc.stdout.strip().splitlines()[-1])["x"]
+    assert "MY-ORIGINAL-EMAIL" in html, (
+        "the outreach body rendered nowhere because the thread did not start with our message")
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node not available")
+def test_a_long_thread_collapses_in_the_middle(tmp_path):
+    """Unbounded, and re-rendered every 2.5s, it pushes the composer — the only thing you opened
+    the contact to use — off the screen."""
+    msgs = [{"direction": "out" if i % 2 == 0 else "in", "from_addr": "a@b.com",
+             "from_name": "Gina", "cc_addrs": [], "snippet": f"MSG{i}",
+             "sent_at": f"2026-07-{10 + i:02d}T10:00:00+00:00"} for i in range(10)]
+    c = _contact(id="c1", full_name="Gina", thread=msgs,
+                 conversation={"state": "awaiting_us", "days": 0, "hours": 2, "who": "Gina"},
+                 reply_to={"to": "G <g@co.com>", "to_addr": "g@co.com", "cc": [],
+                           "subject": "Re: x", "thread_id": "t1"})
+    script = tmp_path / "long.mjs"
+    script.write_text(_STUBS + f"const SRC = {json.dumps(_page_js())};\n"
+                      + f"const CASES = {json.dumps({'x': c})};\n" + _REPLY_DRIVER)
+    proc = subprocess.run(["node", str(script)], capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, f"node failed:\n{proc.stderr[:2000]}"
+    html = json.loads(proc.stdout.strip().splitlines()[-1])["x"]
+    assert "earlier messages" in html, "a 10-message thread rendered in full"
+    assert "MSG0" in html and "MSG9" in html, "the ends must survive the collapse"
+    assert "MSG5" not in html
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node not available")
+def test_the_row_where_someone_joined_says_so(tmp_path):
+    """The single most valuable thing headers can tell you, and it was being discarded: the same
+    full Cc list printed on every row buries WHERE the new person appeared."""
+    c = _contact(id="c1", full_name="Victoria",
+                 conversation={"state": "awaiting_us", "days": 0, "hours": 3, "who": "Victoria"},
+                 reply_to={"to": "V <v@w.com>", "to_addr": "v@w.com",
+                           "cc": ["David Loveless <david@w.com>"], "subject": "Re: x",
+                           "thread_id": "t1"},
+                 thread=[
+                     {"direction": "out", "from_addr": "me@x.com", "cc_addrs": [],
+                      "sent_at": "2026-07-28T10:00:00+00:00"},
+                     {"direction": "in", "from_addr": "v@w.com", "from_name": "Victoria",
+                      "cc_addrs": ["David Loveless <david@w.com>"],
+                      "sent_at": "2026-07-29T10:00:00+00:00"},
+                 ])
+    script = tmp_path / "join.mjs"
+    script.write_text(_STUBS + f"const SRC = {json.dumps(_page_js())};\n"
+                      + f"const CASES = {json.dumps({'x': c})};\n" + _REPLY_DRIVER)
+    proc = subprocess.run(["node", str(script)], capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, f"node failed:\n{proc.stderr[:2000]}"
+    html = json.loads(proc.stdout.strip().splitlines()[-1])["x"]
+    assert "cm-join" in html and "joined" in html, "the handoff is not marked on the message"
+    assert "David Loveless" in html
 
 
 _TABS_DRIVER = """

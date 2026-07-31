@@ -216,7 +216,13 @@ def reply_target(messages: list[dict], me: str | list[str]) -> dict | None:
     what `messages.thread_for_contact()` returns.
     """
     mine = {addr(x) for x in ([me] if isinstance(me, str) else (me or [])) if addr(x)}
-    inbound = [m for m in (messages or []) if (m.get("direction") or "") == "in"]
+    # Robots are not correspondents. A bounce is an inbound message in our own thread, and
+    # without this the newest "reply" is MAILER-DAEMON and the composer politely offers to
+    # answer it. Offering to reply to a bounce notification is the point at which a CRM stops
+    # being trustworthy about the one thing it claims to know.
+    inbound = [m for m in (messages or [])
+               if isinstance(m, dict) and (m.get("direction") or "") == "in"
+               and not is_robot(addr(m.get("from_addr")))]
     if not inbound:
         return None
     last = inbound[-1]
@@ -259,6 +265,23 @@ def reply_target(messages: list[dict], me: str | list[str]) -> dict | None:
 AWAITING_US, AWAITING_THEM = "awaiting_us", "awaiting_them"
 
 
+def _from_robot(msg: dict) -> bool:
+    """True for an inbound message from a machine — a bounce daemon, an ATS, a scheduler.
+
+    A bounce arrives INSIDE our own thread, so nothing about thread membership excludes it. Left
+    in, it becomes the newest inbound message and the whole product agrees that MAILER-DAEMON
+    replied and is owed an answer: the row says "your turn", the banner names the daemon, and
+    the composer aims a reply at it. `is_robot()` was already applied to the Cc list and never
+    to the sender.
+
+    Outbound is never filtered — we are not a robot, and matching our own address against these
+    prefixes would be a coincidence away from hiding our own messages.
+    """
+    if (msg.get("direction") or "") != "in":
+        return False
+    return is_robot(addr(msg.get("from_addr")))
+
+
 def conversation_state(messages: list[dict], now=None) -> dict | None:
     """Whose turn it is in this conversation, and how long it has been that way.
 
@@ -274,7 +297,7 @@ def conversation_state(messages: list[dict], now=None) -> dict | None:
 
     from applypilot.domain.timeutil import hours_since
 
-    msgs = [m for m in (messages or []) if isinstance(m, dict)]
+    msgs = [m for m in (messages or []) if isinstance(m, dict) and not _from_robot(m)]
     if not any((m.get("direction") or "") == "in" for m in msgs):
         return None
     last = msgs[-1]                     # stored oldest-first (`ORDER BY sent_at`)

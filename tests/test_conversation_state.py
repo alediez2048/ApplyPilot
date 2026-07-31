@@ -72,6 +72,47 @@ def test_an_unparseable_timestamp_does_not_raise():
     assert state["state"] == cv.AWAITING_US and state["days"] is None
 
 
+def test_a_bounce_is_not_somebody_replying_to_you():
+    """A bounce arrives INSIDE our own thread, so nothing about thread membership excludes it.
+
+    Left in, MAILER-DAEMON becomes the newest inbound message and the entire product agrees it
+    replied and is owed an answer: the row says "your turn", the banner names the daemon, and
+    the composer aims a reply at it. `is_robot()` existed and was applied to the Cc list and
+    never to the sender we pick.
+
+    Latent rather than live only because bounced contacts leave the polling pool (§Lessons 22) —
+    but `_sync_thread` runs BEFORE `mark_bounced` on the poll that detects one, so the daemon's
+    message is stored, and the next bounce would have hit this.
+    """
+    thread = [_m("out", NOW - timedelta(days=5)),
+              _m("in", NOW - timedelta(days=4), frm="MAILER-DAEMON@googlemail.com",
+                 name="Mail Delivery Subsystem")]
+    assert cv.conversation_state(thread, now=NOW) is None, (
+        "a bounce was reported as them waiting on you")
+    assert cv.reply_target(thread, "me@x.com") is None, (
+        "the composer offered to reply to a bounce notification")
+
+
+def test_a_real_reply_still_counts_when_a_bounce_is_also_on_the_thread():
+    """The filter must remove the robot, not the conversation. A human reply followed by a
+    later delivery notification is still a human who is waiting."""
+    thread = [_m("out", NOW - timedelta(days=5)),
+              _m("in", NOW - timedelta(days=3), frm="gina@co.com", name="Gina Johnson"),
+              _m("in", NOW - timedelta(days=1), frm="postmaster@co.com", name="Postmaster")]
+    state = cv.conversation_state(thread, now=NOW)
+    assert state["state"] == cv.AWAITING_US
+    assert state["who"] == "Gina Johnson", "the robot was treated as the correspondent"
+    assert cv.reply_target(thread, "me@x.com")["to_addr"] == "gina@co.com"
+
+
+def test_our_own_outbound_is_never_filtered_as_a_robot():
+    """Matching our own address against the robot prefixes is one coincidence away from hiding
+    our own messages — `noreply@`-shaped senders exist. Outbound is exempt by construction."""
+    thread = [_m("out", NOW - timedelta(days=2), frm="notifications@mycompany.com"),
+              _m("in", NOW - timedelta(days=1), frm="gina@co.com", name="Gina")]
+    assert cv.conversation_state(thread, now=NOW)["state"] == cv.AWAITING_US
+
+
 def test_junk_entries_are_skipped_rather_than_crashing():
     assert cv.conversation_state(["nope", None], now=NOW) is None
 

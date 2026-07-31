@@ -84,6 +84,10 @@ def _scheduling_link(profile: dict) -> str:
 INTRO_DECK_SENTENCE = "Here's a good intro deck we could go over during the call: {url}"
 
 
+def _flag(name: str) -> bool:
+    return (os.environ.get(name, "") or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _intro_deck_url(profile: dict, contact: dict | None = None) -> str:
     """The intro-deck LINK offered in every outreach email.
 
@@ -100,6 +104,17 @@ def _intro_deck_url(profile: dict, contact: dict | None = None) -> str:
             or ((profile or {}).get("personal", {}).get("intro_deck_url") or "").strip())
     if not base or not contact or not contact.get("id"):
         return base
+
+    # OFF until the site can actually serve /intro/<name>. Learned the hard way: the link
+    # scheme was switched while the Netlify rewrite was still sitting uncommitted, so every
+    # freshly-written draft pointed at a 404 on the live site. A personalised link that does
+    # not resolve is far worse than an un-attributed one that does — it costs the conversation,
+    # which is the entire point of sending it.
+    #
+    # `applypilot doctor` checks the live URL and tells you when to turn this on.
+    if not _flag("INTRO_DECK_PATHS"):
+        return base
+
     from applypilot.domain import deck
     from applypilot.networking.store import ensure_deck_slug
     try:

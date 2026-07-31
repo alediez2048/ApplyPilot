@@ -392,6 +392,96 @@ def draft_for_channel(channel: str, profile: dict, job: dict, contact: dict,
     return draft_followup(profile, job, contact, touch=touch, style=style)
 
 
+_REPLY_SYSTEM = """You write a reply for a job seeker ANSWERING someone who just wrote to them
+about a role they applied for.
+
+This is not outreach and not a follow-up. They replied — the hard part already worked. The only
+job here is to answer what they actually said, and to make the next step easy.
+
+Hard rules:
+- ANSWER THE MESSAGE. If they asked something, answer it first, in the first sentence.
+- SHORT. Two to four sentences. They are reading it on a phone between meetings.
+- Never re-pitch. They already know who the sender is and what they want; repeating the original
+  email is the single fastest way to sound automated.
+- Never thank them for "taking the time" or open with "I hope this finds you well".
+- Match their register. A two-line reply gets a two-line answer, not a paragraph.
+- Never invent facts about the sender, and never attach years to a specific tool or framework.
+- If they introduced a colleague, acknowledge it and address the new person naturally.
+- If they said no, be gracious and brief and do not argue or ask them to reconsider.
+
+Return ONLY JSON: {"subject": "...", "body": "..."}
+The subject MUST keep the thread's existing subject with a "Re: " prefix."""
+
+
+def draft_reply(profile: dict, job: dict, contact: dict, thread: list | None = None,
+                subject: str = "", style: str = "") -> dict:
+    """Draft an answer to a live conversation (CRM-4b).
+
+    Needs the reply's TEXT to be worth anything, so it is gated on the content scope by its
+    callers. Without it the honest product is an empty box — a "contextual" draft written
+    without the context would be a generic follow-up wearing a reply's subject line, which is
+    exactly the automated-sounding message a real conversation cannot survive.
+
+    Only snippets are used, never full bodies — they are all that is stored (§SNIPPET_MAX).
+    """
+    from applypilot.domain import conversations as cv, intent as _intent
+
+    msgs = [m for m in (thread or []) if isinstance(m, dict)]
+    inbound = [m for m in msgs if (m.get("direction") or "") == "in"]
+    if not inbound:
+        raise ValueError("nothing to reply to — no inbound message on this thread")
+    last = inbound[-1]
+    said = (last.get("snippet") or "").strip()
+    if not said:
+        raise ValueError("no readable reply text — enable reply content to draft an answer")
+
+    role = job.get("title") or "the role"
+    company = contact.get("company") or job.get("company") or job.get("site") or "the company"
+    who = last.get("from_name") or last.get("from_addr") or contact.get("full_name") or "them"
+    label = _intent.suggestion(_intent.classify(said))
+    directive = _resolve_style(profile, style)
+    link = _scheduling_link(profile)
+
+    # Who else is on the thread, so the draft can acknowledge an introduction by name rather
+    # than writing to one person while two are reading.
+    others = [cv.display_name(x) or cv.addr(x)
+              for x in (last.get("cc_addrs") or []) if cv.addr(x)]
+
+    user = (
+        f"SENDER (you): {_sender_name(profile)}\n"
+        f"REPLYING TO: {who} at {company}\n"
+        f"ROLE: {role}\n"
+        f"SUBJECT (reuse with 'Re: '): {subject or last.get('subject') or role}\n"
+        + (f"ALSO ON THE THREAD: {', '.join(others)}\n" if others else "")
+        + (f"WHAT THIS LOOKS LIKE: {label['label']}\n" if label["label"] else "")
+        + f"\nWHAT THEY WROTE (the opening of it — this is all that is stored):\n{said}\n\n"
+        + (f"YOUR ORIGINAL MESSAGE (context only, do NOT repeat it):\n"
+           f"{(contact.get('outreach_message') or '')[:400]}\n\n"
+           if contact.get("outreach_message") else "")
+        + (f"SCHEDULING LINK (use it if they want to talk): {link}\n\n" if link else "")
+        + (f"STYLE DIRECTION (follow closely):\n{directive}\n\n" if directive else "")
+        + "Write the reply. Answer what they said. Return the JSON."
+    )
+
+    client = get_client("light")
+    raw = client.chat(
+        [{"role": "system", "content": _REPLY_SYSTEM}, {"role": "user", "content": user}],
+        max_tokens=350, temperature=0.7,
+    )
+    data = extract_json(raw)
+    out_subject = sanitize_text(str(data.get("subject", ""))).strip()
+    body = sanitize_text(str(data.get("body", ""))).strip()
+    if not body:
+        raise ValueError("empty reply body")
+    base = subject or last.get("subject") or role
+    if not out_subject:
+        out_subject = base if base.lower().startswith("re:") else f"Re: {base}"
+    # Deliberately NO intro-deck sentence. That belongs to cold outreach and follow-ups, where
+    # the goal is to earn a reply. Bolting it onto an answer to a live conversation is the
+    # marketing reflex that makes a real exchange read like a sequence.
+    return {"subject": out_subject, "body": body}
+
+
 def draft_linkedin_followup(profile: dict, job: dict, contact: dict, touch: int = 1,
                             style: str = "") -> dict:
     """Draft LinkedIn follow-up #`touch` for a contact who connected but went quiet.

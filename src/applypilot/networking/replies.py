@@ -78,6 +78,11 @@ def _sync_thread(contact: dict, msgs: list[dict], me: str, conn) -> dict:
     """
     from applypilot.domain import conversations as cv
 
+    # CRM-4b: one gate, checked once per thread rather than per message. False on every
+    # metadata-only install, which is the default and stays the default.
+    store_content, _ = gmail_read.can_read_content()
+    by_id = {m.get("id"): m for m in msgs or []}
+
     rows = []
     for m in cv.timeline(msgs, me):
         rows.append({"message_id": m["id"], "thread_id": contact.get("thread_id"),
@@ -86,7 +91,12 @@ def _sync_thread(contact: dict, msgs: list[dict], me: str, conn) -> dict:
                      "from_name": m["from_name"], "to_addrs": m["to_addrs"],
                      "cc_addrs": m["cc_addrs"], "subject": m["subject"],
                      "sent_at": _iso(m["at"]),
-                     "rfc_message_id": m.get("rfc_message_id") or ""})
+                     "rfc_message_id": m.get("rfc_message_id") or "",
+                     # Only INBOUND snippets, and only with the scope. Our own sent text is
+                     # already ours — storing it back would double the content in the database
+                     # for nothing.
+                     "snippet": ((by_id.get(m["id"], {}).get("snippet") or "")
+                                 if (store_content and m["direction"] == "in") else "")})
     new = msg_store.upsert_messages(rows, conn)
     intro = cv.introductions(msgs, me, known=[contact.get("email")])
     return {"new_messages": new, "introductions": intro}

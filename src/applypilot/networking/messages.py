@@ -33,7 +33,17 @@ _MESSAGE_COLUMNS: dict[str, str] = {
     # only chain off our own FIRST email, so a mail client shows the answer as a new
     # conversation next to the one it answers.
     "rfc_message_id": "TEXT",
+    # CRM-4b, and the ONLY content column that will ever exist here. A Gmail snippet, hard-
+    # truncated to SNIPPET_MAX at the STORE layer rather than at the caller — a cap enforced
+    # where the write happens cannot be bypassed by a new caller that forgets it. Populated
+    # only when the token carries `gmail.readonly`; empty on every metadata-only install.
+    "snippet": "TEXT",
 }
+
+#: Enough to draft a reply against, an order of magnitude less than a message body sitting in
+#: a plaintext SQLite file. Adding threads already changed what a leak of applypilot.db costs;
+#: full bodies would make it correspondence.
+SNIPPET_MAX = 200
 
 
 def init_messages(conn: sqlite3.Connection | None = None) -> sqlite3.Connection:
@@ -68,7 +78,14 @@ def upsert_messages(rows: list[dict], conn: sqlite3.Connection | None = None) ->
     from datetime import datetime, timezone
     now = datetime.now(timezone.utc).isoformat()
 
-    known = {r[0] for r in conn.execute("SELECT message_id FROM messages").fetchall()}
+    # Existing snippets come along for the ride because this is INSERT OR **REPLACE**: a
+    # re-sync that carries no snippet would otherwise blank one already stored. That is
+    # exactly what happens the moment `gmail.readonly` is revoked — every poll would quietly
+    # erase the content it had, instead of simply not adding more (the ticket's "degrade
+    # cleanly", which only means anything if nothing is destroyed on the way down).
+    existing = {r[0]: (r[1] or "")
+                for r in conn.execute("SELECT message_id, snippet FROM messages").fetchall()}
+    known = set(existing)
     new = 0
     for r in rows:
         mid = r.get("message_id") or r.get("id")
@@ -76,14 +93,17 @@ def upsert_messages(rows: list[dict], conn: sqlite3.Connection | None = None) ->
             continue
         if mid not in known:
             new += 1
+        # Truncated HERE, at the write, not at the caller. A cap that lives in the caller is
+        # one a future caller forgets; this one cannot be bypassed by any path into the table.
+        snippet = ((r.get("snippet") or "").strip() or existing.get(mid, ""))[:SNIPPET_MAX]
         conn.execute(
             "INSERT OR REPLACE INTO messages (message_id, thread_id, contact_id, job_url, "
             "direction, from_addr, from_name, to_addrs, cc_addrs, subject, sent_at, synced_at, "
-            "rfc_message_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "rfc_message_id, snippet) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (mid, r.get("thread_id"), r.get("contact_id"), r.get("job_url"),
              r.get("direction"), r.get("from_addr"), r.get("from_name"),
              json.dumps(r.get("to_addrs") or []), json.dumps(r.get("cc_addrs") or []),
-             r.get("subject"), r.get("sent_at"), now, r.get("rfc_message_id")))
+             r.get("subject"), r.get("sent_at"), now, r.get("rfc_message_id"), snippet))
     conn.commit()
     return new
 

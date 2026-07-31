@@ -277,6 +277,7 @@ def network(
     no_linkedin: bool = typer.Option(False, "--no-linkedin", help="Apollo only (skip LinkedIn fallback)."),
     linkedin_login: bool = typer.Option(False, "--linkedin-login", help="One-time: open Chrome to log into LinkedIn (for the fallback)."),
     gmail_connect: bool = typer.Option(False, "--gmail-connect", help="One-time: connect Gmail via OAuth for sending outreach."),
+    with_content: bool = typer.Option(False, "--with-content", help="With --gmail-connect: also grant gmail.readonly so ApplyPilot can read what replies SAY (CRM-4b). Off by default."),
     fix_threads: bool = typer.Option(False, "--fix-threads", help="Recover Gmail thread ids so follow-ups reply in the original conversation."),
     import_connections: Optional[str] = typer.Option(None, "--import-connections", help="Import your LinkedIn Connections.csv (to flag existing connections)."),
     dm_login: bool = typer.Option(False, "--dm-login", help="One-time: open a browser to log into LinkedIn for the DM sender (agent-browser)."),
@@ -323,7 +324,19 @@ def network(
         from applypilot.networking import gmail_oauth
         console.print("[cyan]Connecting Gmail (opens a browser)…[/cyan]")
         console.print("  Requesting: send · read (thread follow-ups) · settings (your signature)")
-        ok, msg = gmail_oauth.connect()
+        if with_content:
+            # Spelled out before the browser opens, not after. This is the one scope that can
+            # read every message in the mailbox, and the operator should see that sentence
+            # while they can still press Ctrl+C.
+            console.print("  [yellow]· PLUS gmail.readonly — lets ApplyPilot read what replies "
+                          "SAY, so it can draft answers.[/yellow]")
+            console.print("  [yellow]  That scope can read EVERY message in this mailbox. Only "
+                          "~200-char snippets of replies\n    to your own outreach are ever "
+                          "stored; no message body is written to disk.[/yellow]")
+        else:
+            console.print("  [dim]· reply CONTENT is off — add --with-content to let ApplyPilot "
+                          "read what replies say.[/dim]")
+        ok, msg = gmail_oauth.connect(with_content=with_content)
         console.print(f"[green]{msg}[/green]" if ok else f"[red]{msg}[/red]")
         if ok:
             # Recover thread ids for anything sent before they were persisted, so those
@@ -896,6 +909,22 @@ def doctor(
             results.append(("Reply detection", warn_mark, why))
     except Exception:
         results.append(("Reply detection", warn_mark, "probe failed"))
+
+    # Reply CONTENT (CRM-4b). Reported as a deliberate OFF rather than a missing feature: not
+    # granting this is a legitimate choice, and `doctor` should describe the trade, never nag.
+    try:
+        from applypilot.networking import gmail_read as _gr
+        can, why = _gr.can_read_content()
+        if can:
+            results.append(("Reply content", ok_mark,
+                            "on (gmail.readonly) — ~200-char snippets stored, never full bodies"))
+        else:
+            results.append(("Reply content", "[dim]off[/dim]",
+                            why if "not connected" in why else
+                            "off — headers only. `network --gmail-connect --with-content` "
+                            "grants gmail.readonly (reads the WHOLE mailbox) to draft answers"))
+    except Exception:
+        results.append(("Reply content", warn_mark, "probe failed"))
 
     # Unattended schedule (CRM-3b). Optional: everything still works by hand without it.
     try:

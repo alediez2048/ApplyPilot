@@ -114,8 +114,29 @@ def thread_messages(thread_id: str, service=None) -> list[dict]:
             # Bounces and vacation autoresponders set this. Cheap to ask for, and the only
             # signal that catches an autoresponder whose subject looks like a normal reply.
             "auto_submitted": h.get("auto-submitted", ""),
+            # CRM-4b. Gmail returns `snippet` on the SAME call — under `gmail.metadata` it
+            # comes back empty, and it populates only once the token carries `gmail.readonly`.
+            # So this needs no second request and no wider `format=`: the scope alone decides
+            # whether there is anything here. Storing it is gated separately in replies.py.
+            "snippet": (msg.get("snippet") or "").strip(),
         })
     return out
+
+
+def can_read_content() -> tuple[bool, str]:
+    """May we look at what a reply SAYS? (CRM-4b)
+
+    Separate from `available()` because the answer is different: a normal install can read
+    headers and threads and must keep working exactly as before when this is False.
+    """
+    from applypilot.networking import gmail_oauth
+    if not gmail_oauth.available():
+        return False, "Gmail not connected"
+    if not gmail_oauth.can_read_content():
+        return False, ("reply content is off — only headers are readable. Enable with "
+                       "`applypilot network --gmail-connect --with-content` (grants "
+                       "gmail.readonly: it can read every message in the mailbox).")
+    return True, "ok"
 
 
 def current_history_id(service=None) -> str:

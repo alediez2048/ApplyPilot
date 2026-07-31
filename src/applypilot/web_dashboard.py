@@ -1296,6 +1296,8 @@ def _contact_payload(c: dict, company: str | None = None, ladders: dict | None =
         # Whose turn it is. `awaiting_us` means they wrote and nobody answered — the worst
         # outcome the system can produce, since it paid for the reply and then dropped it.
         "conversation": _conversation_state(thread or []),
+        # CRM-4b. Empty on every metadata-only install, which is the default.
+        "last_reply": _last_reply(thread or []),
         # HOT layer marker: found via your connections (vs cold Apollo). Either the stored source
         # or a live connection match makes it "hot".
         "hot": c.get("source") == "connection" or bool(conn_rec),
@@ -1505,6 +1507,29 @@ def _add_introduced_contact(data: dict) -> dict:
                                            " Use “Regenerate” to draft an email.")}
 
 
+def _last_reply(thread: list) -> dict | None:
+    """The newest inbound message's stored snippet, and what it looks like they want (CRM-4b).
+
+    Returns None when there is no snippet — which is every install that never granted
+    `gmail.readonly`, and the reason 4b can ship without changing anything for them.
+    """
+    try:
+        inbound = [m for m in thread if isinstance(m, dict) and m.get("direction") == "in"]
+        if not inbound:
+            return None
+        last = inbound[-1]
+        text = (last.get("snippet") or "").strip()
+        if not text:
+            return None
+        from applypilot.domain import intent as _intent
+        return {"text": text, "at": last.get("sent_at") or "",
+                "from": last.get("from_name") or last.get("from_addr") or "",
+                **_intent.suggestion(_intent.classify(text))}
+    except Exception:  # noqa: BLE001
+        log.debug("Could not summarise the last reply", exc_info=True)
+        return None
+
+
 def _awaiting_us(contacts: list[dict]) -> list[dict]:
     """Contacts who wrote to us and are still waiting, newest silence last.
 
@@ -1548,6 +1573,44 @@ def _reply_target(thread: list) -> dict | None:
     except Exception:  # noqa: BLE001
         log.debug("Could not compute a reply target", exc_info=True)
         return None
+
+
+def _draft_reply(data: dict) -> dict:
+    """Draft an answer to a live conversation (CRM-4b). Never sends.
+
+    Refuses cleanly without the content scope rather than producing something. A "contextual"
+    reply written without the context is a generic follow-up wearing a Re: subject line — the
+    exact automated-sounding message that kills a real exchange, and it would be indistinguish-
+    able from a working feature until the operator read it.
+    """
+    from applypilot.networking import messages as _msgs, store as _store
+
+    cid = (data.get("contact_id") or "").strip()
+    if not cid:
+        return {"ok": False, "message": "contact_id required"}
+
+    conn = get_connection()
+    _store.init_contacts(conn)
+    contact = _store.get_contact(cid, conn)
+    if not contact:
+        return {"ok": False, "message": "contact not found"}
+
+    thread = _msgs.thread_for_contact(cid, conn)
+    if not any((m.get("snippet") or "").strip() for m in thread):
+        from applypilot.networking import gmail_read
+        _, why = gmail_read.can_read_content()
+        return {"ok": False, "message": f"Can't draft an answer — {why}"}
+
+    job = _jobs.get(contact.get("job_url", ""), conn) or {"url": contact.get("job_url", "")}
+    try:
+        from applypilot.config import load_profile
+        from applypilot.networking import outreach
+        d = outreach.draft_reply(load_profile(), job, contact, thread=thread)
+    except Exception as e:  # noqa: BLE001
+        log.debug("Reply draft failed", exc_info=True)
+        return {"ok": False, "message": f"Draft failed: {e}"}
+    return {"ok": True, "subject": d["subject"], "body": d["body"],
+            "message": "Draft ready — read it before you send it."}
 
 
 def _send_reply(data: dict) -> dict:
@@ -2268,6 +2331,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/contact/reply":
                 _json_response(self, _send_reply(data))
+                return
+            if path == "/api/contact/draft-reply":
+                _json_response(self, _draft_reply(data))
                 return
             if path == "/api/followup":
                 _json_response(self, _followup_action(data))

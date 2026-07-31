@@ -142,11 +142,23 @@ def test_the_timeline_sorts_numerically_not_lexicographically():
 
 def test_the_messages_table_cannot_hold_a_body():
     """The schema is the guarantee, not a docstring. Storing conversations already changes what
-    a leak of the DB costs; bodies would make it correspondence."""
-    from applypilot.networking.messages import _MESSAGE_COLUMNS
+    a leak of the DB costs; bodies would make it correspondence.
+
+    CRM-4b added exactly ONE content column — `snippet`, ~200 chars, opt-in behind
+    `gmail.readonly` and truncated at the write. That is a deliberate, bounded exception and it
+    is spelled out here so a future `body` column cannot arrive claiming the same precedent.
+    The gating itself lives in `test_reply_content.py`; this asserts the shape of the schema.
+    """
+    from applypilot.networking.messages import SNIPPET_MAX, _MESSAGE_COLUMNS
 
     cols = set(_MESSAGE_COLUMNS)
-    assert not (cols & {"body", "snippet", "content", "text", "html"})
+    assert not (cols & {"body", "content", "text", "html", "payload", "raw"}), (
+        "a full-content column appeared on `messages` — headers plus a capped snippet is the "
+        "whole contract")
+    assert "snippet" in cols, "the 4b snippet column is gone; update this test deliberately"
+    assert SNIPPET_MAX <= 400, (
+        f"the snippet cap grew to {SNIPPET_MAX} — at some size this stops being a snippet and "
+        "becomes the body the schema promises not to hold")
 
 
 # ── pending introductions: what the dashboard offers to add ─────────────────────────────

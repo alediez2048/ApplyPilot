@@ -34,6 +34,13 @@ SEND_SCOPE = "https://www.googleapis.com/auth/gmail.send"
 # noticing that a reply arrived), at a fraction of the blast radius if the token leaks.
 READ_SCOPE = "https://www.googleapis.com/auth/gmail.metadata"
 SETTINGS_SCOPE = "https://www.googleapis.com/auth/gmail.settings.basic"
+
+# CRM-4b, OPT-IN ONLY. Reading what a reply SAYS needs `gmail.readonly`, which can read every
+# message in the mailbox — a categorically wider grant than everything above it. It is
+# deliberately NOT in SCOPES, so the ordinary connect flow can never request it by accident and
+# no future scope addition drags it along. Turning it on is `--with-content`, an explicit act.
+CONTENT_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
+
 SCOPES = [SEND_SCOPE, READ_SCOPE, SETTINGS_SCOPE]
 CLIENT_SECRET_PATH = config.APP_DIR / "gmail_oauth_client.json"
 TOKEN_PATH = config.APP_DIR / "gmail_token.json"
@@ -117,22 +124,40 @@ def available() -> bool:
     return _load_creds() is not None
 
 
-def connect() -> tuple[bool, str]:
-    """Run the one-time OAuth flow (opens a browser). Stores the token. Returns (ok, msg)."""
+def can_read_content() -> bool:
+    """True when the stored token carries `gmail.readonly` (CRM-4b).
+
+    Everything else in this module works on `gmail.metadata`. This is the ONE gate that decides
+    whether the system may look at what a message actually says.
+    """
+    return has_scope(CONTENT_SCOPE)
+
+
+def connect(with_content: bool = False) -> tuple[bool, str]:
+    """Run the one-time OAuth flow (opens a browser). Stores the token. Returns (ok, msg).
+
+    `with_content` adds `gmail.readonly` — the CRM-4b opt-in. It must be passed explicitly by
+    something the operator typed; nothing in the codebase defaults it to True, and a test pins
+    that the ordinary flow requests only SCOPES.
+    """
     if not CLIENT_SECRET_PATH.exists():
         return False, _SETUP_HELP
     try:
         _Request, _Credentials, InstalledAppFlow, _build = _libs()
     except ImportError:
         return False, "Install deps: pip install google-api-python-client google-auth-oauthlib"
+    scopes = list(SCOPES) + ([CONTENT_SCOPE] if with_content else [])
     try:
-        flow = InstalledAppFlow.from_client_secrets_file(str(CLIENT_SECRET_PATH), SCOPES)
+        flow = InstalledAppFlow.from_client_secrets_file(str(CLIENT_SECRET_PATH), scopes)
         creds = flow.run_local_server(port=0)
         TOKEN_PATH.write_text(creds.to_json(), encoding="utf-8")
         _lock_down(TOKEN_PATH)
     except Exception as e:  # noqa: BLE001
         return False, f"OAuth flow failed: {e}"
-    return True, f"Gmail connected. Token stored at {TOKEN_PATH}"
+    note = (" Reply content is ON — snippets of incoming replies will be stored."
+            if with_content else
+            " Reply content is OFF (headers only). Add --with-content to enable it.")
+    return True, f"Gmail connected. Token stored at {TOKEN_PATH}.{note}"
 
 
 def probe() -> tuple[bool, str]:

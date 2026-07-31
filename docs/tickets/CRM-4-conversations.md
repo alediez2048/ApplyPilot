@@ -1,7 +1,8 @@
 # CRM-4 — Conversations (memory, context, and replying from the dashboard)
 
 **Phase:** 2 · **Size:** L (~2d, split 4a / 4b) · **Depends on:** CRM-1
-**Status:** 4a ✅ shipped 2026-07-31 (ladder-after-handoff still open) · 4b Todo
+**Status:** ✅ **DONE 2026-07-31.** 4a shipped and live · 4b built and **switched off**
+(needs `gmail.readonly`, which is the operator's call — `network --gmail-connect --with-content`)
 **PRD:** `crm-prd.md` §6.1
 **Why:** CRM-1 made the system *notice* a reply. It still has no idea what the conversation is.
 
@@ -63,12 +64,19 @@ value**. The Victoria case is entirely solvable without new permissions.
       + `gmail_send.send_reply()` + `/api/contact/reply`. Answers the last **inbound** message,
       chains `References` across the whole thread, and shows the Cc as removable chips so the
       operator can *see* who it reaches before clicking Send.
-- [ ] **Ladder correctness after a handoff** — the original contact stays `replied`; the
-      introduced contact starts a fresh ladder. Still open (see Risks: pick the anchor
-      deliberately).
-- [ ] **Structural suggestions** (all that is honest without bodies):
-      *"They introduced someone — email David"* · *"You replied 3 days ago, no answer — nudge?"*
-      · *"They replied and you never answered"* ← that last one is a real failure mode. Not built.
+- [x] **Ladder correctness after a handoff** — **the feared bug does not exist, and inventing an
+      anchor would have created one.** Measured on the live Writer job rather than assumed: the
+      introduced contact has no `sent_message_id`, so `_is_ready` returns False and the email
+      ladder correctly does not apply — you cannot follow up on an email you never sent. He is
+      not invisible either: the checklist counts him under `emailed 2/3`, so the job reads
+      *partial*, not finished. Once he IS emailed, `mark_sent` stamps `submitted_at` and the
+      ladder anchors normally. Back-dating an anchor to the introduction date, as this ticket
+      originally proposed, would have told the ladder we had emailed somebody we had not.
+- [x] **Structural suggestions** — `conversation_state()` + `awaiting_reply`. *"They replied and
+      you never answered"* is the one that mattered and it was **live in the database**: Gina
+      Johnson at Salesforce replied 2026-07-31 and the row still said "1 follow-up due". An
+      unanswered reply now outranks every ladder in `nextAction()`, shows on the collapsed
+      contact row, and `tick` reports it.
 
 ### What the reply work actually cost, and what it found
 
@@ -87,19 +95,32 @@ The statement budget could not see it because none of it was SQL. Cached on the 
 mtime (so reconnecting a different account still invalidates), **2.4s → 0.043s**, with a test
 that counts the profile fetches.
 
-## 4b — Reply context (REQUIRES `gmail.readonly`, opt-in)
+## 4b — Reply context (REQUIRES `gmail.readonly`, opt-in) — ✅ BUILT 2026-07-31, **OFF**
 
-- [ ] `doctor` explains the trade in one line, and the feature is **off** unless the scope is
-      granted. Never request it silently.
-- [ ] **Store the snippet only (~200 chars), never the full body.** Enough to draft against,
-      an order of magnitude less sitting in a plaintext SQLite file that is not encrypted at
-      rest beyond FileVault.
-- [ ] **Contextual reply drafting** — a response that answers what they said, not a generic
-      follow-up.
-- [ ] **Intent classification** for better suggestions: introduction · interested · not now ·
-      rejection · asked a question. A rejection should offer *Mark rejected*, not *draft a
-      follow-up*.
-- [ ] Revocation must degrade cleanly: drop to 4a behaviour, keep everything already stored.
+Shipped inert. The code is in place and every test passes with the scope **not** granted, which
+is the state this machine is in and stays in until somebody types `--with-content`.
+
+- [x] `doctor` explains the trade in one line (`Reply content  off — headers only…`), and the
+      feature is off unless the scope is granted. `CONTENT_SCOPE` is deliberately **not** in
+      `SCOPES`, so no future scope addition can drag it along; a test pins that.
+- [x] **Snippet only (~200 chars), never the full body** — `SNIPPET_MAX`, truncated **at the
+      write** in `upsert_messages`, not at the caller. A cap a new caller can forget is not a cap.
+- [x] **Contextual reply drafting** — `outreach.draft_reply()` + `/api/contact/draft-reply`.
+      Refuses rather than producing something when there is no readable text: a "contextual"
+      reply written without the context is a generic follow-up wearing a `Re:` subject line, and
+      it would look like a working feature until somebody read it. No intro deck — that belongs
+      to outreach whose job is to EARN a reply, not to an answer inside a live conversation.
+- [x] **Intent classification** — `domain/intent.py`, rule-based and quick to say `unknown`.
+      Auto-replies are matched FIRST: an out-of-office can contain almost any phrase and mean
+      none of it, so "Unfortunately I am out of office" must not read as a rejection.
+- [x] Revocation degrades cleanly — and this needed real work. `upsert_messages` is INSERT OR
+      **REPLACE**, so a re-sync carrying no snippet would have blanked one already stored, and
+      `tick` re-syncs every open thread hourly. Existing snippets are now carried forward.
+
+**Why rules and not an LLM for intent:** the input is a ~200-char snippet, the output picks a
+button, and it runs in a loop that may execute hourly forever. A confident wrong label is worse
+than none — "interested" on a rejection would have the operator write an eager reply to somebody
+who already said no.
 
 ---
 

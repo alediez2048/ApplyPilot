@@ -578,14 +578,40 @@ function replyBox(c) {
     <div class="reply-hdr">↩ Reply to <strong>${esc(t.to)}</strong>${
       cc.length ? ` · cc ${cc.length}` : (t.cc || []).length ? ' · <span class="cc-none">cc removed</span>' : ''}</div>
     ${(t.cc || []).length ? `<div class="cc-row">${chips}</div>` : ''}
+    ${lastReplyCard(c)}
     <div class="reply-subj">${esc(t.subject)}</div>
     <textarea class="reply-body" rows="6" placeholder="Write your reply…"
       oninput="REPLY_DRAFT.set('${esc(c.id)}', this.value)">${esc(body)}</textarea>
     <div class="reply-actions">
       <button class="primary" onclick="sendReply('${esc(c.id)}', this)">Send reply</button>
+      ${c.last_reply ? `<button onclick="draftReply('${esc(c.id)}', this)">✍ Draft an answer</button>` : ''}
       <span class="reply-hint">Goes into this thread. No attachments.</span>
     </div>
   </div>`;
+}
+
+// CRM-4b. What they actually said — present only when the token carries gmail.readonly, so
+// this whole card is absent on a default install and the composer just opens empty.
+function lastReplyCard(c) {
+  const r = c.last_reply;
+  if (!r) return '';
+  const tag = r.label ? `<span class="intent-chip ${esc(r.intent)}">${esc(r.label)}</span>` : '';
+  const act = r.action ? `<div class="intent-act">${esc(r.action)}</div>` : '';
+  return `<div class="said">
+    <div class="said-hdr">${esc(r.from || 'They')} wrote ${tag}</div>
+    <div class="said-txt">“${esc(r.text)}”</div>${act}
+  </div>`;
+}
+async function draftReply(cid, btn) {
+  const say = m => { const el = document.getElementById('command'); if (el) el.textContent = m; };
+  btn.disabled = true; btn.textContent = 'Drafting…';
+  const r = await post('/api/contact/draft-reply', {contact_id: cid});
+  say(r.message || (r.ok ? 'Draft ready.' : 'Draft failed.'));
+  // Into the shared draft store, not straight into the DOM — the 2.5s refresh would wipe a
+  // value written only to the textarea.
+  if (r.ok && r.body) REPLY_DRAFT.set(cid, r.body);
+  btn.disabled = false; btn.textContent = '✍ Draft an answer';
+  refresh();
 }
 function firstName(name) { return String(name || '').trim().split(/\s+/)[0] || 'them'; }
 

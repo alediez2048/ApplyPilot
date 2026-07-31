@@ -1293,6 +1293,9 @@ def _contact_payload(c: dict, company: str | None = None, ladders: dict | None =
         # extra round-trip, so the composer can open prefilled. None when nobody has written
         # to us, which is how the UI knows to offer a follow-up instead of a reply.
         "reply_to": _reply_target(thread or []),
+        # Whose turn it is. `awaiting_us` means they wrote and nobody answered — the worst
+        # outcome the system can produce, since it paid for the reply and then dropped it.
+        "conversation": _conversation_state(thread or []),
         # HOT layer marker: found via your connections (vs cold Apollo). Either the stored source
         # or a live connection match makes it "hot".
         "hot": c.get("source") == "connection" or bool(conn_rec),
@@ -1391,6 +1394,7 @@ def _status_payload() -> dict:
             "checklist": _job_checklist(status, row["applied_at"] or "", contacts),
             "followups": _followup_panel(contacts, job_ladders),
             "conversations": job_threads,
+            "awaiting_reply": _awaiting_us(contacts),
             "introductions": _pending_introductions(job_threads, raw_contacts),
             "activity": _job_activity(row["url"], conn),
             "network_running": bool(net_task.get("running")),
@@ -1499,6 +1503,34 @@ def _add_introduced_contact(data: dict) -> dict:
     return {"ok": True, "contact_id": cid,
             "message": f"Added {name}." + (" Draft ready." if drafted else
                                            " Use “Regenerate” to draft an email.")}
+
+
+def _awaiting_us(contacts: list[dict]) -> list[dict]:
+    """Contacts who wrote to us and are still waiting, newest silence last.
+
+    Rolled up per job so the row can rank answering a real human above every follow-up:
+    somebody who replied outranks somebody who did not, and no ladder should be able to
+    outshout them.
+    """
+    out = []
+    for c in contacts:
+        conv = c.get("conversation") or {}
+        if conv.get("state") == "awaiting_us":
+            out.append({"id": c.get("id"), "full_name": c.get("full_name", ""),
+                        "days": conv.get("days"), "hours": conv.get("hours")})
+    return sorted(out, key=lambda r: -(r["hours"] or 0))
+
+
+def _conversation_state(thread: list) -> dict | None:
+    """Whose turn it is on this thread. Never raises — see `_reply_target`."""
+    if not thread:
+        return None
+    try:
+        from applypilot.domain import conversations as cv
+        return cv.conversation_state(thread)
+    except Exception:  # noqa: BLE001
+        log.debug("Could not compute a conversation state", exc_info=True)
+        return None
 
 
 def _reply_target(thread: list) -> dict | None:

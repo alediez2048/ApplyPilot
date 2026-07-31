@@ -158,11 +158,51 @@ def _step_draft_followups(conn, dry_run: bool, limit: int = 10) -> dict:
                       + (f", {held} left for the next tick" if held else "")}
 
 
+def _step_unanswered(conn, dry_run: bool) -> dict:
+    """Report conversations where THEY wrote last and nobody has answered.
+
+    Reports only — drafting a reply would need to know what they said, and on `gmail.metadata`
+    we cannot read a body (that trade is CRM-4b). Saying "Gina replied 2 days ago and you have
+    not answered" needs no body to be true, and it is the highest-value sentence this command
+    can produce: every other step chases people who said nothing.
+    """
+    from applypilot.domain import conversations as cv
+    from applypilot.networking import messages as msg_store, store
+
+    try:
+        contacts = store.all_contacts_for_metrics(conn)
+    except Exception as e:  # noqa: BLE001
+        return {"error": str(e)[:120], "detail": f"could not list contacts: {e}"}
+
+    threads = msg_store.threads_by_contact(conn)   # one query, not one per contact
+    waiting = []
+    for c in contacts:
+        cid = c.get("id")
+        if not cid:
+            continue
+        state = cv.conversation_state(threads.get(cid) or [])
+        if state and state["state"] == cv.AWAITING_US:
+            # The name off the inbound HEADER, not off the contact row. `all_contacts_for_metrics`
+            # is a deliberately narrow projection (no name), and the header is the better source
+            # anyway — a contact stored as "David" is "David Loveless" in the message he sent.
+            waiting.append({"name": state.get("who") or c.get("company") or cid,
+                            "company": c.get("company") or "",
+                            "days": state.get("days")})
+    waiting.sort(key=lambda w: -(w["days"] or 0))
+    if not waiting:
+        return {"awaiting_us": 0, "detail": "no unanswered replies"}
+    names = ", ".join(f"{w['name']} ({w['days']}d)" for w in waiting[:5])
+    return {"awaiting_us": len(waiting), "names": [w["name"] for w in waiting],
+            "detail": f"{len(waiting)} unanswered repl{'y' if len(waiting) == 1 else 'ies'}: {names}"}
+
+
 #: Order matters: release locks first so a stuck job is visible to everything after it, and
 #: poll replies BEFORE drafting so a contact who just answered never gets a follow-up drafted.
+#: `unanswered` runs after the poll so a reply that arrived this minute is already counted.
 STEPS = (
     ("locks", _step_release_locks),
     ("replies", _step_poll_replies),
+    ("unanswered", _step_unanswered),
     ("followups", _step_draft_followups),
 )
 

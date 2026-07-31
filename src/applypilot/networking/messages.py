@@ -145,6 +145,23 @@ def threads_for_job(job_url: str, conn: sqlite3.Connection | None = None) -> dic
     return out
 
 
+def threads_by_contact(conn: sqlite3.Connection | None = None) -> dict:
+    """Every stored conversation, keyed by contact id. ONE query for the whole database.
+
+    `tick` walks all contacts looking for unanswered replies; doing that with a query per
+    contact is the N+1 this codebase keeps re-learning. Hourly rather than every 2.5s is not
+    a reason to write it the other way.
+    """
+    if conn is None:
+        conn = get_connection()
+    init_messages(conn)
+    out: dict[str, list[dict]] = {}
+    for r in conn.execute("SELECT * FROM messages ORDER BY sent_at").fetchall():
+        d = _row(r)
+        out.setdefault(d.get("contact_id") or "", []).append(d)
+    return out
+
+
 def delete_for_contact(contact_id: str, conn: sqlite3.Connection | None = None) -> int:
     """Drop a contact's stored conversation — called when the contact is deleted.
 

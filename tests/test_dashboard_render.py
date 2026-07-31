@@ -89,7 +89,7 @@ def _contact(**over):
         "connection_company": "", "hot": False,
         # CRM-4a: /api/status always sends these, so the fixture must too — a contact with no
         # conversation has an empty thread and a null reply target, never a missing key.
-        "thread": [], "reply_to": None, "introduced_by": "",
+        "thread": [], "reply_to": None, "introduced_by": "", "conversation": None,
     }
     base.update(over)
     return base
@@ -134,8 +134,13 @@ def _job(**over):
                                "subject": "Re: AI Engineer", "in_reply_to": "<b@writer>",
                                "references": "<a@us> <b@writer>", "thread_id": "t1",
                                "answering": "Victoria Shearer",
-                               "at": "2026-07-29T09:00:00+00:00"}),
+                               "at": "2026-07-29T09:00:00+00:00"},
+                     conversation={"state": "awaiting_us", "days": 2, "hours": 50,
+                                   "at": "2026-07-29T09:00:00+00:00",
+                                   "who": "Victoria Shearer", "messages": 2}),
         ],
+        "awaiting_reply": [{"id": "c4", "full_name": "Victoria Shearer",
+                            "days": 2, "hours": 50}],
         "checklist": {"steps": [
             {"key": "contacts", "label": "Found people", "done": 1, "total": 1, "state": "done", "hint": ""},
             {"key": "applied", "label": "Applied", "done": 1, "total": 1, "state": "done", "hint": ""},
@@ -230,6 +235,55 @@ def test_the_reply_composer_shows_who_it_will_reach(tmp_path):
     assert "reply-box" not in out["unanswered"], (
         "offered a 'reply' on a thread nobody answered — that is a follow-up, and it has its "
         "own ladder, schedule and stop conditions")
+
+
+_NEXT_DRIVER = """
+const F = (new Function(SRC + `; return { nextAction, contactRow, CONTACT_OPEN };`))();
+const out = {};
+for (const [name, j] of Object.entries(CASES)) {
+  out[name] = { next: F.nextAction(j), rows: (j.contacts || []).map(c => F.contactRow(c)).join('') };
+}
+console.log(JSON.stringify(out));
+"""
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node not available")
+def test_an_unanswered_reply_outranks_every_follow_up(tmp_path):
+    """Follow-up ladders chase people who said NOTHING. A reply that nobody answered is the
+    opposite case and a far worse one — the system spent Apollo credits and an email to earn
+    it, then dropped it. It was live in the database when this was written: Gina Johnson at
+    Salesforce replied and the dashboard's Next action still said "1 follow-up due".
+
+    The fixture has a genuinely due follow-up, so this fails if the ranking ever flips back.
+    """
+    waiting = _job()
+    assert waiting["followups"]["due_count"] == 1, "fixture must have a competing follow-up"
+
+    answered = _job(url="http://j/answered", awaiting_reply=[])
+
+    script = tmp_path / "next.mjs"
+    script.write_text(
+        _STUBS
+        + f"const SRC = {json.dumps(_page_js())};\n"
+        + f"const CASES = {json.dumps({'waiting': waiting, 'answered': answered})};\n"
+        + _NEXT_DRIVER
+    )
+    proc = subprocess.run(["node", str(script)], capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, f"node failed:\n{proc.stderr[:2000]}"
+    out = json.loads(proc.stdout.strip().splitlines()[-1])
+
+    nxt = out["waiting"]["next"]
+    assert "Answer Victoria" in nxt, f"a waiting reply did not become the Next action: {nxt}"
+    assert "follow-up" not in nxt, "a follow-up outranked a human who actually replied"
+    assert "openReply(" in nxt, "the action does not open the composer"
+
+    assert "follow-up" in out["answered"]["next"], (
+        "with nothing awaiting an answer, the due follow-up must come back as Next")
+
+    # And it must be visible on the COLLAPSED row — a state you have to expand a contact to
+    # find is a state nobody sees for days, which is the failure this ticket is about.
+    assert "your turn" in out["waiting"]["rows"], (
+        "the collapsed contact row does not show that they are waiting on you")
 
 
 _NOTE_DRIVER = """

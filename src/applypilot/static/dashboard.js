@@ -501,7 +501,13 @@ function contactRow(c) {
     : (c.linkedin_url ? `<span class="pill off">🔗 —</span>` : ''));
   // `replied_at` is authoritative (CRM-1 writes it); `followup_status` is the ARCH-3 legacy
   // shim and stays as a fallback for rows recorded before reply detection existed.
-  if (c.replied_at) pills.push(`<span class="pill on">✓ replied ${esc(shortDate(c.replied_at))}</span>`);
+  // "They are waiting on you" outranks "they replied": both are true, but only one is a job.
+  // Shown on the COLLAPSED row, because a state you must expand a contact to discover is a
+  // state that goes unnoticed for days — which is the failure this whole ticket is about.
+  const conv = c.conversation || {};
+  if (conv.state === 'awaiting_us')
+    pills.push(`<span class="pill due" title="They replied and nobody has answered">💬 your turn${conv.days >= 1 ? ` · ${conv.days}d` : ''}</span>`);
+  else if (c.replied_at) pills.push(`<span class="pill on">✓ replied ${esc(shortDate(c.replied_at))}</span>`);
   else if (c.followup_state === 'due')      pills.push(`<span class="pill due">↻ due</span>`);
   else if (c.followup_status === 'replied') pills.push(`<span class="pill on">✓ replied</span>`);
   else if (c.followup_state === 'waiting')  pills.push(`<span class="pill off">↻ ${fuWhen(c.followup_due_in_h)}</span>`);
@@ -533,8 +539,15 @@ function threadView(c) {
   const intro = c.introduced_by
     ? `<div class="th-intro">👋 ${esc(c.introduced_by)} added them to this thread</div>` : '';
   const open = THREAD_OPEN.has(c.id) ? ' open' : '';
+  // Whose turn it is, on the summary line — the thread is collapsed by default, so a state
+  // only visible once you expand it is a state nobody sees.
+  const conv = c.conversation || {};
+  const turn = conv.state === 'awaiting_us'
+    ? `<span class="turn-us">⚠ waiting on you${conv.days >= 1 ? ` · ${conv.days}d` : ''}</span>`
+    : conv.state === 'awaiting_them'
+      ? `<span class="turn-them">you answered${conv.days >= 1 ? ` · ${conv.days}d ago` : ''}</span>` : '';
   return `<details class="thread"${open} ontoggle="onThreadToggle(this,'${esc(c.id)}')">` +
-         `<summary>💬 Conversation (${msgs.length})</summary>${intro}${rows}${replyBox(c)}</details>`;
+         `<summary>💬 Conversation (${msgs.length}) ${turn}</summary>${intro}${rows}${replyBox(c)}</details>`;
 }
 const THREAD_OPEN = new Set();
 function onThreadToggle(el, cid) { if (el.open) THREAD_OPEN.add(cid); else THREAD_OPEN.delete(cid); }
@@ -561,7 +574,7 @@ function replyBox(c) {
       onclick="toggleCc('${esc(c.id)}', decodeURIComponent('${encodeURIComponent(x)}'))">${esc(x)} ${off ? '＋' : '✕'}</button>`;
   }).join('');
   const body = REPLY_DRAFT.get(c.id) || '';
-  return `<div class="reply-box" data-cc="${esc(JSON.stringify(cc))}" data-to="${esc(t.to)}">
+  return `<div class="reply-box" data-reply-for="${esc(c.id)}" data-cc="${esc(JSON.stringify(cc))}" data-to="${esc(t.to)}">
     <div class="reply-hdr">↩ Reply to <strong>${esc(t.to)}</strong>${
       cc.length ? ` · cc ${cc.length}` : (t.cc || []).length ? ' · <span class="cc-none">cc removed</span>' : ''}</div>
     ${(t.cc || []).length ? `<div class="cc-row">${chips}</div>` : ''}
@@ -573,6 +586,24 @@ function replyBox(c) {
       <span class="reply-hint">Goes into this thread. No attachments.</span>
     </div>
   </div>`;
+}
+function firstName(name) { return String(name || '').trim().split(/\s+/)[0] || 'them'; }
+
+// Jump straight from the row's Next action into the composer: open the panel, the People tab,
+// the contact, their email channel and the conversation. Anything less leaves the operator to
+// find the thread themselves, which is how a reply ends up unanswered for a week.
+function openReply(url, cid) {
+  PANEL_OPEN.add(url);
+  TAB_OPEN.set(url, 'people');
+  CONTACT_OPEN.add(cid);
+  CHANNEL_TAB.set(cid, 'email');
+  THREAD_OPEN.add(cid);
+  refresh();
+  // The refresh replaces #jobs wholesale, so the textarea only exists after it has run.
+  setTimeout(() => {
+    const el = document.querySelector(`[data-reply-for="${cid}"] .reply-body`);
+    if (el) { el.focus(); el.scrollIntoView({block: 'center', behavior: 'smooth'}); }
+  }, 60);
 }
 function toggleCc(cid, address) {
   const set = REPLY_DROP.get(cid) || new Set();
@@ -939,6 +970,15 @@ function nextAction(j) {
     return `<button class="secondary" onclick="restartJob(${u}, this, false)">🔄 Restart end-to-end</button>`;
   if (!cs.length)
     return NET_AVAIL ? `<button onclick="findContacts(${u})">Find contacts</button>` : '';
+  // A human who wrote to you outranks every ladder. Follow-ups chase people who said nothing;
+  // this one already answered, and leaving them waiting wastes the only thing outreach is for.
+  const waiting = j.awaiting_reply || [];
+  if (waiting.length) {
+    const w = waiting[0];
+    const ago = w.days >= 1 ? `${w.days}d` : `${w.hours || 0}h`;
+    const more = waiting.length > 1 ? ` +${waiting.length - 1}` : '';
+    return `<button class="primary" onclick="openReply(${u},'${esc(w.id)}')">💬 Answer ${esc(firstName(w.full_name))} (${ago})${more}</button>`;
+  }
   const dueN = (f.due_count || 0) + (f.li_due_count || 0);
   if (dueN)
     return `<button class="amber" onclick="openTab(${u},'followups')">↻ ${dueN} follow-up${dueN>1?'s':''} due</button>`;

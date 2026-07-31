@@ -253,6 +253,43 @@ def reply_target(messages: list[dict], me: str | list[str]) -> dict | None:
     }
 
 
+#: Whose turn it is. `awaiting_us` is the one that matters: somebody wrote to you and the
+#: conversation has been sitting there ever since, which is the single worst outcome this
+#: system can produce — it spent Apollo credits and an email to earn a reply, then dropped it.
+AWAITING_US, AWAITING_THEM = "awaiting_us", "awaiting_them"
+
+
+def conversation_state(messages: list[dict], now=None) -> dict | None:
+    """Whose turn it is in this conversation, and how long it has been that way.
+
+    Returns None when nobody has written to us — a thread of our own messages is outreach with
+    a follow-up ladder, not a conversation, and describing it as "awaiting them" would put every
+    unanswered cold email into the same bucket as a real live thread.
+
+    Structural only, and honestly so: on `gmail.metadata` we know a message arrived and who it
+    was from, never what it said. "They replied and you have not answered" needs no body to be
+    true, which is exactly why it is worth saying.
+    """
+    from datetime import datetime, timezone
+
+    from applypilot.domain.timeutil import hours_since
+
+    msgs = [m for m in (messages or []) if isinstance(m, dict)]
+    if not any((m.get("direction") or "") == "in" for m in msgs):
+        return None
+    last = msgs[-1]                     # stored oldest-first (`ORDER BY sent_at`)
+    inbound = (last.get("direction") or "") == "in"
+    hours = hours_since((last.get("sent_at") or "").strip(), now or datetime.now(timezone.utc))
+    return {
+        "state": AWAITING_US if inbound else AWAITING_THEM,
+        "hours": None if hours is None else round(hours),
+        "days": None if hours is None else int(hours // 24),
+        "at": last.get("sent_at") or "",
+        "who": (last.get("from_name") or last.get("from_addr") or "") if inbound else "",
+        "messages": len(msgs),
+    }
+
+
 def _pick_from(msg: dict) -> str:
     """The raw From fragment, display name intact where we have one."""
     name = (msg.get("from_name") or "").strip()

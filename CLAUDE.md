@@ -12,7 +12,7 @@ campaign happens to be a job search** — see `docs/crm-prd.md` for where that g
 - **Packaging:** Hatchling, `src/` layout, single package `applypilot`
 - **Entry point:** `applypilot = "applypilot.cli:app"` (Typer CLI)
 - **License:** AGPL-3.0-only · **Version:** 0.4.0 (`pyproject.toml`)
-- **Tests:** 725 passing (`tests/`, 48 files) · ruff clean (line-length 120, py311) · ESLint clean
+- **Tests:** 764 passing (`tests/`, 50 files) · ruff clean (line-length 120, py311) · ESLint clean
 - **Schema version:** 1 (`applypilot migrate --status`) · **Settings:** 41 declared in `settings.py`
 
 ## Quick orientation
@@ -123,6 +123,9 @@ harness no longer has to import a web server to test scheduling.
 | `verification.py` | `verify_contact()` — moved from `networking/` (it never was a networking concern). `networking/verify.py` is a re-export shim. |
 | `company.py` | `companies_match()` — shared by connections, Apollo org resolution, and verification, which must all agree. |
 | `timeutil.py` | `parse_ts()` — one implementation of the naive/aware guard. |
+| `conversations.py` | Who is on a thread, who was just introduced, **who owes whom a reply** (`conversation_state`), and who a reply must reach (`reply_target` — the Cc is carried forward, never rebuilt). |
+| `intent.py` | CRM-4b. What a reply wants — rejection / not now / interested / introduction / question / auto-reply — from a ~200-char snippet. Rule-based and quick to say `unknown`. |
+| `metrics.py` | CRM-2 funnel + reply rates. Every rate carries its `n`; bounces leave the denominator. |
 
 **Adding a channel (e.g. SMS) is one `Channel` entry plus one prompt** — executed, not
 claimed: `test_adding_a_channel_needs_no_schema_change` defines an SMS channel that exists
@@ -518,7 +521,24 @@ company `"Jobs"` — the same substring bug class, inside the function written t
     account cannot serve the old address) — **2.4s → 0.043s**. Lesson 11 with a different unit:
     the hot path is hot for *everything*, not just the thing you happened to instrument.
 
-27. **The dangerous half of a feature is the half that looks identical when it is wrong.**
+27. **Everything chased people who said NOTHING; nothing noticed the ones who answered.**
+    Follow-up ladders, touch schedules, LinkedIn nudges — every signal in the system was built
+    around silence. The opposite case is rarer and much worse: somebody replied and it sat
+    there. It was live while CRM-4a was being finished — Gina Johnson at Salesforce replied and
+    the row still read "1 follow-up due". An unanswered reply now outranks every ladder, and the
+    pill is on the COLLAPSED row: a state you must expand a contact to discover is a state
+    nobody sees for days.
+
+28. **Measure the bug before fixing the bug the ticket describes.** CRM-4 said the introduced
+    contact would have no ladder anchor and would "silently never follow up", and prescribed
+    back-dating one to the introduction date. Checking the live Writer job showed the failure
+    does not happen — no `sent_message_id` means the email ladder correctly does not apply (you
+    cannot follow up on an email you never sent), and the checklist already counts him under
+    `emailed 2/3` so the job reads *partial*, not finished. **Implementing the prescribed fix
+    would have told the ladder we had emailed somebody we had not.** Two CRM tickets had already
+    shipped factually wrong instructions; a ticket is a hypothesis.
+
+29. **The dangerous half of a feature is the half that looks identical when it is wrong.**
     Replying in-thread either reaches David or it does not, and both outcomes render the same
     screen and log the same success. So the recipients are computed from the stored thread
     rather than posted by the browser, and the Cc is drawn as visible chips — the operator has
@@ -526,6 +546,14 @@ company `"Jobs"` — the same substring bug class, inside the function written t
     `"david@writer.com" in html` assertion passed with the chips deleted entirely, because the
     address was also sitting in a hidden `data-cc` attribute; only matching the rendered chip
     caught it. Mutation testing found that, not review.
+
+30. **A mutation harness that reports SURVIVED without running anything is worse than none.**
+    Eleven mutations came back clean in one batch; all eleven ran zero tests, because zsh does
+    **not** word-split an unquoted `$VAR`, so `pytest $TESTS` got one bogus path. It printed
+    exactly what a perfectly-tested codebase prints. The harness now fails loudly on "no tests
+    ran". Same session, third vacuous-test find: `classify("Sounds good?") != QUESTION` passes
+    no matter what the question regex does, because `sounds good` matches `interested` and
+    returns first — replacing the entire regex with a bare `\?` left every test green.
 
 ---
 
@@ -551,8 +579,17 @@ were still scheduled against it. CRM-4a then found what that reply actually was:
 **Everything runs on `gmail.metadata`, never `readonly`** — headers, threads and participants;
 it cannot read a body. Two consequences shape the whole design: `q=` search is unavailable, so
 threads are listed by id and never queried; and there is no snippet, so what a reply SAID is
-unknown. Reading reply CONTENT is CRM-4b and needs explicit consent — see that ticket for the
-trade.
+unknown.
+
+**CRM-4b can lift that, and is OFF.** `gmail.readonly` reads every message in the mailbox, so
+`CONTENT_SCOPE` is deliberately **not** in `SCOPES` — no future scope addition can drag it
+along, and a test pins that. Enabling it is `network --gmail-connect --with-content`, which
+prints the trade before the browser opens. With it on, only ~200-char snippets of replies to our
+own outreach are stored (`SNIPPET_MAX`, truncated **at the write**, never at the caller), and
+`domain/intent.py` labels them so a rejection offers *Mark rejected* rather than *draft a
+follow-up*. Revoking it stops adding content and **destroys nothing already stored** — which
+took real work, because `upsert_messages` is INSERT OR REPLACE and an hourly `tick` re-syncs
+every open thread.
 
 **Bounces are not replies, and not non-answers.** A bounce arrives inside our own thread, so
 thread-id matching accepts it happily; counting it as a reply stops the ladder and inflates
@@ -614,15 +651,15 @@ application waits indefinitely — and the longer it waits, the likelier somethi
 **The ARCH set is complete** (`ARCH-1` … `ARCH-6`, all ✅ 2026-07-28/29). `ARCH-4` was
 deliberately narrowed — see its ticket.
 
-**The CRM set is complete** (`CRM-3a`, `CRM-1`, `CRM-2`, `CRM-3b`, `CRM-4a` — shipped
-2026-07-30/31 on branch `crm-phase-1`, not yet merged to `main`). `CRM-4a`'s reply-in-thread
-piece landed 2026-07-31; its one open remainder is the ladder after a handoff.
+**The CRM set is complete and CLOSED** (`CRM-3a`, `CRM-1`, `CRM-2`, `CRM-3b`, `CRM-4a`,
+`CRM-4b` — 2026-07-30/31 on branch `crm-phase-1`). `CRM-4b` is **built and switched off**: it
+needs `gmail.readonly`, which reads the whole mailbox, so enabling it is a deliberate act
+(`network --gmail-connect --with-content`). Everything passes with it off, which is how this
+machine runs.
 
-**Open, in order:** `DISC-1` (discovery has still produced **0** jobs; all 15 were pasted by
-hand) → `CRM-4a` remainder (the ladder after a handoff: the introduced contact has no
-`submitted_at`, so pick its anchor deliberately rather than letting `touch_state` fall through
-to "not ready" and silently never follow up) → `CRM-4b` (reply CONTENT, needs `gmail.readonly`
-— an explicit consent decision, see the ticket).
+**Open:** `DISC-1` — discovery has produced **0** jobs; all 15 were pasted by hand. It is now
+the only open ticket, and by a wide margin the biggest gap: everything downstream of discovery
+works end to end, on jobs the operator has to find themselves.
 
 `CRM-1` (reply detection) is the one that changes what the app can *do*: 13 emails sent, 7
 follow-ups, **1 reply recorded — typed in by hand.** Everything it needs is already stored

@@ -1285,6 +1285,11 @@ def _contact_payload(c: dict, company: str | None = None, ladders: dict | None =
         "confidence": c.get("confidence") or "",
         "verify_note": c.get("verify_note") or "",
         "replied_at": c.get("replied_at") or "",
+        # Intro-deck engagement. A click, not an open — the difference between "a person read
+        # your deck" and "a spam filter fetched an image".
+        "deck_viewed_at": c.get("deck_viewed_at") or "",
+        "deck_last_at": c.get("deck_last_at") or "",
+        "deck_views": c.get("deck_views") or 0,
         # CRM-4: the stored conversation (headers only) and, when the other side added this
         # person to a thread, who did it — the handoff a boolean `replied` used to discard.
         "thread": thread or [],

@@ -242,12 +242,20 @@ def test_a_migrated_database_has_no_ladder_columns_left(db):
     The total is pinned too, so a new column is a DELIBERATE edit here rather than something
     that drifts in. 33 since CRM-1 added `replied_at` — which is a date for the UI and for
     time_to_reply, NOT ladder state: the halt still goes through `sequences`.
+
+    **36** since intro-deck tracking added `deck_viewed_at` / `deck_last_at` / `deck_views`.
+    Those are engagement facts about a CLICK, not ladder state either — nothing in
+    `domain/followup.py` reads them, and a deck view neither starts nor stops a sequence.
+    Note what is deliberately absent: no `deck_token` column. The token is DERIVED from the
+    contact id (`domain/deck.py`), so it survives a restore and cannot drift from the links
+    already sitting in somebody's inbox.
     """
     store.init_contacts(db)
     cols = {r[1] for r in db.execute("PRAGMA table_info(contacts)")}
     assert not [c for c in cols if "followup" in c or "followed_up" in c]
     assert "replied_at" in cols
-    assert len(cols) == 33, f"unexpected contacts columns: {sorted(cols)}"
+    assert "deck_token" not in cols, "the deck token must stay derived, not stored"
+    assert len(cols) == 36, f"unexpected contacts columns: {sorted(cols)}"
 
 
 def test_backfill_moves_state_and_verifies_clean(db):

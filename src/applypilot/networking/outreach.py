@@ -84,14 +84,24 @@ def _scheduling_link(profile: dict) -> str:
 INTRO_DECK_SENTENCE = "Here's a good intro deck we could go over during the call: {url}"
 
 
-def _intro_deck_url(profile: dict) -> str:
+def _intro_deck_url(profile: dict, contact: dict | None = None) -> str:
     """The intro-deck LINK offered in every outreach email.
 
     Distinct from `INTRO_DECK_PATH`, which ATTACHES a PDF. Priority mirrors
     `_scheduling_link`: INTRO_DECK_URL env → profile['personal']['intro_deck_url'] → ''.
+
+    When a contact is supplied the link carries their token (`?v=…`), so a click on the deck —
+    hosted on the sender's own site — can be attributed to a person. That is the one engagement
+    signal worth trusting: an open-tracking pixel fires when a spam filter looks at the message,
+    a deck click means somebody chose to read it. See `domain/deck.py`.
     """
-    return (os.environ.get("INTRO_DECK_URL", "").strip()
+    base = (os.environ.get("INTRO_DECK_URL", "").strip()
             or ((profile or {}).get("personal", {}).get("intro_deck_url") or "").strip())
+    if not base or not contact or not contact.get("id"):
+        return base
+    from applypilot.config import install_secret
+    from applypilot.domain import deck
+    return deck.deck_url(base, deck.token_for(contact["id"], install_secret()))
 
 
 def ensure_intro_deck(body: str, url: str) -> str:
@@ -240,7 +250,7 @@ def draft_email(profile: dict, job: dict, contact: dict, style: str = "", warm: 
         if link else
         "SCHEDULING LINK: none provided — invite a quick call/chat without a link.\n\n"
     )
-    deck = _intro_deck_url(profile)
+    deck = _intro_deck_url(profile, contact)
     deck_block = (
         f"INTRO DECK LINK (include in the EMAIL, not the LinkedIn note): {deck}\n"
         f'Offer it as "{INTRO_DECK_SENTENCE.format(url=deck)}" — or the same idea in your own '
@@ -327,7 +337,7 @@ def draft_followup(profile: dict, job: dict, contact: dict, touch: int = 1,
     intent = _TOUCH_INTENT.get(max(1, min(touch, 3)), _TOUCH_INTENT[3])
     directive = _resolve_style(profile, style)
     link = _scheduling_link(profile)
-    deck = _intro_deck_url(profile)
+    deck = _intro_deck_url(profile, contact)
 
     sent_on = (contact.get("submitted_at") or "")[:10]
     user = (
@@ -592,7 +602,7 @@ def draft_linkedin_followup(profile: dict, job: dict, contact: dict, touch: int 
     company = contact.get("company") or job.get("company") or job.get("site") or "the company"
     intent = _LI_TOUCH_INTENT.get(max(1, min(touch, 3)), _LI_TOUCH_INTENT[3])
     directive = _resolve_style(profile, style)
-    deck = _intro_deck_url(profile)
+    deck = _intro_deck_url(profile, contact)
     sent_on = (contact.get("dm_sent_at") or "")[:10]
 
     user = (

@@ -501,6 +501,66 @@ def tick(
         console.print(f"  {mark} {name:<11} {res.get('detail', '')}")
 
 
+@app.command("deck-hits")
+def deck_hits(
+    source: str = typer.Argument(None, help="File containing hit URLs/log lines. Omit to read stdin."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show who would be marked; change nothing."),
+) -> None:
+    """Import intro-deck clicks from an analytics export or server log.
+
+    Every outreach email carries the deck link with a per-contact token (`?v=…`), so a click can
+    be attributed to a person. This reads ANY text containing those URLs — a Plausible/GA export,
+    a Vercel or Cloudflare log, a copy-pasted list — and scans for the token shape rather than
+    parsing one provider's format, which is what lets it accept all of them.
+
+    A click is the one engagement signal worth trusting. Open tracking is not: Gmail proxies and
+    caches every image on delivery, Apple Mail pre-fetches them all by default, and corporate
+    gateways fetch everything to scan it — so an "open" is usually a machine.
+
+    Idempotent: re-importing the same export bumps the count and re-announces nothing.
+    """
+    import sys as _sys
+
+    from pathlib import Path
+
+    from applypilot import config as _config
+    from applypilot.database import get_connection, init_db, log_event
+    from applypilot.domain import deck as _deck
+    from applypilot.networking import store as _store
+
+    _config.load_env()
+    text = Path(source).read_text(encoding="utf-8", errors="replace") if source else _sys.stdin.read()
+    tokens = _deck.tokens_in(text)
+    if not tokens:
+        console.print("[yellow]No deck tokens found in that input.[/yellow]")
+        console.print("  Expected URLs containing [cyan]?v=<8 hex chars>[/cyan] — the links "
+                      "ApplyPilot puts in outreach emails.")
+        raise typer.Exit(0)
+
+    init_db()
+    conn = get_connection()
+    _store.init_contacts(conn)
+    contacts = [_store.get_contact(c["id"], conn) for c in _store.all_contacts_for_metrics(conn)]
+    hits = _deck.match_contacts(tokens, [c for c in contacts if c], _config.install_secret())
+
+    console.print(f"\n[bold]{len(tokens)} token(s) in the input, "
+                  f"{len(hits)} matched a contact[/bold]"
+                  f"{' [dim](dry run)[/dim]' if dry_run else ''}")
+    if len(tokens) > len(hits):
+        # Loud, because a silent mismatch reads as "nobody clicked" when it may mean the secret
+        # changed or the contact was deleted (§Lessons 15).
+        console.print(f"  [yellow]{len(tokens) - len(hits)} token(s) matched nobody[/yellow] — "
+                      "deleted contacts, or links from a different install.")
+    for c in hits:
+        first = "already seen" if (c.get("deck_viewed_at") or "").strip() else "[green]NEW[/green]"
+        console.print(f"  · {c.get('full_name', '?'):<24} {c.get('company', ''):<16} {first}")
+        if not dry_run and _store.mark_deck_viewed(c["id"], conn=conn):
+            log_event(c.get("job_url", ""), "outreach", "ok",
+                      f"{c.get('full_name') or 'They'} opened the intro deck.", conn)
+    if not hits:
+        console.print("  [dim]nothing to record[/dim]")
+
+
 @app.command()
 def schedule(
     install: bool = typer.Option(False, "--install", help="Install the hourly launchd job."),

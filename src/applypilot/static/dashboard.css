@@ -617,6 +617,9 @@
     letter-spacing:.04em; margin-bottom:5px; }
   .jd-desc { font-size:12.5px; white-space:pre-wrap; max-height:420px; overflow-y:auto;
     padding:9px 11px; border:1px solid var(--line); border-radius:8px; background:var(--surface2); }
+  /* Deck click — a distinct colour from "sent" and "replied": it is a third, weaker-than-reply
+     but real signal, and collapsing it into either would lose that. */
+  .pill.deck { background:#f3ecfd; color:#5b21b6; border-color:#d9c8f5; }
   .turn-us { color:#92400e; font-weight:700; }
   .turn-them { color:var(--faint); font-weight:400; }
   .reply-box { border-top:1px solid var(--line); padding:10px 12px; background:var(--surface); border-radius:0 0 8px 8px; }

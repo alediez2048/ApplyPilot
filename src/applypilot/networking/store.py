@@ -61,6 +61,13 @@ _CONTACT_COLUMNS: dict[str, str] = {
     # CRM-1. Set when an inbound message is matched to this contact. The email ladder halts via
     # `sequences` (ARCH-3) — this column is the DATE, for the UI and for time_to_reply (CRM-2).
     "replied_at": "TEXT",
+    # Intro-deck engagement. A CLICK, not an open: nobody's spam filter follows a link and reads
+    # a deck, so unlike an open-tracking pixel this means a person chose to look. No token column
+    # — the token is DERIVED from the contact id (`domain/deck.py`), so it survives a restore and
+    # cannot drift from the links already sitting in somebody's inbox.
+    "deck_viewed_at": "TEXT",     # first click
+    "deck_last_at": "TEXT",       # most recent click
+    "deck_views": "INTEGER",      # how many times
     "discovered_at": "TEXT",
     "updated_at": "TEXT",
 }
@@ -240,6 +247,32 @@ def _contact_label(contact_id: str, conn: sqlite3.Connection | None = None) -> s
         return (row["full_name"] if row and row["full_name"] else contact_id) or contact_id
     except Exception:  # noqa: BLE001
         return contact_id
+
+
+def mark_deck_viewed(contact_id: str, at: str = "",
+                     conn: sqlite3.Connection | None = None) -> bool:
+    """Record an intro-deck click. Returns True if this is the FIRST one for this contact.
+
+    `deck_viewed_at` keeps the first click (COALESCE), `deck_last_at` moves. The distinction
+    earns its keep: the first click is the event worth acting on, and re-importing the same
+    analytics export must not keep re-announcing it — the same idempotence lesson as the eleven
+    duplicate BOUNCED log lines (§Lessons 22).
+    """
+    if conn is None:
+        conn = get_connection()
+    init_contacts(conn)
+    when = at or datetime.now(timezone.utc).isoformat()
+    row = conn.execute("SELECT deck_viewed_at FROM contacts WHERE id = ?", (contact_id,)).fetchone()
+    if row is None:
+        return False
+    first = not (row[0] or "").strip()
+    conn.execute(
+        "UPDATE contacts SET deck_viewed_at = COALESCE(NULLIF(deck_viewed_at,''), ?), "
+        "deck_last_at = ?, deck_views = COALESCE(deck_views, 0) + 1, updated_at = ? WHERE id = ?",
+        (when, when, datetime.now(timezone.utc).isoformat(), contact_id),
+    )
+    conn.commit()
+    return first
 
 
 def mark_sent(contact_id: str, message_id: str, conn: sqlite3.Connection | None = None,

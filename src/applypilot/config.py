@@ -114,6 +114,35 @@ def ensure_dirs():
         d.mkdir(parents=True, exist_ok=True)
 
 
+def install_secret() -> str:
+    """A stable per-install secret, generated on first use at ~/.applypilot/install_secret.
+
+    Used to derive intro-deck visitor tokens (`domain/deck.py`). HMAC rather than a bare hash of
+    the contact id matters because contact ids are a hash of (job, identity) and are therefore
+    reproducible by anyone who knows the inputs — without a secret, the whole token space could
+    be enumerated from a guess at the id scheme.
+
+    Read via APP_DIR at call time so `APPLYPILOT_DIR` (and therefore every test) gets its own.
+    """
+    import secrets
+    path = APP_DIR / "install_secret"
+    try:
+        if path.exists():
+            existing = path.read_text(encoding="utf-8").strip()
+            if existing:
+                return existing
+    except OSError:
+        pass
+    value = secrets.token_urlsafe(32)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(value, encoding="utf-8")
+        os.chmod(path, 0o600)
+    except OSError:
+        pass   # unwritable dir: tokens still work for this process, just not across restarts
+    return value
+
+
 def load_profile() -> dict:
     """Load user profile from ~/.applypilot/profile.json."""
     import json

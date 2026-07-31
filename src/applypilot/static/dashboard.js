@@ -538,6 +538,13 @@ function contactRow(c) {
   if (conv.state === 'awaiting_us')
     pills.push(`<span class="pill due" title="They replied and nobody has answered">💬 your turn${conv.days >= 1 ? ` · ${conv.days}d` : ''}</span>`);
   else if (c.replied_at) pills.push(`<span class="pill on">✓ replied ${esc(shortDate(c.replied_at))}</span>`);
+  // A deck click. Shown even when they also replied — "read the deck AND answered" is a
+  // different person from "answered without looking", and it is the strongest signal available
+  // short of a reply. Never an open: an open-tracking pixel fires for spam filters.
+  if (c.deck_viewed_at)
+    pills.push(`<span class="pill deck" title="Clicked the intro deck link${
+      c.deck_views > 1 ? ` — ${c.deck_views} times, last ${esc(shortDate(c.deck_last_at))}` : ''
+    }">👁 opened the deck${c.deck_views > 1 ? ` ×${c.deck_views}` : ''}</span>`);
   else if (c.followup_state === 'due')      pills.push(`<span class="pill due">↻ due</span>`);
   else if (c.followup_status === 'replied') pills.push(`<span class="pill on">✓ replied</span>`);
   else if (c.followup_state === 'waiting')  pills.push(`<span class="pill off">↻ ${fuWhen(c.followup_due_in_h)}</span>`);

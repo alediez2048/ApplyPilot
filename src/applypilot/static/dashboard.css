@@ -620,6 +620,12 @@
   /* Deck click — a distinct colour from "sent" and "replied": it is a third, weaker-than-reply
      but real signal, and collapsing it into either would lose that. */
   .pill.deck { background:#f3ecfd; color:#5b21b6; border-color:#d9c8f5; }
+  /* Always-visible Gmail repair control on the contact meta row. */
+  .sync-gm { margin-top:5px; font-size:11.5px; display:flex; gap:8px; align-items:baseline; flex-wrap:wrap; }
+  .sync-gm.off { color:var(--faint); font-style:italic; }
+  .sync-gm.off code { font-style:normal; background:var(--surface2); padding:0 4px; border-radius:3px; }
+  .sync-note { color:#046c3c; }
+  .sync-note.bad { color:#92400e; }
   .turn-us { color:#92400e; font-weight:700; }
   .turn-them { color:var(--faint); font-weight:400; }
   .reply-box { border-top:1px solid var(--line); padding:10px 12px; background:var(--surface); border-radius:0 0 8px 8px; }

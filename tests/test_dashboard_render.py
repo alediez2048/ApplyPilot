@@ -620,6 +620,75 @@ def test_the_full_description_endpoint_returns_the_whole_posting(tmp_path, monke
     assert _jobs is not None
 
 
+_SYNC_DRIVER = """
+const F = (new Function(SRC + `; CONTENT_SCOPE = SCOPE; return { contactPanel, CONTACT_OPEN, CHANNEL_TAB };`))();
+const out = {};
+for (const [name, c] of Object.entries(CASES)) {
+  F.CONTACT_OPEN.add(c.id);
+  F.CHANNEL_TAB.set(c.id, 'email');
+  out[name] = F.contactPanel(c);
+}
+console.log(JSON.stringify(out));
+"""
+
+
+def _sync_cases(tmp_path, cases, scope=True):
+    script = tmp_path / "sync.mjs"
+    script.write_text(
+        _STUBS
+        # globalThis, not const: the driver reads it from INSIDE `new Function(...)`, whose body
+        # is evaluated in global scope and cannot see a module-level `const`.
+        + f"globalThis.SCOPE = {json.dumps(scope)};\n"
+        + f"const SRC = {json.dumps(_page_js())};\n"
+        + f"const CASES = {json.dumps(cases)};\n"
+        + _SYNC_DRIVER
+    )
+    proc = subprocess.run(["node", str(script)], capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, f"node failed:\n{proc.stderr[:2000]}"
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node not available")
+def test_the_gmail_repair_button_exists_when_the_conversation_does_not(tmp_path):
+    """The chicken-and-egg this fixes.
+
+    The button started life inside `conversationView`, which only renders once an inbound
+    message exists. So the control for "my thread is missing or something broke" was hidden
+    inside the thread that was missing — unreachable in the only state anyone needs it in.
+    It now lives on the contact META row, which renders for every open contact.
+    """
+    no_thread = _contact(id="c1", full_name="Nobody Replied", thread=[], reply_to=None,
+                         conversation=None)
+    with_thread = _job()["contacts"][3]          # has an inbound message
+    out = _sync_cases(tmp_path, {"no_thread": no_thread, "with_thread": with_thread})
+
+    for name, html in out.items():
+        assert "syncGmail(" in html, f"no Gmail fetch button on the {name} contact"
+        assert "Fetch from Gmail" in html
+    # Exactly once — it used to be in the banner too, and two identical buttons in one panel
+    # is noise pretending to be a choice.
+    assert out["with_thread"].count("syncGmail(") == 1
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node not available")
+def test_without_the_content_scope_the_button_explains_itself(tmp_path):
+    """A control that silently vanishes teaches nothing. On a default install it says what it
+    needs, because "there is no button" and "the feature is off" look identical otherwise."""
+    c = _contact(id="c1", full_name="X", thread=[], reply_to=None, conversation=None)
+    html = _sync_cases(tmp_path, {"x": c}, scope=False)["x"]
+    assert "syncGmail(" not in html
+    assert "--with-content" in html, "an unavailable feature must say what would enable it"
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node not available")
+def test_a_contact_with_no_email_gets_no_gmail_button(tmp_path):
+    """Nothing to search on."""
+    c = _contact(id="c1", full_name="No Address", email="", thread=[], reply_to=None,
+                 conversation=None)
+    html = _sync_cases(tmp_path, {"x": c})["x"]
+    assert "syncGmail(" not in html and "--with-content" not in html
+
+
 _TABS_DRIVER = """
 const F = (new Function(SRC + `; return { contactPanel, CONTACT_OPEN, CHANNEL_TAB, setChannel };`))();
 const out = {};

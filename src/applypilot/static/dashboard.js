@@ -299,6 +299,8 @@ let GMAIL_AVAIL = false;
 // gmail.readonly granted? Decides whether we can offer "⤓ Fetch from Gmail" at all. False on a
 // default install, where pasting is the only path.
 let CONTENT_SCOPE = false;
+//: The most recent /api/status jobs array, for click handlers that run after render.
+let LAST_JOBS = [];
 // `wantEmail` / `wantLi` select ONE channel — the contact panel shows them as tabs now, so
 // rendering both at once is what made every contact card ~200px tall. Omit both to get the
 // old stacked behaviour.
@@ -612,10 +614,10 @@ function conversationView(c) {
   // whole point is that "needs a reply" is a bucket you act on.
   const banner = conv.state === 'awaiting_us'
     ? `<div class="conv-turn us"><span>⚠ Your turn — ${esc(first)} replied ${esc(agoPhrase(conv))}</span>
-         <span class="conv-acts"><button class="linklike" onclick="openReplyHere('${esc(c.id)}')">Answer now</button>${syncGmailBtn(c)}${gmailLink(c, 'Open in Gmail ↗')}</span></div>`
+         <span class="conv-acts"><button class="linklike" onclick="openReplyHere('${esc(c.id)}')">Answer now</button>${gmailLink(c, 'Open in Gmail ↗')}</span></div>`
     : conv.state === 'awaiting_them'
       ? `<div class="conv-turn them"><span>Answered ${esc(agoPhrase(conv))} — waiting on ${esc(first)}.</span>
-         <span class="conv-acts">${syncGmailBtn(c)}${gmailLink(c, 'Open in Gmail ↗')}</span></div>`
+         <span class="conv-acts">${gmailLink(c, 'Open in Gmail ↗')}</span></div>`
       : '';
   const intro = c.introduced_by
     ? `<div class="th-intro">👋 ${esc(c.introduced_by)} added them to this thread</div>` : '';
@@ -816,16 +818,33 @@ function openReply(url, cid) {
 // Until this existed the CRM's memory stopped at its own outbox: a thread they started, an
 // email sent straight from Gmail, or one where they only CC'd you was invisible, because
 // everything was looked up by a thread id captured at send time.
+// Lives on the contact's META row, which renders for EVERY open contact — not inside the
+// conversation view, where it started. That was a chicken-and-egg: the conversation view only
+// renders once an inbound message exists, so the button for "my thread is missing or broke"
+// was hidden inside the thread that was missing. The repair tool has to be reachable from the
+// broken state, which is the only state anyone needs it in.
 function syncGmailBtn(c) {
-  if (!CONTENT_SCOPE || !c.email) return '';
-  return `<button class="linklike" title="Search Gmail for every conversation with ${esc(c.email)}"
-    onclick="syncGmail('${esc(c.id)}', this)">⟳ Pull all Gmail</button>`;
+  if (!c.email) return '';
+  if (!CONTENT_SCOPE) {
+    return `<div class="sync-gm off" title="Needs gmail.readonly">⟳ Fetch from Gmail — off.
+      Enable with <code>network --gmail-connect --with-content</code></div>`;
+  }
+  const msg = SYNC_MSG.get(c.id);
+  return `<div class="sync-gm">
+      <button class="linklike" title="Search Gmail for every conversation with ${esc(c.email)} — threads they started, mail sent from Gmail directly, and threads where they only Cc'd you"
+        onclick="syncGmail('${esc(c.id)}', this)">⟳ Fetch from Gmail</button>
+      ${msg ? `<span class="sync-note ${msg.bad ? 'bad' : ''}">${esc(msg.text)}</span>` : ''}
+    </div>`;
 }
+const SYNC_MSG = new Map();   // contact id -> {text, bad}; survives the 2.5s refresh
 async function syncGmail(cid, btn) {
   const label = btn.textContent;
   btn.disabled = true; btn.textContent = 'Searching Gmail…';
   const r = await post('/api/contact/sync-gmail', {contact_id: cid});
-  setReplyMsg(cid, r.message || (r.ok ? 'Synced.' : 'Could not sync.'), !r.ok);
+  // Reported HERE, beside the button, not in the reply composer — which may not exist yet, and
+  // when it does not is exactly when this button is being used.
+  SYNC_MSG.set(cid, {text: r.message || (r.ok ? 'Synced.' : 'Could not sync.'), bad: !r.ok});
+  setTimeout(() => { SYNC_MSG.delete(cid); }, 15000);
   btn.disabled = false; btn.textContent = label;
   refresh();
 }
@@ -902,6 +921,7 @@ function contactPanel(c) {
         ${c.phone ? ` · 📱 <a href="tel:${esc(c.phone)}">${esc(c.phone)}</a> <a class="sms" href="sms:${esc(c.phone)}">text</a>` : ''}
         ${c.connection_company ? `<span class="conn-co"> · ${esc(c.connection_company)}</span>` : ''}
         ${c.verify_note ? `<div class="verify-note ${esc(c.confidence)}">${c.confidence === 'high' ? '✓' : '?'} ${esc(c.verify_note)}</div>` : ''}
+        ${syncGmailBtn(c)}
       </div>
       <div class="chan">${tab('email','✉ Email')}${tab('linkedin','🔗 LinkedIn')}${tab('phone','📇 Phone & notes')}</div>
       ${body}
@@ -972,7 +992,34 @@ function bulkBar(j) {
     : `<button class="bulk" disabled title="${GMAIL_AVAIL ? 'No verified emails ready' : 'Connect Gmail first'}">Send all emails (${emailN})</button>`;
   // LinkedIn is per-contact "Compose" (you click Send) — no bulk, since each compose
   // navigates the one browser away from the previous unsent invite.
-  return `<div class="bulkbar">${emailBtn}<span class="li-hint">LinkedIn: use “Compose on LinkedIn” per contact →</span><span class="bulknote" data-bulk="${esc(j.url)}"></span></div>`;
+  // Repair the whole application at once. Per-contact fetch is fine when you know WHICH
+  // conversation is wrong; when something broke you usually do not, and checking six contacts
+  // one at a time is how you stop checking.
+  const syncN = cs.filter(c => c.email).length;
+  const syncBtn = (CONTENT_SCOPE && syncN)
+    ? `<button class="bulk" title="Search Gmail for every conversation with all ${syncN} contact(s) here" onclick="syncAllGmail(decodeURIComponent('${encodeURIComponent(j.url)}'), this)">⟳ Fetch all from Gmail</button>`
+    : '';
+  return `<div class="bulkbar">${emailBtn}${syncBtn}<span class="li-hint">LinkedIn: use “Compose on LinkedIn” per contact →</span><span class="bulknote" data-bulk="${esc(j.url)}"></span></div>`;
+}
+async function syncAllGmail(url, btn) {
+  const label = btn.textContent;
+  btn.disabled = true;
+  const note = document.querySelector(`.bulknote[data-bulk="${CSS.escape(url)}"]`);
+  const say = t => { if (note) note.textContent = t; };
+  const job = (LAST_JOBS || []).find(j => j.url === url) || {};
+  const targets = (job.contacts || []).filter(c => c.email);
+  let threads = 0, msgs = 0, failed = 0;
+  for (let i = 0; i < targets.length; i++) {
+    btn.textContent = `Fetching ${i + 1}/${targets.length}…`;
+    // Sequentially, not in parallel: this hits the Gmail API once per contact and a burst of
+    // six concurrent searches is how a personal token starts getting rate-limited.
+    const r = await post('/api/contact/sync-gmail', {contact_id: targets[i].id});
+    if (r.ok) { threads += r.threads || 0; msgs += r.messages || 0; } else { failed++; }
+  }
+  say(`Checked ${targets.length} contact(s): ${threads} conversation(s), ${msgs} new message(s)`
+      + (failed ? `, ${failed} failed` : ''));
+  btn.disabled = false; btn.textContent = label;
+  refresh();
 }
 async function sendAllEmails(url, btn) {
   if (!confirm('Send ALL verified-email drafts for this company now?')) return;
@@ -1138,6 +1185,10 @@ async function refresh() {
   GMAIL_AVAIL = !!data.gmail_available;
   CONTENT_SCOPE = !!data.content_scope;
   const allJobs = data.jobs || [];
+  // Kept for handlers that need the payload AFTER a click rather than during render — the
+  // bulk Gmail fetch has to know which contacts a job has, and an inline onclick cannot be
+  // handed an array.
+  LAST_JOBS = allJobs;
   renderJobFilters(allJobs);
   const shown = allJobs.filter(j => jobInBucket(j, JOB_FILTER));
   const emptyEl = document.getElementById('jobsEmpty');

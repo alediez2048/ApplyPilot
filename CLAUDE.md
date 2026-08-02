@@ -12,8 +12,8 @@ campaign happens to be a job search** — see `docs/crm-prd.md` for where that g
 - **Packaging:** Hatchling, `src/` layout, single package `applypilot`
 - **Entry point:** `applypilot = "applypilot.cli:app"` (Typer CLI)
 - **License:** AGPL-3.0-only · **Version:** 0.4.0 (`pyproject.toml`)
-- **Tests:** 874 passing (`tests/`, 53 files) · ruff clean (line-length 120, py311) · ESLint clean
-- **Schema version:** 2 (`applypilot migrate --status`) · **Settings:** 43 declared in `settings.py`
+- **Tests:** 905 passing (`tests/`, 54 files) · ruff clean (line-length 120, py311) · ESLint clean
+- **Schema version:** 2 (`applypilot migrate --status`) · **Settings:** 45 declared in `settings.py`
 
 ## Quick orientation
 
@@ -54,7 +54,7 @@ stops the moment a job hands over — see §Lessons 8, which cost two filled app
 | `database.py` | SQLite layer. Owns `jobs` + `job_events`. Thread-local WAL, additive column pass, then numbered migrations. `get_connection()` returns a subclass carrying a per-connection schema memo — see §Lessons 11. |
 | `llm.py` | Multi-provider client (round-robin + failover: OpenAI/Gemini/Anthropic/local). |
 | `view.py` | Static HTML results export. |
-| `web_dashboard.py` | **The operator dashboard.** 2,362 lines, **zero SQL** — data access goes through `repo/` and `store.py` (ARCH-4). |
+| `web_dashboard.py` | **The operator dashboard.** 2,779 lines, **zero SQL** — data access goes through `repo/` and `store.py` (ARCH-4). |
 | `repo/jobs.py` | Every `jobs` query as a named function. Owns `QUEUE_SQL` (what counts as an operator-added job). |
 | `scoring/resume_sections.py` | Parses the BASE résumé into its own sections. The base résumé is the template; tailoring rewrites content inside it. |
 | `settings.py` | **Every env var, one registry.** Types, defaults, validators, secret flags. Malformed values fail at startup naming the variable. `.env.example` is generated from it. |
@@ -130,10 +130,26 @@ harness no longer has to import a web server to test scheduling.
 | `interactions.py` | What a contact has actually DONE, from several sources. Our own actions (an email sent, a LinkedIn invite) are context, never engagement. |
 | `intent.py` | What a reply wants — rejection / not now / interested / introduction / question / auto-reply. Rule-based and quick to say `unknown`. |
 
-**Adding a channel (e.g. SMS) is one `Channel` entry plus one prompt** — executed, not
-claimed: `test_adding_a_channel_needs_no_schema_change` defines an SMS channel that exists
-nowhere in the codebase and drives it end to end. Readiness is data too (`ready=(("phone",
-None),)`), which is what removed the last `if channel is EMAIL` from `_is_ready`.
+**Adding a channel is one `Channel` entry plus one prompt** — executed, not claimed:
+`test_adding_a_channel_needs_no_schema_change` defines a channel that exists nowhere in the
+codebase and drives it end to end. Readiness is data too, which is what removed the last
+`if channel is EMAIL` from `_is_ready`.
+
+**SMS proved the claim and found the one line where it was false** (2026-08-01). Storage,
+scheduling, readiness and terminal state all worked untouched — but `followup_panel` ended with
+`e, li = buckets[EMAIL.name], buckets[LINKEDIN.name]` and spelled both key sets out by hand, so
+a third channel passed through every part of the engine correctly and then **vanished at the
+return statement**. It is built from `CHANNELS` now. Two more branches became data: the
+dashboard's `"LinkedIn " if channel.name == "linkedin"` is `channel.label`, and the anchor
+setter is a `{channel: store-function}` map.
+
+Real cost of the third channel: **one column** (`sms_sent_at`), one registry row, one prompt.
+
+That test used to name SMS, and shipping SMS broke it in a way worth keeping: its fake channel
+declared `default_schedule=(24, 72)`, but `channel_schedule()` resolves through the settings
+registry — so the moment `SMS_FOLLOWUP_SCHEDULE` became real, the fake channel silently
+inherited `[72, 168]` and the arithmetic stopped holding. **A test proving "an unknown channel
+works" has to name one that is actually unknown.** It is WhatsApp now.
 
 ### `networking/` — contacts, outreach, follow-up
 | File | Role |
@@ -145,7 +161,7 @@ None),)`), which is what removed the last `if channel is EMAIL` from `_is_ready`
 | `verify.py` | **Self-check**: does this person actually work there? Runs before contacts reach you. |
 | `rank.py` | Pick 3–5 (peers + a recruiter). |
 | `connections.py` | LinkedIn `Connections.csv` import + `companies_match()` (word-aware, strict/lenient). |
-| `outreach.py` / `prompt.py` | Drafts: cold email + LinkedIn note + **email follow-ups** + **LinkedIn follow-ups**, each written for its touch position. |
+| `outreach.py` / `prompt.py` | Drafts: cold email + LinkedIn note + **email follow-ups** + **LinkedIn follow-ups** + **texts** (`draft_sms`), each written for its touch position. |
 | `gmail_send.py` / `gmail_oauth.py` | Send via OAuth (preferred) or SMTP. Threading, signature, attachments, safeguards. |
 | `linkedin_dm.py` / `dm_prompt.py` | Dormant CLI-only compose helpers (auto-send abandoned — §Lessons). |
 | `linkedin_agent.py` | Opt-in read-only LinkedIn augmentation. Never sends. |
@@ -162,7 +178,7 @@ incapable of touching a LinkedIn page. See §Lessons.
 | Table | Owner | Purpose |
 |-------|-------|---------|
 | `jobs` (32 cols) | `database.py` | The 6-stage state machine. `_ALL_COLUMNS` is its source of truth. |
-| `contacts` (32 cols) | `networking/store.py` | People per job + outreach + verification. |
+| `contacts` (38 cols) | `networking/store.py` | People per job + outreach + verification. |
 | `touches` | `networking/touches.py` | One follow-up touch per row, ANY channel. `seq` is per (contact, channel). |
 | `sequences` | `networking/touches.py` | Terminal state per (contact, channel): `stopped` / `replied`. |
 | `connections` | `networking/connections.py` | Imported LinkedIn CSV. |
@@ -172,8 +188,8 @@ incapable of touching a LinkedIn page. See §Lessons.
 
 | `schema_migrations` | `migrations/` | Version, status, `claimed_at` lease. See §Lessons on the 300s lease. |
 
-Live counts (2026-07-31, end of day): jobs 16, contacts 64 (**42 emailed, 2 replied, 1
-bounced**), messages 54, interactions 2, touches 11, sequences 13, job_events 318,
+Live counts (2026-08-01): jobs 16, contacts 64 (**34 emailed, 2 replied, 1 bounced**,
+21 with a deck slug), messages 54, interactions 2, touches 12, sequences 13, job_events 321,
 connections 899. **Schema version 2** (migration 002 re-keyed `messages` per contact).
 
 **The second reply arrived on its own** — Gina Johnson at Salesforce, 2026-07-31, detected by
@@ -187,7 +203,7 @@ apply_error,agent_id,verification_confidence`), plus `rejected_at`.
 
 **`contacts` groups:** identity · outreach(`outreach_subject/message/status,sent_message_id`) ·
 threading(`thread_id,rfc_message_id`) · LinkedIn invite(`dm_status,dm_sent_at`) ·
-operator(`phone,notes`) · verification(`confidence,verify_note`).
+operator(`phone,notes`) · verification(`confidence,verify_note`) · SMS(`sms_sent_at`) · deck(`deck_slug,deck_viewed_at,deck_last_at,deck_views`).
 **Follow-up state is NOT here** — it is `touches` / `sequences`, keyed by channel (ARCH-3).
 
 ---
@@ -215,7 +231,11 @@ in that timeline. §Lessons 31.
 - **One tabbed panel**: People · Follow-ups · Materials · Activity. `PANEL_OPEN` / `TAB_OPEN`
   survive the 2.5s refresh.
 - **Contacts collapse to one line** with channel pills (`✉ sent · 🔗 connected · ↻ due`).
-  Opening one shows channels as tabs so email/LinkedIn/phone stop stacking.
+  Opening one shows channels as tabs: **✉ Email · 🔗 LinkedIn · 💬 Text**. Email and LinkedIn
+  hide when there is nothing behind them; **Text is always offered**, which looks inconsistent
+  and is not — that tab is where a phone number gets entered, so hiding it without one hides the
+  only way to add one. With no number the composer renders **disabled** rather than being
+  described in prose (§Lessons 41).
 - `⋯` row menu holds destructive actions (rejected, delete). It is anchored `right:0` and
   flips up near the bottom: `.table-wrap` clips with `overflow:hidden` to round the table's
   corners, so an absolutely-positioned menu is CUT, never scrolled to (it rendered as "✕ Ma",
@@ -243,14 +263,26 @@ here that touches the network needs the same treatment.
 
 ## Follow-up sequences
 
-Two independent ladders, both human-in-the-loop. Nothing auto-sends.
+**Three** independent ladders, all human-in-the-loop. Only email can auto-send.
 
-| | Email | LinkedIn |
-|---|---|---|
-| Anchor | `submitted_at` → last `touches.sent_at` | `dm_sent_at` → last `touches.sent_at` |
-| Default | `FOLLOWUP_SCHEDULE=48,96,168` (2d/4d/7d) | `LINKEDIN_FOLLOWUP_SCHEDULE=120,288` (5d/12d) |
-| Send | `gmail_send.send_followup()`, threaded | copy → open profile → you paste → `✓ I sent it` |
-| Stop | reply / stop / sequence complete | same |
+| | Email | LinkedIn | SMS / iMessage |
+|---|---|---|---|
+| Anchor | `submitted_at` | `dm_sent_at` | `sms_sent_at` |
+| Proof it started | `sent_message_id` | `dm_status` | operator clicks `✓ I sent it` |
+| Default | `48,96,168` (2d/4d/7d) | `120,288` (5d/12d) | `72,168` (3d/7d) |
+| Send | `send_followup()`, threaded | copy → open profile → paste | copy → open Messages → paste |
+| Stop | reply / stop / complete | same | same |
+
+All three anchor to the last `touches.sent_at` once a ladder is running; the column above is
+only the *first* message. **A phone number does NOT start the SMS ladder** — it is typed in by
+hand for anyone the operator MIGHT text, so keying readiness on it would mark a follow-up due
+for people nobody has ever messaged. `sms_sent_at` is the proof, and it is operator-asserted
+because nothing can watch Messages.app.
+
+SMS is the slowest and shortest ladder on purpose: a text interrupts, and the three-touch
+cadence that is normal in email reads as harassment on a phone. **Texts never carry a link** —
+a URL from an unrecognised number is the strongest spam signal there is, so `_intro_deck_url`
+is deliberately never consulted on that path, unlike every other channel.
 
 **Every outreach email offers the intro deck** (`INTRO_DECK_URL`, default
 `https://www.jorgealejandrodiez.com/intro/`) — cold email and all three follow-up touches.
@@ -275,8 +307,10 @@ and we generate the RFC `Message-ID` ourselves — both persisted at send time. 
 **all 13 sent emails have both ids and all 13 threads resolve live** against the mailbox, so
 `backfill_thread_ids()` has nothing left to recover.
 
-**Not built:** no scheduler (nothing fires while the dashboard is closed), no reply
-detection, **no per-company cap** — 5 contacts × 3 touches is 15 emails at one company.
+**Not built:** no scheduler (nothing fires while the dashboard is closed — `applypilot
+schedule --install` exists and has never been run), **no per-company cap** — 5 contacts × 3
+touches is 15 emails at one company, and SMS now adds 2 more per person on top. Reply detection
+is CLOSED (CRM-1).
 
 ---
 
@@ -620,6 +654,56 @@ company `"Jobs"` — the same substring bug class, inside the function written t
     control for "my thread is missing" was hidden inside the thread that was missing. It lives
     on the contact meta row now, which always renders.
 
+38. **The cause was not in the repo, and nothing that reads the repo could ever have found it.**
+    Two deploys of the deck collector "failed" five hours apart with no visible error. Three
+    agents ran 157 tool calls and correctly exonerated every suspect — the `@netlify/blobs`
+    dependency (`git diff d33b6ad HEAD -- package.json yarn.lock` is EMPTY, so the tree that
+    "failed" is the one building green), the bundler (real zip-it-and-ship-it zips both
+    functions at nodejs20.x), `gatsby-adapter-netlify` (it writes to `.netlify/functions-internal`,
+    a different directory), and the lockfile split. All correct, all useless: the cause was
+    **`AWS_LAMBDA_JS_RUNTIME = nodejs12.x`**, an environment variable set on the Netlify site
+    years ago and forgotten. `NODE_VERSION=20` and `.nvmrc` govern the BUILD node; the functions
+    runtime is a separate setting that lives only in the hosting account. Nothing had needed it
+    before because the site had never had a function. **When every in-repo hypothesis is
+    eliminated, stop generating more — go read the deploy log.** One click settled what a large
+    fan-out could not, and the agents' own synthesis said so and was ignored for one more round.
+
+39. **A function that takes a thread may not read the thread.** `conversation_transcript(contact,
+    thread)` renders the sender's own email and uses `thread` ONLY for the replier's name and
+    date — the reply TEXT must be handed over separately as `their_reply`, which is why
+    `_draft_reply` extracts the snippet first. Calling it with just the thread produced a
+    transcript containing one side of the conversation, so the SMS draft for a contact who had
+    replied could only restate, never continue. **The model caught it, not a test**: it refused
+    with *"only Alejandro's initial email is shown"* instead of inventing a continuation. It was
+    right and the prompt was wrong. A parameter being accepted is not evidence it is used.
+
+40. **A contradiction in a prompt is not fixed by saying the other side louder.** The SMS
+    standing block told the model a contact had replied and to never ask whether the email
+    arrived. The touch ladder — arriving under the heading `THIS MESSAGE:` — told it to earn the
+    channel, give the prior touchpoint and ask a yes/no, because it describes COLD outreach.
+    The heading won every time, and drafts for someone who had answered still asked whether the
+    message came through. Strengthening the standing text changed nothing. The fix was to
+    REPLACE the ladder with a continuation intent, not append to it. Two instructions in one
+    prompt disagreeing is a code bug, not a wording problem.
+
+41. **Describing a control is not showing it, and accurate copy hides that.** The SMS tab
+    rendered "No phone number for Blake — add one below to text them" plus the notes block. True,
+    helpful, and reported TWICE as "I'm not seeing the text UI" by someone looking straight at
+    it. An empty state that only describes what would appear reads as an empty tab. It renders
+    the whole composer disabled now. The render test made it worse: it asserted on the sentence,
+    so it passed happily for a tab showing nothing but the right words — the assertion has to be
+    that the control EXISTS and is disabled, never that the copy is correct.
+
+42. **The prompt's own example comes back verbatim — including when the example is a rule.**
+    §Lessons 9 again, third occurrence, this time in prose rather than a worked example: the SMS
+    prompt said to concede the channel with *"hope a text is okay — happy to move this back to
+    email"*, and that exact sentence appeared in **all five** generated drafts. Several people at
+    one company get texted, so a stock sentence across them proves a machine wrote it — worse
+    than omitting the move entirely. Naming the phrasings as burned and demanding variation
+    fixed it (0/5). **Generate against real data before believing a prompt**: reading it would
+    never have shown this, and the same pass also caught a raw scraper title reaching a draft as
+    "the Betterup uploaded job".
+
 ---
 
 ## The CRM phase (2026-07-30, branch `crm-phase-1`)
@@ -665,6 +749,35 @@ Stored text is capped (`SNIPPET_MAX` 200 auto / `PASTED_MAX` 2000 pasted) **at t
 `cv.strip_quoted_tail()` drops the quoted original first — Gmail's snippet runs through the
 quote header, so a short reply can be a third our own email quoted back.
 
+## Texting a recruiter (2026-08-01)
+
+The channel where getting it wrong costs the relationship, not the reply. A text interrupts:
+lock screen, whatever hour it is sent, next to messages from their family. And **in most cases
+the number came from Apollo, not from the recipient** — that is the whole difficulty, and the
+prompt says so out loud rather than implying it. A prompt that only says "be respectful"
+produces a polite sales text.
+
+Every draft must: identify the sender in the first clause (they have not saved this number),
+give the real prior touchpoint, concede the channel and offer to retreat to email, ask ONE
+yes/no answerable at a traffic light, and be explicitly fine to ignore. **Never a link** — a URL
+from an unrecognised number is the strongest spam signal there is, and carriers filter on it.
+No urgency, no scarcity, no calendar ask.
+
+**Standing is graded across five tiers**, not "did we email them": replied → emailed+invited →
+emailed → invited → fully cold. The cold case needs the copy to work hardest and was previously
+indistinguishable from having sent an invite; it is told to be shortest, not to sell, and not to
+be charming. `_sms_permission()` — and a test asserts all five render differently AND that
+exactly one is the weakest, after a mutation relabelled a tier while keeping its own wording.
+
+**A contact who has REPLIED gets a different message, not a gentler one.** The touch ladder is
+replaced, not appended to — see §Lessons 40 — and their actual words are passed as
+`their_reply`, see §Lessons 39. Without both, the draft asks whether the email arrived, of
+someone who answered it.
+
+`applypilot`'s own numbers: 15 tests in `tests/test_sms_prompt.py`, mutation-verified. Two
+survived the first pass — one was `"WEAK" in "WEAKEST…"`, **§Lessons 1 inside the test written
+to guard the grading**.
+
 ## Engagement signals — what is detectable, and what is not
 
 Established by LOOKING at the real mailbox, not by guessing:
@@ -673,7 +786,7 @@ Established by LOOKING at the real mailbox, not by guessing:
 |---|---|---|
 | Replied | `messages` | automatic |
 | **Booked a call** | cal.com emails the host — verified (`hello@cal.com`, "30 Min Meeting between …") | automatic |
-| **Opened the intro deck** | first-party beacon on the sender's OWN site | needs the collector deployed |
+| **Opened the intro deck** | first-party beacon on the sender's OWN site → Netlify Blobs → polled every 5 min | **automatic, live 2026-08-01** |
 | **Viewed your LinkedIn profile** | **not detectable** — absent from the LinkedIn data export AND no notification email exists. Only LinkedIn's UI has it, and automating that was abandoned twice (§Lessons 3) | operator-logged, tagged `noted` |
 
 **Email OPEN tracking was rejected outright.** A pixel fires when Gmail proxies and caches the
@@ -684,11 +797,29 @@ measures machines. A click does not.
 only one looks like it, in the one message whose point is sounding personal. The slug is
 STORED (`contacts.deck_slug`) because it cannot be derived — two people are often called Gina —
 assigned once and never moved, since links are already in inboxes. A second Gina gets `gina-b`,
-not `gina-2f9c`. **Gated by `INTRO_DECK_PATHS`, default OFF** (§Lessons 32); the Netlify rewrite
-`/intro/* → /intro/index.html` (status 200, a REWRITE — a 301 would strip the name) must be live
-first. It is, and it is a wildcard: any name works, unlimited, no rebuild.
+not `gina-2f9c`. Gated by `INTRO_DECK_PATHS` (default OFF in code, **ON here since
+2026-08-01**) — §Lessons 32: the scheme was switched once while the rewrite was still
+uncommitted and four recruiters got a 404. The Netlify rewrite `/intro/* → /intro/index.html`
+(status 200, a REWRITE — a 301 would strip the name) is a wildcard: any name works, unlimited,
+no rebuild, **no page is created per person and there is nothing to clean up**.
 `applypilot deck-relink` repoints existing drafts without regenerating them, and never touches a
 sent one — that draft is the only record of what went out.
+
+**The collector is two Netlify Functions** (`deploy/netlify/functions/`), deployed alone.
+`deck-hit.mjs` stores `{slug, at}` in a Netlify Blob (rolling window of 500, self-trimming — so
+retention needs no cleanup job); `deck-hits.mjs` serves them behind `DECK_HITS_TOKEN` and
+returns **503 rather than serving openly** when that variable is unset, because a collector that
+answers everyone because its config is missing looks like it is working. ApplyPilot POLLS over
+outbound HTTPS — the dashboard binds `127.0.0.1` and cannot receive a webhook, and that property
+is worth keeping. `deck_hits.poll()` is idempotent, so the window is re-read whole every time.
+
+**`deploy/netlify/` is the canonical copy.** The site repo diverged from it once and the drift
+was a `deck-hit.mjs` validating `body.v` against an 8-hex regex while the live beacon sent
+`{slug:"gina"}` — it would return **204, its success code**, on every real click and store
+nothing. `git checkout <old-commit> -- netlify/functions/` is the obvious move and the wrong one.
+
+**Never open your own `/intro/<name>` link** — it records that person opening the deck. Any
+made-up name returns 200 and matches nobody.
 
 ## The human-in-the-loop apply model (2026-07-30)
 
@@ -732,21 +863,26 @@ deliberately narrowed — see its ticket.
 `CRM-4b` — 2026-07-30/31). `gmail.readonly` is now GRANTED on this machine, but nothing reads
 automatically — see §Engagement signals.
 
-**Open:** `DISC-1` — discovery has produced **0** jobs; all 15 were pasted by hand. Still the
+**Open:** `DISC-1` — discovery has produced **0** jobs; all 16 were pasted by hand. Still the
 biggest gap by a wide margin: everything downstream of it works end to end, on jobs the
 operator has to find themselves.
 
-**Half-finished, and the only thing in the product that is:** intro-deck click collection. The
-two Netlify Functions (`deploy/netlify/`) are written and tested but NOT deployed — they were
-pulled out of the site commit after the bundled deploy failed (§Lessons 33), and their build
-error has never been seen. The `/intro/*` rewrite IS live, so links work; nothing records the
-clicks. To finish: deploy the functions alone, set `DECK_HITS_TOKEN` both sides, then
-`INTRO_DECK_PATHS=1` and `applypilot deck-relink`.
+~~**Half-finished:** intro-deck click collection.~~ **DONE 2026-08-01 — the whole chain is
+live**, and the cause of the two "build failures" was finally seen: **`AWS_LAMBDA_JS_RUNTIME =
+nodejs12.x`**, a variable set on the Netlify site years ago and forgotten. Deleting it was the
+entire fix; the function code shipped unchanged (§Lessons 38). `INTRO_DECK_PATHS=1`, 12 drafts
+relinked, 26 already-sent ones correctly untouched.
 
-`CRM-1` (reply detection) is the one that changes what the app can *do*: 13 emails sent, 7
-follow-ups, **1 reply recorded — typed in by hand.** Everything it needs is already stored
-(`thread_id` + `rfc_message_id` captured at send time, all 13 verified live against the
-mailbox); the only missing piece is reading. The `gmail.metadata` scope is now granted.
+Verified against the live site rather than assumed: write 204, invalid slug 204, wrong method
+405, unauthenticated read 401, wrong token 401, authenticated read round-trips the hit, and
+`/intro/<name>` still 200. ApplyPilot then pulled the probes and recorded **0** — they match no
+contact, which is the designed behaviour and the reason throwaway slugs were used.
+
+**Do not open your own `/intro/<name>` links.** Loading `/intro/dinara` records *Dinara opened
+the deck*. `/intro/<anything-made-up>` returns 200 and matches nobody.
+
+`CRM-1` (reply detection) is the one that changed what the app can *do*: it found a real reply
+nobody knew about and an address that had been bouncing silently since Jul 16.
 
 The ARCH-first order was chosen against the analysis's advice. The reason it was contentious
 is still true and worth remembering: **the ARCH set delivered no user-visible change.** All 9
@@ -793,7 +929,9 @@ What is actually open now, ordered by leverage:
 
 3. **Discovery has produced 0 jobs.** ~2,500 lines of working, tested discovery (JobSpy across
    five boards, 48 Workday portals, an AI scraper) and every one of the **13** jobs was pasted
-   in by hand. A configuration and trust problem, not a code problem — `DISC-1`.
+   in by hand. A configuration and trust problem, not a code problem — `DISC-1`. **With deck
+   tracking closed this is now the only large gap left**, and it is the one at the top of the
+   funnel: everything downstream works end to end on jobs the operator has to find themselves.
 
 4. **15 modules still execute SQL directly** (was 21) — `apply/launcher.py`,
    `enrichment/detail.py`, `view.py`, `cli.py`, `pipeline.py`, the three discovery scrapers,
@@ -801,11 +939,13 @@ What is actually open now, ordered by leverage:
    `test_sql_lives_only_in_the_data_layer` names the remainder in an allowlist, so the list can
    only shrink and no NEW module can join it. Deliberately deferred; see ARCH-4's ticket.
 
-5. **`web_dashboard.py` is 2,362 lines**, all Python, zero SQL. ~430 lines are pipeline
+5. **`web_dashboard.py` is 2,779 lines**, all Python, zero SQL. ~430 lines are pipeline
    orchestration (`run_dashboard_prepare/apply/fill_one/restart/continue`) that are not HTTP
    concerns. Extracting them is the natural companion to debt item 1.
 
-6. **No per-company outreach cap.** 5 contacts × 3 touches is 15 emails at one company.
+6. **No per-company outreach cap**, and it got worse. 5 contacts × 3 email touches is 15
+   emails at one company; the SMS ladder adds up to 2 texts per person on top of that, on the
+   one channel where volume is least forgivable. Nothing counts sends per employer.
 
 7. **`@react-pdf` is a major version behind** (3.4.5 installed, 4.5.1 current). The textkit
    layout crash in §Lessons 10 may be fixed upstream; the renderer now survives it either way,
@@ -917,9 +1057,18 @@ change still needs the `pip install` above — but that copy gives the file a ne
   Run the install alone, and verify with `python -c "import applypilot; print(applypilot.__version__)"`.
 - **Check for in-flight applies before ANY restart or reinstall.** The apply is a child of the
   dashboard, so it dies with the server. This happened three times on 2026-07-30 alone.
-- Working tree clean. **`main` is at `stable-crm-20260731`** — the CRM phase is merged and
-  pushed. Tags: `stable-arch2/3/5/6` · `stable-e2e-20260730` · `stable-crm-20260731`.
-- **A tag restores CODE only.** `~/.applypilot/` — 15 jobs, 51 contacts, 33 sent emails, 36
+- Working tree clean. **`main` is at `b9163ac`** — deck tracking live + the SMS channel,
+  merged and pushed. Tags: `stable-arch2/3/5/6` · `stable-e2e-20260730` · `stable-crm-20260731`.
+- **Check `git log --oneline -1` before believing anything about this repo.** Found on
+  2026-08-02 checked out on `crm-phase-1` (an ancestor of `main`, nothing unique on it) with
+  ~50 of main's files showing as *staged* — they only look staged because HEAD is an older
+  commit. Nothing was lost; `git checkout main` fixed it, and the tree already matched.
+  Alongside it were four **`" 2"`-suffixed duplicate files** (`web_dashboard 2.py`,
+  `service 2.py`, `dashboard 2.css`, `test_repo_jobs 2.py`) — macOS/iCloud sync-conflict copies
+  dated two days stale, containing none of the recent work. They **fail two tests**: the
+  SQL-boundary check counts them as new SQL-executing modules, and the duplicate test file runs
+  twice. Delete them; verify with `git log` and a clean `pytest` before diagnosing anything.
+- **A tag restores CODE only.** `~/.applypilot/` — 16 jobs, 64 contacts, 34 sent emails, 54
   stored messages, 899 connections — is not in git and needs its own backup
   (`~/.applypilot/backups/`). Nothing does this automatically. Latest:
   `applypilot-20260731-crm-phase-closed.db`. Use the **sqlite3 backup API, not `cp`** — the WAL

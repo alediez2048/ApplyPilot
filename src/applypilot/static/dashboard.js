@@ -422,8 +422,8 @@ function badge(status) {
   return `<span class="badge ${m.cls}"><span class="st-icon">${m.icon}</span> ${esc(m.label)}</span>`;
 }
 let NET_AVAIL = false;
-async function findContacts(url) {
-  const r = await post('/api/network', {url, per_job: 5});
+async function findContacts(url, skipKnown) {
+  const r = await post('/api/network', {url, per_job: 5, skip_known: skipKnown ? 1 : ''});
   if (!r.ok) alert(r.message || 'Could not start');
   refresh();
 }
@@ -778,8 +778,9 @@ async function addIntroduced(url, email, name, by, btn) {
 }
 function peopleList(j) {
   const cs = j.contacts || [];
-  const intro = introBanner(j);
+  let intro = introBanner(j);
   if (!cs.length) return intro + `<div class="pane-empty">No contacts yet. ${findContactsPrompt(j)}</div>`;
+  intro += anotherRoundPrompt(j, cs);
   const hot = cs.filter(c => c.hot), cold = cs.filter(c => !c.hot);
   let out = intro + bulkBar(j);
   if (hot.length)  out += `<div class="ppl-group hot">🔥 People you know here <span class="ppl-g-n">${hot.length}</span></div>` + hot.map(c => contactRow(c)).join('');
@@ -822,7 +823,12 @@ function contactRow(c) {
 
   // 2. The follow-up ladder — only meaningful while nobody has replied.
   if (!c.replied_at && conv.state !== 'awaiting_us') {
-    if (c.followup_state === 'due')          pills.push(`<span class="pill due">↻ due</span>`);
+    // `exhausted` first: every channel we used has run out and nobody answered. It is the END
+    // of the ladder, so showing "↻ due" beside it would be contradictory — and a contact who
+    // was never written to must NEVER wear this, which is why the server computes it from
+    // ladder state rather than from "no reply".
+    if (c.exhausted)                         pills.push(`<span class="pill none" title="Every follow-up on every channel has been sent and nobody answered">🚫 no response</span>`);
+    else if (c.followup_state === 'due')     pills.push(`<span class="pill due">↻ due</span>`);
     else if (c.followup_state === 'waiting') pills.push(`<span class="pill off">↻ ${fuWhen(c.followup_due_in_h)}</span>`);
   }
 
@@ -1359,10 +1365,139 @@ const NEEDS_SEEN = new Set();
 
 // What "needs you" means, and it is exactly what the row's own Next action offers:
 // a filled form waiting to be submitted, a blocker only a human can clear, or follow-ups due.
+// ── What is outstanding, computed ONCE ──────────────────────────────────────
+//
+// The tab badge, the per-job Next button, the Follow-ups tab count and the header aggregator
+// all have to agree. They did not: `needsYou` and `nextAction` summed email + LinkedIn and
+// silently ignored SMS the moment that channel shipped, so a job whose only outstanding action
+// was a text read as "nothing to do". §Lessons 21 — a derived number computed in two places is
+// two numbers. Everything below reads `dueByChannel`.
+
+//: Every follow-up ladder that is due on one job, per channel. Reads the payload keys
+//: `followup_panel` emits, which are built from CHANNELS — so a fourth channel appears here
+//: with no change, the same property the ladder engine has.
+const FOLLOWUP_CHANNELS = [
+  { key: '',      name: 'email',    icon: '✉',  label: 'email' },
+  { key: 'li_',   name: 'linkedin', icon: '🔗', label: 'LinkedIn' },
+  { key: 'sms_',  name: 'sms',      icon: '💬', label: 'text' },
+];
+function dueByChannel(j) {
+  const f = j.followups || {};
+  const out = {};
+  let total = 0;
+  for (const ch of FOLLOWUP_CHANNELS) {
+    const n = f[`${ch.key}due_count`] || 0;
+    out[ch.name] = n;
+    total += n;
+  }
+  out.total = total;
+  return out;
+}
+
 function needsYou(j) {
   if (j.status === 'ready_to_submit' || j.status === 'needs_human') return true;
-  const f = j.followups || {};
-  return ((f.due_count || 0) + (f.li_due_count || 0)) > 0;
+  if ((j.awaiting_reply || []).length) return true;   // somebody answered and is still waiting
+  return dueByChannel(j).total > 0;
+}
+
+//: Every outstanding action across every application, grouped and ordered by what should be
+//: done first. Ordering is the whole value: a flat count of 31 tells you nothing, and a list
+//: that puts "3 LinkedIn invites left" above "someone replied 4 days ago" is actively harmful.
+//: A human who wrote to you outranks every ladder (§Lessons 27).
+function pendingActions(jobs) {
+  const js = jobs || [];
+  const g = (key, icon, label, urgent) => ({ key, icon, label, urgent, n: 0, jobs: [] });
+  const groups = [
+    g('replies',   '💬', 'waiting on your reply',   true),
+    g('submit',    '📋', 'filled, ready to submit', true),
+    g('human',     '⚠',  'need you at the keyboard', true),
+    g('fill',      '▶',  'ready to fill',           false),
+    g('followups', '↻',  'follow-ups due',          false),
+    g('outreach',  '✉',  'contacts not emailed',    false),
+    g('contacts',  '🔍', 'no contacts found yet',   false),
+    g('failed',    '✕',  'failed, need a decision', false),
+  ];
+  const by = Object.fromEntries(groups.map(x => [x.key, x]));
+  const add = (key, j, n) => { if (n > 0) { by[key].n += n; by[key].jobs.push(j.url); } };
+
+  for (const j of js) {
+    if (j.status === 'rejected') continue;      // a closed application owes you nothing
+    add('replies', j, (j.awaiting_reply || []).length);
+    if (j.status === 'ready_to_submit') add('submit', j, 1);
+    if (j.status === 'needs_human') add('human', j, 1);
+    if (j.status === 'ready') add('fill', j, 1);
+    if (j.status === 'failed') add('failed', j, 1);
+    add('followups', j, dueByChannel(j).total);
+    if (!(j.contacts || []).length) add('contacts', j, 1);
+    else {
+      // Contacts found but never written to. From the checklist, which already knows the
+      // denominator — recomputing it here is how the two would disagree.
+      const step = ((j.checklist || {}).steps || []).find(s => s.key === 'emailed');
+      if (step && step.state !== 'na') add('outreach', j, Math.max(0, (step.total || 0) - (step.done || 0)));
+    }
+  }
+  // Per-channel breakdown for the follow-ups line, so "6 follow-ups due" can say which kind.
+  const channels = FOLLOWUP_CHANNELS.map(ch => ({
+    ...ch, n: js.reduce((a, j) => a + (j.status === 'rejected' ? 0 : dueByChannel(j)[ch.name]), 0),
+  })).filter(c => c.n > 0);
+
+  const live = groups.filter(x => x.n > 0);
+  return { total: live.reduce((a, x) => a + x.n, 0), groups: live, channels,
+           urgent: live.filter(x => x.urgent).reduce((a, x) => a + x.n, 0) };
+}
+
+let TODO_OPEN = false;
+function toggleTodo() {
+  TODO_OPEN = !TODO_OPEN;
+  renderTodo(LAST_JOBS || []);
+}
+// Jump to the first job with this kind of work outstanding, open on the right tab.
+function gotoTodo(url, tab) {
+  TODO_OPEN = false;
+  PANEL_OPEN.add(url);
+  if (tab) TAB_OPEN.set(url, tab);
+  renderTodo(LAST_JOBS || []);
+  rerenderJobs();
+  const row = document.getElementById('jobs');
+  if (row && row.scrollIntoView) row.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+const _TODO_TAB = { replies: 'people', followups: 'followups', outreach: 'people',
+                    contacts: 'people' };
+
+function renderTodo(jobs) {
+  const p = pendingActions(jobs);
+  const btn = document.getElementById('todoBtn');
+  const count = document.getElementById('todoCount');
+  const panel = document.getElementById('todoPanel');
+  const list = document.getElementById('todoList');
+  if (!btn || !count || !panel || !list) return p;
+
+  count.textContent = p.total;
+  // Amber only when something is genuinely time-sensitive. A badge that is permanently lit
+  // trains you to ignore it — the same reason the tab badge counts what is NEW (CRM-3a).
+  btn.classList.toggle('urgent', p.urgent > 0);
+  btn.classList.toggle('idle', p.total === 0);
+  btn.setAttribute('aria-expanded', TODO_OPEN ? 'true' : 'false');
+  panel.hidden = !TODO_OPEN;
+
+  if (!TODO_OPEN) return p;
+  if (!p.total) {
+    list.innerHTML = `<div class="todo-empty">Nothing waiting. Every application is up to date.</div>`;
+    return p;
+  }
+  list.innerHTML = p.groups.map(x => {
+    const first = x.jobs[0];
+    const sub = x.key === 'followups' && p.channels.length > 1
+      ? `<div class="todo-sub">${p.channels.map(c => `${c.icon} ${c.n} ${c.label}`).join(' · ')}</div>`
+      : '';
+    const where = x.jobs.length > 1 ? ` <span class="todo-where">across ${x.jobs.length} jobs</span>` : '';
+    return `<button class="todo-row${x.urgent ? ' urgent' : ''}"
+      onclick="gotoTodo(${tagArg(first)},'${_TODO_TAB[x.key] || ''}')">
+      <span class="todo-n">${x.n}</span>
+      <span class="todo-label">${x.icon} ${esc(x.label)}${where}</span>${sub}</button>`;
+  }).join('');
+  return p;
 }
 
 // Co-pilot apply ENDS by waiting for the operator, and the queue stays paused until they act.
@@ -1484,6 +1619,10 @@ function renderJobsTable(allJobs, editing) {
 // already fetched.
 function rerenderJobs() { renderJobsTable(LAST_JOBS || [], isEditingJobs()); }
 
+// The aggregator counts the WHOLE set, never the filtered view. A search that hides a job
+// does not mean its follow-up stopped being due — a counter that drops as you type is
+// worse than none, because it reads as work disappearing.
+
 async function refresh() {
   // NOTE: this used to `return` here, aborting the WHOLE refresh — stats, progress, the apply
   // log, the metrics panel and the (N) ⚠ tab badge all froze along with the jobs table. Leave
@@ -1511,6 +1650,7 @@ async function refresh() {
   // bulk Gmail fetch has to know which contacts a job has, and an inline onclick cannot be
   // handed an array.
   LAST_JOBS = allJobs;
+  renderTodo(allJobs);
   renderJobsTable(allJobs, editing);
   document.querySelectorAll('details.rowmenu[open]').forEach(positionRowMenu);
 }
@@ -1526,6 +1666,31 @@ async function unmarkRejected(url, btn) {
   if (r.ok) refresh(); else { btn.disabled = false; alert(r.message || 'Failed'); }
 }
 // The People toggle in the footer: the expandable contacts panel when contacts exist, or a
+// Round two. Offered ONLY when the first round is genuinely spent: everybody found has been
+// written to, every ladder on every channel has run out, and nobody answered. Showing it any
+// earlier competes with the follow-ups that have not been sent yet — and the cheapest next
+// move is always finishing the sequence you already started, not buying more contacts.
+//
+// It spends Apollo credits, so the label says what it will do rather than being a bare verb.
+function anotherRoundPrompt(j, cs) {
+  if (!NET_AVAIL || !cs.length) return '';
+  const answered = cs.filter(c => c.replied_at || (c.conversation || {}).state === 'awaiting_us');
+  if (answered.length) return '';                 // somebody is talking to you; work that first
+  const spent = cs.filter(c => c.exhausted);
+  if (spent.length < cs.length) return '';        // a sequence is still running
+  const running = j.network_running;
+  const dis = running ? 'disabled' : '';
+  const label = running ? '⏳ looking for new people…' : '🔄 Find a new round of contacts';
+  return `<div class="round2">
+      <div class="round2-txt"><b>No response from any of the ${cs.length}.</b>
+        Every follow-up has been sent and nobody replied.</div>
+      <button class="secondary" ${dis}
+        title="Searches the same company again, skipping everyone above, and drafts fresh outreach. Spends Apollo credits."
+        onclick="findContacts(decodeURIComponent('${encodeURIComponent(j.url)}'), true)">${label}</button>
+      ${j.network_note && !running ? `<div class="netnote">${esc(j.network_note)}</div>` : ''}
+    </div>`;
+}
+
 // "Find contacts" action when there are none. Sits right next to Activity so both are obvious.
 // Shown in the People tab when no contacts have been found yet.
 function findContactsPrompt(j) {
@@ -1590,7 +1755,7 @@ function stepStrip(j) {
 // The ONE thing to do next, in priority order. Returns '' when the job is fully worked.
 function nextAction(j) {
   const u = `decodeURIComponent('${encodeURIComponent(j.url)}')`;
-  const cl = j.checklist || {}, f = j.followups || {};
+  const cl = j.checklist || {};
   const cs = j.contacts || [];
   if (j.status === 'rejected') return '';
   if (j.status === 'ready')
@@ -1612,9 +1777,14 @@ function nextAction(j) {
     const more = waiting.length > 1 ? ` +${waiting.length - 1}` : '';
     return `<button class="primary" onclick="openReply(${u},'${esc(w.id)}')">💬 Answer ${esc(firstName(w.full_name))} (${ago})${more}</button>`;
   }
-  const dueN = (f.due_count || 0) + (f.li_due_count || 0);
-  if (dueN)
-    return `<button class="amber" onclick="openTab(${u},'followups')">↻ ${dueN} follow-up${dueN>1?'s':''} due</button>`;
+  const due = dueByChannel(j);
+  if (due.total) {
+    // Name the channel when only one kind is outstanding — "1 text due" is an instruction,
+    // "1 follow-up due" makes you open the tab to find out which.
+    const only = FOLLOWUP_CHANNELS.filter(c => due[c.name] > 0);
+    const what = only.length === 1 ? `${only[0].icon} ${due.total} ${only[0].label}` : `↻ ${due.total} follow-up`;
+    return `<button class="amber" onclick="openTab(${u},'followups')">${what}${due.total>1?'s':''} due</button>`;
+  }
   const step = (cl.steps || []).find(s => s.state === 'todo' || s.state === 'partial');
   if (step && step.key === 'emailed')
     return `<button class="primary" onclick="openTab(${u},'people')">✉ Email ${step.total - step.done} more</button>`;
@@ -1629,16 +1799,14 @@ const TAB_OPEN = new Map();
 function activeTab(j) {
   const t = TAB_OPEN.get(j.url);
   if (t) return t;
-  return (j.followups && j.followups.due_count) ? 'followups' : 'people';
+  return dueByChannel(j).total ? 'followups' : 'people';
 }
 function jobTabs(j) {
   const u = `decodeURIComponent('${encodeURIComponent(j.url)}')`;
   const cur = activeTab(j);
-  const f = j.followups || {};
   const defs = [
     ['people',    'People',     (j.contacts || []).length, false],
-    ['followups', 'Follow-ups', (f.due_count + (f.li_due_count || 0)) || 0,
-      !!(f.due_count || f.li_due_count)],
+    ['followups', 'Follow-ups', dueByChannel(j).total, dueByChannel(j).total > 0],
     ['materials', 'Materials',  (j.materials || []).length, false],
     ['activity',  'Activity',   (j.activity || []).length, false],
     ['interactions', 'Interactions', (j.interactions || {}).total || 0,

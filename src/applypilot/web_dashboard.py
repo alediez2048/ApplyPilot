@@ -180,18 +180,22 @@ class NetworkRunner:
         with self._lock:
             return {k: dict(v) for k, v in self._tasks.items()}
 
-    def start(self, job_url: str, per_job: int, use_linkedin: bool) -> tuple[bool, str]:
+    def start(self, job_url: str, per_job: int, use_linkedin: bool,
+              skip_known: bool = False) -> tuple[bool, str]:
         with self._lock:
             if self._tasks.get(job_url, {}).get("running"):
                 return False, "already finding contacts for this job"
-            self._tasks[job_url] = {"running": True, "note": "searching…", "error": "",
-                                    "finished_at": None}
+            self._tasks[job_url] = {
+                "running": True, "error": "", "finished_at": None,
+                "note": "looking for people you have not contacted…" if skip_known
+                        else "searching…"}
         threading.Thread(
-            target=self._run, args=(job_url, per_job, use_linkedin), daemon=True
+            target=self._run, args=(job_url, per_job, use_linkedin, skip_known), daemon=True
         ).start()
         return True, "started"
 
-    def _run(self, job_url: str, per_job: int, use_linkedin: bool) -> None:
+    def _run(self, job_url: str, per_job: int, use_linkedin: bool,
+             skip_known: bool = False) -> None:
         note, error = "done", ""
         try:
             from applypilot.config import require_contacts_provider
@@ -217,7 +221,9 @@ class NetworkRunner:
             # dropped everything it found. The CLI path passed a real row and worked, which is
             # why it looked like a coverage problem.
             job = dict(row)
-            res = service.find_contacts_for_job(job, per_job=per_job, use_linkedin=use_linkedin)
+            res = service.find_contacts_for_job(job, per_job=per_job,
+                                                use_linkedin=use_linkedin,
+                                                skip_known=skip_known)
             note = f"{res['found']} found, {res['revealed']} with email ({res['note']})"
         except Exception as exc:  # noqa: BLE001
             error = str(exc)
@@ -1255,6 +1261,7 @@ def _legacy_followup_status(ladder: dict) -> str:
 def _contact_payload(c: dict, company: str | None = None, ladders: dict | None = None,
                      conn_matches: dict | None = None, thread: list | None = None) -> dict:
     from applypilot.domain.followup import EMPTY_LADDER
+    from applypilot.domain.followup import exhausted as _exhausted
     from applypilot.networking import connections
     # Prebuilt by the caller in one query when rendering a whole job; falls back to a
     # single lookup so this stays usable on its own.
@@ -1309,6 +1316,10 @@ def _contact_payload(c: dict, company: str | None = None, ladders: dict | None =
         "sms_followup_count": sms_l["count"],
         "sms_followup_status": _legacy_followup_status(sms_l),
         "sms_followup_message": sms_l["draft_body"],
+        # "No response": every channel we actually USED has run out and nobody answered.
+        # Derived here rather than stored — a column would be stale between a touch being sent
+        # and the next recompute, which is the §Lessons 21 failure with a new name.
+        "exhausted": _exhausted(c, {"email": email_l, "linkedin": li_l, "sms": sms_l}),
         # LinkedIn DM channel state + per-contact readiness (has note + profile, not sent).
         "dm_status": c.get("dm_status") or "none",
         "dm_error": c.get("dm_error") or "",
@@ -2550,6 +2561,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 url = data.get("url", "")
                 per_job = int(data.get("per_job") or 5)
                 use_linkedin = str(data.get("use_linkedin", "")).lower() in {"1", "true", "yes", "on"}
+                # Round two: exclude everyone already on this job so the search reaches deeper
+                # into the ranked pool instead of re-picking (and overwriting) the same five.
+                skip_known = str(data.get("skip_known", "")).lower() in {"1", "true", "yes", "on"}
                 if not url:
                     _json_response(self, {"ok": False, "message": "url required"}, 400)
                     return
@@ -2557,7 +2571,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     _json_response(self, {"ok": False,
                                           "message": "Set APOLLO_API_KEY (paid plan) to find contacts"}, 409)
                     return
-                ok, msg = _network.start(url, per_job, use_linkedin)
+                ok, msg = _network.start(url, per_job, use_linkedin, skip_known)
                 _json_response(self, {"ok": ok, "message": msg}, 200 if ok else 409)
                 return
             if path == "/api/outreach":

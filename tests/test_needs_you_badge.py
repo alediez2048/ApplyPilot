@@ -24,6 +24,8 @@ from applypilot import web_dashboard
 _STUBS = """
 const el = () => ({ innerHTML:'', textContent:'', hidden:false, value:'', style:{},
   closest:()=>el(), querySelector:()=>el(), querySelectorAll:()=>[],
+  setAttribute(){}, getAttribute:()=>null, removeAttribute(){}, focus(){},
+  scrollIntoView(){},
   classList:{toggle(){},add(){},remove(){}}, addEventListener(){}, appendChild(){}, dataset:{} });
 globalThis.document = { title: '', hasFocus: () => FOCUSED.value,
   getElementById: el, querySelectorAll: ()=>[], querySelector: el,

@@ -117,6 +117,7 @@ def find_contacts_for_job(
     use_linkedin: bool = False,
     dry_run: bool = False,
     draft: bool = True,
+    skip_known: bool = False,
 ) -> dict:
     """Find + persist up to `per_job` contacts for a job.
 
@@ -125,6 +126,11 @@ def find_contacts_for_job(
         per_job: how many contacts to find/reveal.
         use_linkedin: reserved for NET-5 (fallback); no-op in NET-1.
         dry_run: search + rank only — no reveal (no Apollo credits), no persistence of email.
+        skip_known: drop anyone already stored for this job BEFORE selection, so a second round
+            reaches deeper into the ranked pool instead of re-picking the same five. Without it
+            a re-run is a no-op that spends credits: `select()` scores title relevance and is
+            deterministic, so it returns the same top N, and `upsert_contact` then overwrites
+            the rows you already had. This is the "nobody replied, find me new people" path.
 
     Returns:
         {"company": str|None, "found": int, "revealed": int, "contacts": [dict], "note": str}
@@ -197,6 +203,29 @@ def find_contacts_for_job(
     # real @zello.com recruiters were never looked at — they were candidates 6..25. Stopping
     # after batch one turned an ambiguous employer into a silent zero.
     ranked = rank.select(candidates, role, n=len(candidates))
+
+    # Round two. Excluded by the SAME identity function that stores them — computing a fresh
+    # name/email match here would be a second answer to "is this the same person", and the two
+    # would disagree (§Lessons 1 is a whole family of exactly that).
+    already = 0
+    if skip_known and job_url:
+        known = {c["id"] for c in store.get_contacts_for_job(job_url)}
+        before = len(ranked)
+        ranked = [c for c in ranked
+                  if store.contact_id(job_url, c.get("linkedin_url"), c.get("full_name"))
+                  not in known]
+        already = before - len(ranked)
+        log.info("Second round: %d of %d candidates already known, %d left",
+                 already, before, len(ranked))
+        if not ranked:
+            # Loud, not silent. A search that spent credits and found nobody NEW must not look
+            # identical to a button that never fired (§Lessons 15).
+            note = (f"No new people at {company or 'this company'} — all "
+                    f"{already} candidate(s) the provider returned are already on this job.")
+            from applypilot.database import log_event
+            log_event(job_url, "network", "warn", note)
+            return {"company": company, "found": 0, "revealed": 0, "contacts": [],
+                    "note": note}
 
     # LinkedIn fallback (opt-in): when the provider under-covers this company, read
     # the company People page and merge the found profiles.

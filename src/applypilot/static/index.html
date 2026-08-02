@@ -15,7 +15,23 @@
       <div class="brand-sub">Autonomous Application Console</div>
     </div>
   </div>
-  <div id="appDir" class="path-pill"></div>
+  <div class="header-right">
+    <!-- The inbox: every outstanding action across every application, in one number. Static
+         markup — refresh() writes into #todoCount and #todoList, never replaces this node, so
+         an open panel survives the 2.5s refresh. -->
+    <div class="todo-wrap">
+      <button id="todoBtn" class="todo-btn" onclick="toggleTodo()"
+              aria-haspopup="true" aria-expanded="false" title="Everything waiting on you">
+        <span class="todo-bell" aria-hidden="true">🔔</span>
+        <span id="todoCount" class="todo-count">0</span>
+      </button>
+      <div id="todoPanel" class="todo-panel" hidden>
+        <div class="todo-head">Waiting on you</div>
+        <div id="todoList" class="todo-list"></div>
+      </div>
+    </div>
+    <div id="appDir" class="path-pill"></div>
+  </div>
 </header>
 <main>
   <div class="stats" id="stats"></div>

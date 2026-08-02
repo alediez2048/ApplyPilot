@@ -25,6 +25,8 @@ from applypilot import web_dashboard
 _STUBS = """
 const el = () => ({ innerHTML:'', textContent:'', hidden:false, value:'', style:{},
   closest:()=>el(), querySelector:()=>el(), querySelectorAll:()=>[],
+  setAttribute(){}, getAttribute:()=>null, removeAttribute(){}, focus(){},
+  scrollIntoView(){},
   classList:{toggle(){},add(){},remove(){}}, addEventListener(){}, appendChild(){}, dataset:{} });
 globalThis.document = { getElementById: el, querySelectorAll: ()=>[], querySelector: el,
   addEventListener(){}, activeElement:null, body: el() };
@@ -872,10 +874,14 @@ def test_an_unanswered_reply_outranks_every_follow_up(tmp_path):
 
     nxt = out["waiting"]["next"]
     assert "Answer Victoria" in nxt, f"a waiting reply did not become the Next action: {nxt}"
-    assert "follow-up" not in nxt, "a follow-up outranked a human who actually replied"
     assert "openReply(" in nxt, "the action does not open the composer"
+    # Assert the ACTION, not the wording. nextAction now names the channel when only one kind
+    # is due ("✉ 1 email due" rather than "↻ 1 follow-up due"), and a `"follow-up" not in nxt`
+    # check would have gone vacuous the moment that label changed — passing forever, guarding
+    # nothing. What must be true is that the button does not open the follow-ups tab.
+    assert "'followups'" not in nxt, "a follow-up outranked a human who actually replied"
 
-    assert "follow-up" in out["answered"]["next"], (
+    assert "'followups'" in out["answered"]["next"], (
         "with nothing awaiting an answer, the due follow-up must come back as Next")
 
     # And it must be visible on the COLLAPSED row — a state you have to expand a contact to

@@ -150,6 +150,47 @@ def _is_ready(contact: dict, channel: Channel) -> bool:
     return True
 
 
+def exhausted(contact: dict, ladders: dict[str, dict] | None = None,
+              now: datetime | None = None) -> bool:
+    """Has every channel we actually used run out, with nothing to show for it?
+
+    "No response" — the honest end state of an outreach attempt. Distinct from every other
+    state the UI already shows:
+
+      * `finished` is per-CHANNEL. Someone whose email ladder is done but whose LinkedIn
+        sequence is still running has not gone quiet; they have one channel left.
+      * `stopped` is a decision the operator made, not an outcome.
+      * a contact nobody ever wrote to is not unresponsive — they are untouched, which is a
+        completely different action (write to them) and must never wear this label.
+
+    DERIVED, never stored. A column would have to be recomputed every time a touch is sent, a
+    reply arrives, or a schedule changes, and the version on disk would be wrong in between —
+    the §Lessons 21 failure with a new name. This is computed at render time from the same
+    ladder state the follow-up panel reads, so the two cannot disagree.
+
+    A reply of any kind disqualifies immediately: `replied_at` is the fact, and a sequence
+    marked `replied` says the same thing from the other direction.
+    """
+    if (contact.get("replied_at") or "").strip():
+        return False
+    now = now or datetime.now(timezone.utc)
+    ladders = ladders or {}
+    contact = normalize_for_ladder(contact)
+
+    used_any = False
+    for channel in CHANNELS:
+        ladder = ladders.get(channel.name) or EMPTY_LADDER
+        state, _ = touch_state(contact, channel, channel_schedule(channel), now, ladder)
+        if not state:
+            continue                       # channel never applied to this person
+        used_any = True
+        if state == "replied":
+            return False
+        if state != "finished" and state != "stopped":
+            return False                   # still due or waiting — the attempt is not over
+    return used_any
+
+
 def touch_state(contact: dict, channel: Channel, schedule: list[int], now: datetime,
                 ladder: dict | None = None) -> tuple[str, int | None]:
     """(state, hours_until_due) for one contact on one channel.

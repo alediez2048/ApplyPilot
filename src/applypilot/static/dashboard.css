@@ -230,6 +230,57 @@
 
   /* Search + active filters. STATIC markup — never re-rendered, so typing survives the 2.5s
      refresh without the focus guard the notes fields need. */
+  /* The inbox counter. Top-right of the header, next to the app-dir pill. */
+  .header-right { display:flex; align-items:center; gap:12px; }
+  /* "No response" — the honest end of an outreach attempt. Deliberately grey, not red: it is
+     an outcome, not an error, and 42 red pills would make the People tab look broken. */
+  .pill.none { background:#f0f1f3; color:#7c8792; border:1px solid #e2e5e9; }
+  /* Round two. Only rendered when every ladder on every channel is spent. */
+  .round2 { display:flex; align-items:center; gap:12px; flex-wrap:wrap;
+    background:var(--surface2); border:1px solid var(--line); border-left:3px solid #c9ced4;
+    border-radius:8px; padding:10px 14px; margin:2px 0 12px; }
+  .round2-txt { font-size:12.5px; color:var(--muted); flex:1 1 260px; line-height:1.45; }
+  .round2-txt b { color:var(--soft); font-weight:600; }
+  .round2 .netnote { flex-basis:100%; }
+
+  .todo-wrap { position:relative; }
+  .todo-btn {
+    display:flex; align-items:center; gap:7px; padding:5px 12px 5px 10px;
+    border-radius:999px; border:1px solid var(--line2); background:var(--surface);
+    min-height:34px; cursor:pointer; font-weight:600;
+  }
+  .todo-btn .todo-bell { font-size:14px; line-height:1; }
+  .todo-count {
+    min-width:20px; padding:1px 7px; border-radius:999px; font-size:12px; font-weight:700;
+    background:var(--accent); color:#fff; font-variant-numeric:tabular-nums;
+  }
+  /* Amber ONLY when something is time-sensitive. A badge that is permanently lit trains you
+     to ignore it, which is the same reason the tab badge counts what is NEW. */
+  .todo-btn.urgent { border-color:#f0c890; background:var(--yellow-soft); }
+  .todo-btn.urgent .todo-count { background:var(--yellow); }
+  .todo-btn.idle .todo-count { background:var(--green); }
+  .todo-panel {
+    position:absolute; right:0; top:calc(100% + 8px); z-index:60; width:330px;
+    background:var(--surface); border:1px solid var(--line2); border-radius:12px;
+    box-shadow:0 12px 32px rgba(0,0,0,.18), 0 0 0 1px rgba(0,0,0,.04); overflow:hidden;
+  }
+  .todo-head { padding:11px 14px; font-size:12px; font-weight:700; text-transform:uppercase;
+    letter-spacing:.5px; color:var(--muted); border-bottom:1px solid var(--line); }
+  .todo-list { max-height:60vh; overflow-y:auto; }
+  .todo-row {
+    display:grid; grid-template-columns:34px 1fr; align-items:baseline; gap:8px; width:100%;
+    text-align:left; padding:10px 14px; border:none; border-bottom:1px solid var(--line);
+    background:none; border-radius:0; min-height:0; cursor:pointer; font-weight:500;
+  }
+  .todo-row:hover { background:var(--surface3); box-shadow:none; }
+  .todo-row:last-child { border-bottom:none; }
+  .todo-n { font-size:17px; font-weight:700; color:var(--text); font-variant-numeric:tabular-nums; }
+  .todo-row.urgent .todo-n { color:var(--yellow); }
+  .todo-label { font-size:13px; color:var(--soft); }
+  .todo-where { color:var(--faint); font-size:11px; }
+  .todo-sub { grid-column:2; font-size:11px; color:var(--muted); margin-top:2px; }
+  .todo-empty { padding:18px 14px; font-size:13px; color:var(--muted); }
+
   .jobs-toolbar { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-bottom:12px; }
   .jobsearch { position:relative; flex:1 1 340px; min-width:240px; display:flex; align-items:center; }
   .jobsearch-icon { position:absolute; left:11px; color:var(--faint); font-size:15px; pointer-events:none; }

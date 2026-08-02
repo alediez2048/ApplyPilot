@@ -28,6 +28,8 @@ pytestmark = pytest.mark.skipif(not shutil.which("node"), reason="node not avail
 _STUBS = """
 const el = () => ({ innerHTML:'', textContent:'', hidden:false, value:'', style:{},
   closest:()=>el(), querySelector:()=>el(), querySelectorAll:()=>[],
+  setAttribute(){}, getAttribute:()=>null, removeAttribute(){}, focus(){},
+  scrollIntoView(){},
   classList:{toggle(){},add(){},remove(){}}, addEventListener(){}, appendChild(){}, dataset:{} });
 globalThis.document = { getElementById: el, querySelectorAll: ()=>[], querySelector: el,
   addEventListener(){}, activeElement:null, body: el() };

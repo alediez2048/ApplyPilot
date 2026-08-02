@@ -104,6 +104,8 @@ const html = fs.readFileSync(process.argv[3], 'utf8');
 const names = new Set([...(src + html).matchAll(/__HANDLER_RE__/g)].map(m => m[1]));
 const el = () => ({ innerHTML:'', textContent:'', hidden:false, value:'', style:{},
   closest:()=>el(), querySelector:()=>el(), querySelectorAll:()=>[],
+  setAttribute(){}, getAttribute:()=>null, removeAttribute(){}, focus(){},
+  scrollIntoView(){},
   classList:{toggle(){},add(){},remove(){}}, addEventListener(){}, appendChild(){}, dataset:{} });
 const ctx = vm.createContext({
   document: { getElementById: el, querySelectorAll: ()=>[], querySelector: el,

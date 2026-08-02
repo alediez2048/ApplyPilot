@@ -255,6 +255,143 @@ function jobInBucket(j, bucketKey) {
   if (!b || !b.statuses) return true;             // 'all'
   return b.statuses.includes(j.status);
 }
+
+// ── Tags: the last column, and the facets you filter by ─────────────────────
+//
+// Replaces the old Links column. Those links were already redundant — the `job` one was
+// truncated and uncopyable, which is the whole reason the Job TAB exists and carries both URLs
+// in full. The column's width is better spent on what actually distinguishes one row from
+// another when you are scanning sixteen of them.
+//
+// Every tag is DERIVED from fields already on the wire (location, salary, fit_score,
+// applied_at, company). No schema change, no new query, nothing to keep in sync — a tag cannot
+// drift from the job because it is not stored.
+
+//: Free-text salary → something that fits in a chip. "$150,000 - $200,000/yr" → "$150–200k".
+//: Returns the raw string when it cannot parse, and "" only when there is nothing at all: a
+//: salary we failed to prettify is still worth showing.
+function salaryTag(raw) {
+  const s = String(raw || '').trim();
+  if (!s) return '';
+  const nums = (s.match(/\d[\d,]*(?:\.\d+)?/g) || [])
+    .map(n => parseFloat(n.replace(/,/g, ''))).filter(n => n > 0);
+  if (!nums.length) return s.slice(0, 24);
+  // Hourly and small numbers stay as written — "$45/hr" must not become "$0k".
+  const lo = Math.min(...nums), hi = Math.max(...nums);
+  if (lo < 1000 && hi < 1000) return s.slice(0, 24);
+  const n = v => Math.round(v / 1000);
+  // The unit goes on the range, not on each end: "$180–220k", not "$180k–220k".
+  return lo === hi ? `$${n(lo)}k` : `$${n(lo)}–${n(hi)}k`;
+}
+
+//: Long locations eat the column. "Austin, Texas, United States" → "Austin, TX".
+const _STATE_ABBR = {
+  alabama:'AL',alaska:'AK',arizona:'AZ',arkansas:'AR',california:'CA',colorado:'CO',
+  connecticut:'CT',delaware:'DE',florida:'FL',georgia:'GA',hawaii:'HI',idaho:'ID',
+  illinois:'IL',indiana:'IN',iowa:'IA',kansas:'KS',kentucky:'KY',louisiana:'LA',maine:'ME',
+  maryland:'MD',massachusetts:'MA',michigan:'MI',minnesota:'MN',mississippi:'MS',
+  missouri:'MO',montana:'MT',nebraska:'NE',nevada:'NV','new hampshire':'NH','new jersey':'NJ',
+  'new mexico':'NM','new york':'NY','north carolina':'NC','north dakota':'ND',ohio:'OH',
+  oklahoma:'OK',oregon:'OR',pennsylvania:'PA','rhode island':'RI','south carolina':'SC',
+  'south dakota':'SD',tennessee:'TN',texas:'TX',utah:'UT',vermont:'VT',virginia:'VA',
+  washington:'WA','west virginia':'WV',wisconsin:'WI',wyoming:'WY',
+};
+function locationTag(raw) {
+  let s = String(raw || '').trim();
+  if (!s) return '';
+  if (/^(remote|anywhere)\b/i.test(s)) return 'Remote';
+  s = s.replace(/,?\s*(united states|usa|u\.s\.a?\.?)$/i, '').trim().replace(/,$/, '');
+  const parts = s.split(',').map(x => x.trim()).filter(Boolean);
+  if (parts.length >= 2) {
+    const abbr = _STATE_ABBR[parts[1].toLowerCase()];
+    return `${parts[0]}, ${abbr || parts[1]}`.slice(0, 28);
+  }
+  return s.slice(0, 28);
+}
+
+//: Tags for one job. `k` is the filter key (stable, lowercased); `label` is what you read.
+//: Kept to at most five so the column stays scannable — a row wearing nine chips is noise.
+function jobTags(j) {
+  const out = [];
+  const push = (kind, value, icon) => {
+    const v = String(value || '').trim();
+    if (v) out.push({ k: `${kind}:${v.toLowerCase()}`, kind, label: `${icon} ${v}`, value: v });
+  };
+  push('loc', locationTag(j.location), '📍');
+  push('pay', salaryTag(j.salary), '💰');
+  if (j.fit_score !== null && j.fit_score !== undefined && j.fit_score !== '')
+    push('fit', `${j.fit_score}/10`, '⭐');
+  push('src', j.company, '🏢');
+  // Date only — fmtDate carries a time ("Jul 20, 05:00 AM") which is three times the width
+  // of the chip and tells you nothing you would ever filter on.
+  const when = j.applied_at || j.rejected_at || '';
+  if (when) push('when', String(fmtDate(when)).split(',')[0], '📅');
+  return out;
+}
+
+// A tag key inside a single-quoted onclick, made safe. `esc()` is NOT enough: it turns ' into
+// &#39;, which the HTML parser turns back into ' before JS ever sees the attribute, so an
+// apostrophe (O'Fallon, MO) breaks the handler — and a broken onclick throws silently, leaving
+// a chip that just does nothing when clicked. Same encode/decode pair `deleteContact` uses.
+// encodeURIComponent does NOT escape ' ( ) ! * — they are "unreserved marks" in RFC 2396 and
+// it leaves them alone. So the apostrophe survives into the single-quoted attribute and closes
+// the string early. Escaping it explicitly is the whole point; decodeURIComponent reverses %27
+// like any other escape, so the key still round-trips exactly.
+function tagArg(k) { return `decodeURIComponent('${encodeURIComponent(k).replace(/'/g, '%27')}')`; }
+
+// Active tag filters. A SET of `k` values; a row must carry ALL of them (AND, not OR) — with OR
+// a second click widens the result, which reads as the filter not working.
+const TAG_FILTER = new Set();
+let JOB_QUERY = '';
+
+function toggleTag(k) {
+  if (TAG_FILTER.has(k)) TAG_FILTER.delete(k); else TAG_FILTER.add(k);
+  rerenderJobs();
+}
+function clearTags() { TAG_FILTER.clear(); rerenderJobs(); }
+
+function jobMatchesTags(j) {
+  if (!TAG_FILTER.size) return true;
+  const have = new Set(jobTags(j).map(t => t.k));
+  for (const k of TAG_FILTER) if (!have.has(k)) return false;
+  return true;
+}
+
+// Search covers what is ON the row plus the description, because "the one about the drone
+// startup" is how you actually remember a job. Every term must match somewhere (AND), so
+// adding a word always narrows.
+function jobMatchesQuery(j) {
+  const q = JOB_QUERY.trim().toLowerCase();
+  if (!q) return true;
+  const hay = [j.title, j.company, j.location, j.salary, j.description, j.status,
+               j.url, j.application_url, ...jobTags(j).map(t => t.value)]
+    .filter(Boolean).join(' ').toLowerCase();
+  return q.split(/\s+/).every(term => hay.includes(term));
+}
+
+function onJobSearch(v) {
+  JOB_QUERY = v || '';
+  const clear = document.getElementById('jobSearchClear');
+  if (clear) clear.hidden = !JOB_QUERY;
+  rerenderJobs();
+}
+function clearJobSearch() {
+  const el = document.getElementById('jobSearch');
+  if (el) el.value = '';
+  onJobSearch('');
+  if (el) el.focus();
+}
+
+function renderActiveTags() {
+  const el = document.getElementById('activeTags');
+  if (!el) return;
+  if (!TAG_FILTER.size) { el.innerHTML = ''; return; }
+  // Label from the key, so a removed job cannot leave an unlabelable chip stuck on screen.
+  el.innerHTML = [...TAG_FILTER].map(k => {
+    const value = k.slice(k.indexOf(':') + 1);
+    return `<button class="tag-chip on" onclick="toggleTag(${tagArg(k)})" title="Remove this filter">${esc(value)} ✕</button>`;
+  }).join('') + `<button class="tag-clear" onclick="clearTags()">clear</button>`;
+}
 function setJobFilter(key) { JOB_FILTER = key; refresh(); }
 function renderJobFilters(jobs) {
   const el = document.getElementById('jobFilters');
@@ -1295,6 +1432,58 @@ function renderMetrics(mx) {
     <div class="m-note">${notes.join(' ')}</div>`;
 }
 
+// Renders the jobs table from a payload ALREADY IN HAND. Split out of refresh() so typing in
+// the search box re-filters locally instead of refetching /api/status — that endpoint costs 50
+// SQL statements, and putting it behind a keystroke is §Lessons 11 and 26 with a new trigger.
+function renderJobsTable(allJobs, editing) {
+  renderJobFilters(allJobs);
+  renderActiveTags();
+  // Bucket → tags → search, narrowing at each step. The bucket counts above deliberately keep
+  // counting the WHOLE set: a filter pill that renumbers itself as you type cannot tell you
+  // where the thing you are searching for lives.
+  const shown = allJobs
+    .filter(j => jobInBucket(j, JOB_FILTER))
+    .filter(jobMatchesTags)
+    .filter(jobMatchesQuery);
+  const emptyEl = document.getElementById('jobsEmpty');
+  if (emptyEl) {
+    emptyEl.hidden = shown.length > 0;
+    // Say which filter emptied the table, and offer the way out. "No applications in All" is
+    // the message a naive version prints while a search term is quietly hiding everything.
+    const bits = [];
+    if (JOB_QUERY.trim()) bits.push(`matching “${JOB_QUERY.trim()}”`);
+    if (TAG_FILTER.size) bits.push(`with ${TAG_FILTER.size} tag filter${TAG_FILTER.size > 1 ? 's' : ''}`);
+    emptyEl.textContent = allJobs.length === 0 ? ''
+      : bits.length ? `No applications ${bits.join(' ')}.`
+      : `No applications in "${JOB_BUCKETS[JOB_FILTER].label}".`;
+  }
+  // The one destructive write: replacing #jobs discards whatever is being typed inside it.
+  // Everything above has already run, so the header, badge and logs stay live while you type.
+  if (editing) return;
+  document.getElementById('jobs').innerHTML = shown.map(j => {
+    return `
+    <tr>
+      <td class="status-cell"><div class="status-head">${badge(j.status)}</div>${j.status === 'rejected' && j.rejected_at ? `<div class="rejected-on">Rejected ${fmtDate(j.rejected_at)}</div>` : (j.applied_at ? `<div class="applied-on">Applied ${fmtDate(j.applied_at)}</div>` : '')}</td>
+      <td class="job-cell"><div class="job-title">${esc(j.title)}</div><div class="job-co">${esc(j.company)}</div></td>
+      <td class="desc"><div class="desc-text">${esc(j.description)}</div></td>
+      <td class="tags-cell">${jobTags(j).map(t =>
+        `<button class="tag-chip${TAG_FILTER.has(t.k) ? ' on' : ''}" onclick="event.stopPropagation();toggleTag(${tagArg(t.k)})" title="Filter by ${esc(t.value)}">${esc(t.label)}</button>`
+      ).join('') || '<span class="tags-none">—</span>'}</td>
+    </tr>
+    <tr class="job-foot"><td colspan="4">
+      ${stepStrip(j)}
+      ${PANEL_OPEN.has(j.url) ? jobTabs(j) + `<div class="pane">${jobPane(j)}</div>` : ''}
+    </td></tr>`;
+  }).join('');
+  // A <details> restored with the `open` attribute does NOT fire `toggle` on parse, so the
+  // 2.5s refresh would leave an already-open menu unpositioned. Re-measure them here.
+  document.querySelectorAll('details.rowmenu[open]').forEach(positionRowMenu);
+}
+
+// Re-filter without hitting the network. LAST_JOBS is the payload the most recent refresh
+// already fetched.
+function rerenderJobs() { renderJobsTable(LAST_JOBS || [], isEditingJobs()); }
+
 async function refresh() {
   // NOTE: this used to `return` here, aborting the WHOLE refresh — stats, progress, the apply
   // log, the metrics panel and the (N) ⚠ tab badge all froze along with the jobs table. Leave
@@ -1322,31 +1511,7 @@ async function refresh() {
   // bulk Gmail fetch has to know which contacts a job has, and an inline onclick cannot be
   // handed an array.
   LAST_JOBS = allJobs;
-  renderJobFilters(allJobs);
-  const shown = allJobs.filter(j => jobInBucket(j, JOB_FILTER));
-  const emptyEl = document.getElementById('jobsEmpty');
-  if (emptyEl) {
-    emptyEl.hidden = shown.length > 0;
-    emptyEl.textContent = allJobs.length === 0 ? '' : `No applications in "${JOB_BUCKETS[JOB_FILTER].label}".`;
-  }
-  // The one destructive write: replacing #jobs discards whatever is being typed inside it.
-  // Everything above has already run, so the header, badge and logs stay live while you type.
-  if (editing) return;
-  document.getElementById('jobs').innerHTML = shown.map(j => {
-    return `
-    <tr>
-      <td class="status-cell"><div class="status-head">${badge(j.status)}</div>${j.status === 'rejected' && j.rejected_at ? `<div class="rejected-on">Rejected ${fmtDate(j.rejected_at)}</div>` : (j.applied_at ? `<div class="applied-on">Applied ${fmtDate(j.applied_at)}</div>` : '')}</td>
-      <td class="job-cell"><div class="job-title">${esc(j.title)}</div><div class="job-co">${esc(j.company)}</div></td>
-      <td class="desc"><div class="desc-text">${esc(j.description)}</div></td>
-      <td class="links-cell"><a href="${esc(j.url)}" target="_blank">job</a>${j.application_url ? `<br><a href="${esc(j.application_url)}" target="_blank">apply page</a>` : ''}</td>
-    </tr>
-    <tr class="job-foot"><td colspan="4">
-      ${stepStrip(j)}
-      ${PANEL_OPEN.has(j.url) ? jobTabs(j) + `<div class="pane">${jobPane(j)}</div>` : ''}
-    </td></tr>`;
-  }).join('');
-  // A <details> restored with the `open` attribute does NOT fire `toggle` on parse, so the
-  // 2.5s refresh would leave an already-open menu unpositioned. Re-measure them here.
+  renderJobsTable(allJobs, editing);
   document.querySelectorAll('details.rowmenu[open]').forEach(positionRowMenu);
 }
 async function markRejected(url, btn) {

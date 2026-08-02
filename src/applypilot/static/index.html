@@ -76,10 +76,24 @@
 
   <section>
     <h2>Applications</h2>
+    <!-- The search box is STATIC markup, deliberately. `refresh()` replaces #jobs wholesale
+         every 2.5s and renderJobFilters() replaces #jobFilters — anything rendered into either
+         would be destroyed mid-keystroke. JS only ever reads .value here. -->
+    <div class="jobs-toolbar">
+      <div class="jobsearch">
+        <span class="jobsearch-icon" aria-hidden="true">⌕</span>
+        <input id="jobSearch" type="search" autocomplete="off" spellcheck="false"
+               placeholder="Search title, company, location, salary, description…"
+               oninput="onJobSearch(this.value)" />
+        <button id="jobSearchClear" class="jobsearch-clear" hidden
+                onclick="clearJobSearch()" title="Clear search">✕</button>
+      </div>
+      <div id="activeTags" class="active-tags"></div>
+    </div>
     <div id="jobFilters" class="job-filters"></div>
     <div class="table-wrap">
       <table>
-        <thead><tr><th>Status</th><th>Job</th><th>Description</th><th>Links</th></tr></thead>
+        <thead><tr><th>Status</th><th>Job</th><th>Description</th><th>Tags</th></tr></thead>
         <tbody id="jobs"></tbody>
       </table>
     </div>

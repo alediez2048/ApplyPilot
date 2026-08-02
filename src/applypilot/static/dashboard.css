@@ -213,7 +213,40 @@
   tbody tr:not(.job-foot):not(.contacts-row):hover td { background:#f8f9fa; }
   .job-cell .job-title { font-weight:600; color:var(--text); }
   .job-cell .job-co { font-size:12.5px; color:var(--muted); margin-top:2px; }
-  .links-cell { font-size:13px; }
+  /* Tags replaced the Links column. Chips wrap within a fixed-ish width so a job with five
+     facets does not stretch the column and squeeze the description. */
+  .tags-cell { font-size:13px; max-width:230px; }
+  .tags-cell .tag-chip { margin:0 4px 4px 0; }
+  .tags-none { color:var(--faint); }
+  .tag-chip {
+    display:inline-block; font:500 11px/1.5 var(--font); padding:2px 9px;
+    border:1px solid var(--line2); border-radius:999px; background:var(--surface);
+    color:var(--soft); cursor:pointer; min-height:0; max-width:100%;
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap; vertical-align:top;
+  }
+  .tag-chip:hover { background:rgba(0,0,0,.05); border-color:var(--line2); box-shadow:none; }
+  .tag-chip.on { background:var(--accent); border-color:var(--accent); color:#fff; font-weight:600; }
+  .tag-chip.on:hover { background:var(--accent-hover); }
+
+  /* Search + active filters. STATIC markup — never re-rendered, so typing survives the 2.5s
+     refresh without the focus guard the notes fields need. */
+  .jobs-toolbar { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-bottom:12px; }
+  .jobsearch { position:relative; flex:1 1 340px; min-width:240px; display:flex; align-items:center; }
+  .jobsearch-icon { position:absolute; left:11px; color:var(--faint); font-size:15px; pointer-events:none; }
+  .jobsearch input {
+    width:100%; padding:8px 32px 8px 30px; border-radius:999px;
+    border:1px solid var(--line2); background:var(--surface); font:13px var(--font);
+  }
+  .jobsearch input::-webkit-search-cancel-button { display:none; }
+  .jobsearch-clear {
+    position:absolute; right:6px; border:none; background:none; color:var(--faint);
+    font-size:13px; padding:2px 6px; min-height:0; border-radius:999px; cursor:pointer;
+  }
+  .jobsearch-clear:hover { background:rgba(0,0,0,.06); box-shadow:none; }
+  .active-tags { display:flex; gap:6px; flex-wrap:wrap; align-items:center; }
+  .tag-clear { border:none; background:none; color:var(--accent); font-size:11px;
+    font-weight:600; padding:2px 4px; min-height:0; cursor:pointer; }
+  .tag-clear:hover { background:none; box-shadow:none; text-decoration:underline; }
   /* Description: normal table cell; clamp the INNER div (clamping the td breaks cell sizing). */
   td.desc { color:var(--muted); font-size:12.5px; }
   td.desc .desc-text { display:-webkit-box; -webkit-line-clamp:6; -webkit-box-orient:vertical; overflow:hidden; line-height:1.45; }

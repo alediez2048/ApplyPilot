@@ -775,12 +775,27 @@ def test_typing_in_a_contact_field_does_not_freeze_the_rest_of_the_page(tmp_path
         "refresh() bails out before fetching, so the whole page freezes while you type — not "
         f"just the jobs table. Offending preamble:\n{preamble}")
 
-    guard = body.index("if (editing) return;")
+    # The jobs table moved into renderJobsTable() so the search box can re-filter without
+    # refetching /api/status. The guard travelled with it, which creates a new way to break
+    # this: calling renderJobsTable(jobs) with no second argument leaves `editing` undefined,
+    # the guard never fires, and typing gets eaten again — silently, with no error anywhere.
+    assert "renderJobsTable(allJobs, editing)" in body, (
+        "refresh() no longer passes `editing` to the table renderer, so the guard cannot fire "
+        "and the jobs table is rewritten while a field inside it has focus")
+
     for marker in ("updateNeedsYouBadge", "renderMetrics", "applyLog", "renderProgress"):
-        assert body.index(marker) < guard, (
-            f"{marker} runs after the edit guard, so it freezes while you type")
-    assert body.index("getElementById('jobs').innerHTML") > guard, (
+        assert body.index(marker) < body.index("renderJobsTable"), (
+            f"{marker} runs after the jobs table, so it freezes while you type")
+
+    table = src[src.index("function renderJobsTable"):]
+    table = table[:table.index("\n}\n")]
+    guard = table.index("if (editing) return;")
+    assert table.index("getElementById('jobs').innerHTML") > guard, (
         "the jobs table is rewritten even while a field inside it has focus")
+    # …and the local re-render path must respect the same guard, or typing in a contact note
+    # while the search box has a value would still wipe the field.
+    assert "renderJobsTable(LAST_JOBS || [], isEditingJobs())" in src, (
+        "rerenderJobs() bypasses the edit guard")
 
 
 @pytest.mark.skipif(not shutil.which("node"), reason="node not available")

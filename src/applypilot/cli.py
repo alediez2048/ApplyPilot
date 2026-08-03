@@ -1139,6 +1139,73 @@ def doctor(
     console.print()
 
 
+@app.command("ats")
+def ats_cmd(
+    job: str = typer.Option("", "--job", help="Substring of the job URL, title or company."),
+) -> None:
+    """What an ATS reads back from your résumé PDFs, and which of the posting's words are missing.
+
+    Two checks, no tricks. The round trip extracts the text back OUT of the PDF, because that is
+    the only version a screener sees — and nothing verified it until now. The coverage report is
+    a REPORT: where a term is true of you, using the posting's literal word helps a parser that
+    matches strings rather than meanings; where it is not true, the gap stays.
+    """
+    from applypilot.config import load_profile
+    from applypilot.database import get_connection, init_db
+    from applypilot.scoring.ats import ats_report, keyword_coverage
+
+    init_db()
+    conn = get_connection()
+    try:
+        profile = load_profile()
+    except Exception:  # noqa: BLE001
+        profile = {}
+    personal = profile.get("personal", {}) or {}
+
+    rows = conn.execute(
+        "SELECT title, site, url, tailored_resume_path, full_description FROM jobs "
+        "WHERE tailored_resume_path IS NOT NULL AND tailored_resume_path != ''"
+    ).fetchall()
+    if job:
+        needle = job.lower()
+        rows = [r for r in rows if needle in " ".join(str(x or "") for x in r).lower()]
+    if not rows:
+        console.print("[yellow]No tailored résumés to check.[/yellow]")
+        return
+
+    unverified = 0
+    for title, site, url, path, jd in rows:
+        pdf = str(path).replace(".txt", ".pdf")
+        rep = ats_report(pdf, name=personal.get("full_name", ""),
+                         email=personal.get("email", ""), phone=personal.get("phone", ""),
+                         companies=tuple(profile.get("preserved_companies") or []))
+        label = (title or site or url or "?")[:46]
+        if rep["ok"] is None:
+            unverified += 1
+            console.print(f"[dim]{label}[/dim]  [yellow]not verified[/yellow] — {rep['note']}")
+            continue
+        mark = "[green]OK[/green]" if rep["ok"] else "[red]FAIL[/red]"
+        console.print(f"\n[bold]{label}[/bold]  {mark}  [dim]({rep['how']})[/dim]")
+        for c in rep["checks"]:
+            if not c["ok"]:
+                console.print(f"   [red]x[/red] {c['label']}"
+                              + (f" [dim]({c['detail']})[/dim]" if c["detail"] else ""))
+        if jd:
+            cov = keyword_coverage(jd, rep["text"])
+            console.print(f"   keywords: {cov['pct']}% "
+                          f"[dim]({len(cov['covered'])}/{cov['total']})[/dim]")
+            if cov["missing"]:
+                # Framed as a question, never an instruction. Roughly half of any posting's
+                # terms describe work the candidate has genuinely never done, and only they
+                # can say which half.
+                console.print(f"   [yellow]not in your résumé[/yellow] "
+                              f"[dim](add ONLY what is true)[/dim]: "
+                              f"{', '.join(cov['missing'][:10])}")
+    if unverified:
+        console.print(f"\n[yellow]{unverified} résumé(s) could not be verified.[/yellow] "
+                      "Install poppler (`brew install poppler`) or `pip install pypdf`.")
+
+
 @app.command("migrate")
 def migrate(
     status: bool = typer.Option(False, "--status", help="Show schema version and pending migrations."),

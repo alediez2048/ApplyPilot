@@ -573,6 +573,7 @@ def convert_to_pdf(
             from applypilot.scoring import resume_render
             if resume_render.render_with_node(resume_block, out):
                 log.info("PDF generated (react-pdf): %s", out)
+                verify_pdf_is_readable(out)
                 return out
         except Exception:  # noqa: BLE001 - fall through to HTML
             log.debug("React-PDF renderer errored; using HTML fallback", exc_info=True)
@@ -580,7 +581,51 @@ def convert_to_pdf(
     # Fallback: Chromium HTML template.
     render_pdf(build_html(parse_resume(text)), str(out))
     log.info("PDF generated (html fallback): %s", out)
+    verify_pdf_is_readable(out)
     return out
+
+
+def verify_pdf_is_readable(pdf_path, job_url: str = "") -> dict:
+    """Extract the text back OUT and log what a parser would see. Never raises.
+
+    The only fact that matters about a résumé is what an ATS reads back, and until now nothing
+    checked. §Lessons 10 is precisely this failure: a layout crash fell through to the HTML
+    renderer, which wrote a **380-character PDF with no WORK EXPERIENCE** — worse than an error,
+    because it looks like a résumé and got attached to real applications.
+
+    Advisory, deliberately. A PDF that exists and is imperfect still beats no PDF at the moment
+    somebody is trying to apply, so this warns and records rather than blocking the stage.
+    """
+    from applypilot.scoring.ats import ats_report
+    try:
+        from applypilot.config import load_profile
+        try:
+            profile = load_profile()
+        except Exception:  # noqa: BLE001
+            profile = {}
+        personal = profile.get("personal", {}) or {}
+        rep = ats_report(pdf_path, name=personal.get("full_name", ""),
+                         email=personal.get("email", ""), phone=personal.get("phone", ""),
+                         companies=tuple(profile.get("preserved_companies") or []))
+        if rep["ok"] is None:
+            log.debug("ATS check skipped: %s", rep["note"])
+            return rep
+        if rep["ok"]:
+            log.info("ATS check: readable (%s, %d chars)", rep["how"], len(rep["text"]))
+            return rep
+        log.warning("ATS check FAILED for %s: %s", pdf_path, rep["note"])
+        if job_url:
+            # Reaches the job's Activity tab, where validator warnings already go. A warning
+            # only in a log file is a warning nobody reads.
+            try:
+                from applypilot.database import log_event
+                log_event(job_url, "pdf", "warn", f"ATS check: {rep['note']}")
+            except Exception:  # noqa: BLE001
+                pass
+        return rep
+    except Exception:  # noqa: BLE001
+        log.debug("ATS check errored", exc_info=True)
+        return {"ok": None, "checks": [], "text": "", "how": "", "note": "check errored"}
 
 
 def is_pdf_stale(txt_path: Path) -> bool:

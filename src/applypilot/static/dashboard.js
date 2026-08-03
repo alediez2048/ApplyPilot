@@ -1700,8 +1700,12 @@ async function markInterview(url, btn) {
              + 'sequence for this job stops. Chasing someone after they agreed to meet is the '
              + 'one follow-up guaranteed to cost you something.')) return;
   btn.disabled = true;
+  // Immediate acknowledgement. The refresh takes a moment and the row may be off-screen, so
+  // without this the only feedback is a change the operator might not be looking at.
+  btn.textContent = 'Saving…';
   const r = await post('/api/mark-interview', {url});
-  if (r.ok) refresh(); else { btn.disabled = false; alert(r.message || 'Failed'); }
+  if (r.ok) { btn.textContent = '🎯 Scheduled ✓'; refresh(); }
+  else { btn.disabled = false; btn.textContent = '🎯 Interview'; alert(r.message || 'Failed'); }
 }
 async function unmarkInterview(url, btn) {
   btn.disabled = true;

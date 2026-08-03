@@ -233,6 +233,44 @@ def test_the_button_is_on_the_row_not_only_in_the_menu(tmp_path):
     assert "unmarkInterview" in out["wonStrip"], "no way to undo it"
 
 
+def test_the_won_row_is_visibly_different():
+    """The first attempt greyed the row with --surface2 (#f8f9fa) against a white row: a 2.7%
+    difference on two channels, which is imperceptible. The button worked and the state saved,
+    and it was reported as "the button does nothing" — because from the operator's side nothing
+    about the row changed. A state change nobody can see has not happened.
+
+    Asserts a real colour difference rather than "some rule exists", so a future tidy-up that
+    swaps the value back for a token cannot pass.
+    """
+    import re
+
+    from applypilot import web_dashboard
+    css = (web_dashboard._STATIC_DIR / "dashboard.css").read_text(encoding="utf-8")
+    rule = re.search(r"tr\.row-won td \{([^}]*)\}", css)
+    assert rule, "the won-row rule is gone"
+    bg = re.search(r"background:\s*(#[0-9a-fA-F]{6})", rule.group(1))
+    assert bg, f"the won row has no literal background colour: {rule.group(1)!r}"
+
+    r, g, b = (int(bg.group(1)[i:i + 2], 16) for i in (1, 3, 5))
+    # Against #ffffff. 2.7% was invisible; 5% per channel is the floor for "obviously changed".
+    assert min(255 - r, 255 - g, 255 - b) >= 12, (
+        f"{bg.group(1)} is {round(100 * (255 - max(r, g, b)) / 255, 1)}% off white — "
+        "the same mistake as #f8f9fa, which shipped and read as a broken button")
+    assert "var(--green)" in css[rule.end():rule.end() + 400], (
+        "no green rail; the row reads as disabled rather than won")
+
+
+def test_the_button_acknowledges_the_click_immediately():
+    """The refresh takes a moment and the row may be off-screen. Without this the only feedback
+    is a change the operator might not be looking at — which is exactly how the invisible-grey
+    version came to look like a dead button."""
+    from applypilot import web_dashboard
+    js = (web_dashboard._STATIC_DIR / "dashboard.js").read_text(encoding="utf-8")
+    fn = js[js.index("async function markInterview"):]
+    fn = fn[:fn.index("\n}") + 2]
+    assert "Saving" in fn and "Scheduled" in fn, "the button gives no immediate feedback"
+
+
 def test_the_frontend_and_backend_agree_on_the_endpoints():
     """A half-applied rename here is silent: the button posts, nothing handles it, and the
     dashboard reports a generic failure the operator reads as a fluke."""

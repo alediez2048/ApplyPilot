@@ -255,14 +255,22 @@
   /* Interview scheduled: the success metric, and the only state that means STOP. Greyed
      rather than celebrated in colour — a row that no longer needs attention should recede,
      and the chip carries the good news. Text stays above 4.5:1 so it is muted, not unreadable. */
-  tr.row-won td { background:var(--surface2); color:var(--muted); }
-  tr.row-won .job-title { color:var(--soft); }
-  tr.row-won .desc-text, tr.row-won .job-co { opacity:.72; }
-  tr.row-won + tr.job-foot td { background:var(--surface2); }
-  tr.row-won + tr.job-foot .step-strip { opacity:.75; }
+  /* This has to be VISIBLE. The first attempt used --surface2 (#f8f9fa) against a white row:
+     a 2.7% difference on two channels, which is imperceptible. The button worked, the state
+     saved, and the operator reported "it does nothing" — because from their side nothing about
+     the row changed. A state change nobody can see has not happened.
+
+     Reads as WON, not disabled: a green rail on the left, a genuinely grey field, and muted
+     text. Rejected rows recede; this one should look settled and slightly triumphant. */
+  tr.row-won td { background:#eef2ee; color:var(--muted); }
+  tr.row-won td:first-child { box-shadow:inset 4px 0 0 var(--green); }
+  tr.row-won .job-title { color:var(--soft); text-decoration:none; }
+  tr.row-won .desc-text, tr.row-won .job-co { opacity:.6; }
+  tr.row-won + tr.job-foot td { background:#eef2ee; box-shadow:inset 4px 0 0 var(--green); }
+  tr.row-won + tr.job-foot .step-strip { opacity:.7; }
   .won-chip {
-    display:inline-block; font:600 10.5px/1.6 var(--font); padding:1px 8px; margin-left:6px;
-    border-radius:999px; background:var(--green-soft); color:var(--green);
+    display:inline-block; font:700 11px/1.6 var(--font); padding:2px 10px; margin-left:6px;
+    border-radius:999px; background:var(--green); color:#fff;
     text-transform:none; letter-spacing:0; vertical-align:middle;
   }
   .won-next { font-size:12px; font-weight:600; color:var(--green); white-space:nowrap; }

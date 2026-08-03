@@ -1674,20 +1674,44 @@ async function unmarkRejected(url, btn) {
 // It spends Apollo credits, so the label says what it will do rather than being a bare verb.
 function anotherRoundPrompt(j, cs) {
   if (!NET_AVAIL || !cs.length) return '';
+
+  // ALWAYS rendered once contacts exist, and disabled with the reason when it is not the right
+  // move. The first version returned '' unless every ladder was spent, which is correct
+  // behaviour and unusable feedback — reported as "I'm not seeing the button" while looking at
+  // a job whose sequences were simply still running. §Lessons 41, written two commits before
+  // this one and then repeated: a control that is conditionally ABSENT reads as a control that
+  // is missing, and the operator cannot tell "not yet" from "broken".
   const answered = cs.filter(c => c.replied_at || (c.conversation || {}).state === 'awaiting_us');
-  if (answered.length) return '';                 // somebody is talking to you; work that first
   const spent = cs.filter(c => c.exhausted);
-  if (spent.length < cs.length) return '';        // a sequence is still running
-  const running = j.network_running;
-  const dis = running ? 'disabled' : '';
-  const label = running ? '⏳ looking for new people…' : '🔄 Find a new round of contacts';
-  return `<div class="round2">
-      <div class="round2-txt"><b>No response from any of the ${cs.length}.</b>
-        Every follow-up has been sent and nobody replied.</div>
+  const untouched = cs.filter(c => !c.exhausted && !c.emailed
+                                   && !(c.dm_status === 'sent' || c.dm_status === 'manual'));
+  const running = cs.length - spent.length - untouched.length - answered.length;
+
+  let why = '', head = '';
+  if (answered.length) {
+    // Somebody is talking to you. Buying more strangers is never the next move (§Lessons 27).
+    why = `${answered.map(c => esc(firstName(c.full_name))).join(', ')} ${answered.length > 1 ? 'are' : 'is'} waiting on you — answer first.`;
+    head = `<b>Someone replied.</b>`;
+  } else if (running > 0) {
+    why = `${running} sequence${running > 1 ? 's are' : ' is'} still running. Finishing what you started is free; this is not.`;
+    head = `<b>Not yet.</b>`;
+  } else if (untouched.length) {
+    why = `${untouched.length} contact${untouched.length > 1 ? 's have' : ' has'} never been written to. Send those before buying more.`;
+    head = `<b>Not yet.</b>`;
+  } else {
+    head = `<b>No response from any of the ${cs.length}.</b>`;
+    why = 'Every follow-up has been sent and nobody replied.';
+  }
+  const ready = !why || (!answered.length && running === 0 && !untouched.length);
+  const busy = j.network_running;
+  const dis = (busy || !ready) ? 'disabled' : '';
+  const label = busy ? '⏳ looking for new people…' : '🔄 Find a new round of contacts';
+  return `<div class="round2${ready ? ' ready' : ''}">
+      <div class="round2-txt">${head} ${esc(why)}</div>
       <button class="secondary" ${dis}
-        title="Searches the same company again, skipping everyone above, and drafts fresh outreach. Spends Apollo credits."
+        title="${ready ? 'Searches this company again, skipping everyone above, and drafts fresh outreach. Spends Apollo credits.' : esc(why)}"
         onclick="findContacts(decodeURIComponent('${encodeURIComponent(j.url)}'), true)">${label}</button>
-      ${j.network_note && !running ? `<div class="netnote">${esc(j.network_note)}</div>` : ''}
+      ${j.network_note && !busy ? `<div class="netnote">${esc(j.network_note)}</div>` : ''}
     </div>`;
 }
 

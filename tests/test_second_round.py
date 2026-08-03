@@ -189,3 +189,79 @@ def test_a_normal_first_run_is_unchanged_by_the_flag(db, monkeypatch):
     service.find_contacts_for_job({"url": "http://j/1", "title": "AI Engineer"},
                                   per_job=5, draft=False)
     assert seen.get("n") == 1, "the default path stopped considering candidates"
+
+
+# ── the panel must EXPLAIN itself, not vanish ───────────────────────────────
+
+import json as _json          # noqa: E402
+import shutil as _shutil      # noqa: E402
+import subprocess as _sp      # noqa: E402
+
+from applypilot import web_dashboard as _wd   # noqa: E402
+
+_STUBS = """
+const el = () => ({ innerHTML:'', textContent:'', hidden:false, value:'', style:{},
+  closest:()=>el(), querySelector:()=>el(), querySelectorAll:()=>[],
+  setAttribute(){}, getAttribute:()=>null, focus(){}, scrollIntoView(){},
+  classList:{toggle(){},add(){},remove(){}}, addEventListener(){}, appendChild(){}, dataset:{} });
+globalThis.document = { getElementById: el, querySelectorAll: ()=>[], querySelector: el,
+  addEventListener(){}, activeElement:null, body: el(), hasFocus: () => false };
+globalThis.window = { open(){}, location:{href:''} };
+Object.defineProperty(globalThis,"navigator",{value:{clipboard:{writeText(){}}},configurable:true});
+globalThis.setInterval = () => 0; globalThis.setTimeout = () => 0;
+globalThis.fetch = async () => ({ json: async () => ({}) });
+globalThis.alert = () => {}; globalThis.confirm = () => true;
+"""
+
+
+def _panel(contacts, tmp_path, network_running=False):
+    src = (_wd._STATIC_DIR / "dashboard.js").read_text(encoding="utf-8")
+    script = tmp_path / "r2.mjs"
+    script.write_text(
+        _STUBS
+        + f"const SRC = {_json.dumps(src)};\n"
+        + "const F = (new Function(SRC + '; NET_AVAIL = true; return { anotherRoundPrompt };'))();\n"
+        + f"const CS = {_json.dumps(contacts)};\n"
+        + f"const J = {{ url: 'http://j/1', network_running: {str(network_running).lower()} }};\n"
+        + "console.log(JSON.stringify(F.anotherRoundPrompt(J, CS)));"
+    )
+    proc = _sp.run(["node", str(script)], capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr[:1500]
+    return _json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+def _c(**over):
+    base = {"id": "x", "full_name": "Ada Lovelace", "emailed": True, "exhausted": False,
+            "replied_at": "", "dm_status": "", "conversation": {}}
+    base.update(over)
+    return base
+
+
+@pytest.mark.skipif(not _shutil.which("node"), reason="node not available")
+def test_the_panel_explains_why_instead_of_disappearing(tmp_path):
+    """§Lessons 41, repeated two commits after it was written down. Returning '' when the round
+    is not spent is correct behaviour and unusable feedback: reported as "I'm not seeing the
+    button" on a job whose sequences were simply still running. The operator cannot tell
+    "not yet" from "broken" if there is nothing on screen."""
+    running = _panel([_c(), _c(id="y", exhausted=True)], tmp_path)
+    assert running, "the panel vanished instead of saying why it is not available"
+    assert "disabled" in running and "still running" in running
+
+    replied = _panel([_c(replied_at="2026-08-01T00:00:00+00:00")], tmp_path)
+    assert "disabled" in replied and "waiting on you" in replied, \
+        "a live reply must be named as the reason, not silently disable the button"
+    assert "Ada" in replied, "it does not say WHO is waiting"
+
+    untouched = _panel([_c(emailed=False)], tmp_path)
+    assert "disabled" in untouched and "never been written to" in untouched
+
+    ready = _panel([_c(exhausted=True), _c(id="y", exhausted=True)], tmp_path)
+    assert "disabled" not in ready, "every ladder is spent and the button is still disabled"
+    assert "No response from any of the 2" in ready and "round2 ready" in ready
+
+
+@pytest.mark.skipif(not _shutil.which("node"), reason="node not available")
+def test_no_contacts_means_no_panel(tmp_path):
+    """With nobody found, the FIRST-round prompt is the right control. Two competing
+    find-contacts buttons on one empty tab is worse than either alone."""
+    assert _panel([], tmp_path) == ""

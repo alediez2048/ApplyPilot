@@ -233,7 +233,12 @@ def draft_email(profile: dict, job: dict, contact: dict, style: str = "", warm: 
     role = job.get("title") or "the role"
     company = contact.get("company") or job.get("company") or job.get("site") or "your company"
     sender_bits = sender_background(profile)
-    jd = (job.get("full_description") or "")[:1200]
+    # The parts of the posting that say what the JOB IS — not the first 1200 characters, which
+    # on a real description is the mission statement, the org chart, and then the role starting
+    # exactly where the budget ran out. See domain/jobdesc.py for the measurement.
+    from applypilot.domain.jobdesc import role_essentials
+    jd = role_essentials(job.get("full_description"))
+    noticed = (contact.get("noticed") or "").strip()[:400]
 
     directive = _resolve_style(profile, style)
     style_block = f"STYLE DIRECTION (follow closely):\n{directive}\n\n" if directive else ""
@@ -287,7 +292,28 @@ def draft_email(profile: dict, job: dict, contact: dict, style: str = "", warm: 
         f"Title: {contact.get('title', '')}\n"
         f"Relationship: {relationship}\n\n"
         f"JOB APPLIED TO:\nRole: {role}\nCompany: {company}\n"
-        f"Description (excerpt):\n{jd}\n\n"
+        f"WHAT THE ROLE ACTUALLY INVOLVES (from the posting — the specific thing to react to):\n"
+        f"{jd}\n\n"
+        # The operator saw something on their profile and wrote it down. This is the ONE piece
+        # of genuinely person-specific input available, so it takes precedence over the posting
+        # — but it must be used as a human would use it, not announced.
+        + (f"WHAT THE SENDER NOTICED ABOUT THIS PERSON (verbatim, from looking at their "
+           f"profile):\n{noticed}\n"
+           "How to use it:\n"
+           "- ENGAGE WITH THE SUBSTANCE. NEVER ANNOUNCE THE NOTICING. Any sentence whose job is "
+           "to report that you looked — \"I noticed your…\", \"I saw your…\", \"I came across "
+           "your…\", \"your recent post about…\" — is the single most recognisable "
+           "automated-outreach shape there is, and a recruiter reads several a week. It is the "
+           "SHAPE that is banned, not a list of verbs: if the sentence could be deleted and the "
+           "observation still stand on its own, delete it.\n"
+           "  Wrong shape: \"I noticed your post about the ferry timetable problem.\"\n"
+           "  Right shape: \"Nine different ferry timetables and no single source of truth is "
+           "the kind of thing that never makes it into a job description.\"\n"
+           "- It is an ADDITION, not a replacement. The email must still say what the role "
+           "involves and what the sender has actually done. An email that is only the "
+           "observation is a compliment, not an application.\n"
+           "- If it does not fit this email naturally, leave it out entirely. A forced "
+           "reference is worse than none.\n\n" if noticed else "")
         + sched_block + deck_block + warm_block + style_block +
         "Write the outreach email. Return the JSON."
     )

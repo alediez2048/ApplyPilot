@@ -247,6 +247,11 @@
   .round2-txt b { color:var(--soft); font-weight:600; }
   .round2 .netnote { flex-basis:100%; }
 
+  .noticed { margin-top:10px; padding-top:10px; border-top:1px dashed var(--line2); }
+  .noticed textarea { width:100%; font-size:12px; padding:5px 6px; border:1px solid #d7e2ec;
+    border-radius:5px; font-family:inherit; resize:vertical; }
+  .noticed-on { color:var(--green); font-weight:600; text-transform:none; letter-spacing:0; }
+
   .todo-wrap { position:relative; }
   .todo-btn {
     display:flex; align-items:center; gap:7px; padding:5px 12px 5px 10px;

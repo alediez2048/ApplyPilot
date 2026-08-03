@@ -1241,7 +1241,32 @@ function emailChannel(c) {
     return followupCard(c, {touch: (c.followup_count || 0) + 1}, c.followup_total);
   return draftBlock(c, true);
 }
-function linkedinChannel(c) { return draftBlock(c, false, true); }
+function linkedinChannel(c) { return draftBlock(c, false, true) + noticedBox(c); }
+
+// The personalisation input, placed where you are already standing. "Copy note + open LinkedIn"
+// puts you ON their profile — this is the box for what you see there. Deliberately NOT scraped:
+// reading LinkedIn programmatically was abandoned twice (§Lessons 3), it risks the account the
+// whole outreach ladder runs on, and five seconds of human judgement beats "posted about X three
+// days ago". Kept separate from Notes, which is scratch and would be noise in a prompt.
+function noticedBox(c) {
+  const has = (c.noticed || '').trim();
+  return `<div class="noticed" data-cid="${esc(c.id)}">
+      <div class="d-label">Anything you noticed?${has ? ' <span class="noticed-on">✓ in the draft</span>' : ''}</div>
+      <textarea class="c-noticed" rows="2"
+        placeholder="A recent post, a talk, a shared background — whatever you'd mention if you knew them. Used in the draft; left out if it doesn't fit.">${esc(c.noticed)}</textarea>
+      <div class="dbtns">
+        <button onclick="saveNoticed('${esc(c.id)}', this)">Save</button>
+        <button class="secondary" onclick="regenDraft('${esc(c.id)}', this)">Rewrite the email with it</button>
+      </div>
+    </div>`;
+}
+async function saveNoticed(cid, btn) {
+  const box = btn.closest('.noticed');
+  const r = await post('/api/contact/details',
+                       {contact_id: cid, noticed: box.querySelector('.c-noticed').value});
+  btn.textContent = r.ok ? 'Saved ✓' : 'Failed';
+  setTimeout(() => { btn.textContent = 'Save'; if (r.ok) refresh(); }, 900);
+}
 
 // LinkedIn-style initials avatar: 1–2 initials + a stable color derived from the name.
 function initials(name) {

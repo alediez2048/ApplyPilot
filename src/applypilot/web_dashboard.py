@@ -1320,6 +1320,9 @@ def _contact_payload(c: dict, company: str | None = None, ladders: dict | None =
         # Derived here rather than stored — a column would be stale between a touch being sent
         # and the next recompute, which is the §Lessons 21 failure with a new name.
         "exhausted": _exhausted(c, {"email": email_l, "linkedin": li_l, "sms": sms_l}),
+        # What the operator noticed on their profile — the personalisation input that a
+        # LinkedIn scraper was considered for and rejected (§Lessons 3).
+        "noticed": c.get("noticed") or "",
         # LinkedIn DM channel state + per-contact readiness (has note + profile, not sent).
         "dm_status": c.get("dm_status") or "none",
         "dm_error": c.get("dm_error") or "",
@@ -2148,6 +2151,8 @@ def _save_contact_details(data: dict) -> dict:
         fields["phone"] = str(data.get("phone") or "").strip()[:_PHONE_MAX_LEN]
     if "notes" in data:
         fields["notes"] = str(data.get("notes") or "").strip()[:_NOTES_MAX_LEN]
+    if "noticed" in data:
+        fields["noticed"] = str(data.get("noticed") or "").strip()[:_NOTES_MAX_LEN]
     if len(fields) == 2:
         return {"ok": False, "message": "nothing to save"}
     before = _store.contact_name_and_phone(cid, conn)

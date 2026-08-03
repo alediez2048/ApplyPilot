@@ -266,7 +266,11 @@ def test_a_migrated_database_has_no_ladder_columns_left(db):
     # `dm_sent_at`: proof a first message went out on that channel. Everything after it is a
     # `touches` row, which is why adding a whole channel cost one column and not ten.
     assert "sms_sent_at" in cols
-    assert len(cols) == 38, f"unexpected contacts columns: {sorted(cols)}"
+    # `noticed` is what the operator saw on the profile — the personalisation input a LinkedIn
+    # scraper was considered for and rejected (§Lessons 3). Kept separate from `notes`, which is
+    # scratch and would be noise in a drafting prompt.
+    assert "noticed" in cols
+    assert len(cols) == 39, f"unexpected contacts columns: {sorted(cols)}"
 
 
 def test_backfill_moves_state_and_verifies_clean(db):

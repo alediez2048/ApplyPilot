@@ -55,6 +55,15 @@ _CONTACT_COLUMNS: dict[str, str] = {
     # dm_status; this is that same fact for texting, and the operator sets it by clicking
     # "✓ I sent it" — we cannot observe an iMessage leaving the Messages app.
     "sms_sent_at": "TEXT",
+    # What the OPERATOR noticed about this person — a recent post, a talk, a shared background.
+    # Deliberately not scraped. Reading LinkedIn programmatically was abandoned twice here
+    # (§Lessons 3), it risks the account the whole outreach ladder runs on, and it produces a
+    # worse answer: the "Copy note + open LinkedIn" flow already puts a human ON the profile,
+    # and five seconds of their judgement beats "posted about X three days ago".
+    #
+    # Separate from `notes` on purpose. `notes` is operator scratch ("called, no answer") and
+    # feeding that to a drafting prompt is noise; this field exists to be quoted from.
+    "noticed": "TEXT",
     # NOTE: the ten follow-up columns that used to live here (followup_* and li_followup_*)
     # moved to the `touches` / `sequences` tables in ARCH-3. Do NOT add them back — a
     # channel is a value in those tables, not a column-name prefix here. See touches.py.

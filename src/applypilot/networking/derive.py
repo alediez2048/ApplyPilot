@@ -185,6 +185,82 @@ def _norm_name(name: str) -> str:
     return re.sub(r"[^a-z0-9]", "", (name or "").lower())
 
 
+#: Words an ATS tenant slug wraps a company name in. `ouryahoo.wd5.myworkdayjobs.com` is Yahoo;
+#: `wd1.myworkdaysite.com/.../WellsFargoJobs` is Wells Fargo. Neither trimmed name is a guess we
+#: are willing to act on alone — see `refine_company_from_posting`.
+#: Separator characters allowed inside a corroborated name. Two covers "Bank of America"; the
+#: point is to stop a name being assembled letter-by-letter out of a sentence.
+_MAX_NAME_GAPS = 2
+
+_TENANT_PREFIXES = ("our", "the", "my", "join", "work", "life", "team", "careers", "jobs")
+_TENANT_SUFFIXES = ("jobs", "careers", "career", "corp", "corporate", "inc", "llc", "global",
+                    "external", "hcm", "recruiting", "talent", "hiring", "group", "holdings")
+
+
+def refine_company_from_posting(company: str | None, full_description: str | None) -> str | None:
+    """A better employer name for an ATS tenant slug, CORROBORATED by the posting itself.
+
+    Apollo returned "0 found, 0 with email" for a Yahoo job, which was correct: the employer had
+    been read off the Workday tenant `ouryahoo.wd5.myworkdayjobs.com` and stored as **Ouryahoo**,
+    a company that does not exist. The tenant slug is chosen by the employer's HR team and
+    routinely wraps the real name — `ouryahoo`, `WellsFargoJobs`, `acme-external`.
+
+    Stripping those affixes blind is not acceptable: "OurCrowd" is a real company, and trimming
+    it to "Crowd" would send outreach to strangers with more confidence than before. So a variant
+    is only accepted when the POSTING'S OWN TEXT contains it — the description for this job says
+    "Yahoo" repeatedly. That makes this a corroboration in the same shape as
+    `confirm_employer_domain`, not an inference (§Lessons 34).
+
+    Returns the name as the posting actually spells it, so "wellsfargo" comes back "Wells Fargo".
+    None when nothing corroborates, which leaves the original name untouched.
+    """
+    if not company or not full_description:
+        return None
+    slug = _norm_name(company)
+    if not slug:
+        return None
+
+    variants: list[str] = []
+    for affix in _TENANT_PREFIXES:
+        if slug.startswith(affix) and len(slug) > len(affix) + 2:
+            variants.append(slug[len(affix):])
+    for affix in _TENANT_SUFFIXES:
+        if slug.endswith(affix) and len(slug) > len(affix) + 2:
+            variants.append(slug[: -len(affix)])
+    if not variants:
+        return None
+
+    for variant in sorted(set(variants), key=len, reverse=True):
+        spelled = _spelling_in_text(variant, full_description)
+        if spelled and _norm_name(spelled) != slug:
+            return spelled
+    return None
+
+
+def _spelling_in_text(flat_name: str, text: str) -> str | None:
+    """How the posting writes a name whose letters are `flat_name` — as a WHOLE word.
+
+    The boundary is the entire safety mechanism. A plain substring test accepted
+    "OurCrowd" -> "Crowd", because the letters of the trimmed variant are of course still inside
+    the untrimmed name wherever the posting mentions it. That is §Lessons 1 for the fifth time,
+    inside the function written to be careful about it — and here it would have sent outreach to
+    strangers at a company called Crowd with more confidence than the original had.
+
+    Requiring that the match is not flanked by other letters fixes it: in "OurCrowd" the "C" is
+    preceded by "r", so the variant is refused and the original name survives.
+
+    A match may also contain at most `_MAX_NAME_GAPS` separator characters in total. One space
+    gives "Wells Fargo", two give "Bank of America" — and nine would let the letters of a company
+    name be assembled out of unrelated words spread across a sentence, which is not a mention.
+    """
+    body = r"[^A-Za-z0-9]?".join(re.escape(c) for c in flat_name)
+    for m in re.finditer(rf"(?<![A-Za-z0-9]){body}(?![A-Za-z0-9])", text, re.IGNORECASE):
+        span = m.group(0)
+        if sum(not c.isalnum() for c in span) <= _MAX_NAME_GAPS:
+            return span.strip()
+    return None
+
+
 def _company_owns_the_posting(company: str, job: dict) -> bool:
     """True when this posting is on the company's OWN careers site, so the board list is wrong.
 

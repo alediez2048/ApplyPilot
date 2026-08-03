@@ -140,6 +140,13 @@ def find_contacts_for_job(
     job_url = job.get("url")
     role = job.get("title")
     company = derive.derive_company(job)
+    # An ATS tenant slug is not the employer's name. `ouryahoo.wd5.myworkdayjobs.com` stored the
+    # company as "Ouryahoo" and Apollo truthfully reported "0 found" — there is no such company.
+    # The posting's own text is the corroboration, so this cannot invent a name that the job
+    # description does not say.
+    refined = derive.refine_company_from_posting(company, job.get("full_description"))
+    if refined:
+        company = refined
     domain = derive.derive_domain(job, company)
     # WHERE the domain came from decides how much it may be trusted later. A domain read off the
     # careers-site host is an inference: avathongov.com hosts Avathon Government's postings, but
@@ -188,10 +195,26 @@ def find_contacts_for_job(
     # Query the active contact provider (Apollo).
     candidates = providers.search(company, domain, role, titles, per_page=25)
     if not candidates:
-        result["note"] = f"no candidates from {providers.active() or 'provider'} (coverage or plan/key)"
-        _log(f"No contacts found at {company or 'the employer'} — "
-             f"{providers.active() or 'the provider'} returned nobody for this company "
-             f"(coverage, or the plan/key).", "warn")
+        # "coverage or plan/key" named three unrelated problems at once and pointed at none of
+        # them. It cost a wrong diagnosis on the Yahoo job, where the real answer was that the
+        # employer name was a Workday tenant slug ("Ouryahoo") that no provider has ever heard
+        # of — and where a missing API key would have printed exactly the same sentence.
+        # §Lessons 15: a zero result has to say WHICH zero it is.
+        name = providers.active() or "the provider"
+        reachable, why = providers.probe()
+        if not reachable:
+            result["note"] = f"{name} is not usable: {why}"
+            _log(f"Could not search for contacts: {name} is not usable ({why}). "
+                 f"No credits were spent.", "error")
+        elif not providers.company_known(company, domain):
+            result["note"] = f"{name} has no company called {company!r}"
+            _log(f"No contacts found: {name} has no company named {company!r}. If that is not "
+                 f"how the employer is actually known, correct the company on the Job tab — an "
+                 f"ATS tenant slug is often not the employer's name.", "warn")
+        else:
+            result["note"] = f"{name} knows {company!r} but returned nobody matching this role"
+            _log(f"No contacts found at {company} — {name} knows the company but returned "
+                 f"nobody for these titles. Try “find contacts” again for a wider search.", "warn")
         return result
 
     # Rank the WHOLE pool, then work down it in batches. Ranking scores title relevance and

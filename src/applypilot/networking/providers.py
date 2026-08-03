@@ -57,6 +57,27 @@ def resolve_orgs(company: str | None, per_page: int = 5) -> tuple[list[dict], st
     return (strict or lenient), ""
 
 
+def company_known(company: str | None, domain: str | None = None) -> bool:
+    """Has the provider ever heard of this employer, under this name?
+
+    Used only to explain a ZERO result, which is the whole point: "Apollo has no company called
+    'Ouryahoo'" and "Apollo has nobody matching this role at Yahoo" are different problems with
+    different fixes, and the old message described them with one sentence naming neither.
+
+    Measured on the live API: `Ouryahoo` returns nothing at all, `Yahoo` returns six
+    organizations. A domain is treated as sufficient on its own — if one was corroborated
+    earlier, the employer is certainly known.
+    """
+    if domain:
+        return True
+    if not company:
+        return False
+    try:
+        return bool(apollo.company_lookup(company, per_page=3))
+    except Exception:  # noqa: BLE001 — an explanation must never raise into the search path
+        return True  # cannot tell; do not claim the company is unknown
+
+
 def search(company: str | None, domain: str | None, role: str | None,
            titles: list[str], per_page: int = 25) -> list[dict]:
     """Return ranked-ready candidates, each with a stable "key" field."""

@@ -31,6 +31,12 @@ _SMTP_HOST = "smtp.gmail.com"
 _SMTP_PORT = 465
 
 _DAILY_LIMIT = int(os.environ.get("OUTREACH_DAILY_LIMIT", "20") or "20")
+#: Total emails ONE employer may receive — first contacts plus every follow-up, across every
+#: job. The gap the other two caps leave wide open: the daily limit is global and the cooldown
+#: is per address, so 7 people at one company × 3 touches is 21 emails and nothing objects.
+#: Measured before this existed: Webai and Salesforce had already had 10 each, Wander and
+#: Affirm 9. A company sees one sender, not seven conversations.
+_COMPANY_CAP = int(os.environ.get("OUTREACH_COMPANY_CAP", "8") or "8")
 _COOLDOWN_DAYS = int(os.environ.get("OUTREACH_COOLDOWN_DAYS", "30") or "30")
 
 
@@ -103,6 +109,12 @@ def can_send(contact: dict, confirm_unverified: bool = False) -> tuple[bool, str
     prior = store.already_contacted_email(email, _COOLDOWN_DAYS, exclude_id=contact.get("id"))
     if prior:
         return False, f"already emailed {email} for another role on {prior[:10]}"
+    company = (contact.get("company") or "").strip()
+    if company and _COMPANY_CAP > 0:
+        n = store.emails_sent_to_company(company)
+        if n >= _COMPANY_CAP:
+            return False, (f"{company} has already had {n} emails from you "
+                           f"(cap {_COMPANY_CAP}) — a company sees one sender, not seven threads")
     return True, "ok"
 
 
@@ -362,6 +374,16 @@ def send_followup(contact_id: str, dry_run: bool = False) -> dict:
         return {"ok": False, "message": "no email address"}
     if store.sent_today() >= _DAILY_LIMIT:
         return {"ok": False, "message": f"daily send limit reached ({_DAILY_LIMIT})"}
+    # The cap counts follow-ups too — they are the reason it is needed. Live data: 43 follow-ups
+    # against 34 first contacts, so most of the volume reaching any one employer is chasing.
+    company = (contact.get("company") or "").strip()
+    if company and _COMPANY_CAP > 0:
+        n = store.emails_sent_to_company(company)
+        if n >= _COMPANY_CAP:
+            return {"ok": False,
+                    "message": (f"{company} has already had {n} emails from you "
+                                f"(cap {_COMPANY_CAP}) — stop here or raise "
+                                f"OUTREACH_COMPANY_CAP deliberately")}
 
     if dry_run:
         return {"ok": True, "message": f"dry-run: would follow up with {to_addr}"}

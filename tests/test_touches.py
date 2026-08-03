@@ -270,7 +270,10 @@ def test_a_migrated_database_has_no_ladder_columns_left(db):
     # scraper was considered for and rejected (§Lessons 3). Kept separate from `notes`, which is
     # scratch and would be noise in a drafting prompt.
     assert "noticed" in cols
-    assert len(cols) == 39, f"unexpected contacts columns: {sorted(cols)}"
+    # `draft_variant` records WHAT PRODUCED a draft, so reply rate can be attributed. Without it
+    # reply rate is one number that moves for reasons nobody can name.
+    assert "draft_variant" in cols
+    assert len(cols) == 40, f"unexpected contacts columns: {sorted(cols)}"
 
 
 def test_backfill_moves_state_and_verifies_clean(db):

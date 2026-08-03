@@ -706,6 +706,7 @@ def stats(
     _rates("Overall", [mx["overall"]])
     _rates("Warm vs cold", mx["by_layer"])
     _rates("By verification confidence", mx["by_confidence"])
+    _rates("By draft variant", mx["by_variant"])
     _rates("By follow-ups sent", mx["by_touch"])
 
     if mx["median_hours_to_reply"] is not None:

@@ -219,6 +219,36 @@ def sender_background(profile: dict) -> list[str]:
     return bits
 
 
+def draft_variant(*, warm: bool = False, noticed: bool = False, jd_chars: int = 0,
+                  deck: bool = False, scheduling: bool = False, style: bool = False) -> str:
+    """A compact signature of WHAT WENT INTO a draft, e.g. "cold+jd2k+deck+cal".
+
+    Reply rate without this is a single number that can only go up or down for reasons nobody
+    can name. After 77 emails and 2 replies there was no way to ask "did the personalised ones
+    do better" — so every improvement to the copy was unfalsifiable, which is the real ceiling
+    on the whole outreach system.
+
+    Records the INPUTS, not a version number. A version number goes stale the moment a prompt is
+    edited and silently pools two different things under one label; a signature of the inputs
+    stays true because it describes what actually happened for that message.
+
+    `jd_chars` is bucketed rather than exact — every draft would otherwise be its own variant
+    and nothing would ever accumulate an n worth reading.
+    """
+    bits = ["warm" if warm else "cold"]
+    if jd_chars:
+        bits.append(f"jd{min(9, max(1, round(jd_chars / 1000)))}k")
+    if noticed:
+        bits.append("noticed")
+    if deck:
+        bits.append("deck")
+    if scheduling:
+        bits.append("cal")
+    if style:
+        bits.append("style")
+    return "+".join(bits)
+
+
 def draft_email(profile: dict, job: dict, contact: dict, style: str = "", warm: bool = False) -> dict:
     """Return {"subject": str, "body": str} for one contact. Raises on LLM/parse failure.
 
@@ -323,6 +353,8 @@ def draft_email(profile: dict, job: dict, contact: dict, style: str = "", warm: 
         [{"role": "system", "content": _SYSTEM}, {"role": "user", "content": user}],
         max_tokens=400, temperature=0.8,  # a bit higher for warmth/variety
     )
+    variant = draft_variant(warm=warm, noticed=bool(noticed), jd_chars=len(jd),
+                            deck=bool(deck), scheduling=bool(link), style=bool(directive))
     data = extract_json(raw)
     subject = sanitize_text(str(data.get("subject", ""))).strip()
     body = sanitize_text(str(data.get("body", ""))).strip()
@@ -341,7 +373,7 @@ def draft_email(profile: dict, job: dict, contact: dict, style: str = "", warm: 
         # A cold CONNECTION REQUEST note. Still no deck: LinkedIn strips/penalises links in
         # invite notes, and a 41-char URL is 14% of a 300-char budget that is already tight.
         note = _cap_linkedin(note)
-    return {"subject": subject, "body": body, "linkedin_note": note}
+    return {"subject": subject, "body": body, "linkedin_note": note, "variant": variant}
 
 
 _FOLLOWUP_SYSTEM = """You write short follow-up emails for a job seeker who already emailed

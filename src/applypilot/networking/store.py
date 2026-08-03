@@ -64,6 +64,11 @@ _CONTACT_COLUMNS: dict[str, str] = {
     # Separate from `notes` on purpose. `notes` is operator scratch ("called, no answer") and
     # feeding that to a drafting prompt is noise; this field exists to be quoted from.
     "noticed": "TEXT",
+    # What produced this draft — "cold+jd2k+deck+cal". Not a version number: a version goes
+    # stale the moment a prompt is edited and silently pools two different things under one
+    # label. Recording the INPUTS keeps it true. Without it, reply rate is a single number that
+    # moves for reasons nobody can name, and every change to the copy is unfalsifiable.
+    "draft_variant": "TEXT",
     # NOTE: the ten follow-up columns that used to live here (followup_* and li_followup_*)
     # moved to the `touches` / `sequences` tables in ARCH-3. Do NOT add them back — a
     # channel is a value in those tables, not a column-name prefix here. See touches.py.
@@ -200,6 +205,41 @@ def sent_today(conn: sqlite3.Connection | None = None) -> int:
         (cutoff,),
     ).fetchone()
     return row[0] if row else 0
+
+
+def emails_sent_to_company(company: str, conn: sqlite3.Connection | None = None) -> int:
+    """Every email this employer has received from us — first contacts AND follow-ups.
+
+    Per COMPANY, not per contact, because that is the unit the recipient experiences. The
+    existing caps do not reach this: the daily limit is global, and the cooldown is per address,
+    so 7 people at one company × 3 touches each is 21 emails and nothing objects. Measured on
+    live data before this existed — Salesforce had 7 contacts, Webai 6, Saronic 6.
+
+    Counted across JOBS on purpose. Applying to two roles at one employer does not buy a second
+    allowance; the inbox and the reputation are shared.
+
+    Matching is on the normalised company string rather than `companies_match()`. That function
+    answers "are these the same employer" for verification, where a false negative loses a real
+    contact; here a false negative silently RAISES the cap, so the conservative direction is the
+    opposite and exact-ish matching is the safer error.
+    """
+    if conn is None:
+        conn = get_connection()
+    init_contacts(conn)
+    key = (company or "").strip().lower()
+    if not key:
+        return 0
+    first = conn.execute(
+        "SELECT COUNT(*) FROM contacts WHERE LOWER(TRIM(COALESCE(company,''))) = ? "
+        "AND outreach_status = 'submitted'", (key,)).fetchone()[0]
+    # Follow-ups live in `touches`, keyed by contact — so join back through contacts.
+    from applypilot.networking.touches import init_touches
+    init_touches(conn)
+    later = conn.execute(
+        "SELECT COUNT(*) FROM touches t JOIN contacts c ON c.id = t.contact_id "
+        "WHERE LOWER(TRIM(COALESCE(c.company,''))) = ? AND t.channel = 'email' "
+        "AND t.sent_at IS NOT NULL AND t.sent_at != ''", (key,)).fetchone()[0]
+    return int(first) + int(later)
 
 
 def already_contacted_email(

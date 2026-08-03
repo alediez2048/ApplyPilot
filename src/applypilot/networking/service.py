@@ -38,6 +38,7 @@ def _draft_and_store(profile: dict, job: dict, contact: dict, warm: bool = False
             "linkedin_message": draft.get("linkedin_note", ""),
             "outreach_status": "drafted",
             "outreach_channel": "email",
+            "draft_variant": draft.get("variant", ""),
         })
     except Exception as e:  # noqa: BLE001
         log.debug("Outreach draft failed for %s: %s", contact.get("full_name"), e)
@@ -78,6 +79,7 @@ def draft_for_contact(contact_id: str, style: str = "") -> dict | None:
         "outreach_subject": draft["subject"], "outreach_message": draft["body"],
         "linkedin_message": draft.get("linkedin_note", ""),
         "outreach_status": "drafted", "outreach_channel": "email",
+        "draft_variant": draft.get("variant", ""),
     })
     return draft
 

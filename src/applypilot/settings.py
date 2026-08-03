@@ -119,6 +119,10 @@ SETTINGS: tuple[Setting, ...] = (
     Setting("OUTREACH_DAILY_LIMIT", "outreach", "int", 20, "Max emails sent per 24h."),
     Setting("OUTREACH_COOLDOWN_DAYS", "outreach", "int", 30,
             "Don't email the same address again within this many days."),
+    Setting("OUTREACH_COMPANY_CAP", "outreach", "int", 8,
+            "Total emails ONE employer may receive — first contacts plus follow-ups, across "
+            "every job. 0 disables. The daily limit is global and the cooldown is per address, "
+            "so neither stops 7 people at one company getting 3 touches each."),
     Setting("OUTREACH_FROM_NAME", "outreach", "str", "", "Display name on outgoing mail."),
     Setting("OUTREACH_FROM_ADDRESS", "outreach", "str", "", "From address (defaults to the connected Gmail)."),
     Setting("OUTREACH_SIGNATURE", "outreach", "str", "", "Signature HTML; falls back to the Gmail one."),

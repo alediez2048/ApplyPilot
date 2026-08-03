@@ -128,6 +128,30 @@ def by_layer(contacts: list[dict]) -> list[Rate]:
     return [reply_rate(warm, "warm (your connections)"), reply_rate(cold, "cold (Apollo)")]
 
 
+def by_variant(contacts: list[dict]) -> list[Rate]:
+    """Reply rate per DRAFT VARIANT — "cold+jd2k+deck" vs "cold+jd2k+noticed+deck".
+
+    The metric the system was missing, and the reason every improvement to the copy was
+    unfalsifiable: after 77 emails and 2 replies there was no way to ask whether the
+    personalised ones did better. A single reply-rate number moves for reasons nobody can name.
+
+    Untagged contacts are grouped as "(untagged)" rather than dropped. Every email sent before
+    tagging existed is untagged, and silently excluding them would make the first tagged variant
+    look like the whole history. They are shown, and they are honestly labelled.
+
+    Every Rate carries its n, and `meaningful` is False below MIN_MEANINGFUL_N — which for a
+    while will be all of them. That is the point: an unreadable number that says so beats a
+    confident percentage drawn from three sends.
+    """
+    buckets: dict[str, list[dict]] = {}
+    for c in contacts:
+        key = (c.get("draft_variant") or "").strip() or "(untagged)"
+        buckets.setdefault(key, []).append(c)
+    # Most-sent first: the variants with enough n to read belong at the top.
+    return [reply_rate(v, k) for k, v in
+            sorted(buckets.items(), key=lambda kv: -len(_deliverable(kv[1])))]
+
+
 def by_confidence(contacts: list[dict]) -> list[Rate]:
     """Does verification's confidence predict a reply?
 
@@ -223,6 +247,7 @@ def summary(jobs: list[dict], contacts: list[dict], touches: list[dict], parse_t
         "funnel": funnel(jobs, contacts).as_dict(),
         "overall": reply_rate(contacts).as_dict(),
         "by_layer": [r.as_dict() for r in by_layer(contacts)],
+        "by_variant": [r.as_dict() for r in by_variant(contacts)],
         "by_confidence": [r.as_dict() for r in by_confidence(contacts)],
         "by_touch": [r.as_dict() for r in by_touch(contacts, touches)],
         "by_company": by_company(contacts),

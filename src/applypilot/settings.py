@@ -123,6 +123,14 @@ SETTINGS: tuple[Setting, ...] = (
             "Hours of silence from THEM before a live conversation counts as stalled. Shorter "
             "than any cold ladder on purpose: somebody who replied has earned a faster, lighter "
             "nudge than a stranger."),
+    # A blended Apollo query returned 25 recruiters and 0 peers on a real job, because the
+    # bespoke role title matched nobody and the recruiter titles took every slot. Colleagues and
+    # recruiters are searched separately now, and these are the MINIMUMS each side aims for —
+    # not caps: a short side is filled by the other rather than returning fewer people.
+    Setting("OUTREACH_MIN_PEERS", "networking", "int", 4,
+            "Minimum colleagues (people doing the job) to find per job."),
+    Setting("OUTREACH_MIN_RECRUITERS", "networking", "int", 4,
+            "Minimum recruiters / talent contacts to find per job."),
     Setting("OUTREACH_COMPANY_CAP", "outreach", "int", 8,
             "Total emails ONE employer may receive — first contacts plus follow-ups, across "
             "every job. 0 disables. The daily limit is global and the cooldown is per address, "

@@ -293,9 +293,40 @@ def extract_from_json_ld(intel: dict) -> dict | None:
         return {
             "full_description": desc_clean,
             "application_url": apply_url,
+            "role_title": _clean_role_title(posting.get("title")),
         }
 
     return None
+
+
+#: Site furniture a page <title> is padded with. Everything after one of these is the employer
+#: or the board, not the role: "AI Specialist - SLAC Careers", "Program Manager | Visa".
+_TITLE_TAIL = re.compile(r"\s*[|–—-]\s*[^|–—-]*$")
+#: Placeholder titles the dashboard import invents. `title = f"{company} uploaded job"` is
+#: written for EVERY pasted URL and nothing ever replaced it, so the peer search was handed the
+#: word "job" and duly found people at Yahoo whose titles are "Job", "Student Job" and "No job".
+_PLACEHOLDER_TITLE = re.compile(r"\buploaded\s+job\b", re.I)
+
+
+def _clean_role_title(raw: str | None) -> str:
+    """A role title fit to search on, or "" when the page offers nothing better."""
+    t = (raw or "").strip()
+    if not t or _PLACEHOLDER_TITLE.search(t):
+        return ""
+    for _ in range(2):  # "Role - Company - Careers"
+        if len(_TITLE_TAIL.sub("", t).split()) >= 2:
+            t = _TITLE_TAIL.sub("", t).strip()
+    t = re.sub(r"\s+", " ", t).strip(" -|–—")
+    # "Job Search", "Job Details", "Job Description" are the page's furniture, not the role.
+    if re.match(r"^job\b", t, re.I):
+        return ""
+    # A title that is one generic word is not worth overwriting a placeholder with.
+    return t if len(t) > 3 and len(t.split()) >= 2 else ""
+
+
+def is_placeholder_title(title: str | None) -> bool:
+    """True for the import's invented "<Company> uploaded job"."""
+    return bool(_PLACEHOLDER_TITLE.search(title or ""))
 
 
 # -- Tier 2: Deterministic pattern matching ----------------------------------
@@ -595,9 +626,17 @@ def scrape_detail_page(page, url: str) -> dict:
 
     intel = collect_detail_intelligence(page)
 
+    # The role, from the page itself. `collect_detail_intelligence` has always captured
+    # `page_title` and nothing ever read it, while every dashboard-pasted job kept the invented
+    # title "<Company> uploaded job" forever. JSON-LD overwrites this below when it has one.
+    result["role_title"] = _clean_role_title(intel.get("page_title"))
+
     # Tier 1: JSON-LD
     json_ld_result = extract_from_json_ld(intel)
     if json_ld_result and json_ld_result.get("full_description"):
+        # A JSON-LD posting without a usable `title` must not blank the page-title fallback.
+        json_ld_result = {k: v for k, v in json_ld_result.items()
+                          if not (k == "role_title" and not v)}
         result.update(json_ld_result)
         result["tier_used"] = 1
         if not result.get("application_url"):
@@ -732,6 +771,17 @@ def scrape_site_batch(
                         "detail_scraped_at = ?, detail_error = NULL WHERE url = ?",
                         (result.get("full_description"), result.get("application_url"), now, url),
                     )
+                    # Replace the import's invented "<Company> uploaded job" with the real role,
+                    # and ONLY that: a title the operator or a discovery source set is theirs.
+                    # The placeholder is not cosmetic — it is what the contact search searches
+                    # on, and broadening "Yahoo uploaded job" reached the bare word "job",
+                    # which at Yahoo matches people titled "Job", "Student Job" and "No job".
+                    role_title = result.get("role_title") or ""
+                    if role_title and is_placeholder_title(title):
+                        conn.execute("UPDATE jobs SET title = ? WHERE url = ?",
+                                     (role_title, url))
+                        stats["titled"] = stats.get("titled", 0) + 1
+                        log.info("  role title: %r", role_title)
                 else:
                     # A failure is not automatically a VERDICT. `detail_scraped_at` is what
                     # removes a row from the enrich queue, so stamping it here retired the job

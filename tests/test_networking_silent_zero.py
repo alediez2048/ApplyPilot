@@ -57,7 +57,7 @@ def all_rejected(monkeypatch):
     from applypilot.networking import connections, providers
 
     monkeypatch.setattr(providers, "active", lambda: "apollo")
-    monkeypatch.setattr(providers, "search", lambda *a, **k: _candidates(5))
+    monkeypatch.setattr(providers, "search_mix", lambda *a, **k: {"peers": _candidates(5), "recruiters": []})
     monkeypatch.setattr(providers, "enrich",
                         lambda sel: {c["key"]: {"email": f"{c['key']}@zello-systems.de",
                                                 "email_status": "verified"} for c in sel})
@@ -95,7 +95,7 @@ def test_a_search_with_no_candidates_at_all_also_logs(db, monkeypatch):
     returned early, before any logging existed."""
     from applypilot.networking import connections, providers
     monkeypatch.setattr(providers, "active", lambda: "apollo")
-    monkeypatch.setattr(providers, "search", lambda *a, **k: [])
+    monkeypatch.setattr(providers, "search_mix", lambda *a, **k: {"peers": [], "recruiters": []})
     monkeypatch.setattr(connections, "count_at_company", lambda *a, **k: 0)
 
     res = service.find_contacts_for_job(JOB, per_job=5)
@@ -109,7 +109,7 @@ def test_a_successful_search_is_not_double_logged(db, monkeypatch):
     fire on the happy path, or every find writes two contradictory lines."""
     from applypilot.networking import connections, providers
     monkeypatch.setattr(providers, "active", lambda: "apollo")
-    monkeypatch.setattr(providers, "search", lambda *a, **k: _candidates(2))
+    monkeypatch.setattr(providers, "search_mix", lambda *a, **k: {"peers": _candidates(2), "recruiters": []})
     monkeypatch.setattr(providers, "enrich",
                         lambda sel: {c["key"]: {"email": f"{c['key']}@zello.com",
                                                 "email_status": "verified"} for c in sel})
@@ -163,7 +163,7 @@ def ambiguous_employer(monkeypatch):
     from applypilot.networking import connections, providers
 
     monkeypatch.setattr(providers, "active", lambda: "apollo")
-    monkeypatch.setattr(providers, "search", lambda *a, **k: _mixed_pool())
+    monkeypatch.setattr(providers, "search_mix", lambda *a, **k: {"peers": _mixed_pool(), "recruiters": []})
     monkeypatch.setattr(connections, "count_at_company", lambda *a, **k: 0)
     monkeypatch.setattr(connections, "at_company", lambda *a, **k: [])
 
@@ -205,7 +205,7 @@ def test_topping_up_is_bounded_so_it_cannot_burn_every_credit(db, monkeypatch):
     enriched: list[str] = []
 
     monkeypatch.setattr(providers, "active", lambda: "apollo")
-    monkeypatch.setattr(providers, "search", lambda *a, **k: _candidates(25))
+    monkeypatch.setattr(providers, "search_mix", lambda *a, **k: {"peers": _candidates(25), "recruiters": []})
     monkeypatch.setattr(connections, "count_at_company", lambda *a, **k: 0)
     monkeypatch.setattr(connections, "at_company", lambda *a, **k: [])
 
@@ -233,7 +233,7 @@ def test_a_first_batch_that_passes_costs_no_extra_credits(db, monkeypatch):
     calls: list[int] = []
 
     monkeypatch.setattr(providers, "active", lambda: "apollo")
-    monkeypatch.setattr(providers, "search", lambda *a, **k: _candidates(25))
+    monkeypatch.setattr(providers, "search_mix", lambda *a, **k: {"peers": _candidates(25), "recruiters": []})
     monkeypatch.setattr(connections, "count_at_company", lambda *a, **k: 0)
     monkeypatch.setattr(connections, "at_company", lambda *a, **k: [])
 

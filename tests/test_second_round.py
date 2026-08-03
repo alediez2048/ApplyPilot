@@ -126,8 +126,10 @@ def test_round_two_excludes_exactly_what_is_already_stored(db, monkeypatch):
 
     monkeypatch.setattr(service.derive, "derive_company", lambda job: "Acme")
     monkeypatch.setattr(service.derive, "derive_domain", lambda job, company: "acme.com")
-    monkeypatch.setattr(service.providers, "search", lambda *a, **kw: list(pool))
-    monkeypatch.setattr(service.rank, "select", lambda cands, role, n=None: list(cands))
+    monkeypatch.setattr(service.providers, "search_mix",
+                        lambda *a, **kw: {"peers": list(pool), "recruiters": []})
+    monkeypatch.setattr(service.rank, "select_mix",
+                        lambda peers, recs, role, **kw: [*peers, *recs])
     seen = {}
 
     def fake_enrich(batch):
@@ -150,10 +152,12 @@ def test_round_two_finding_nobody_new_says_so_loudly(db, monkeypatch):
                           "linkedin_url": "https://l/in/ada"}, db)
     monkeypatch.setattr(service.derive, "derive_company", lambda job: "Acme")
     monkeypatch.setattr(service.derive, "derive_domain", lambda job, company: "acme.com")
-    monkeypatch.setattr(service.providers, "search",
-                        lambda *a, **kw: [{"full_name": "Ada Known",
-                                          "linkedin_url": "https://l/in/ada", "title": "R"}])
-    monkeypatch.setattr(service.rank, "select", lambda cands, role, n=None: list(cands))
+    monkeypatch.setattr(service.providers, "search_mix",
+                        lambda *a, **kw: {"peers": [{"full_name": "Ada Known",
+                                          "linkedin_url": "https://l/in/ada", "title": "R"}],
+                                          "recruiters": []})
+    monkeypatch.setattr(service.rank, "select_mix",
+                        lambda peers, recs, role, **kw: [*peers, *recs])
 
     def boom(batch):
         raise AssertionError("enriched a candidate that was already known — credits spent")
@@ -176,10 +180,12 @@ def test_a_normal_first_run_is_unchanged_by_the_flag(db, monkeypatch):
 
     monkeypatch.setattr(service.derive, "derive_company", lambda job: "Acme")
     monkeypatch.setattr(service.derive, "derive_domain", lambda job, company: "acme.com")
-    monkeypatch.setattr(service.providers, "search",
-                        lambda *a, **kw: [{"full_name": "Ada", "linkedin_url": "https://l/in/a",
-                                          "title": "R"}])
-    monkeypatch.setattr(service.rank, "select", lambda cands, role, n=None: list(cands))
+    monkeypatch.setattr(service.providers, "search_mix",
+                        lambda *a, **kw: {"peers": [{"full_name": "Ada",
+                                          "linkedin_url": "https://l/in/a", "title": "R"}],
+                                          "recruiters": []})
+    monkeypatch.setattr(service.rank, "select_mix",
+                        lambda peers, recs, role, **kw: [*peers, *recs])
     seen = {}
     def _enrich(batch):
         seen["n"] = len(batch)

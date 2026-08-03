@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 import re
 
-from applypilot.networking import apollo
+from applypilot.networking import apollo, rank
 
 log = logging.getLogger(__name__)
 
@@ -55,6 +55,71 @@ def resolve_orgs(company: str | None, per_page: int = 5) -> tuple[list[dict], st
         if len(candidates) == 1:
             return candidates, candidates[0].get("domain", "")
     return (strict or lenient), ""
+
+
+def _resolve_targets(company: str | None, domain: str | None) -> tuple[list[str], str]:
+    """Apollo org ids + a corroborated domain for this employer. Shared by both searches so a
+    mixed search resolves the company ONCE rather than paying for it twice."""
+    if domain or not company:
+        return [], ""
+    orgs, resolved = resolve_orgs(company)
+    if not orgs:
+        # Apollo's name search does not always surface the real employer (asking for "BetterUp"
+        # returns BetterUp Government and Better Up Now, but not BetterUp itself). The caller
+        # falls back to keywords rather than finding nobody.
+        log.info("Apollo: no organization confidently matches %r — falling back to keywords",
+                 company)
+    return [o["id"] for o in orgs], resolved
+
+
+def search_mix(company: str | None, domain: str | None, role: str | None,
+               per_page: int = 25) -> dict[str, list[dict]]:
+    """Two separate searches — colleagues and recruiters — instead of one blended query.
+
+    A single query cannot produce a mix, because Apollo decides the composition. Measured on a
+    real Yahoo job, the blended query returned **25 recruiters and 0 peers**: the bespoke title
+    "AI Operations Strategist" matches nobody in Apollo, so the recruiter titles took every
+    slot, and the ranking stage was left choosing five recruiters out of five recruiters.
+
+    Peer titles are widened progressively and the FIRST non-empty result wins, so a company that
+    really does have someone with the exact title gets them, and one that does not still gets
+    colleagues rather than nobody. Same measurement:
+    "AI Operations Strategist" 0, "Operations Strategist" 0, "Strategist" 25.
+    """
+    if active() != "apollo":
+        return {"peers": [], "recruiters": []}
+    org_ids, resolved_domain = _resolve_targets(company, domain)
+    keywords = None if (domain or org_ids) else company
+    common = {"domains": [domain] if domain else None,
+              "organization_ids": org_ids or None,
+              "keywords": keywords, "per_page": per_page}
+
+    peers: list[dict] = []
+    tried: list[str] = []
+    for title in rank.peer_titles(role):
+        tried.append(title)
+        found = apollo.search_people(titles=[title], **common)
+        # Exclude hiring-side people the peer query happens to match — a "Talent Acquisition
+        # Strategist" answers a search for "Strategist", and counting them as colleagues would
+        # rebuild the very imbalance this split exists to prevent.
+        found = [p for p in found if not rank.is_recruiter(p.get("title"))]
+        if found:
+            peers = found
+            log.info("Apollo: %d colleague(s) via title %r (tried %s)",
+                     len(peers), title, " -> ".join(tried))
+            break
+    if not peers and tried:
+        log.info("Apollo: no colleagues for any of %s", " -> ".join(tried))
+
+    recruiters = [p for p in apollo.search_people(titles=rank.RECRUITER_TITLES, **common)
+                  if rank.is_recruiter(p.get("title"))]
+
+    for pool in (peers, recruiters):
+        for c in pool:
+            c["key"] = c.get("apollo_id")
+            c["employer_domain"] = domain or resolved_domain
+            c["from_domain_search"] = bool(domain)
+    return {"peers": peers, "recruiters": recruiters}
 
 
 def company_known(company: str | None, domain: str | None = None) -> bool:

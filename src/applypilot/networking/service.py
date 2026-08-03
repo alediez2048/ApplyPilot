@@ -190,10 +190,20 @@ def find_contacts_for_job(
             result["employer_domain"] = domain
             domain_source = "apollo"      # corroborated: people there report this employer
 
-    titles = rank.role_to_person_titles(role)
+    # Colleagues and recruiters are searched SEPARATELY. One blended query cannot produce a mix
+    # because the provider decides the composition — measured at 25 recruiters and 0 peers on a
+    # real job, after which the ranking stage was choosing five recruiters out of five.
+    # Defaults come from the settings registry, never repeated here: `OUTREACH_ATTACH_DECK`
+    # defaulted to "1" at the call site while settings.py declared False, so `doctor --config`
+    # reported the feature off while 3.1 MB rode along on 34 real emails. A default in two
+    # places is two defaults.
+    from applypilot import settings as _settings
+    _cfg, _ = _settings.resolve()
+    min_peers = _cfg["OUTREACH_MIN_PEERS"]
+    min_recruiters = _cfg["OUTREACH_MIN_RECRUITERS"]
 
-    # Query the active contact provider (Apollo).
-    candidates = providers.search(company, domain, role, titles, per_page=25)
+    pools = providers.search_mix(company, domain, role, per_page=25)
+    candidates = pools["peers"] + pools["recruiters"]
     if not candidates:
         # "coverage or plan/key" named three unrelated problems at once and pointed at none of
         # them. It cost a wrong diagnosis on the Yahoo job, where the real answer was that the
@@ -227,7 +237,12 @@ def find_contacts_for_job(
     # best-titled people were all from the wrong one, were all correctly dropped, and the two
     # real @zello.com recruiters were never looked at — they were candidates 6..25. Stopping
     # after batch one turned an ambiguous employer into a silent zero.
-    ranked = rank.select(candidates, role, n=len(candidates))
+    # Interleaved, not scored into one list: the loop below enriches down this order and drops
+    # whoever fails verification, so the two sides must stay interwoven the whole way. Putting
+    # four peers at the front means a company whose first four peers all fail verification ends
+    # up all-recruiter again — the original bug, one step later.
+    ranked = rank.select_mix(pools["peers"], pools["recruiters"], role,
+                             min_peers=min_peers, min_recruiters=min_recruiters)
 
     # Round two. Excluded by the SAME identity function that stores them — computing a fresh
     # name/email match here would be a second answer to "is this the same person", and the two

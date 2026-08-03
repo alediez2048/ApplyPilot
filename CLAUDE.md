@@ -12,7 +12,7 @@ campaign happens to be a job search** — see `docs/crm-prd.md` for where that g
 - **Packaging:** Hatchling, `src/` layout, single package `applypilot`
 - **Entry point:** `applypilot = "applypilot.cli:app"` (Typer CLI)
 - **License:** AGPL-3.0-only · **Version:** 0.4.0 (`pyproject.toml`)
-- **Tests:** 905 passing (`tests/`, 54 files) · ruff clean (line-length 120, py311) · ESLint clean
+- **Tests:** 1073 passing (`tests/`, 66 files) · ruff clean (line-length 120, py311) · ESLint clean
 - **Schema version:** 2 (`applypilot migrate --status`) · **Settings:** 45 declared in `settings.py`
 
 ## Quick orientation
@@ -54,7 +54,7 @@ stops the moment a job hands over — see §Lessons 8, which cost two filled app
 | `database.py` | SQLite layer. Owns `jobs` + `job_events`. Thread-local WAL, additive column pass, then numbered migrations. `get_connection()` returns a subclass carrying a per-connection schema memo — see §Lessons 11. |
 | `llm.py` | Multi-provider client (round-robin + failover: OpenAI/Gemini/Anthropic/local). |
 | `view.py` | Static HTML results export. |
-| `web_dashboard.py` | **The operator dashboard.** 2,779 lines, **zero SQL** — data access goes through `repo/` and `store.py` (ARCH-4). |
+| `web_dashboard.py` | **The operator dashboard.** 2,900 lines, **zero SQL** — data access goes through `repo/` and `store.py` (ARCH-4). |
 | `repo/jobs.py` | Every `jobs` query as a named function. Owns `QUEUE_SQL` (what counts as an operator-added job). |
 | `scoring/resume_sections.py` | Parses the BASE résumé into its own sections. The base résumé is the template; tailoring rewrites content inside it. |
 | `settings.py` | **Every env var, one registry.** Types, defaults, validators, secret flags. Malformed values fail at startup naming the variable. `.env.example` is generated from it. |
@@ -124,6 +124,7 @@ harness no longer has to import a web server to test scheduling.
 | `company.py` | `companies_match()` — shared by connections, Apollo org resolution, and verification, which must all agree. |
 | `timeutil.py` | `parse_ts()` — one implementation of the naive/aware guard. |
 | `conversations.py` | Who is on a thread, who was just introduced, **who owes whom a reply** (`conversation_state`), and who a reply must reach (`reply_target` — the Cc is carried forward, never rebuilt). |
+| `jobdesc.py` | `role_essentials()` — the parts of a posting that say what the JOB IS. Outreach read `full_description[:1200]`, which on a real posting is the mission statement and the org chart. |
 | `intent.py` | CRM-4b. What a reply wants — rejection / not now / interested / introduction / question / auto-reply — from a ~200-char snippet. Rule-based and quick to say `unknown`. |
 | `metrics.py` | CRM-2 funnel + reply rates. Every rate carries its `n`; bounces leave the denominator. |
 | `deck.py` | Intro-deck links. `slugify`/`disambiguate` → `/intro/gina`, **not** `?v=<token>`. `relink()` rewrites an existing draft's link without regenerating the copy. |
@@ -177,8 +178,8 @@ incapable of touching a LinkedIn page. See §Lessons.
 
 | Table | Owner | Purpose |
 |-------|-------|---------|
-| `jobs` (32 cols) | `database.py` | The 6-stage state machine. `_ALL_COLUMNS` is its source of truth. |
-| `contacts` (38 cols) | `networking/store.py` | People per job + outreach + verification. |
+| `jobs` (33 cols) | `database.py` | The 6-stage state machine. `_ALL_COLUMNS` is its source of truth. |
+| `contacts` (40 cols) | `networking/store.py` | People per job + outreach + verification. |
 | `touches` | `networking/touches.py` | One follow-up touch per row, ANY channel. `seq` is per (contact, channel). |
 | `sequences` | `networking/touches.py` | Terminal state per (contact, channel): `stopped` / `replied`. |
 | `connections` | `networking/connections.py` | Imported LinkedIn CSV. |
@@ -188,9 +189,16 @@ incapable of touching a LinkedIn page. See §Lessons.
 
 | `schema_migrations` | `migrations/` | Version, status, `claimed_at` lease. See §Lessons on the 300s lease. |
 
-Live counts (2026-08-01): jobs 16, contacts 64 (**34 emailed, 2 replied, 1 bounced**,
-21 with a deck slug), messages 54, interactions 2, touches 12, sequences 13, job_events 321,
-connections 899. **Schema version 2** (migration 002 re-keyed `messages` per contact).
+Live counts (2026-08-03): jobs 19 (15 applied, **1 interview scheduled**), contacts 66
+(**34 emailed, 3 replied, 1 bounced**, 54 with a deck slug), 47 follow-ups sent, messages 90,
+connections 899. **Schema version 2**.
+
+**77 emails for 2 replies** was the number that prompted the 2026-08-03 audit. Engineering
+quality scored 9/10 and outcomes about 3/10, and the gap was the whole finding: the system
+optimised the middle of the funnel while nothing could tell you what worked. `draft_variant` and
+the per-company cap came out of that. Discovery scored 1/10 and was then correctly re-scored —
+LinkedIn's job feed is a RECOMMENDER and ApplyPilot's discovery is a keyword SEARCH, so the
+operator finding jobs by hand is a better tool for the job, not a gap.
 
 **The second reply arrived on its own** — Gina Johnson at Salesforce, 2026-07-31, detected by
 the CRM-1 background poller with nobody watching. That is the whole point of the heartbeat:
@@ -214,6 +222,29 @@ Localhost-only (`127.0.0.1:8765`), Origin/CSRF-guarded. Restructured 2026-07-28 
 sibling accordions into:
 
 **Six tabs** (2026-07-31): People · Follow-ups · Materials · Activity · **Interactions** · **Job**.
+
+**The 🔔 counter, top right** (2026-08-02) — every outstanding action across every application,
+grouped and ORDERED. A flat count of 49 tells you nothing, and a list putting "3 LinkedIn
+invites left" above "someone replied 4 days ago" is worse than none. Replies outrank ladders
+(§Lessons 27); rejected and interviewing jobs are excluded, because a badge that is permanently
+lit trains you to ignore it. Everything reads ONE `dueByChannel()` — the tab badge, the Next
+button, the Follow-ups tab count and this all summed email + LinkedIn by name and silently
+ignored SMS the moment that channel shipped.
+
+**Tags replaced the Links column** (2026-08-02). Those links were already redundant: the table's
+`job` link is truncated and uncopyable, which is why the Job tab exists. Tags are DERIVED from
+fields already on the wire, so a tag cannot drift from its job. Clicking one filters; chips AND
+rather than OR, because with OR a second click returns MORE rows and reads as broken. The search
+box is STATIC markup — `refresh()` replaces `#jobs` wholesale every 2.5s, so anything rendered
+into it is destroyed mid-keystroke. Typing re-filters from `LAST_JOBS` and never refetches
+`/api/status` (§Lessons 11, 26 — 50 SQL statements behind a keystroke).
+
+**🎯 Interview scheduled is the success metric** (2026-08-03), on the row next to Re-apply. Every
+other number counts EFFORT; this is the only outcome, and the funnel now ends at it. It is also
+the only state that means STOP: marking it greys the row, removes the job from the counter, and
+HALTS every sequence — chasing somebody after they agreed to meet is the one follow-up
+guaranteed to cost something. It does not touch `apply_status`: a rejected job has left the
+pipeline, an interviewing one has arrived.
 `Job` carries the posting's links in full — the table's `job` link is truncated and uncopyable,
 which is why the tab exists — with the description fetched on demand (the list payload holds a
 900-char excerpt; real ones run 4–10KB). `Interactions` answers "has anyone actually engaged?".
@@ -284,6 +315,36 @@ cadence that is normal in email reads as harassment on a phone. **Texts never ca
 a URL from an unrecognised number is the strongest spam signal there is, so `_intro_deck_url`
 is deliberately never consulted on that path, unlike every other channel.
 
+**A follow-up READS THE THREAD** (2026-08-03). `draft_followup` saw only
+`contact.outreach_message` — the first email, truncated to 700 chars — so touch 2 did not know
+what touch 1 said and touch 3 knew neither. The prompt has always said "do NOT repeat it" while
+being handed a third of what there was not to repeat. `conversation_transcript` and
+`touches.sent_touches` both already existed and `_draft_reply` already used them; this path
+simply never did (§Lessons 39).
+
+**The deck is offered ONCE.** It used to go in every touch, and `ensure_intro_deck()`
+force-appended the link when the model correctly left it out — a guarantee that guaranteed the
+repetition. Both are conditional now. The already-sent check compares the BASE url: the earlier
+emails went out as `/intro/` and `INTRO_DECK_PATHS` now builds `/intro/michael`, so matching the
+full link found nothing and re-pitched the deck to a man who had already had it twice.
+
+**The PDF attachment is gone** (2026-08-03). 3.1 MB riding alongside a link to the same deck, on
+all 34 sent emails, and ON BY ACCIDENT: `_intro_deck_path` defaulted `OUTREACH_ATTACH_DECK` to
+"1" while `settings.py` declared `False`, so `doctor --config` reported it off the whole time. A
+default in two places is two defaults. Résumé and cover letter still attach.
+
+**The job description is SPENT, not truncated** (`domain/jobdesc.role_essentials`, 2026-08-03).
+`draft_email` read `full_description[:1200]`. On the live Affirm posting that is 180 chars of
+mission statement, 340 of org chart, and then the role STARTS at ~520 — the sentence saying what
+the person does began exactly where the budget ran out. Sections are classified by header and
+the shared ones dropped; 1.5–2.6KB of role content instead of 1.2KB of preamble.
+
+**`contacts.noticed`** — what the operator saw on the profile, typed into a box on the LinkedIn
+tab. This is the LinkedIn-post idea WITHOUT the crawl (§Lessons 3): the "Copy note + open
+LinkedIn" flow already puts a human on the page, and five seconds of their judgement beats
+"posted about X three days ago". The prompt bans the SHAPE, not a verb list — the first version
+forbade "I saw your post" and the model wrote "I noticed your post about…" (§Lessons 42).
+
 **Every outreach email offers the intro deck** (`INTRO_DECK_URL`, default
 `https://www.jorgealejandrodiez.com/intro/`) — cold email and all three follow-up touches.
 Both prompts are told the URL and the wording, AND `ensure_intro_deck()` appends the exact
@@ -306,6 +367,37 @@ shorter (it lands in a chat window) and must ask exactly one answerable question
 and we generate the RFC `Message-ID` ourselves — both persisted at send time. As of 2026-07-29
 **all 13 sent emails have both ids and all 13 threads resolve live** against the mailbox, so
 `backfill_thread_ids()` has nothing left to recover.
+
+**Per-company cap** (`OUTREACH_COMPANY_CAP`, default 8, 2026-08-03). The other two limits leave
+this wide open: the daily limit is global and the cooldown is per ADDRESS, so seven people at one
+company times three touches is 21 emails and nothing objects. Measured before writing it — Webai,
+Wander and Salesforce had already received **10 emails each**. Counted per COMPANY across every
+job, follow-ups included, because that is the unit the recipient experiences.
+
+**`draft_variant`** records what produced each draft (`cold+jd2k+noticed+deck+cal`) so reply rate
+can be attributed. Inputs, not a version number: a version goes stale the moment a prompt is
+edited and pools two different things under one label. `metrics.by_variant` reads it. Before
+this, every improvement to the copy was unfalsifiable.
+
+**Stalled conversations** (`conversations.STALLED_AFTER_HOURS`, default 72). `replied` is
+TERMINAL so the cold ladder halts — correct — but nothing replaced it, and a warm thread that
+went quiet had no mechanism at all. The system chased strangers and abandoned everyone who
+engaged. `unanswered` counts messages since they last spoke; 2+ means the nudge is spent. NOT a
+Channel: it is a conversation state, with different copy and a different cadence. Known tension:
+at 72h the EMAIL ladder still nudges a stranger sooner, at 48h.
+
+**Threads we did not start.** `poll()` read threads by `thread_id`, captured at send time, and
+skipped every contact without one — so anyone who wrote to us FIRST, replied from another
+address, or was introduced into somebody else's thread was invisible forever. That is the Writer
+case: Victoria CC'd David, David wrote on a NEW thread, nothing saw it. Resolved in ONE batched
+Gmail query, only for people in play (§Lessons 26).
+
+**Round two** (`skip_known`). When every contact is spent and nobody replied, search the same
+company again excluding everyone already stored — by `contact_id`, the same function that stores
+them, because a second name/email match would be a competing answer to "is this the same
+person". Without the exclusion the button is an expensive no-op: `select()` is deterministic and
+returns the same top five. A contact is `exhausted` when every channel USED has run out with no
+reply; a phone number or an unwritten address is NOT unresponsive, it is untouched.
 
 **Not built:** no scheduler (nothing fires while the dashboard is closed — `applypilot
 schedule --install` exists and has never been run), **no per-company cap** — 5 contacts × 3
@@ -704,6 +796,41 @@ company `"Jobs"` — the same substring bug class, inside the function written t
     never have shown this, and the same pass also caught a raw scraper title reaching a draft as
     "the Betterup uploaded job".
 
+43. **A control nobody can find is a broken feature, and this shipped FOUR times in one day.**
+    The SMS composer rendered a sentence describing a box instead of the box. The round-two
+    panel returned `''` when it was not the right moment. The 🎯 Interview button went into the
+    `⋯` overflow menu. And the won row was greyed with `#f8f9fa` against a white row — a **2.7%
+    difference**, so the click saved state and changed nothing visible. Every one was reported as
+    "it does nothing", and the last is the sharpest: the feature worked perfectly and the result
+    was imperceptible. `restartButton` already carried the comment *"burying it made it
+    unfindable"* directly above the interview button, and it was repeated anyway. Render the
+    control disabled with the reason, put the important one on the row, and make the state change
+    visible enough to see without looking for it.
+
+44. **A partial result with nothing in it is a permanent silent death.** A Google careers URL
+    (JavaScript-rendered) returned an empty shell. `status` is `"partial"` whenever no
+    application_url is found, and that is the SUCCESS branch — so it stored an empty description,
+    stamped `detail_scraped_at`, and set `detail_error` to **NULL**, erasing the one signal
+    anything was wrong. `queue_needing_detail` requires `detail_scraped_at IS NULL`, so the row
+    could never be retried; with no description, tailor and cover never ran. `prepare` completed
+    in 0.54s reporting "0 imported URL(s)" and returncode 0. The row rendered exactly like a
+    healthy one, which is why it was reported as *the whole dashboard breaking*. An empty result
+    is a failure whatever the status field says, and it needs an error that names the way out.
+
+45. **A sanitiser cannot clean a string that does not exist yet.** Every Python guard against em
+    dashes ran correctly, and the PDF still had two. The `.txt` and `_DATA.json` were clean;
+    `document.mjs` builds the education line itself with `join(' — ')`. The renderer runs AFTER
+    the payload is scrubbed, so the check had to move to the renderer source. Found by the ATS
+    round-trip check on its first live run, in a file every other check called clean — which is
+    the argument for verifying the artifact that actually ships rather than the one before it.
+
+46. **Read the file that gets SENT, not the one on the way to it.** "14 of 16 résumés have a junk
+    header" was reported, loudly, from the `.txt` intermediate. Zero delivered PDFs contained the
+    string. The renderer builds its header separately and infers a real role. Two further claims
+    built on that same mistake also collapsed on inspection: the missing target-role line and the
+    stale summary opening were both real ONCE and fixed on 2026-07-29, visible as a clean split
+    in the file mtimes. Check the artifact, then check when it was made.
+
 ---
 
 ## The CRM phase (2026-07-30, branch `crm-phase-1`)
@@ -777,6 +904,39 @@ someone who answered it.
 `applypilot`'s own numbers: 15 tests in `tests/test_sms_prompt.py`, mutation-verified. Two
 survived the first pass — one was `"WEAK" in "WEAKEST…"`, **§Lessons 1 inside the test written
 to guard the grading**.
+
+## No em dashes, anywhere a recipient reads (2026-08-03)
+
+An em dash in a cold email is the clearest "pasted out of a chatbot" signal there is, and a
+reader who spots one re-reads the whole message as machine-written. Belt AND braces, because a
+prompt instruction is not a guarantee (§Lessons 9, 12): every generation prompt forbids them AND
+`strip_ai_dashes` removes them anyway. Covers emails, LinkedIn notes, texts, cover letters,
+résumés. Source comments are internal and untouched.
+
+Four holes the obvious fix missed: `U+2015`/`U+2212` lookalikes (`U+2212` maps to a HYPHEN — a
+comma would invert "−20%"); a dash opening a LINE is a bullet, not a clause break; the résumé
+assembler's ORIGINAL-text fallbacks; and the base résumé itself, which had one. Then two more:
+`outreach.py` contained **93 em dashes**, so the rule banning them arrived in a prompt saturated
+with them, and the Node renderer adds its own downstream of every Python guard (§Lessons 45).
+
+## ATS: verify what a parser reads back (`scoring/ats.py`, 2026-08-03)
+
+Asked for invisible text and keyword stuffing; this is the legitimate version, and it found more
+than the trick would have. Two checks, no new dependency.
+
+**The round trip** extracts the text back OUT of the PDF and asserts a screener can see the
+name, email, phone, employers and standard headings. This is what §Lessons 10 needed: a layout
+crash fell through to the HTML renderer, which wrote a **380-character PDF with no WORK
+EXPERIENCE** and it went out on real applications. Runs on BOTH render paths, advisory rather
+than blocking, and failures reach the Activity tab. With no extractor installed it returns
+`ok=None` — "could not check" and "the PDF is fine" are opposite findings.
+
+**Keyword coverage is a REPORT, never an inserter.** Where a term is true, using the posting's
+literal word helps a parser that matches strings rather than meanings; where it is not true the
+gap stays. About half of any posting's terms describe work the candidate has never done and only
+they can say which half. Term quality took four passes against the real corpus — the first
+version's top "missing keywords" were `Additional Perks`, `BENEFITS` and `California Employees`.
+`applypilot ats [--job X]` runs both.
 
 ## Engagement signals — what is detectable, and what is not
 
@@ -863,9 +1023,17 @@ deliberately narrowed — see its ticket.
 `CRM-4b` — 2026-07-30/31). `gmail.readonly` is now GRANTED on this machine, but nothing reads
 automatically — see §Engagement signals.
 
-**Open:** `DISC-1` — discovery has produced **0** jobs; all 16 were pasted by hand. Still the
-biggest gap by a wide margin: everything downstream of it works end to end, on jobs the
-operator has to find themselves.
+**`DISC-1` was re-scored on 2026-08-03 and is NOT the gap it looked like.** Discovery has
+produced 0 jobs and all 19 were pasted by hand — but the operator finds them on LinkedIn, whose
+job feed is a RECOMMENDER (profile, network, behaviour, a ranking model). ApplyPilot's discovery
+is 2,137 lines of keyword SEARCH across boards. Those are not two implementations of the same
+idea; for RELEVANCE the recommender wins, and running ours would buy throughput at worse
+precision that the operator would then have to filter back down. Do not "fix" this by default.
+
+**Open, and the real ceiling:** nothing could tell you what works. 77 emails, 2 replies, and no
+way to ask whether the personalised ones did better — so every improvement to the copy was
+unfalsifiable. `draft_variant` (2026-08-03) starts fixing it, but nothing is readable until
+enough tagged sends accumulate; `MIN_MEANINGFUL_N` is 10.
 
 ~~**Half-finished:** intro-deck click collection.~~ **DONE 2026-08-01 — the whole chain is
 live**, and the cause of the two "build failures" was finally seen: **`AWS_LAMBDA_JS_RUNTIME =
@@ -927,11 +1095,11 @@ What is actually open now, ordered by leverage:
    that eventually gets closed by a restart. A tab-title badge is near-free and covers most of
    it; a desktop notification behind an opt-in toggle covers the rest.
 
-3. **Discovery has produced 0 jobs.** ~2,500 lines of working, tested discovery (JobSpy across
-   five boards, 48 Workday portals, an AI scraper) and every one of the **13** jobs was pasted
-   in by hand. A configuration and trust problem, not a code problem — `DISC-1`. **With deck
-   tracking closed this is now the only large gap left**, and it is the one at the top of the
-   funnel: everything downstream works end to end on jobs the operator has to find themselves.
+3. **`derive_company` returns None for some employers' own careers sites.** `google.com/about/
+   careers/...` and a bare uploaded URL both import as **"Uploaded uploaded job"**, and the
+   résumé and cover letter are then written against a company called "Uploaded". §Lessons 20's
+   table says that host should resolve to Google. Found 2026-08-03, not fixed. This is the
+   highest-value small bug open.
 
 4. **15 modules still execute SQL directly** (was 21) — `apply/launcher.py`,
    `enrichment/detail.py`, `view.py`, `cli.py`, `pipeline.py`, the three discovery scrapers,
@@ -939,13 +1107,14 @@ What is actually open now, ordered by leverage:
    `test_sql_lives_only_in_the_data_layer` names the remainder in an allowlist, so the list can
    only shrink and no NEW module can join it. Deliberately deferred; see ARCH-4's ticket.
 
-5. **`web_dashboard.py` is 2,779 lines**, all Python, zero SQL. ~430 lines are pipeline
+5. **`web_dashboard.py` is 2,900 lines**, all Python, zero SQL. ~430 lines are pipeline
    orchestration (`run_dashboard_prepare/apply/fill_one/restart/continue`) that are not HTTP
    concerns. Extracting them is the natural companion to debt item 1.
 
-6. **No per-company outreach cap**, and it got worse. 5 contacts × 3 email touches is 15
-   emails at one company; the SMS ladder adds up to 2 texts per person on top of that, on the
-   one channel where volume is least forgivable. Nothing counts sends per employer.
+6. ~~**No per-company outreach cap.**~~ **CLOSED 2026-08-03** (`OUTREACH_COMPANY_CAP`, default
+   8). Kept for the number: six companies were already OVER the cap the moment it shipped, three
+   of them at 10 emails. Nothing had counted per employer, because the daily limit is global and
+   the cooldown is per address.
 
 7. **`@react-pdf` is a major version behind** (3.4.5 installed, 4.5.1 current). The textkit
    layout crash in §Lessons 10 may be fixed upstream; the renderer now survives it either way,
@@ -1057,7 +1226,12 @@ change still needs the `pip install` above — but that copy gives the file a ne
   Run the install alone, and verify with `python -c "import applypilot; print(applypilot.__version__)"`.
 - **Check for in-flight applies before ANY restart or reinstall.** The apply is a child of the
   dashboard, so it dies with the server. This happened three times on 2026-07-30 alone.
-- Working tree clean. **`main` is at `b9163ac`** — deck tracking live + the SMS channel,
+- Working tree clean. **`main` is at `b3ff9f5`**; 7 commits ahead of it locally as of
+  2026-08-03 (ATS, interview, empty-scrape, renderer dashes).
+- **`applypilot ats`** is the fastest way to check a résumé is readable and see keyword gaps.
+- **All 28 existing résumé PDFs carry an em dash** from the old renderer and need a re-render;
+  nothing rewrites a PDF in place.
+- Working tree was previously at **`b9163ac`** — deck tracking live + the SMS channel,
   merged and pushed. Tags: `stable-arch2/3/5/6` · `stable-e2e-20260730` · `stable-crm-20260731`.
 - **Check `git log --oneline -1` before believing anything about this repo.** Found on
   2026-08-02 checked out on `crm-phase-1` (an ancestor of `main`, nothing unique on it) with

@@ -152,3 +152,35 @@ def test_the_base_resume_has_none(tmp_path, monkeypatch):
     assert EM not in text and BAR not in text, (
         f"the base résumé contains {text.count(EM)} em dash(es); every tailored résumé that "
         "falls back to an original section inherits them")
+
+
+# ── the renderer inserts its own text, downstream of every Python sanitiser ──
+
+def test_the_node_renderer_emits_no_dashes_of_its_own():
+    """The gap that shipped an em dash into a real PDF.
+
+    `_scrub` cleans the render PAYLOAD, and the .txt and _DATA.json for that résumé both
+    contained zero em dashes — but the PDF had two, in EDUCATION. The renderer builds that line
+    itself: `[ed.school, ed.degree, ed.detail].join(' — ')`. Every Python guard ran before the
+    string that reached the page existed.
+
+    So the check has to be on the renderer source, not on anything Python can see. Comments are
+    excluded: the model never reads them and they are not in the output.
+    """
+    import re
+
+    from applypilot import scoring
+    src_dir = pathlib.Path(scoring.__file__).parent.parent / "resume_renderer"
+    assert src_dir.is_dir(), "the renderer source moved; this test is measuring nothing"
+
+    offenders = []
+    for f in sorted(src_dir.glob("*.mjs")):
+        for i, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
+            code = re.sub(r"//.*$", "", line)          # strip trailing line comments
+            if code.strip().startswith(("*", "/*")):    # block-comment bodies
+                continue
+            if any(d in code for d in (EM, EN, BAR)):
+                offenders.append(f"{f.name}:{i}: {code.strip()[:80]}")
+    assert not offenders, (
+        "the renderer emits a dash of its own, downstream of every Python sanitiser:\n  "
+        + "\n  ".join(offenders))

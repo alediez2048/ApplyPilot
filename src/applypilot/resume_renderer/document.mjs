@@ -26,7 +26,7 @@ export function ContactLine(styles, contact) {
 
   const children = []
   parts.forEach((p, i) => {
-    if (i > 0) children.push(h(Text, { key: `s${i}`, style: styles.contactSep }, '–'))
+    if (i > 0) children.push(h(Text, { key: `s${i}`, style: styles.contactSep }, '·'))
     const style = isLink(p) ? styles.contactLink : styles.contactItem
     children.push(h(Text, { key: `p${i}`, style }, p))
   })
@@ -81,7 +81,7 @@ function SkillRows(styles, marker, rows) {
 
 function EducationRows(styles, rows) {
   return rows.filter(Boolean).map((ed, i) => {
-    const label = [ed.school, ed.degree, ed.detail].filter(Boolean).join(' — ')
+    const label = [ed.school, ed.degree, ed.detail].filter(Boolean).join(', ')
     return h(View, { key: i, style: styles.eduRow }, [
       h(Text, { key: 't', style: styles.eduText }, label),
       ed.date ? h(Text, { key: 'd', style: styles.eduDate }, String(ed.date)) : null,
@@ -177,7 +177,7 @@ export function ResumeDocument({ resume, styles, theme }) {
   if (education.length) {
     sections.push(Section(styles, 'Education',
       education.filter(Boolean).map((ed, i) => {
-        const label = [ed.school, ed.degree, ed.detail].filter(Boolean).join(' — ')
+        const label = [ed.school, ed.degree, ed.detail].filter(Boolean).join(', ')
         return h(View, { key: i, style: styles.eduRow }, [
           h(Text, { key: 't', style: styles.eduText }, label),
           ed.date ? h(Text, { key: 'd', style: styles.eduDate }, String(ed.date)) : null,

@@ -98,7 +98,13 @@ def peer_titles(job_title: str | None) -> list[str]:
     if not job_title:
         return []
     base = re.sub(r"\s*[(\[].*?[)\]]", "", job_title).strip()
-    base = re.sub(r"\s*[-–—,|/].*$", "", base).strip()   # "PM, Search" / "PM - Remote"
+    # Keep the LONGEST segment, not the first. Cutting at the first separator turned
+    # "Salesforce - Forward Deployed Engineer" into a search for "Salesforce" — the company,
+    # which is guaranteed to match nobody by title and would then widen to nothing. Ties go to
+    # the earlier segment, so "Product Manager, Business Operations" stays a Product Manager.
+    segments = [s.strip() for s in re.split(r"\s[-–—|/]\s|,\s", base) if s.strip()]
+    if segments:
+        base = max(segments, key=lambda s: len(s.split()))
     if not base:
         return []
 

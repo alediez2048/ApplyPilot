@@ -235,6 +235,24 @@ def collect_detail_intelligence(page) -> dict:
     intel["page_title"] = page.title()
     intel["final_url"] = page.url
 
+    # The page's own heading, as a fallback for the role. Single-page ATSes render the <title>
+    # before their content and never update it — every Ashby posting reports "Jobs" — and an
+    # auth wall titles itself "Create Account" while still showing the role on the page. The
+    # Visa posting is exactly that: title "Create Account", h1 "Senior Technical Program
+    # Manager".
+    intel["heading"] = ""
+    # h2 last, and only because Workday renders an EMPTY h1 and puts the role in an h2. Widening
+    # the net this far is what makes `_SECTION_HEADING` necessary — every posting has an h2
+    # reading "About the role".
+    for sel in ("h1", "[data-testid='job-title']", ".job-title", "h2"):
+        try:
+            el = page.query_selector(sel)
+        except Exception:  # noqa: BLE001
+            continue
+        if el and (el.inner_text() or "").strip():
+            intel["heading"] = el.inner_text().strip()
+            break
+
     for el in page.query_selector_all('script[type="application/ld+json"]'):
         try:
             data = json.loads(el.inner_text())
@@ -306,6 +324,26 @@ _TITLE_TAIL = re.compile(r"\s*[|–—-]\s*[^|–—-]*$")
 #: written for EVERY pasted URL and nothing ever replaced it, so the peer search was handed the
 #: word "job" and duly found people at Yahoo whose titles are "Job", "Student Job" and "No job".
 _PLACEHOLDER_TITLE = re.compile(r"\buploaded\s+job\b", re.I)
+#: What an auth wall calls itself. Five of nineteen applications hit one, so this is the single
+#: most likely thing a page title says instead of a role.
+_AUTH_PAGE_TITLE = re.compile(
+    r"\b(sign in|sign-in|signin|log ?in|create account|register|forgot|password|"
+    r"authenticat|sso|verify|captcha|access denied|forbidden|not found)\b", re.I)
+
+
+#: Greenhouse titles every application page "Job Application for <ROLE> at <COMPANY>". Five real
+#: roles were thrown away by the "starts with Job" rule before this was measured rather than
+#: assumed — reading the actual titles took one pass and settled it.
+_APPLICATION_PREFIX = re.compile(r"^job application (?:for|to)\s+", re.I)
+#: "<ROLE> at <COMPANY>" / "<ROLE> @ <COMPANY>". The employer is not part of the role, and
+#: leaving it on means the peer search widens through the company name.
+_EMPLOYER_TAIL = re.compile(r"\s+(?:@|at)\s+\S.*$", re.I)
+#: Headings that appear INSIDE a posting rather than naming it.
+_SECTION_HEADING = re.compile(
+    r"^(about|overview|responsibilit|qualification|requirement|what you|who you|why |"
+    r"benefit|compensation|perks|the role|the team|our |your |how we|equal |diversity|"
+    r"apply|share this|similar|related|search|filter|menu|skip to|not found|no results)",
+    re.I)
 
 
 def _clean_role_title(raw: str | None) -> str:
@@ -313,12 +351,27 @@ def _clean_role_title(raw: str | None) -> str:
     t = (raw or "").strip()
     if not t or _PLACEHOLDER_TITLE.search(t):
         return ""
+    t = _APPLICATION_PREFIX.sub("", t).strip()
     for _ in range(2):  # "Role - Company - Careers"
         if len(_TITLE_TAIL.sub("", t).split()) >= 2:
             t = _TITLE_TAIL.sub("", t).strip()
+    # Drop the employer only when a plausible role survives it, so "Head of AI" is not eaten by
+    # a title that happens to read "AI at Scale".
+    without_employer = _EMPLOYER_TAIL.sub("", t).strip()
+    if len(without_employer.split()) >= 2:
+        t = without_employer
     t = re.sub(r"\s+", " ", t).strip(" -|–—")
     # "Job Search", "Job Details", "Job Description" are the page's furniture, not the role.
     if re.match(r"^job\b", t, re.I):
+        return ""
+    # An auth wall answers with its own title. "Create Account" and "Sign In" would be stored as
+    # the role and then searched for, which is how the contact search ends up looking for people
+    # whose job is Sign In — the "Job"/"No job" failure with different words.
+    if _AUTH_PAGE_TITLE.search(t):
+        return ""
+    # A section heading is not the role. Only reachable because the h2 fallback exists, and
+    # every posting on earth has an h2 reading "About the role".
+    if _SECTION_HEADING.match(t):
         return ""
     # A title that is one generic word is not worth overwriting a placeholder with.
     return t if len(t) > 3 and len(t.split()) >= 2 else ""
@@ -629,7 +682,8 @@ def scrape_detail_page(page, url: str) -> dict:
     # The role, from the page itself. `collect_detail_intelligence` has always captured
     # `page_title` and nothing ever read it, while every dashboard-pasted job kept the invented
     # title "<Company> uploaded job" forever. JSON-LD overwrites this below when it has one.
-    result["role_title"] = _clean_role_title(intel.get("page_title"))
+    result["role_title"] = (_clean_role_title(intel.get("page_title"))
+                            or _clean_role_title(intel.get("heading")))
 
     # Tier 1: JSON-LD
     json_ld_result = extract_from_json_ld(intel)

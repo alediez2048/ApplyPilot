@@ -172,8 +172,64 @@ def test_the_scraper_persists_a_recovered_title_only_over_a_placeholder():
 
     from applypilot.enrichment import detail
     src = pathlib.Path(detail.__file__).read_text(encoding="utf-8")
-    assert 'result["role_title"] = _clean_role_title(intel.get("page_title"))' in src, (
+    assert 'intel.get("page_title")' in src, (
         "the page title is captured and still never used")
     block = src[src.index('role_title = result.get("role_title")'):]
     assert "is_placeholder_title(title)" in block[:400], (
         "a scraped title can overwrite one the operator set")
+
+
+# ── everything the 21-job backfill turned up ────────────────────────────────
+
+def test_the_company_prefix_is_not_mistaken_for_the_role():
+    """"Salesforce - Forward Deployed Engineer" cut at the first separator and searched for
+    "Salesforce" — a company name, which matches nobody by title and then widens to nothing.
+
+    Keeping the LONGEST segment fixes it; ties go to the earlier one so a trailing
+    specialisation ("Product Manager, Business Operations") does not displace the role.
+    """
+    assert rank.peer_titles("Salesforce - Forward Deployed Engineer (All Levels)")[0] == \
+        "Forward Deployed Engineer"
+    assert rank.peer_titles("Avathon Government - Senior AI Engineer")[0] == "Senior AI Engineer"
+    assert rank.peer_titles("Product Manager, Business Operations")[0] == "Product Manager"
+    assert rank.peer_titles("Field Engineer, Public Sector")[0] == "Field Engineer"
+
+
+@pytest.mark.parametrize("raw,expect", [
+    # Greenhouse titles every application page this way. The "starts with Job" rule threw away
+    # five real roles before the actual titles were read instead of guessed at.
+    ("Job Application for AI Solutions Engineer at Affirm", "AI Solutions Engineer"),
+    ("Job Application for Senior IT Engineer (AI) at Iterable", "Senior IT Engineer (AI)"),
+    ("Job Application for Field Engineer, Public Sector at Scale AI", "Field Engineer, Public Sector"),
+    # The employer is not part of the role; leaving it on widens the peer search through it.
+    ("Senior AI Automation Engineer @ BetterUp", "Senior AI Automation Engineer"),
+    ("Product Engineer at Hamming AI", "Product Engineer"),
+    ("Head of AI at Scale", "Head of AI"),
+])
+def test_real_page_titles_from_the_backfill(raw, expect):
+    assert _clean_role_title(raw) == expect
+
+
+@pytest.mark.parametrize("raw", [
+    "About the role", "What you will do", "Responsibilities", "The Role", "Our Mission",
+    "Apply Now", "Job not found", "No results found",
+])
+def test_a_section_heading_is_never_the_role(raw):
+    """Only reachable because the heading fallback reads h2 — Workday renders an EMPTY h1 and
+    puts the role in an h2, and every posting on earth also has an h2 saying "About the role"."""
+    assert _clean_role_title(raw) == ""
+
+
+def test_the_heading_fallback_is_wired_and_ordered_after_the_title():
+    """The Visa posting titles itself "Create Account" behind its auth wall while still showing
+    "Senior Technical Program Manager" on the page. Without the fallback that role is
+    unrecoverable; with it ahead of the page title, a good <title> would be overridden by a
+    heading like "Careers"."""
+    import pathlib
+
+    from applypilot.enrichment import detail
+    src = pathlib.Path(detail.__file__).read_text(encoding="utf-8")
+    assert '"h2"' in src, "the h2 fallback is gone; Workday roles become unrecoverable"
+    assert ('result["role_title"] = (_clean_role_title(intel.get("page_title"))\n'
+            '                            or _clean_role_title(intel.get("heading")))') in src, (
+        "the heading is consulted before the page title, or not at all")

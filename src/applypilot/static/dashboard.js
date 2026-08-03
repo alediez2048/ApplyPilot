@@ -1921,6 +1921,19 @@ function jobTabs(j) {
 const JOB_DESC = new Map();     // job url -> full description, fetched once per session
 const JOB_DESC_OPEN = new Set();
 
+async function saveJobDescription(url, btn) {
+  const box = btn.closest('.jd-paste').querySelector('.jd-paste-box');
+  const text = (box.value || '').trim();
+  btn.disabled = true; btn.textContent = 'Saving…';
+  const r = await post('/api/job-description/save', {url, description: text});
+  if (!r.ok) {
+    btn.disabled = false; btn.textContent = 'Save description';
+    alert(r.message || 'Could not save that.');
+    return;
+  }
+  btn.textContent = 'Saved ✓';
+  refresh();
+}
 function jobDetail(j) {
   const link = (href, label, cls) => href
     ? `<a class="${cls}" href="${esc(href)}" target="_blank" rel="noopener">${label} ↗</a>` : '';
@@ -1943,8 +1956,24 @@ function jobDetail(j) {
   const open = JOB_DESC_OPEN.has(j.url);
   const full = JOB_DESC.get(j.url);
   const excerpt = (j.description || '').trim();
+  // No description means the job is DEAD: tailor and cover both need it, and a row whose
+  // detail_scraped_at is already stamped is never re-queued. Some postings are JavaScript-
+  // rendered and return an empty shell to a plain fetch (Google's careers site is one), so the
+  // escape hatch is the same one LinkedIn and SMS use — the human is already on the page.
   const desc = !excerpt
-    ? `<div class="pane-empty">No description scraped. Run Enrich, or open the posting above.</div>`
+    ? `<div class="jd-paste">
+         <div class="jd-paste-why">${j.detail_error
+             ? esc(j.detail_error)
+             : 'No description was read from this page.'}
+           <b>Nothing else can run without one</b> — tailoring and the cover letter both need it.</div>
+         <textarea class="jd-paste-box" rows="6"
+           placeholder="Open the posting, select the whole description, and paste it here."></textarea>
+         <div class="dbtns">
+           <button class="primary" onclick="saveJobDescription(${
+             `decodeURIComponent('${encodeURIComponent(j.url)}')`}, this)">Save description</button>
+           ${link(j.url, 'Open the posting', '')}
+         </div>
+       </div>`
     : `<div class="jd-desc">${esc(open && full ? full : excerpt)}${
         !open && excerpt.length >= 900 ? '…' : ''}</div>
        ${excerpt.length >= 900 ? `<button class="linklike" onclick="toggleJobDesc(${

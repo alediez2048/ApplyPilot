@@ -1025,6 +1025,32 @@ def _unmark_rejected(url: str) -> dict:
     return {"ok": True, "message": "Restored from rejected pile"}
 
 
+def _save_job_description(url: str, description: str) -> dict:
+    """Let the operator paste a description the scraper could not read.
+
+    Some postings are JavaScript-rendered and return an empty shell to a plain fetch — Google's
+    careers site is one. Without this the job is stuck forever: no description means tailor and
+    cover never run, and `queue_needing_detail` will not retry a row whose detail_scraped_at is
+    already stamped. Copy-paste is the same escape hatch the LinkedIn and SMS channels use, for
+    the same reason: the human is already looking at the page.
+    """
+    from applypilot.database import log_event
+    text = (description or "").strip()
+    if not url:
+        return {"ok": False, "message": "url required"}
+    if len(text) < 120:
+        # A stub is worse than nothing: it would clear the error, satisfy the tailor queue, and
+        # produce a résumé written against three sentences.
+        return {"ok": False, "message": "that looks too short to be a job description"}
+    init_db()
+    conn = get_connection()
+    if not _jobs.exists(url, conn):
+        return {"ok": False, "message": "job not found"}
+    _jobs.set_description(url, text, conn)
+    log_event(url, "enrich", "ok", f"Description pasted by hand ({len(text):,} chars).", conn)
+    return {"ok": True, "message": f"Saved {len(text):,} characters — run Prepare now"}
+
+
 def _mark_interview(url: str) -> dict:
     """Record that an interview is scheduled. The one success metric in the system.
 
@@ -1506,6 +1532,9 @@ def _status_payload() -> dict:
             "apply_attempts": row["apply_attempts"] or 0,
             "applied_at": row["applied_at"] or "",
             "rejected_at": row["rejected_at"] or "",
+            # Surfaced so the Job tab can say WHY there is no description and offer the
+            # paste box. Silent before: a scrape that read nothing looked like a healthy row.
+            "detail_error": (row["detail_error"] if "detail_error" in row.keys() else "") or "",
             # The success metric. A job with this set needs no more attention.
             "interview_at": (row["interview_at"] if "interview_at" in row.keys() else "") or "",
             "last_attempted_at": row["last_attempted_at"] or "",
@@ -2668,6 +2697,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/contact/sync-gmail":
                 _json_response(self, _sync_all_gmail(data))
+                return
+            if path == "/api/job-description/save":
+                _json_response(self, _save_job_description(
+                    data.get("url", ""), data.get("description", "")))
                 return
             if path == "/api/job-description":
                 _json_response(self, _job_description(data))

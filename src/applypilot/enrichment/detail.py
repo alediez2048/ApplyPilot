@@ -670,7 +670,26 @@ def scrape_site_batch(
                 log.info("  %s | %s | desc=%s chars | apply=%s | %.1fs%s",
                          status, tier_str, f"{desc_len:,}", apply_str, elapsed, err_str)
 
-                if status in ("ok", "partial"):
+                # An empty description is a FAILURE whatever the status says. "partial" only
+                # means no application_url was found, so a page that rendered nothing at all
+                # took this branch: it wrote an empty description, stamped detail_scraped_at,
+                # and set detail_error to NULL. The job then failed `queue_needing_detail`
+                # (which requires detail_scraped_at IS NULL) forever, and with no description
+                # tailor and cover never ran either.
+                #
+                # Reported as "the dashboard is no longer working" on a Google careers URL — a
+                # JS-rendered page that returns an empty shell to a plain fetch. Nothing in the
+                # UI said anything, because the row looked exactly like a healthy one.
+                if status in ("ok", "partial") and not (result.get("full_description") or "").strip():
+                    stats["error"] += 1
+                    conn.execute(
+                        "UPDATE jobs SET application_url = COALESCE(?, application_url), "
+                        "detail_error = ?, detail_scraped_at = ? WHERE url = ?",
+                        (result.get("application_url"),
+                         "No description could be read from this page (often a JavaScript-"
+                         "rendered site). Paste it into the Job tab to continue.", now, url),
+                    )
+                elif status in ("ok", "partial"):
                     stats[status] += 1
                     conn.execute(
                         "UPDATE jobs SET full_description = ?, application_url = ?, "

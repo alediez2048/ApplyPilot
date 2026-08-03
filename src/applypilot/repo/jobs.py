@@ -316,6 +316,20 @@ def mark_rejected(url: str, conn: sqlite3.Connection | None = None) -> str:
     return now
 
 
+def set_description(url: str, text: str, conn: sqlite3.Connection | None = None) -> None:
+    """Store a description the operator pasted, and clear the scrape error.
+
+    `COALESCE` on detail_scraped_at keeps the original scrape time when there was one: the page
+    really was visited, and overwriting it would claim the paste was a scrape.
+    """
+    conn = _c(conn)
+    conn.execute(
+        "UPDATE jobs SET full_description = ?, detail_error = NULL, "
+        "detail_scraped_at = COALESCE(detail_scraped_at, ?) WHERE url = ?",
+        (text, _now(), url))
+    conn.commit()
+
+
 def mark_interview(url: str, conn: sqlite3.Connection | None = None) -> str:
     """Record that an interview is scheduled. Returns the timestamp.
 

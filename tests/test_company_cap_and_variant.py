@@ -176,3 +176,38 @@ def test_a_thin_variant_reports_counts_not_a_percentage():
     one = [{"email": "a@x.com", "sent_message_id": "g1", "draft_variant": "cold",
             "replied_at": "2026-08-01T00:00:00+00:00"}]
     assert metrics.by_variant(one)[0].meaningful is False
+
+
+# ── zero means unlimited, in all three caps ─────────────────────────────────
+
+def test_zero_disables_the_daily_limit_rather_than_blocking_everything(monkeypatch):
+    """The trap this shipped with. `_COMPANY_CAP` was guarded by `> 0` and a zero-day cooldown
+    window matches nothing, so 0 already meant "off" in two of the three caps — but the daily
+    limit compared `sent_today() >= 0`, which is true before the first email of the day.
+
+    So turning the limit off silently blocked EVERY send, and the refusal read "daily send limit
+    reached (0)" — a message describing a cap that had been switched off. One word meaning
+    "unlimited" here and "send nothing" there is not a setting, it is a coin flip.
+    """
+    from applypilot.networking import gmail_send, store
+    monkeypatch.setattr(gmail_send, "_DAILY_LIMIT", 0)
+    monkeypatch.setattr(gmail_send, "_COMPANY_CAP", 0)
+    monkeypatch.setattr(gmail_send, "_COOLDOWN_DAYS", 0)
+    monkeypatch.setattr(gmail_send, "configured", lambda: True)
+    monkeypatch.setattr(store, "sent_today", lambda *a, **k: 500)
+    monkeypatch.setattr(store, "already_contacted_email", lambda *a, **k: None)
+    monkeypatch.setattr(store, "emails_sent_to_company", lambda *a, **k: 500)
+
+    ok, why = gmail_send.can_send({"email": "a@b.com", "email_status": "verified",
+                                   "company": "Acme"})
+    assert ok, f"a disabled cap still blocked the send: {why}"
+
+
+def test_a_positive_daily_limit_still_stops_at_the_cap(monkeypatch):
+    """The other half — without this, deleting the check entirely would also pass."""
+    from applypilot.networking import gmail_send, store
+    monkeypatch.setattr(gmail_send, "_DAILY_LIMIT", 20)
+    monkeypatch.setattr(gmail_send, "configured", lambda: True)
+    monkeypatch.setattr(store, "sent_today", lambda *a, **k: 20)
+    ok, why = gmail_send.can_send({"email": "a@b.com", "email_status": "verified"})
+    assert not ok and "daily send limit" in why

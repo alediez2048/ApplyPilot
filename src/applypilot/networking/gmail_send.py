@@ -30,6 +30,14 @@ log = logging.getLogger(__name__)
 _SMTP_HOST = "smtp.gmail.com"
 _SMTP_PORT = 465
 
+#: ZERO MEANS UNLIMITED, for all three caps below.
+#:
+#: It already did for the company cap (`if _COMPANY_CAP > 0`) and for the cooldown (a zero-day
+#: window matches nothing), but NOT here: `sent_today() >= 0` is true before the first email of
+#: the day, so setting this to 0 to "turn the limit off" silently blocked every send instead.
+#: The same word meaning "unlimited" in two settings and "send nothing" in a third is a trap
+#: with no failure message — outreach would simply stop, and the note would read like a cap had
+#: been reached.
 _DAILY_LIMIT = int(os.environ.get("OUTREACH_DAILY_LIMIT", "20") or "20")
 #: Total emails ONE employer may receive — first contacts plus every follow-up, across every
 #: job. The gap the other two caps leave wide open: the daily limit is global and the cooldown
@@ -104,7 +112,7 @@ def can_send(contact: dict, confirm_unverified: bool = False) -> tuple[bool, str
     # regenerate that resets outreach_status), or the status is explicitly submitted.
     if (contact.get("sent_message_id") or "").strip() or contact.get("outreach_status") == "submitted":
         return False, "already sent to this contact"
-    if store.sent_today() >= _DAILY_LIMIT:
+    if _DAILY_LIMIT > 0 and store.sent_today() >= _DAILY_LIMIT:
         return False, f"daily send limit reached ({_DAILY_LIMIT})"
     prior = store.already_contacted_email(email, _COOLDOWN_DAYS, exclude_id=contact.get("id"))
     if prior:
@@ -372,7 +380,7 @@ def send_followup(contact_id: str, dry_run: bool = False) -> dict:
     to_addr = (contact.get("email") or "").strip()
     if not to_addr:
         return {"ok": False, "message": "no email address"}
-    if store.sent_today() >= _DAILY_LIMIT:
+    if _DAILY_LIMIT > 0 and store.sent_today() >= _DAILY_LIMIT:
         return {"ok": False, "message": f"daily send limit reached ({_DAILY_LIMIT})"}
     # The cap counts follow-ups too — they are the reason it is needed. Live data: 43 follow-ups
     # against 34 first contacts, so most of the volume reaching any one employer is chasing.
@@ -456,7 +464,7 @@ def send_reply(contact_id: str, body: str, subject: str = "", cc: list[str] | No
     cc_list = list(target["cc"]) if cc is None else [c for c in cc if (c or "").strip()]
     subject = (subject or target["subject"] or "").strip()
 
-    if store.sent_today() >= _DAILY_LIMIT:
+    if _DAILY_LIMIT > 0 and store.sent_today() >= _DAILY_LIMIT:
         return {"ok": False, "message": f"daily send limit reached ({_DAILY_LIMIT})"}
     if dry_run:
         return {"ok": True, "message": f"dry-run: would reply to {to_addr}"

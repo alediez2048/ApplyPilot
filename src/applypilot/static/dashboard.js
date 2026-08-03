@@ -816,6 +816,10 @@ function contactRow(c) {
   //    ARCH-3 legacy shim and may ONLY speak when the real column is empty.
   if (conv.state === 'awaiting_us')
     pills.push(`<span class="pill due" title="They replied and nobody has answered">💬 your turn${conv.days >= 1 ? ` · ${conv.days}d` : ''}</span>`);
+  else if (conv.stalled && (conv.unanswered || 0) < 2)
+    pills.push(`<span class="pill due" title="They replied, you answered, and it has gone quiet since">🕓 quiet ${conv.days}d</span>`);
+  else if (conv.stalled)
+    pills.push(`<span class="pill off" title="Two messages sent with no answer — the nudge is spent">🕓 quiet ${conv.days}d · nudged ${conv.unanswered}×</span>`);
   else if (c.replied_at)
     pills.push(`<span class="pill on">✓ replied ${esc(shortDate(c.replied_at))}</span>`);
   else if (c.followup_status === 'replied')
@@ -1434,6 +1438,7 @@ function pendingActions(jobs) {
   const g = (key, icon, label, urgent) => ({ key, icon, label, urgent, n: 0, jobs: [] });
   const groups = [
     g('replies',   '💬', 'waiting on your reply',   true),
+    g('stalled',   '🕓', 'live threads gone quiet',  true),
     g('submit',    '📋', 'filled, ready to submit', true),
     g('human',     '⚠',  'need you at the keyboard', true),
     g('fill',      '▶',  'ready to fill',           false),
@@ -1448,6 +1453,14 @@ function pendingActions(jobs) {
   for (const j of js) {
     if (j.status === 'rejected') continue;      // a closed application owes you nothing
     add('replies', j, (j.awaiting_reply || []).length);
+    // A conversation that stalled outranks every cold ladder: they already engaged, which is
+    // the hardest part, and letting it go quiet wastes the only thing outreach is for. Capped
+    // at `unanswered < 2` — once two messages have gone unanswered the honest move is to stop,
+    // not to keep the prompt lit forever.
+    add('stalled', j, (j.contacts || []).filter(c => {
+      const cv = c.conversation || {};
+      return cv.stalled && (cv.unanswered || 0) < 2;
+    }).length);
     if (j.status === 'ready_to_submit') add('submit', j, 1);
     if (j.status === 'needs_human') add('human', j, 1);
     if (j.status === 'ready') add('fill', j, 1);
@@ -1487,7 +1500,7 @@ function gotoTodo(url, tab) {
   if (row && row.scrollIntoView) row.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
-const _TODO_TAB = { replies: 'people', followups: 'followups', outreach: 'people',
+const _TODO_TAB = { replies: 'people', stalled: 'people', followups: 'followups', outreach: 'people',
                     contacts: 'people' };
 
 function renderTodo(jobs) {
@@ -1825,6 +1838,19 @@ function nextAction(j) {
     const ago = w.days >= 1 ? `${w.days}d` : `${w.hours || 0}h`;
     const more = waiting.length > 1 ? ` +${waiting.length - 1}` : '';
     return `<button class="primary" onclick="openReply(${u},'${esc(w.id)}')">💬 Answer ${esc(firstName(w.full_name))} (${ago})${more}</button>`;
+  }
+  // A stalled live thread beats a cold ladder. Someone who answered once and went quiet is a
+  // better prospect than three strangers who never answered at all.
+  const quiet = (j.contacts || []).filter(c => {
+    const cv = c.conversation || {};
+    return cv.stalled && (cv.unanswered || 0) < 2;
+  });
+  if (quiet.length) {
+    const q = quiet[0], cv = q.conversation || {};
+    const more = quiet.length > 1 ? ` +${quiet.length - 1}` : '';
+    // openReply, not a bespoke opener: a stalled thread needs the composer focused, which is
+    // exactly what answering a live reply needs. The action is the same; only the reason differs.
+    return `<button class="amber" onclick="openReply(${u},'${esc(q.id)}')">🕓 ${esc(firstName(q.full_name))} went quiet ${cv.days}d ago${more}</button>`;
   }
   const due = dueByChannel(j);
   if (due.total) {

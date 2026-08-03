@@ -234,6 +234,58 @@ def note_introductions(contact: dict, intros: list[dict], conn) -> None:
         log.info("Introduction on %s: %s -> %s", contact["job_url"], by, person["email"])
 
 
+def _adopt_threads_by_address(contacts: list[dict], conn) -> int:
+    """Give a thread_id to contacts who have an email but no thread, in ONE search.
+
+    Only for people actually in play — emailed, replied, or introduced. Every discovered contact
+    would otherwise be searched for forever, spending an API call apiece to learn nothing about
+    strangers we have never written to.
+
+    Mutates the passed dicts so the caller's loop picks the thread up on THIS poll rather than
+    the next one; a contact who has been silently missed for days should not wait another cycle.
+    """
+    if not gmail_read.can_read_content()[0]:
+        return 0                       # metadata scope cannot search at all
+    waiting = [c for c in contacts
+               if not (c.get("thread_id") or "").strip()
+               and (c.get("email") or "").strip()
+               and ((c.get("outreach_status") or "") == "submitted"
+                    or (c.get("replied_at") or "").strip()
+                    or "introduc" in (c.get("match_reason") or "").lower())]
+    if not waiting:
+        return 0
+    by_addr = {(c["email"] or "").strip().lower(): c for c in waiting}
+    # One query, every address. `cc:` matters as much as from/to — being CC'd into somebody
+    # else's thread is exactly how the Writer handoff arrived.
+    terms = " OR ".join(f"from:{a} OR to:{a} OR cc:{a}" for a in by_addr)
+    try:
+        thread_ids = gmail_read.search_threads(terms, limit=50)
+    except Exception:  # noqa: BLE001
+        log.debug("Address sweep failed", exc_info=True)
+        return 0
+
+    from applypilot.networking.store import upsert_contact
+    adopted = 0
+    for tid in thread_ids:
+        try:
+            msgs = gmail_read.thread_messages(tid)
+        except Exception:  # noqa: BLE001
+            continue
+        # Attribute the thread to whichever waiting contact actually appears in it. A thread can
+        # match the OR query through any address, so it must be checked rather than assumed.
+        blob = " ".join(f"{m.get('from_addr','')} {' '.join(m.get('to_addrs') or [])} "
+                        f"{' '.join(m.get('cc_addrs') or [])}" for m in msgs).lower()
+        for addr, c in by_addr.items():
+            if addr in blob and not (c.get("thread_id") or "").strip():
+                c["thread_id"] = tid            # in-memory, so this poll uses it immediately
+                upsert_contact({"id": c["id"], "job_url": c.get("job_url", ""),
+                                "thread_id": tid}, conn)
+                adopted += 1
+                log.info("Adopted a thread nobody started for %s", c.get("full_name") or addr)
+                break
+    return adopted
+
+
 def poll(conn=None, force_full: bool = False) -> dict:
     """One incremental poll. Safe to run repeatedly; returns a summary for the caller to log.
 
@@ -273,6 +325,18 @@ def poll(conn=None, force_full: bool = False) -> dict:
     found: list[dict] = []
     bounced: list[dict] = []
     intros: list[dict] = []
+
+    # Contacts we never emailed have no thread_id, and this loop used to `continue` past them —
+    # so anyone who wrote to us FIRST, replied from a different address, or was introduced into
+    # a thread of somebody else's was invisible to the poller forever. That is the Writer case:
+    # Victoria CC'd David, David then wrote on a NEW thread, and nothing saw it, because the
+    # only threads ever read were ones we had started.
+    #
+    # Resolved in ONE batched Gmail query rather than a search per contact. `/api/status` already
+    # learned that lesson expensively (§Lessons 26) — a per-contact network call on a 5-minute
+    # timer is how a poller quietly becomes the slowest thing in the system.
+    _adopt_threads_by_address(contacts, conn)
+
     for c in contacts:
         tid = (c.get("thread_id") or "").strip()
         if not tid:

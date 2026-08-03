@@ -119,6 +119,10 @@ SETTINGS: tuple[Setting, ...] = (
     Setting("OUTREACH_DAILY_LIMIT", "outreach", "int", 20, "Max emails sent per 24h."),
     Setting("OUTREACH_COOLDOWN_DAYS", "outreach", "int", 30,
             "Don't email the same address again within this many days."),
+    Setting("STALLED_AFTER_HOURS", "followup", "int", 72,
+            "Hours of silence from THEM before a live conversation counts as stalled. Shorter "
+            "than any cold ladder on purpose: somebody who replied has earned a faster, lighter "
+            "nudge than a stranger."),
     Setting("OUTREACH_COMPANY_CAP", "outreach", "int", 8,
             "Total emails ONE employer may receive — first contacts plus follow-ups, across "
             "every job. 0 disables. The daily limit is global and the cooldown is per address, "

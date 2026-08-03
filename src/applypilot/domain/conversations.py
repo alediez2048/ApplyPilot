@@ -338,7 +338,47 @@ def conversation_state(messages: list[dict], now=None) -> dict | None:
         "at": last.get("sent_at") or "",
         "who": (last.get("from_name") or last.get("from_addr") or "") if inbound else "",
         "messages": len(msgs),
+        # A live conversation that went quiet. The cold ladder halts permanently on `replied`
+        # (TERMINAL), which is right — you do not keep cold-chasing someone who answered — but
+        # nothing replaced it, so a warm thread that stalled had no mechanism at all. The system
+        # chased strangers and abandoned people who had actually engaged.
+        #
+        # Measured: Gina replied 7/31, was answered the same day, and then received a SECOND
+        # unanswered message on 8/3 that nothing tracked. Two consecutive outbound messages is
+        # the thing this state exists to make visible.
+        "stalled": (not inbound) and hours is not None and hours >= _stalled_after_hours(),
+        # How many messages we have sent since they last spoke. 2+ means the nudge is already
+        # spent and the honest next move is to stop, not to send a third.
+        "unanswered": _outbound_since_last_inbound(msgs),
     }
+
+
+#: Hours of silence from THEM before a live conversation counts as stalled. Deliberately shorter
+#: than any cold ladder (the shortest is 48h): somebody who replied has earned a faster, lighter
+#: nudge than a stranger, and waiting a week on a warm thread is how a real lead goes cold.
+def _stalled_after_hours() -> int:
+    from applypilot import settings
+    values, _ = settings.resolve()
+    return int(values.get("STALLED_AFTER_HOURS") or 72)
+
+
+STALLED_AFTER_HOURS = 72
+
+
+def _outbound_since_last_inbound(msgs: list[dict]) -> int:
+    """How many messages we have sent since they last wrote.
+
+    Distinguishes "they went quiet after my reply" (1) from "I have now nudged twice with no
+    answer" (2+). Without it the UI would keep offering the same prompt indefinitely, which is
+    how a stalled-conversation feature turns into the pestering the per-company cap exists to
+    prevent.
+    """
+    n = 0
+    for m in reversed(msgs or []):
+        if (m.get("direction") or "") == "in":
+            break
+        n += 1
+    return n
 
 
 def _pick_from(msg: dict) -> str:

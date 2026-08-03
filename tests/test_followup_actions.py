@@ -122,8 +122,8 @@ def test_draft_uses_the_channel_drafter_and_stores_the_result(db, cid, monkeypat
     from applypilot.networking import outreach
     seen = {}
 
-    def fake(channel, profile, job, contact, touch=1, style="", thread=None):
-        seen.update(channel=channel, touch=touch, thread=thread)
+    def fake(channel, profile, job, contact, touch=1, style="", thread=None, touches=None):
+        seen.update(channel=channel, touch=touch, thread=thread, touches=touches)
         return {"subject": f"S{touch}", "body": f"B{touch}"}
     monkeypatch.setattr(outreach, "draft_for_channel", fake)
 
@@ -132,6 +132,10 @@ def test_draft_uses_the_channel_drafter_and_stores_the_result(db, cid, monkeypat
     # The conversation is loaded ONLY for the channel that reads it. A thread here would mean
     # every LinkedIn and email draft pays for a messages query it never looks at.
     assert seen["thread"] is None, "loaded a thread for a channel that does not use one"
+    # Prior touches ARE loaded for every channel — without them the drafter sees only the first
+    # message and repeats what touch 1 already said.
+    assert seen["touches"] is not None, (
+        "the drafter was given no record of what has already been sent, so it can only repeat")
     assert touches.ladder_state(cid, "linkedin", db)["draft_body"] == "B1"
 
     # touch number advances with the ladder, so the prompt differs per position

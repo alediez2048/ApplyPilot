@@ -2258,9 +2258,13 @@ def _followup_action(data: dict) -> dict:
             from applypilot.networking import messages as _msgs
             thread = (_msgs.thread_for_contact(cid, conn) if channel.name == "sms"
                       and (contact.get("replied_at") or "").strip() else None)
+            # Every follow-up already sent on THIS channel. Without it the drafter saw only the
+            # first email, so touch 2 did not know what touch 1 said — three messages making the
+            # same offer in slightly different words, which is what "it repeats itself" was.
+            prior = touches.sent_touches(cid, channel.name, conn)
             d = outreach.draft_for_channel(channel.name, profile, job, contact,
                                            touch=touch, style=(data.get("style") or "").strip(),
-                                           thread=thread)
+                                           thread=thread, touches=prior)
         except Exception as e:  # noqa: BLE001
             return {"ok": False, "message": f"draft failed: {e}"}
         touches.set_draft(cid, channel.name, d["subject"], d["body"])

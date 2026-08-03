@@ -207,22 +207,19 @@ def job_attachments(job_url: str) -> list[tuple[str, str]]:
     cover_pdf = Path(row[1]).with_suffix(".pdf") if row[1] else None
     if cover_pdf and cover_pdf.exists():
         out.append((str(cover_pdf), f"{slug}_Cover_Letter{co}.pdf"))
-    # Intro deck / one-pager — the same static PDF on every outreach (not per-job). Drop a PDF at
-    # ~/.applypilot/intro_deck.pdf (or point INTRO_DECK_PATH at one) and it rides along.
-    deck = _intro_deck_path()
-    if deck and deck.exists():
-        out.append((str(deck), f"{slug}_Intro_Deck.pdf"))
+    # The intro deck is a LINK, never an attachment. Removed 2026-08-03.
+    #
+    # It used to attach ~/.applypilot/intro_deck.pdf to every outreach email — 3.1 MB riding
+    # alongside a link to the same deck, so recipients got it twice. Three reasons it is gone:
+    # a multi-megabyte attachment from an unknown sender is a spam-filter magnet; the link is
+    # the only version whose opens can be counted (`/intro/<name>`, see domain/deck.py); and a
+    # deck that changes on the site is stale in every inbox it was ever mailed to.
+    #
+    # It was also on by ACCIDENT. `OUTREACH_ATTACH_DECK` defaulted to "1" here while
+    # settings.py declared the default False, so `doctor --config` reported it off while all 34
+    # sent emails carried it — a default living in two places is two defaults (§Lessons 21).
+    # The résumé and cover letter still attach; those are per-job and genuinely wanted.
     return out
-
-
-def _intro_deck_path():
-    """Path to the intro deck PDF to attach to outreach, or None if disabled/absent."""
-    from pathlib import Path
-    from applypilot import config
-    if os.environ.get("OUTREACH_ATTACH_DECK", "1").lower() not in {"1", "true", "yes", "on"}:
-        return None
-    override = os.environ.get("INTRO_DECK_PATH")
-    return Path(override).expanduser() if override else (config.APP_DIR / "intro_deck.pdf")
 
 
 def attach_pdfs(msg: EmailMessage, attachments: list[tuple[str, str]] | None) -> None:

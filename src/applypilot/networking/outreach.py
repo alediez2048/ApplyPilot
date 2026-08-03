@@ -346,11 +346,21 @@ _TOUCH_INTENT = {
 
 
 def draft_followup(profile: dict, job: dict, contact: dict, touch: int = 1,
-                   style: str = "") -> dict:
+                   style: str = "", touches: list | None = None) -> dict:
     """Draft follow-up #`touch` for a contact who was emailed and hasn't replied.
 
     `touch` is 1-based: 1 = the first follow-up (second message overall). Returns
     {"subject", "body"}. Raises on LLM/parse failure, like draft_email.
+
+    `touches` is every follow-up ALREADY SENT on this channel. Without it this function saw
+    only `contact.outreach_message` — the first email — so touch 2 did not know what touch 1
+    said and touch 3 knew neither. The prompt has always instructed "do NOT repeat it" while
+    being shown a third of what there was not to repeat, and the result was three messages
+    making the same offer in slightly different words.
+
+    `conversation_transcript` already assembles exactly this and `_draft_reply` already passes
+    it; this path simply never did. Same shape as §Lessons 39 — a function able to take the
+    context, called without it.
     """
     role = job.get("title") or "the role"
     company = contact.get("company") or job.get("company") or job.get("site") or "the company"
@@ -361,19 +371,40 @@ def draft_followup(profile: dict, job: dict, contact: dict, touch: int = 1,
     deck = _intro_deck_url(profile, contact)
 
     sent_on = (contact.get("submitted_at") or "")[:10]
+
+    # EVERYTHING already said on this thread, not just the first email.
+    transcript = conversation_transcript(contact, touches=touches)
+    # Has the deck link already gone out? If so this follow-up must not re-pitch it.
+    #
+    # Compared against the BASE url, never the personalised one. Caught on live data: the
+    # earlier emails went out as ".../intro/" and INTRO_DECK_PATHS now builds ".../intro/michael",
+    # so matching the full link found nothing and cheerfully re-pitched the deck to a man who
+    # had already been sent it twice. What matters is "have they been given the deck", and every
+    # variant shares the base. Trailing slash and case normalised for the same reason.
+    deck_base = _intro_deck_url(profile) or deck        # no contact → the un-personalised URL
+    deck_sent = bool(deck_base) and deck_base.rstrip("/").lower() in transcript.lower()
+
     user = (
         f"SENDER: {_sender_name(profile)}\n"
         f"TARGET: {contact.get('full_name', '')} — {contact.get('title', '')} at {company}\n"
         f"ROLE APPLIED FOR: {role}\n"
         f"ORIGINAL SUBJECT (reuse it with a 'Re: ' prefix): {original_subject}\n"
-        f"ORIGINAL EMAIL SENT: {sent_on or 'recently'} — no reply since.\n"
-        f"PREVIOUS MESSAGE BODY (do NOT repeat it):\n{(contact.get('outreach_message') or '')[:700]}\n\n"
+        f"ORIGINAL EMAIL SENT: {sent_on or 'recently'} — no reply since.\n\n"
+        f"EVERYTHING YOU HAVE ALREADY SENT THEM — do NOT repeat any of it, in any words:\n"
+        f"{transcript or (contact.get('outreach_message') or '')[:700]}\n\n"
         f"THIS FOLLOW-UP: {intent}\n\n"
         + (f"SCHEDULING LINK (optional, only if it fits naturally): {link}\n\n" if link else "")
-        + (f"INTRO DECK LINK (include it): {deck}\n"
-           f'Offer it as "{INTRO_DECK_SENTENCE.format(url=deck)}", or the same idea in fewer '
-           "words — the full URL must appear verbatim. This is the concrete thing this "
-           "follow-up offers, so lead with it rather than tacking it on.\n\n" if deck else "")
+        # Offered ONCE. Re-pitching the same link in every touch is the single most automated-
+        # sounding thing this sequence did: four messages, four times "here's a deck". If they
+        # have it, the only honest move is a light reference, and even that is optional.
+        + ("INTRO DECK: already sent — the link is in the thread above. Do NOT paste it again "
+           "and do NOT re-pitch it. You may refer to it in passing at most once (\"the deck I "
+           "sent\"), and only if it is genuinely relevant to this message.\n\n" if deck_sent
+           else (f"INTRO DECK LINK (include it — they have NOT been sent it): {deck}\n"
+                 f'Offer it as "{INTRO_DECK_SENTENCE.format(url=deck)}", or the same idea in '
+                 "fewer words — the full URL must appear verbatim. This is the concrete thing "
+                 "this follow-up offers, so lead with it rather than tacking it on.\n\n"
+                 if deck else ""))
         + (f"STYLE DIRECTION (follow closely):\n{directive}\n\n" if directive else "")
         + "Write the follow-up. Return the JSON."
     )
@@ -390,7 +421,12 @@ def draft_followup(profile: dict, job: dict, contact: dict, touch: int = 1,
         subject = original_subject if original_subject.lower().startswith("re:") else f"Re: {original_subject}"
     if not body:
         raise ValueError("empty follow-up body")
-    body = ensure_intro_deck(body, deck)
+    # Force-append ONLY when they have never been sent it. `ensure_intro_deck` exists because a
+    # prompt instruction is not a guarantee (§Lessons 9, 12) — but applied unconditionally it
+    # guaranteed the repetition instead, re-adding the link to touch 2 and 3 even when the model
+    # had correctly left it out.
+    if not deck_sent:
+        body = ensure_intro_deck(body, deck)
     return {"subject": subject, "body": body}
 
 
@@ -423,7 +459,8 @@ _LI_TOUCH_INTENT = {
 
 
 def draft_for_channel(channel: str, profile: dict, job: dict, contact: dict,
-                      touch: int = 1, style: str = "", thread: list | None = None) -> dict:
+                      touch: int = 1, style: str = "", thread: list | None = None,
+                      touches: list | None = None) -> dict:
     """One entry point per channel, returning ONE shape: {"subject", "body"}.
 
     The drafters below return different keys for historical reasons (email has a subject
@@ -437,7 +474,7 @@ def draft_for_channel(channel: str, profile: dict, job: dict, contact: dict,
     if channel == "sms":
         return {"subject": "", "body": draft_sms(
             profile, job, contact, touch=touch, style=style, thread=thread)["message"]}
-    return draft_followup(profile, job, contact, touch=touch, style=style)
+    return draft_followup(profile, job, contact, touch=touch, style=style, touches=touches)
 
 
 _REPLY_SYSTEM = """You write a reply for a job seeker ANSWERING someone who just wrote to them

@@ -124,8 +124,10 @@ SETTINGS: tuple[Setting, ...] = (
     Setting("OUTREACH_SIGNATURE", "outreach", "str", "", "Signature HTML; falls back to the Gmail one."),
     Setting("OUTREACH_STYLE", "outreach", "str", "", "Extra style guidance for drafts."),
     Setting("OUTREACH_ATTACH_DOCS", "outreach", "bool", True, "Attach résumé + cover letter to the first email."),
-    Setting("OUTREACH_ATTACH_DECK", "outreach", "bool", False, "Also attach the intro deck."),
-    Setting("INTRO_DECK_PATH", "outreach", "path", "", "Path to the intro deck PDF."),
+    # OUTREACH_ATTACH_DECK / INTRO_DECK_PATH removed 2026-08-03. The intro deck is a LINK
+    # (INTRO_DECK_URL), never an attachment — see gmail_send.job_attachments for why. Left
+    # undeclared deliberately rather than deprecated: an unknown variable in .env is reported
+    # by `doctor`, which is the right way to find out you were relying on it.
     Setting("INTRO_DECK_URL", "outreach", "str", "https://www.jorgealejandrodiez.com/intro/",
             "Intro-deck link offered in every outreach email (not LinkedIn notes)."),
     Setting("INTRO_DECK_PATHS", "outreach", "bool", False,

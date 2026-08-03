@@ -73,7 +73,7 @@ def test_all_problems_are_reported_at_once():
     """Otherwise a broken .env is fixed one restart at a time."""
     problems = settings.validate({"FOLLOWUP_SCHEDULE": "48;96",
                                   "OUTREACH_DAILY_LIMIT": "lots",
-                                  "OUTREACH_ATTACH_DECK": "sure"})
+                                  "OUTREACH_ATTACH_DOCS": "sure"})
     assert len(problems) == 3
 
 

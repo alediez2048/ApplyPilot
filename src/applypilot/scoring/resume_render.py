@@ -325,7 +325,7 @@ def _run_node_render(request: dict, out_path: Path, what: str) -> bool:
         with tempfile.NamedTemporaryFile(
             "w", suffix=".json", delete=False, dir=str(out_path.parent), encoding="utf-8"
         ) as fh:
-            json.dump(request, fh)
+            json.dump(_scrub(request), fh)
             tmp = Path(fh.name)
 
         proc = subprocess.run(
@@ -346,6 +346,29 @@ def _run_node_render(request: dict, out_path: Path, what: str) -> bool:
     finally:
         if tmp is not None:
             tmp.unlink(missing_ok=True)
+
+
+def _scrub(value):
+    """Strip em dashes from every string in the render payload, however deep.
+
+    The LAST thing before a PDF exists, and deliberately a catch-all rather than a fix at each
+    producer. Three paths reach here and only one of them is sanitised: model output goes
+    through `sanitize_text`, but a section the model OMITS falls back to the original résumé
+    text, and short bullet lists are padded from the trailing originals. Neither fallback is
+    cleaned, and the base résumé really does contain an em dash (line 15, the Akamai bullet) —
+    so the exact case this guards is not hypothetical, it is one omitted section away.
+
+    An em dash in a résumé is the "pasted out of a chatbot" tell, and unlike an email nobody
+    gets to re-read a PDF before it is filed.
+    """
+    from applypilot.scoring.validator import strip_ai_dashes
+    if isinstance(value, str):
+        return strip_ai_dashes(value)
+    if isinstance(value, dict):
+        return {k: _scrub(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_scrub(v) for v in value]
+    return value
 
 
 def render_with_node(resume: dict, out_path: Path, fit: str = "auto") -> bool:

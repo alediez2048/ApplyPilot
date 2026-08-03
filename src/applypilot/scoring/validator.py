@@ -85,10 +85,43 @@ def _build_skills_set(profile: dict) -> set[str]:
     return allowed
 
 
+#: Dashes no human types on a US keyboard. An em dash in a cold email is the single most
+#: recognisable "this was pasted out of a chatbot" signal there is, and a recipient who spots one
+#: re-reads the whole message as machine-written — which costs more than the punctuation is worth.
+#: U+2015 (horizontal bar) and U+2212 (minus) are here because they render identically and a
+#: model reaches for them roughly as often once you have told it to avoid the obvious one.
+_EM_DASHES = ("\u2014", "\u2015")
+#: Dashes that are RANGES or SIGNS, not clause breaks. U+2212 is a real minus: turning "−20%"
+#: into ", 20%" would invert what the sentence claims, which is a worse failure than the
+#: punctuation it was fixing.
+_HYPHEN_LIKE = ("\u2013", "\u2212")
+
+
+def strip_ai_dashes(text: str) -> str:
+    """Remove every em-style dash. Exposed separately so paths that skip the full sanitiser
+    (the résumé assembler's ORIGINAL-text fallback, the renderer) can still call it.
+
+    Order matters. A spaced dash is a clause break and becomes a comma; an unspaced one is
+    usually a compound and becomes a comma too, but a dash at the START of a line is a bullet
+    marker and must become a hyphen, not a stray comma opening the line.
+    """
+    if not text:
+        return text or ""
+    for d in _EM_DASHES:
+        # Line-leading dash: a bullet, not a clause break.
+        text = re.sub(rf"(?m)^(\s*){re.escape(d)}\s*", r"\1- ", text)
+        text = text.replace(f" {d} ", ", ").replace(d, ", ")
+    for d in _HYPHEN_LIKE:
+        text = text.replace(d, "-")
+    # ", ," and " ,": artefacts of a dash next to punctuation that was already there.
+    text = re.sub(r",\s*,", ",", text)
+    text = re.sub(r"\s+,", ",", text)
+    return text
+
+
 def sanitize_text(text: str) -> str:
     """Auto-fix common LLM output issues instead of rejecting."""
-    text = text.replace(" \u2014 ", ", ").replace("\u2014", ", ")   # em dash -> comma
-    text = text.replace("\u2013", "-")    # en dash -> hyphen
+    text = strip_ai_dashes(text)
     text = text.replace("\u201c", '"').replace("\u201d", '"')   # smart double quotes
     text = text.replace("\u2018", "'").replace("\u2019", "'")   # smart single quotes
     return text.strip()

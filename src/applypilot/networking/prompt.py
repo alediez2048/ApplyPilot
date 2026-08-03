@@ -1,7 +1,7 @@
 """Prompt + tool scoping for the LinkedIn people-search agent.
 
 Read-only is ENFORCED at the tool layer (see READONLY_TOOLS), not just requested in
-the prompt — the agent is launched with an allowlist that excludes every click/type/
+the prompt, the agent is launched with an allowlist that excludes every click/type/
 form tool, so it physically cannot connect/message/apply.
 """
 
@@ -24,7 +24,7 @@ def build_linkedin_prompt(company: str, role: str | None, n: int = 5) -> str:
     """Instruction for a READ-ONLY LinkedIn People search."""
     role_line = f'people whose title relates to "{role}"' if role else "people who work there"
     return f"""You are researching contacts on LinkedIn. You are LOGGED IN as the user.
-You have ONLY read-only browser tools — you cannot click, type, or message anyone, and
+You have ONLY read-only browser tools, you cannot click, type, or message anyone, and
 you must not attempt to. Do NOT send connection requests, messages, or InMail.
 
 TASK: Find up to {n} {role_line} at "{company}".

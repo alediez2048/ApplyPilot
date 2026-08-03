@@ -42,14 +42,14 @@ def _aggressive_enabled() -> bool:
 def _never_employer_rule(resume_facts: dict) -> str:
     """A hard rule keeping bootcamps/programs out of the EXPERIENCE section.
 
-    Some entities (e.g. the Gauntlet AI bootcamp) are education, not jobs — LinkedIn may list them
+    Some entities (e.g. the Gauntlet AI bootcamp) are education, not jobs, LinkedIn may list them
     under Experience, but they must never appear as an employer/work history on the resume.
     """
     names = resume_facts.get("never_list_as_employer") or []
     if not names:
         return ""
     joined = ", ".join(names)
-    return (f"- NEVER list these as an employer or under work experience — they are EDUCATION/"
+    return (f"- NEVER list these as an employer or under work experience, they are EDUCATION/"
             f"training programs (bootcamps), and must appear ONLY in the Education section: {joined}.")
 
 
@@ -61,7 +61,7 @@ def _preserved_projects_rule(resume_facts: dict) -> str:
     project that is irrelevant to the target role is legitimate tailoring. What is never allowed
     is renaming a real project or inventing one, so that is exactly what this rule forbids.
 
-    Returns "" when the profile lists no projects — including the leading newline — so a profile
+    Returns "" when the profile lists no projects, including the leading newline, so a profile
     without projects produces a byte-identical prompt. Contains no em dash on purpose: the prompt
     bans them and the validator treats one as a hard error, so the rule must not prime for them.
     """
@@ -92,9 +92,9 @@ get the interview.
 
 Take the base resume and the job description. Return a tailored resume as a JSON object.
 
-## STRATEGY — MATCH THE JD AGGRESSIVELY:
+## STRATEGY, MATCH THE JD AGGRESSIVELY:
 - Read the job description's required skills, tools, frameworks, and keywords.
-- Put the JD's must-have technologies FRONT AND CENTER in the Skills section — include the
+- Put the JD's must-have technologies FRONT AND CENTER in the Skills section, include the
   specific tools/languages/frameworks the JD asks for so ATS keyword filters and the recruiter
   scan both hit.
 - Reframe EVERY experience bullet so it reads as if the candidate has done the exact work the
@@ -103,7 +103,7 @@ Take the base resume and the job description. Return a tailored resume as a JSON
   the candidate's core strengths.
 - Reorder/emphasize projects and bullets so the most JD-relevant appear first.
 
-## PRESERVE (do NOT change — these are background-checkable):
+## PRESERVE (do NOT change, these are background-checkable):
 - Real employers: {companies_str} -- names and the fact of employment stay as-is.
 - Real school: {school} and degree level: {education_level}.
 - Do NOT invent employers, job titles at fake companies, degrees, or certifications.
@@ -151,7 +151,7 @@ def _build_tailor_prompt(profile: dict) -> str:
     metrics_str = ", ".join(real_metrics) if real_metrics else "N/A"
 
     # Include ALL banned words from the validator so the LLM knows exactly
-    # what will be rejected — the validator checks for these automatically.
+    # what will be rejected, the validator checks for these automatically.
     banned_str = ", ".join(BANNED_WORDS)
 
     education = profile.get("experience", {})
@@ -190,7 +190,7 @@ BULLETS: Strong verb + what you built + quantified impact. Vary verbs (Built, De
 - Write like a real engineer. Short, direct.
 - GOOD: "Automated financial reporting with Python + API integrations, cut processing time from 10 hours to 2"
 - BAD: "Leveraged cutting-edge AI technologies to drive transformative operational efficiencies"
-- BANNED WORDS (using ANY of these = validation failure — do not use them even once):
+- BANNED WORDS (using ANY of these = validation failure, do not use them even once):
   {banned_str}
 - No em dashes. Use commas, periods, or hyphens.
 
@@ -391,7 +391,7 @@ def assemble_resume_text(data: dict, profile: dict) -> str:
 
 # ── Structure-preserving mode (2026-07-29) ────────────────────────────────
 # The base résumé is the template. The previous prompt imposed a fixed five-section shape
-# and the differences were not cosmetic — on a real run it deleted KEY STRENGTHS entirely
+# and the differences were not cosmetic, on a real run it deleted KEY STRENGTHS entirely
 # (no slot existed), flattened EDUCATION to "Gauntlet AI; University of Texas | Bachelors"
 # (the schema stored it as one string), invented a PROJECTS section by promoting a work
 # bullet so the same achievement appeared twice, and cut 4,341 characters to 2,571.
@@ -413,7 +413,7 @@ def _structure_block(resume_text: str) -> str:
            "any section.",
            "",
            "This constrains the SHAPE of the document, not its words. Every section still gets",
-           "rewritten for this role — returning one unchanged is a failure, not a safe default.",
+           "rewritten for this role, returning one unchanged is a failure, not a safe default.",
            ""]
     for i, sec in enumerate(r.sections, 1):
         n = len(sec.bullets())
@@ -450,9 +450,9 @@ You are given their résumé and a job description. Rewrite the CONTENT for this
 keeping the DOCUMENT'S STRUCTURE identical.
 
 {_structure_block(resume_text)}
-## WHAT TO CHANGE — REWRITE EVERY BULLET
+## WHAT TO CHANGE, REWRITE EVERY BULLET
 Reframe EVERY bullet for THIS role. Same real work, a different angle. Every bullet must be
-genuinely reworded — lead with the verb and the outcome this job cares about. Reordering the
+genuinely reworded, lead with the verb and the outcome this job cares about. Reordering the
 clauses of the original sentence is NOT rewriting it.
 
 The test, using an unrelated example so you do not borrow its wording or its shape:
@@ -475,7 +475,7 @@ was built.
 - Never copy a bullet verbatim.
 
 ## THE TARGET ROLE
-`title` is the role being applied FOR — use the job's own title, not the current one. It is
+`title` is the role being applied FOR, use the job's own title, not the current one. It is
 rendered under the name, so the résumé announces what it is aimed at.
 
 The summary must NOT open by restating a previous job title. "Technical Project Manager with
@@ -483,7 +483,7 @@ The summary must NOT open by restating a previous job title. "Technical Project 
 the wrong document before they reach a single achievement. Open with the CAPABILITY the target
 role needs, evidenced by real work:
 
-Shown with an unrelated career so you do not borrow the wording — a warehouse ops manager
+Shown with an unrelated career so you do not borrow the wording, a warehouse ops manager
 applying for a data engineering role:
 
   NOT: "Warehouse Operations Manager with N years of experience..."    <- names the old job
@@ -491,7 +491,7 @@ applying for a data engineering role:
         pipelines end to end."                                          <- names the capability
 
 Write the real figure where N appears. YEARS OF EXPERIENCE COME FROM THE RESUME AND NEVER
-CHANGE — an example's number is a placeholder, not a suggestion. Understating someone's
+CHANGE, an example's number is a placeholder, not a suggestion. Understating someone's
 experience is a factual error, and it happened: a "10+ years" résumé came back saying
 "Seven years" because an example used a different figure.
 
@@ -515,6 +515,8 @@ what they were called.
 - No em dashes. Use commas, periods, or hyphens.
 
 ## OUTPUT
+- NEVER use an em dash (—), en dash (–), or any long dash. Not one, anywhere. It is the clearest signal that text was pasted out of a chatbot, and a reader who spots one re-reads the whole message as machine-written. Use a comma, a full stop, or rewrite the sentence. A plain hyphen in a compound word ("large-scale") is fine.
+
 Return ONLY valid JSON, no markdown fences, no commentary:
 
 {{"title":"Role Title",
@@ -536,7 +538,7 @@ def assemble_structured_resume_text(data: dict, profile: dict, resume_text: str)
     returned = {str(s.get("title", "")).strip().upper(): s for s in data.get("sections", [])}
     lines: list[str] = []
 
-    # Header comes from the RÉSUMÉ, not profile.json — the résumé is the source of truth,
+    # Header comes from the RÉSUMÉ, not profile.json, the résumé is the source of truth,
     # and profile.json disagreed with it (it drops "Magni" from the name).
     lines.extend(base.header)
     if data.get("title"):
@@ -563,7 +565,7 @@ def assemble_structured_resume_text(data: dict, profile: dict, resume_text: str)
                 lines.append(str(entry.get("dates") or orig.get("dates", "")))
                 bullets = [b for b in (entry.get("bullets") or []) if str(b).strip()]
                 # Never emit fewer bullets than the original had. Pad to the original COUNT
-                # using the TRAILING originals — do not try to merge by text similarity. A
+                # using the TRAILING originals, do not try to merge by text similarity. A
                 # genuinely rewritten bullet does not resemble its source, so matching on a
                 # prefix would treat every rewrite as new and duplicate the whole list
                 # (3 rewrites + 3 originals = 6). The prompt asks for most-relevant-first,
@@ -675,7 +677,7 @@ def tailor_resume(
     """
     # TAILOR_AGGRESSIVE used to force lenient here, which silently disabled the fabrication
     # judge AND every banned-word check. That was a defensible trade when the mode existed to
-    # let the résumé mirror the JD's skills — content preservation depended on the prompt.
+    # let the résumé mirror the JD's skills, content preservation depended on the prompt.
     # It no longer does: `assemble_structured_resume_text` enforces sections and bullet counts
     # mechanically, so the mode now only needs to change VOICE. Skipping fabrication detection
     # to get JD-matching vocabulary was buying something it no longer has to pay for.
@@ -738,7 +740,7 @@ def tailor_resume(
             avoid_notes.extend(validation["errors"])
             if attempt < max_retries:
                 continue
-            # Last attempt — assemble whatever we got
+            # Last attempt, assemble whatever we got
             tailored = (assemble_structured_resume_text(data, profile, resume_text)
                         if _structured else assemble_resume_text(data, profile))
             report["resume_data"] = data
@@ -750,7 +752,7 @@ def tailor_resume(
                     if _structured else assemble_resume_text(data, profile))
         report["resume_data"] = data
 
-        # Layer 2: LLM judge (catches subtle fabrication) — skipped in lenient mode
+        # Layer 2: LLM judge (catches subtle fabrication), skipped in lenient mode
         if validation_mode == "lenient":
             report["judge"] = {"verdict": "SKIPPED", "passed": True, "issues": "none"}
             report["status"] = "approved"
@@ -847,7 +849,7 @@ def run_tailoring(min_score: int = 7, limit: int = 20,
             report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
 
             # Generate PDF for approved resumes (best-effort)
-            # "approved_with_judge_warning" is also a success — resume was generated.
+            # "approved_with_judge_warning" is also a success, resume was generated.
             pdf_path = None
             if report["status"] in ("approved", "approved_with_judge_warning"):
                 try:

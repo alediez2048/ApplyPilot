@@ -60,7 +60,7 @@ def _build_cover_letter_prompt(profile: dict) -> str:
         metrics_hint = f"\nReal metrics to use: {', '.join(real_metrics)}"
 
     # Build the full banned list from the validator so the prompt stays in sync
-    # with what will actually be rejected — the validator checks all of these.
+    # with what will actually be rejected, the validator checks all of these.
     all_banned = ", ".join(f'"{w}"' for w in BANNED_WORDS)
     leak_banned = ", ".join(f'"{p}"' for p in LLM_LEAK_PHRASES)
 
@@ -74,13 +74,18 @@ PARAGRAPH 2 (3-4 sentences): Pick 2 achievements from the resume that are MOST r
 
 PARAGRAPH 3 (1-2 sentences): One specific thing about the company from the job description (a product, a technical challenge, a team structure). Then close. "Happy to walk through any of this in more detail." or "Let's discuss." Nothing else.
 
-BANNED WORDS AND PHRASES (automated validator rejects ANY of these — do not use even once):
+PUNCTUATION: never an em dash (—), an en dash (–), or any long dash. Not one, anywhere. It is
+the clearest signal that text was pasted out of a chatbot, and a hiring manager who spots one
+re-reads the whole letter as machine-written. Use a comma, a full stop, or rewrite the sentence.
+A plain hyphen in a compound word ("large-scale") is fine.
+
+BANNED WORDS AND PHRASES (automated validator rejects ANY of these, do not use even once):
 {all_banned}
 
 ALSO BANNED (meta-commentary the validator catches):
 {leak_banned}
 
-BANNED PUNCTUATION: No em dashes (—) or en dashes (–). Use commas or periods.
+BANNED PUNCTUATION: No em dashes (, ) or en dashes (-). Use commas or periods.
 
 VOICE:
 - Write like a real engineer emailing someone they respect. Not formal, not casual. Just direct.
@@ -188,7 +193,7 @@ def generate_cover_letter(
             return letter
 
         avoid_notes.extend(validation["errors"])
-        # Warnings never block — only hard errors trigger a retry
+        # Warnings never block, only hard errors trigger a retry
         log.debug(
             "Cover letter attempt %d/%d failed: %s",
             attempt + 1, max_retries + 1, validation["errors"],

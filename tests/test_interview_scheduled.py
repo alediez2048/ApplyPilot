@@ -160,7 +160,7 @@ def _js(driver, tmp_path, **payload):
     script.write_text(
         _STUBS + f"const SRC = {json.dumps(src)};\n"
         + "const F = (new Function(SRC + '; return { pendingActions, needsYou, nextAction, "
-          "rowMenu, PANEL_OPEN };'))();\n"
+          "rowMenu, stepStrip, PANEL_OPEN };'))();\n"
         + "".join(f"const {k} = {json.dumps(v)};\n" for k, v in payload.items()) + driver)
     proc = subprocess.run(["node", str(script)], capture_output=True, text=True, timeout=60)
     assert proc.returncode == 0, proc.stderr[:1500]
@@ -209,6 +209,28 @@ def test_the_menu_offers_undo_once_it_is_set(tmp_path):
         """, tmp_path, J=_job())
     assert "markInterview" in out["off"] and "unmarkInterview" not in out["off"]
     assert "unmarkInterview" in out["on"]
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node not available")
+def test_the_button_is_on_the_row_not_only_in_the_menu(tmp_path):
+    """It shipped inside the ⋯ menu and was reported as missing — the third control this
+    session placed somewhere invisible. `restartButton` already carried the lesson in a comment
+    ("burying it made it unfindable") and it was repeated anyway.
+
+    Once set, nothing renders: `nextAction` replaces the whole Next slot with the chip, and a
+    second control saying the same thing is noise.
+    """
+    out = _js("""
+        const won = Object.assign({}, J, { interview_at: '2026-08-03T00:00:00+00:00' });
+        console.log(JSON.stringify({ strip: F.stepStrip(J), wonStrip: F.stepStrip(won) }));
+        """, tmp_path, J=_job())
+    # `won-btn`, not `markInterview`: "unmarkInterview" CONTAINS "markInterview", so the
+    # substring check reported the button as present on a job whose menu only offered undo.
+    # §Lessons 1, in the test written to guard the placement.
+    assert "won-btn" in out["strip"], "the success metric is only reachable through the ⋯ menu"
+    assert "won-btn" not in out["wonStrip"], "it still offers to mark an already-won job"
+    assert "Interview scheduled" in out["wonStrip"]
+    assert "unmarkInterview" in out["wonStrip"], "no way to undo it"
 
 
 def test_the_frontend_and_backend_agree_on_the_endpoints():

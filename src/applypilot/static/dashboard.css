@@ -266,6 +266,14 @@
     text-transform:none; letter-spacing:0; vertical-align:middle;
   }
   .won-next { font-size:12px; font-weight:600; color:var(--green); white-space:nowrap; }
+  /* Quiet on purpose: it sits beside `Next`, which is the thing to do RIGHT NOW. This is the
+     thing you press when something good has already happened, so it must be findable without
+     competing with the action the strip is actually recommending. */
+  .won-btn {
+    font-size:12px; padding:4px 12px; min-height:30px; border-radius:999px;
+    border:1px solid #bfe3cd; background:var(--green-soft); color:var(--green); font-weight:600;
+  }
+  .won-btn:hover { background:#cdeeda; box-shadow:inset 0 0 0 1px #a9d9bd; }
 
   .todo-wrap { position:relative; }
   .todo-btn {

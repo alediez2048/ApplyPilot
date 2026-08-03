@@ -1827,7 +1827,7 @@ function stepStrip(j) {
   return `<div class="strip">
       <button class="strip-toggle" onclick="onPanelToggle(${u})" title="${open ? 'Collapse' : 'Open details'}">${open ? '▾' : '▸'}</button>
       <div class="steps">${steps}</div>
-      <div class="next">${na ? `<span class="next-label">Next</span>${na}` : `<span class="next-done">🏆 fully worked</span>`}${signinButton(j)}${restartButton(j)}${rowMenu(j)}</div>
+      <div class="next">${na ? `<span class="next-label">Next</span>${na}` : `<span class="next-done">🏆 fully worked</span>`}${signinButton(j)}${interviewButton(j)}${restartButton(j)}${rowMenu(j)}</div>
     </div>${signinBar(j)}${hint ? `<div class="strip-hint">${hint}</div>` : ''}`;
 }
 // The ONE thing to do next, in priority order. Returns '' when the job is fully worked.
@@ -2243,6 +2243,21 @@ async function signinDone(url, fill, btn) {
   if (fill && r.ok) { await pollCommandUntilDone('Fill'); }
   refresh();
 }
+// The success metric, ON THE ROW. It shipped inside the ⋯ menu and was reported as missing —
+// the third control this session placed somewhere invisible, after the SMS composer and the
+// round-two panel. The comment directly below already recorded the lesson for Re-apply
+// ("burying it made it unfindable") and it was repeated anyway.
+//
+// Nothing renders here once it is set: `nextAction` already replaces the whole Next slot with
+// the 🎯 chip, and a second control saying the same thing is noise. Undo lives in the ⋯ menu,
+// which is the right home for a rare, corrective action.
+function interviewButton(j) {
+  if (j.interview_at || j.status === 'rejected' || j.status === 'in_progress') return '';
+  const u = `decodeURIComponent('${encodeURIComponent(j.url)}')`;
+  return `<button class="won-btn" onclick="markInterview(${u}, this)"
+    title="Greys this row and stops every follow-up sequence for this job">🎯 Interview</button>`;
+}
+
 // Re-apply stays visible on the row rather than living only in the ⋯ menu: on an applied
 // job it is the main thing you might still want, and burying it made it unfindable.
 function restartButton(j) {

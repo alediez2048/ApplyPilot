@@ -1541,6 +1541,117 @@ function renderTodo(jobs) {
   return p;
 }
 
+// ── sign-in walls ───────────────────────────────────────────────────────────
+// A wall is per EMPLOYER, not per job: one Salesforce Workday account covers every Salesforce
+// job forever. So this list stays short, and clearing it in one sitting is the difference
+// between eight interruptions across a week and ten minutes once.
+let ACCOUNTS_OPEN = false;
+let LAST_ACCOUNTS = { blocking: [], ready: [] };
+
+function toggleAccounts() { ACCOUNTS_OPEN = !ACCOUNTS_OPEN; renderAccounts(LAST_ACCOUNTS); }
+
+function accountRow(a) {
+  // "You have cookies for this site" is a HINT, never an answer — a Workday cookie is set by
+  // viewing a job. Shown so the operator can settle it in one click, not used to decide.
+  const hint = a.session_seen
+    ? `<div class="acct-hint">You have visited this site before, so you may already have an account.</div>`
+    : '';
+  const why = a.kind === 'sso'
+    ? `Requires signing in with your ${esc(a.vendor || 'provider')}.`
+    : `Requires an account on their site before you can apply.`;
+  const blocked = a.blocked ? ` <span class="acct-blocked">blocked ${a.blocked} application${a.blocked > 1 ? 's' : ''}</span>` : '';
+  return `<div class="acct-row">
+    <div class="acct-main">
+      <div class="acct-name">${esc(a.label)}${blocked}</div>
+      <div class="acct-why">${why}</div>${hint}
+    </div>
+    <div class="acct-actions">
+      <button class="primary acct-btn" onclick="openAccount(${tagArg(a.realm)}, this)">🔐 Open sign-in</button>
+      <button class="secondary acct-btn" onclick="haveAccount(${tagArg(a.realm)}, this)">✓ I have an account</button>
+    </div>
+  </div>`;
+}
+
+function renderAccounts(payload) {
+  const bar = document.getElementById('accountsBar');
+  if (!bar) return;
+  LAST_ACCOUNTS = payload || { blocking: [], ready: [] };
+  const blocking = LAST_ACCOUNTS.blocking || [];
+  const ready = LAST_ACCOUNTS.ready || [];
+  // Nothing known at all — say nothing. An empty panel about a problem you do not have is
+  // noise, and noise is what makes a real warning ignorable.
+  if (!blocking.length && !ready.length) { bar.hidden = true; return; }
+  bar.hidden = false;
+  bar.classList.toggle('blocking', blocking.length > 0);
+
+  const head = blocking.length
+    ? `🔐 <strong>${blocking.length} employer${blocking.length > 1 ? 's need' : ' needs'} an account</strong>
+       before ${blocking.length > 1 ? 'their' : 'its'} jobs can run`
+    : `🔐 Sign-ins: <strong>${ready.length}</strong> employer${ready.length > 1 ? 's' : ''} set up`;
+
+  if (!ACCOUNTS_OPEN) {
+    bar.innerHTML = `<button class="acct-summary" onclick="toggleAccounts()">
+      <span>${head}</span>
+      <span class="acct-open">${blocking.length ? 'Set these up' : 'Manage'} →</span></button>`;
+    return;
+  }
+
+  // The already-done list is worth showing: it is the evidence that the system read your
+  // browser rather than asking you to re-answer something you had already handled.
+  const readyList = ready.length
+    ? `<div class="acct-ready"><span class="acct-ready-h">Already set up</span>
+        ${ready.map(a => `<span class="acct-chip" title="${esc(a.evidence)}">✓ ${esc(a.label)}</span>`).join('')}</div>`
+    : '';
+  const none = !blocking.length
+    ? `<div class="acct-none">Nothing is blocked. Every employer with a sign-in wall is set up.</div>`
+    : '';
+
+  bar.innerHTML = `
+    <button class="acct-summary" onclick="toggleAccounts()">
+      <span>${head}</span><span class="acct-open">Close ▲</span></button>
+    <div class="acct-body">
+      ${none}${blocking.map(accountRow).join('')}${readyList}
+      <div class="acct-foot">
+        <button class="linklike" onclick="syncAccounts(this)">↻ Re-scan browser</button>
+        <button class="linklike" onclick="purgeCredentials(this)"
+          title="Delete saved passwords and cards from the browser the apply agent drives. Cookies and sessions are kept.">🛡 Remove saved passwords from the apply browser</button>
+      </div>
+    </div>`;
+}
+
+async function openAccount(realm, btn) {
+  btn.disabled = true; btn.textContent = 'Opening…';
+  const r = await post('/api/accounts/open', { realm });
+  alert(r.message || (r.ok ? 'Chrome is open.' : 'Failed'));
+  btn.disabled = false; btn.textContent = '🔐 Open sign-in';
+}
+
+async function haveAccount(realm, btn) {
+  btn.disabled = true; btn.textContent = 'Saving…';
+  const r = await post('/api/accounts/have', { realm, have: true });
+  if (r.ok) refresh();
+  else { btn.disabled = false; btn.textContent = '✓ I have an account'; alert(r.message || 'Failed'); }
+}
+
+async function syncAccounts(btn) {
+  btn.disabled = true; btn.textContent = 'Scanning…';
+  const r = await post('/api/accounts/sync', {});
+  alert(r.message || 'Done');
+  btn.disabled = false; btn.textContent = '↻ Re-scan browser';
+  refresh();
+}
+
+async function purgeCredentials(btn) {
+  if (!confirm('Remove saved passwords, cards and autofill from the APPLY browser?\n\n'
+             + 'Cookies and sessions are kept, so no sign-in wall has to be paid twice. '
+             + 'Your normal Chrome profile is not touched.')) return;
+  btn.disabled = true; btn.textContent = 'Removing…';
+  const r = await post('/api/accounts/purge', {});
+  alert(r.message || 'Done');
+  btn.disabled = false;
+  btn.textContent = '🛡 Remove saved passwords from the apply browser';
+}
+
 // Co-pilot apply ENDS by waiting for the operator, and the queue stays paused until they act.
 // Nothing pulled them back to the tab — no sound, no notification, no badge — so a filled
 // application sat until someone happened to look, and a restart eventually closed it.
@@ -1692,6 +1803,7 @@ async function refresh() {
   // handed an array.
   LAST_JOBS = allJobs;
   renderTodo(allJobs);
+  renderAccounts(data.accounts);
   renderJobsTable(allJobs, editing);
   document.querySelectorAll('details.rowmenu[open]').forEach(positionRowMenu);
 }

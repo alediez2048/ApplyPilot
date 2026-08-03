@@ -182,6 +182,13 @@ def test_sql_lives_only_in_the_data_layer():
         "migrations/__init__.py",                            # the migration runner (ARCH-5)
         "migrations/m001_touches_backfill.py",               # migrations ARE schema changes
         "migrations/m002_messages_per_contact.py",           # same — a table rebuild, by definition
+        "repo/accounts.py",                                  # the `ats_accounts` repository
+        # Reads CHROME's cookie and login databases, never ours — the sign-in evidence that
+        # tells an employer we already have an account from one we do not. Allowlisted as a
+        # decision rather than dodged by renaming the handle: §Lessons 25 is that this rule
+        # should detect SQL against OUR schema, and a false positive here is what pushed real
+        # modules onto a list that is supposed to only shrink.
+        "apply/profile_scan.py",
         "networking/store.py", "networking/touches.py",      # per-table repositories
         "networking/messages.py",                            # the CRM-4 conversation store
         "networking/interactions_store.py",                  # the `interactions` table's own repository

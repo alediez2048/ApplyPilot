@@ -29,6 +29,31 @@ log = logging.getLogger(__name__)
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 
+#: Attempts inside ONE run. Small on purpose: it exists so a single click on Prepare recovers
+#: from a blip, not so one run can decide a posting is unreadable.
+RETRIES_PER_RUN = 2
+
+#: Total attempts across ALL runs before the row is retired and the operator is told to paste.
+#: Deliberately larger than RETRIES_PER_RUN. Spending the whole budget in one pass would mean a
+#: thirty-second network outage permanently retires every job in the queue at once — the same
+#: unrecoverable-dead-end failure this is fixing, just at a worse scale.
+MAX_DETAIL_ATTEMPTS = 6
+
+#: Failures that say something about THIS MOMENT rather than about the page. A timeout, a reset
+#: connection, a rate limit or a 5xx are all worth trying again; a 404 or a login wall are not.
+#: Anything unrecognised is treated as permanent — retrying forever on an unknown error is how a
+#: queue starts looping, and the operator always has the paste box as a way out.
+_TRANSIENT_MARKERS = (
+    "timeout", "timed out", "econnreset", "connection reset", "connection refused",
+    "net::err_", "temporarily", "socket hang up", "eai_again", "dns",
+    "http 429", "http 500", "http 502", "http 503", "http 504",
+)
+
+
+def _is_transient(error: str | None) -> bool:
+    """True when the error describes the attempt, not the page."""
+    return any(marker in (error or "").lower() for marker in _TRANSIENT_MARKERS)
+
 # Sites that block scraping -- skip detail extraction entirely
 SKIP_DETAIL_SITES = {"glassdoor", "google", "Workopolis"}
 
@@ -652,7 +677,18 @@ def scrape_site_batch(
             for i, (url, title) in enumerate(jobs):
                 log.info("[%d/%d] %s", i + 1, len(jobs), title[:50] if title else url[:50])
 
+                # Retry a TRANSIENT failure inside this run, so one click on Prepare recovers
+                # from a blip instead of reporting "enriched: 0" and needing another. Verified
+                # against the posting that prompted this: it timed out once at 45s and then
+                # scraped clean in 5.1s, tier 1, 13,602 chars.
                 result = scrape_detail_page(page, url)
+                tries = 1
+                while _is_transient(result.get("error")) and tries < RETRIES_PER_RUN:
+                    log.info("  transient (%s) — retry %d of %d",
+                             result.get("error"), tries + 1, RETRIES_PER_RUN)
+                    time.sleep(2 * tries)
+                    result = scrape_detail_page(page, url)
+                    tries += 1
                 stats["processed"] += 1
 
                 tier = result.get("tier_used")
@@ -697,11 +733,32 @@ def scrape_site_batch(
                         (result.get("full_description"), result.get("application_url"), now, url),
                     )
                 else:
+                    # A failure is not automatically a VERDICT. `detail_scraped_at` is what
+                    # removes a row from the enrich queue, so stamping it here retired the job
+                    # permanently — a 45-second timeout on a page that loads fine in five
+                    # seconds meant the posting could never be read, tailored or applied to.
+                    # Observed live: a Stanford/SLAC posting timed out once and left the whole
+                    # pipeline reporting "enriched: 0" with a returncode of 0.
                     stats["error"] += 1
-                    conn.execute(
-                        "UPDATE jobs SET detail_error = ?, detail_scraped_at = ? WHERE url = ?",
-                        (result.get("error", "unknown"), now, url),
-                    )
+                    attempts = (conn.execute(
+                        "SELECT COALESCE(detail_attempts, 0) FROM jobs WHERE url = ?",
+                        (url,)).fetchone() or [0])[0] + tries
+                    err = result.get("error", "unknown")
+                    if _is_transient(err) and attempts < MAX_DETAIL_ATTEMPTS:
+                        # Leave detail_scraped_at NULL so the row stays in the queue.
+                        conn.execute(
+                            "UPDATE jobs SET detail_error = ?, detail_attempts = ? WHERE url = ?",
+                            (f"{err} (attempt {attempts} of {MAX_DETAIL_ATTEMPTS}, will retry)",
+                             attempts, url))
+                        stats["retryable"] = stats.get("retryable", 0) + 1
+                    else:
+                        give_up = (f"{err} — gave up after {attempts} attempts. "
+                                   if _is_transient(err) else f"{err}. ")
+                        conn.execute(
+                            "UPDATE jobs SET detail_error = ?, detail_attempts = ?, "
+                            "detail_scraped_at = ? WHERE url = ?",
+                            (give_up + "Paste the description into the Job tab to continue.",
+                             attempts, now, url))
 
                 conn.commit()
 

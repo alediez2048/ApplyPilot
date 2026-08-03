@@ -27,7 +27,22 @@ _BOARD_HOSTS = {
 # (jobs.stripe.com is Stripe's own careers portal, not a board).
 # Suffix labels that are never part of a company name. `hr` was missing, so acme.breezy.hr
 # resolved to the employer "Hr" — the same shape as the "Ats" bug.
-_TLD_LABELS = ("com", "io", "co", "net", "org", "ai", "app", "hr", "jobs", "dev", "us", "uk")
+#
+# `edu` was missing, so careersearch.stanford.edu resolved to the employer "Edu" — the third
+# instance of this exact shape after "Ats" and "Hr", and the one that shipped a résumé and a
+# cover letter written for a company called Edu. Every entry here is a real suffix; a label
+# that is merely GENERIC ("careers", "apply") belongs in _GENERIC_HOST_LABELS instead, because
+# those are legal company names and these are not.
+_TLD_LABELS = (
+    "com", "io", "co", "net", "org", "ai", "app", "hr", "jobs", "dev",
+    # non-commercial suffixes: universities, national labs, government
+    "edu", "gov", "mil", "int", "ac",
+    # country codes seen on careers hosts
+    "us", "uk", "ca", "de", "fr", "es", "it", "nl", "se", "no", "dk", "fi", "ch", "at",
+    "be", "ie", "pt", "pl", "au", "nz", "jp", "sg", "in", "br", "mx", "eu",
+    # newer gTLDs
+    "info", "biz", "tech", "cloud", "xyz", "team", "group", "global", "works",
+)
 
 # Host labels that describe INFRASTRUCTURE, not an employer. "ats" and "apply" are the
 # general fix for ats.<vendor>.com: without them the fallback returns whichever label comes
@@ -315,9 +330,24 @@ def derive_domain(job: dict, company: str | None = None) -> str | None:
     return None
 
 
+def _is_careers_label(label: str) -> bool:
+    """A leading host label that names a hiring portal rather than the employer.
+
+    The exact-word set missed `careersearch.stanford.edu`, which yielded the employer domain
+    `careersearch.stanford.edu` — a host no human has an address at, and one that then gets fed
+    to contact verification as though it were Stanford's mail domain (§Lessons 34: a guessed
+    domain handed to a check whose docstring calls a mismatch "near-proof").
+
+    Prefix-matching is safe HERE, unlike §Lessons 1, for two reasons: these are generic English
+    words rather than entity names, and `_employer_domain` only ever strips leading labels while
+    more than two remain — so the registrable domain itself can never be eaten.
+    """
+    return label in _CAREERS_SUBDOMAINS or label.startswith(("career", "job", "recruit"))
+
+
 def _employer_domain(host: str) -> str:
     """Strip a leading careers-portal subdomain: careers.amd.com -> amd.com."""
     parts = host.split(".")
-    while len(parts) > 2 and parts[0] in _CAREERS_SUBDOMAINS:
+    while len(parts) > 2 and _is_careers_label(parts[0]):
         parts = parts[1:]
     return ".".join(parts)

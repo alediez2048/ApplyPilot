@@ -26,6 +26,7 @@ from rich.live import Live
 
 from applypilot import config
 from applypilot.database import get_connection, log_event
+from applypilot.apply import accounts
 from applypilot.apply import pause
 from applypilot.apply import prompt as prompt_mod
 from applypilot.apply.chrome import (
@@ -287,7 +288,21 @@ def mark_result(url: str, status: str, error: str | None = None,
         if status == "applied":
             log_event(url, "apply", "ok", f"Application submitted successfully{secs}.")
         elif status == "needs_human":
-            log_event(url, "apply", "info", f"Filled, then paused for you: {error or 'blocker'}{secs}. Resolve in the browser + Continue.")
+            # A login wall stops the agent BEFORE it fills anything, so the old wording —
+            # "Filled, then paused for you" — described work that had not happened and sent the
+            # operator to review a form that did not exist.
+            if (error or "") == "account":
+                log_event(url, "apply", "info",
+                          "Skipped before launching: this employer needs an account you do not "
+                          "have yet. Create it once in the Accounts panel.")
+            elif (error or "") in ("login", "sso_required", "login_issue"):
+                log_event(url, "apply", "info",
+                          f"Stopped at a sign-in wall{secs}. Nothing was filled. Sign in in the "
+                          f"open browser, then Continue.")
+            else:
+                log_event(url, "apply", "info",
+                          f"Filled, then paused for you: {error or 'blocker'}{secs}. "
+                          f"Resolve in the browser + Continue.")
         elif status in ("needs_review", "ready_to_submit"):
             log_event(url, "apply", "ok", f"Application fully filled — waiting for you to review + submit{secs}.")
         else:
@@ -847,6 +862,22 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
 
         empty_polls = 0
 
+        # Don't spend a Chrome launch and a full agent run rediscovering a wall we already
+        # know about. Salesforce's Workday cost 59 seconds and a `needs_human:login` EVERY
+        # time, because the finding was recorded on the job and the next job at the same
+        # employer could not read it. `resume` skips this deliberately: the human has just
+        # signed in, so the stored answer is the stale one.
+        if not resume:
+            allowed, realm_id, why = accounts.preflight(job)
+            if not allowed:
+                add_event(f"[W{worker_id}] {job.get('company') or '?'}: no account for "
+                          f"{realm_id} — skipped before launching")
+                mark_result(job["url"], "needs_human", error="account")
+                log_event(job["url"], "apply", "info", why)
+                update_state(worker_id, status="idle", last_action="needs an account")
+                jobs_done += 1
+                continue
+
         chrome_proc = None
         try:
             # Resume reconnects to the STILL-OPEN review browser (same CDP port) so a fresh agent
@@ -882,6 +913,9 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
                 # open on the blocking page so the human resolves it and clicks Continue (resume).
                 reason = result.split(":", 1)[-1] if ":" in result else "blocker"
                 mark_result(job["url"], "needs_human", error=reason, duration_ms=duration_ms)
+                # Teach the realm, so the next job at this employer is decided for free rather
+                # than rediscovered at the cost of another full run.
+                accounts.note_wall(job, reason)
                 keep_chrome_alive(worker_id)
                 chrome_proc = None
                 add_event(f"[W{worker_id}] Needs you ({reason}): {job['title'][:30]} — resolve in the open tab, then Continue")

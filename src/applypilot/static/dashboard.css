@@ -326,6 +326,35 @@
   .todo-sub { grid-column:2; font-size:11px; color:var(--muted); margin-top:2px; }
   .todo-empty { padding:18px 14px; font-size:13px; color:var(--muted); }
 
+  /* Sign-in walls. Amber when something is blocked, quiet when it is only a list of what is
+     already set up — a strip that looks urgent whatever it says stops being read. */
+  .accounts-bar { border:1px solid var(--line2); border-radius:10px; background:var(--surface);
+    margin:0 0 18px; overflow:hidden; }
+  .accounts-bar.blocking { border-color:#f0c890; background:var(--yellow-soft); }
+  .acct-summary { display:flex; justify-content:space-between; align-items:center; gap:12px;
+    width:100%; text-align:left; border:none; background:none; border-radius:0; padding:11px 15px;
+    font-size:13.5px; font-weight:500; color:var(--soft); }
+  .acct-summary:hover { background:rgba(0,0,0,.04); box-shadow:none; }
+  .acct-open { color:var(--accent); font-weight:600; font-size:12.5px; white-space:nowrap; }
+  .acct-body { border-top:1px solid var(--line2); padding:4px 15px 12px; }
+  .accounts-bar.blocking .acct-body { border-top-color:#f0c890; }
+  .acct-row { display:flex; justify-content:space-between; align-items:flex-start; gap:14px;
+    flex-wrap:wrap; padding:11px 0; border-bottom:1px solid var(--line); }
+  .acct-row:last-of-type { border-bottom:none; }
+  .acct-name { font-size:13.5px; font-weight:600; color:var(--text); }
+  .acct-why { font-size:12px; color:var(--muted); margin-top:2px; }
+  .acct-hint { font-size:12px; color:var(--yellow); margin-top:3px; }
+  .acct-blocked { font-size:11px; font-weight:500; color:var(--red); margin-left:6px; }
+  .acct-actions { display:flex; gap:7px; flex-wrap:wrap; }
+  .acct-btn { font-size:12px; padding:4px 13px; min-height:30px; }
+  .acct-ready { display:flex; align-items:center; gap:6px; flex-wrap:wrap; padding-top:11px; }
+  .acct-ready-h { font-size:11px; text-transform:uppercase; letter-spacing:.04em; color:var(--faint); }
+  .acct-chip { font-size:11.5px; padding:2px 9px; border-radius:999px;
+    background:var(--green-soft); color:var(--green); font-weight:600; }
+  .acct-none { font-size:12.5px; color:var(--muted); padding:8px 0 2px; }
+  .acct-foot { display:flex; gap:16px; flex-wrap:wrap; padding-top:12px; margin-top:4px;
+    border-top:1px solid var(--line); }
+
   .jobs-toolbar { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-bottom:12px; }
   .jobsearch { position:relative; flex:1 1 340px; min-width:240px; display:flex; align-items:center; }
   .jobsearch-icon { position:absolute; left:11px; color:var(--faint); font-size:15px; pointer-events:none; }

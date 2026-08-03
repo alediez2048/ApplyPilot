@@ -14,6 +14,7 @@ import time
 from pathlib import Path
 
 from applypilot import config
+from applypilot.apply import profile_scan
 
 logger = logging.getLogger(__name__)
 
@@ -170,6 +171,13 @@ def setup_worker_profile(worker_id: int) -> Path:
         "MEIPreload", "SSLErrorAssistant", "recovery", "Temp",
         "SingletonLock", "SingletonSocket", "SingletonCookie",
     }
+    # ...and never the credential stores. This copy is what put 682 saved passwords, 2 credit
+    # cards and 831 autofill entries into the browser the apply agent drives with
+    # `bypassPermissions` on attacker-controlled careers pages. Cookies are a separate file and
+    # are still copied, so sessions persist and a sign-in wall stays a once-per-employer cost —
+    # which is the only thing this copy was ever wanted for.
+    credentials = (*profile_scan.CREDENTIAL_FILES, *profile_scan.CREDENTIAL_DIRS)
+    skip |= set(credentials)
 
     for item in source.iterdir():
         if item.name in skip:
@@ -179,8 +187,13 @@ def setup_worker_profile(worker_id: int) -> Path:
             if item.is_dir():
                 shutil.copytree(
                     str(item), str(dst), dirs_exist_ok=True,
+                    # The credential names must be repeated here, not only in `skip`: the loop
+                    # above walks the user-data-dir's TOP level, where the only entry that
+                    # matters is `Default/` — and it is copied whole. Excluding "Login Data"
+                    # from `skip` alone excludes nothing, because it never appears there.
                     ignore=shutil.ignore_patterns(
                         "Cache", "Code Cache", "GPUCache", "Service Worker",
+                        *credentials, *(f"{n}-journal" for n in profile_scan.CREDENTIAL_FILES),
                     ),
                 )
             else:

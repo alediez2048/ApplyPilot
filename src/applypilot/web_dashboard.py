@@ -754,6 +754,84 @@ def _finish_signin(job_url: str, fill: bool = False) -> dict:
     return {"ok": True, "message": "Closed. You are signed in for next time."}
 
 
+# ── accounts (the sign-in wall, handled once per employer) ──────────────────
+
+def _account_open(realm_id: str) -> dict:
+    """Open the apply browser on this realm's wall, with NO agent attached.
+
+    The same Chrome profile the apply uses, so whatever account is created here is the account
+    the agent later arrives with. Deliberately not a fresh window: a session in a different
+    profile would look identical and help with nothing.
+    """
+    from applypilot.apply.chrome import BASE_CDP_PORT, launch_chrome
+    from applypilot.repo import accounts as arepo
+
+    row = arepo.get(realm_id)
+    if not row:
+        return {"ok": False, "message": "unknown site"}
+    target = row["signup_url"] or f"https://{realm_id.split('/')[0]}"
+
+    running = _jobs.in_progress()
+    if running:
+        names = ", ".join((r["title"] or "?")[:28] for r in running[:3])
+        return {"ok": False, "message": f"{names} is being filled right now. Pause it first — "
+                                        f"signing in uses the same Chrome profile."}
+    if _review_browser_alive():
+        return {"ok": False, "message": "A browser is already open. Finish or close it first — "
+                                        "signing in uses the same profile."}
+    try:
+        launch_chrome(0, port=BASE_CDP_PORT, url=target, human=True)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "message": f"Could not open Chrome: {exc}"}
+    return {"ok": True, "message": f"Chrome is open on {row['label'] or realm_id}. Create the "
+                                   f"account or sign in, then click “I have an account”."}
+
+
+def _account_set_have(realm_id: str, have: bool) -> dict:
+    """The operator is the authority on whether they have an account (§Lessons 19).
+
+    Recorded as `operator` evidence, which outranks everything the scanners produce, so a
+    cookie sweep cannot quietly revert it the next time a session expires.
+    """
+    from applypilot.repo import accounts as arepo
+    if not arepo.set_have_account(realm_id, have, "operator"):
+        return {"ok": False, "message": "unknown site"}
+    row = arepo.get(realm_id)
+    label = (row or {}).get("label") or realm_id
+    return {"ok": True, "message": f"{label}: {'account saved' if have else 'marked as no account'}."}
+
+
+def _account_sync() -> dict:
+    """Re-read the apply browser for saved logins and sessions."""
+    from applypilot.apply import accounts as acct
+    found = acct.sync_evidence()
+    if not found.get("accounts") and not found.get("sessions"):
+        # §Lessons 15: a scan that found nothing must not look like a button that never fired.
+        return {"ok": True, "message": "Scanned the apply browser: no saved sign-ins found."}
+    return {"ok": True, "message": f"Found {found['accounts']} saved sign-in(s) and "
+                                   f"{found['sessions']} site(s) you have visited."}
+
+
+def _account_purge() -> dict:
+    """Take the saved passwords and cards out of the browser the apply agent drives.
+
+    Cookies are left alone, so every session survives and no wall has to be paid twice — the
+    only thing the profile copy was ever wanted for.
+    """
+    from applypilot.apply import profile_scan
+    if _review_browser_alive() or _jobs.in_progress():
+        return {"ok": False, "message": "Close the apply browser first — Chrome rewrites these "
+                                        "files when it exits, so purging now would do nothing."}
+    before = profile_scan.credential_exposure()
+    result = profile_scan.purge_credentials()
+    if not result["count"]:
+        return {"ok": True, "message": "Nothing to remove — the apply profile holds no saved "
+                                       "passwords or cards."}
+    return {"ok": True, "message": f"Removed {before['passwords']} saved password(s), "
+                                   f"{before['credit_cards']} card(s) and {before['autofill']} "
+                                   f"autofill entries. Sessions and cookies were kept."}
+
+
 log = logging.getLogger(__name__)
 
 #: Background reply polling. Gmail is the slow part, so it never runs inside a request — a
@@ -797,7 +875,8 @@ class ReplyPoller:
         #
         # Each is isolated: a dead cal.com search must not stop reply detection, which is the
         # one people notice.
-        for name, fn in (("bookings", self._poll_bookings), ("deck", self._poll_deck)):
+        for name, fn in (("bookings", self._poll_bookings), ("deck", self._poll_deck),
+                         ("accounts", self._poll_accounts)):
             try:
                 res[name] = fn()
             except Exception:  # noqa: BLE001
@@ -826,6 +905,21 @@ class ReplyPoller:
             return {"skipped": True}
         r = deck_hits.poll()
         return {"recorded": r.get("recorded", 0), "new": r.get("new", 0)}
+
+    @staticmethod
+    def _poll_accounts() -> dict:
+        """Keep the realm list and its evidence current, OFF the hot path.
+
+        Deliberately here rather than in `/api/status`: `sync_evidence` copies Chrome's cookie
+        and login databases to read them, and `/api/status` re-runs every 2.5 seconds. That is
+        §Lessons 26 exactly — the query budget counts SQL, so a per-request file copy would sail
+        past it and only show up as a dashboard that had become mysteriously slow.
+        """
+        from applypilot.apply import accounts as acct
+        from applypilot.repo import jobs as jobsrepo
+        rows = [dict(r) for r in jobsrepo.dashboard_rows()]
+        found = acct.refresh(rows)
+        return {"realms": found, **acct.sync_evidence()}
 
     def start(self) -> None:
         def loop() -> None:
@@ -1583,7 +1677,23 @@ def _status_payload() -> dict:
         "poll_every_s": _replies.interval_s,
         # Mutual shared token for the LinkedIn extension — operator pastes it into the popup once.
         "ext_token": _ext_token(),
+        # Employers whose sign-in wall is unpaid. ONE query — the realm list is refreshed and
+        # the browser is scanned by the background poller, never here.
+        "accounts": _accounts_payload(conn),
     }
+
+
+def _accounts_payload(conn) -> dict:
+    """The Accounts panel's data. Kept to a single statement on purpose.
+
+    A wall is per EMPLOYER, not per job, so this is a short list however many jobs are queued —
+    which is exactly why it can ride on a 2.5-second refresh at all.
+    """
+    try:
+        from applypilot.apply import accounts as acct
+        return acct.panel(conn)
+    except Exception:  # noqa: BLE001
+        return {"blocking": [], "ready": [], "open_count": 0}
 
 
 def _pending_introductions(job_threads: dict, raw_contacts: list) -> list[dict]:
@@ -2806,6 +2916,22 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if path == "/api/delete":
                 result = _delete_job(data.get("url", ""))
                 _json_response(self, result, 200 if result["ok"] else 404)
+                return
+            if path == "/api/accounts/open":
+                result = _account_open((data.get("realm") or "").strip())
+                _json_response(self, result, 200 if result["ok"] else 409)
+                return
+            if path == "/api/accounts/have":
+                result = _account_set_have((data.get("realm") or "").strip(),
+                                           bool(data.get("have", True)))
+                _json_response(self, result, 200 if result["ok"] else 404)
+                return
+            if path == "/api/accounts/sync":
+                _json_response(self, _account_sync())
+                return
+            if path == "/api/accounts/purge":
+                result = _account_purge()
+                _json_response(self, result, 200 if result["ok"] else 409)
                 return
             if path == "/api/stop":
                 ok, msg = _runner.stop()

@@ -90,6 +90,12 @@
 
   <hr class="section-sep">
 
+  <!-- Sign-in walls, batched. A wall is per EMPLOYER, so this list is short however many jobs
+       are queued — and it sits ABOVE the table because the jobs behind it cannot run until it
+       is cleared (§Lessons 43: a control nobody can find is a broken feature). Rendered by
+       renderAccounts(); hidden entirely when nothing is blocked. -->
+  <section id="accountsBar" class="accounts-bar" hidden></section>
+
   <section>
     <h2>Applications</h2>
     <!-- The search box is STATIC markup, deliberately. `refresh()` replaces #jobs wholesale

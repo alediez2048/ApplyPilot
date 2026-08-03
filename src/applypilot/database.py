@@ -266,6 +266,12 @@ _ALL_COLUMNS: dict[str, str] = {
     "application_url": "TEXT",
     "detail_scraped_at": "TEXT",
     "detail_error": "TEXT",
+    # How many times the scrape has been tried. `detail_scraped_at` is what removes a row from
+    # the enrich queue, and the error branch used to stamp it on ANY failure — so a 45-second
+    # network blip disqualified a job permanently, with no retry path and no way to tell that
+    # from a page we genuinely cannot read. Transient failures now leave the row queued and
+    # count instead. Mirrors tailor_attempts / cover_attempts.
+    "detail_attempts": "INTEGER DEFAULT 0",
     # Scoring
     "fit_score": "INTEGER",
     "score_reasoning": "TEXT",

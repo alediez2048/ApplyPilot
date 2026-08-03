@@ -1424,6 +1424,7 @@ function dueByChannel(j) {
 }
 
 function needsYou(j) {
+  if (j.interview_at) return false;          // arrived; nothing here needs chasing
   if (j.status === 'ready_to_submit' || j.status === 'needs_human') return true;
   if ((j.awaiting_reply || []).length) return true;   // somebody answered and is still waiting
   return dueByChannel(j).total > 0;
@@ -1451,7 +1452,9 @@ function pendingActions(jobs) {
   const add = (key, j, n) => { if (n > 0) { by[key].n += n; by[key].jobs.push(j.url); } };
 
   for (const j of js) {
-    if (j.status === 'rejected') continue;      // a closed application owes you nothing
+    // A rejected job has left the pipeline; an interviewing job has ARRIVED. Both are done
+    // asking for work, and leaving either in the counter keeps the badge permanently lit.
+    if (j.status === 'rejected' || j.interview_at) continue;
     add('replies', j, (j.awaiting_reply || []).length);
     // A conversation that stalled outranks every cold ladder: they already engaged, which is
     // the hardest part, and letting it go quiet wastes the only thing outreach is for. Capped
@@ -1635,8 +1638,8 @@ function renderJobsTable(allJobs, editing) {
   if (editing) return;
   document.getElementById('jobs').innerHTML = shown.map(j => {
     return `
-    <tr>
-      <td class="status-cell"><div class="status-head">${badge(j.status)}</div>${j.status === 'rejected' && j.rejected_at ? `<div class="rejected-on">Rejected ${fmtDate(j.rejected_at)}</div>` : (j.applied_at ? `<div class="applied-on">Applied ${fmtDate(j.applied_at)}</div>` : '')}</td>
+    <tr class="${j.interview_at ? 'row-won' : ''}">
+      <td class="status-cell"><div class="status-head">${badge(j.status)}${j.interview_at ? ` <span class="won-chip" title="Interview scheduled ${esc(fmtDate(j.interview_at))}">🎯 interview</span>` : ''}</div>${j.status === 'rejected' && j.rejected_at ? `<div class="rejected-on">Rejected ${fmtDate(j.rejected_at)}</div>` : (j.applied_at ? `<div class="applied-on">Applied ${fmtDate(j.applied_at)}</div>` : '')}</td>
       <td class="job-cell"><div class="job-title">${esc(j.title)}</div><div class="job-co">${esc(j.company)}</div></td>
       <td class="desc"><div class="desc-text">${esc(j.description)}</div></td>
       <td class="tags-cell">${jobTags(j).map(t =>
@@ -1691,6 +1694,19 @@ async function refresh() {
   renderTodo(allJobs);
   renderJobsTable(allJobs, editing);
   document.querySelectorAll('details.rowmenu[open]').forEach(positionRowMenu);
+}
+async function markInterview(url, btn) {
+  if (!confirm('Mark an interview as scheduled?\n\nThe row greys out and every follow-up '
+             + 'sequence for this job stops. Chasing someone after they agreed to meet is the '
+             + 'one follow-up guaranteed to cost you something.')) return;
+  btn.disabled = true;
+  const r = await post('/api/mark-interview', {url});
+  if (r.ok) refresh(); else { btn.disabled = false; alert(r.message || 'Failed'); }
+}
+async function unmarkInterview(url, btn) {
+  btn.disabled = true;
+  const r = await post('/api/unmark-interview', {url});
+  if (r.ok) refresh(); else { btn.disabled = false; alert(r.message || 'Failed'); }
 }
 async function markRejected(url, btn) {
   if (!confirm('Move this application to the rejected pile?')) return;
@@ -1820,6 +1836,8 @@ function nextAction(j) {
   const cl = j.checklist || {};
   const cs = j.contacts || [];
   if (j.status === 'rejected') return '';
+  if (j.interview_at)
+    return `<span class="won-next" title="Scheduled ${esc(fmtDate(j.interview_at))}">🎯 Interview scheduled</span>`;
   if (j.status === 'ready')
     return `<button class="primary" onclick="fillOne(${u}, this)">▶ Fill application</button>`;
   if (j.status === 'ready_to_submit')
@@ -2259,6 +2277,10 @@ function rowMenu(j) {
   const label = `decodeURIComponent('${encodeURIComponent(`${j.company} - ${j.title}`)}')`;
   // Restart lives on the strip as "🔄 Re-apply" (restartButton) — not duplicated here.
   const items = [];
+  // The success metric goes first: it is the outcome every other action exists to cause.
+  items.push(j.interview_at
+    ? `<button onclick="unmarkInterview(${u}, this)">↩ Not scheduled after all<span>Sequences stay stopped</span></button>`
+    : `<button onclick="markInterview(${u}, this)">🎯 Interview scheduled<span>Greys the row and stops every sequence</span></button>`);
   items.push(j.status === 'rejected'
     ? `<button onclick="unmarkRejected(${u}, this)">↩ Restore<span>Move back out of the rejected pile</span></button>`
     : `<button onclick="markRejected(${u}, this)">✕ Mark rejected<span>Move to the rejected pile</span></button>`);

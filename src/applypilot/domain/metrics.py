@@ -57,12 +57,15 @@ class Funnel:
     emailed: int = 0
     replied: int = 0
     bounced: int = 0
+    #: The only OUTCOME in this dataclass. Everything above it counts effort.
+    interviews: int = 0
     steps: list = field(default_factory=list)
 
     def as_dict(self) -> dict:
         return {"discovered": self.discovered, "applied": self.applied,
                 "contacted": self.contacted, "emailed": self.emailed,
                 "replied": self.replied, "bounced": self.bounced,
+                "interviews": self.interviews,
                 "steps": self.steps}
 
 
@@ -89,7 +92,12 @@ def _deliverable(contacts: list[dict]) -> list[dict]:
 
 
 def funnel(jobs: list[dict], contacts: list[dict]) -> Funnel:
-    """discovered → applied → contacted → emailed → replied, with the bounce leak shown."""
+    """discovered → applied → contacted → emailed → replied → INTERVIEW, bounce leak shown.
+
+    Interviews are the last step because they are the only one that is an outcome. Every step
+    before it counts effort — jobs found, applications sent, people emailed — and a funnel that
+    ends at "replied" measures how much talking happened, not whether any of it worked.
+    """
     jobs = jobs or []
     contacts = contacts or []
     job_urls_with_contacts = {c.get("job_url") for c in contacts if c.get("job_url")}
@@ -101,12 +109,14 @@ def funnel(jobs: list[dict], contacts: list[dict]) -> Funnel:
         replied=sum(1 for c in contacts if _replied(c)),
         bounced=sum(1 for c in contacts if _bounced(c)),
     )
+    f.interviews = sum(1 for j in jobs if (j.get("interview_at") or "").strip())
     f.steps = [
         {"key": "discovered", "label": "Jobs", "n": f.discovered},
         {"key": "applied", "label": "Applied", "n": f.applied},
         {"key": "contacted", "label": "With contacts", "n": f.contacted},
         {"key": "emailed", "label": "Emailed", "n": f.emailed},
         {"key": "replied", "label": "Replied", "n": f.replied},
+        {"key": "interviews", "label": "Interviews", "n": f.interviews},
     ]
     return f
 

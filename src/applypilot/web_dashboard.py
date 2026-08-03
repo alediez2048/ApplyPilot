@@ -1025,6 +1025,63 @@ def _unmark_rejected(url: str) -> dict:
     return {"ok": True, "message": "Restored from rejected pile"}
 
 
+def _mark_interview(url: str) -> dict:
+    """Record that an interview is scheduled. The one success metric in the system.
+
+    Everything else it measures is effort. This is the outcome, so it is also the thing that
+    stops work: the row greys, the job leaves the aggregator, and every ladder halts. Chasing
+    somebody after they have agreed to meet you is the one follow-up guaranteed to cost you
+    something.
+    """
+    from applypilot.database import log_event
+    if not url:
+        return {"ok": False, "message": "url required"}
+    init_db()
+    conn = get_connection()
+    if not _jobs.exists(url, conn):
+        return {"ok": False, "message": "job not found"}
+    _jobs.mark_interview(url, conn)
+    # Halt every sequence for this job's contacts. Without this the ladders keep coming due and
+    # the operator has to remember, per contact, not to send them — which is exactly the kind of
+    # thing nobody remembers at the moment they have just booked an interview.
+    stopped = 0
+    try:
+        from applypilot.networking import store as _s
+        from applypilot.networking import touches as _t
+        _s.init_contacts(conn)
+        _t.init_touches(conn)
+        for c in _s.get_contacts_for_job(url, conn):
+            for channel in ("email", "linkedin", "sms"):
+                st = _t.ladder_state(c["id"], channel, conn)
+                if st["count"] or st["draft_body"]:
+                    _t.set_sequence_status(c["id"], channel, "stopped")
+                    stopped += 1
+    except Exception:  # noqa: BLE001
+        log.debug("Could not halt ladders on interview", exc_info=True)
+    log_event(url, "apply", "ok",
+              "Interview scheduled." + (f" {stopped} sequence(s) stopped." if stopped else ""),
+              conn)
+    return {"ok": True, "message": "Interview scheduled"
+                                   + (f" — {stopped} sequence(s) stopped" if stopped else "")}
+
+
+def _unmark_interview(url: str) -> dict:
+    """Undo. Does NOT restart the ladders: they were stopped deliberately, and silently
+    resuming outreach to people who were told nothing is worse than making you reopen them."""
+    from applypilot.database import log_event
+    if not url:
+        return {"ok": False, "message": "url required"}
+    init_db()
+    conn = get_connection()
+    if not _jobs.exists(url, conn):
+        return {"ok": False, "message": "job not found"}
+    _jobs.unmark_interview(url, conn)
+    log_event(url, "apply", "info",
+              "Interview unmarked. Stopped sequences stay stopped — reopen any you want back.",
+              conn)
+    return {"ok": True, "message": "Interview unmarked"}
+
+
 def _json_response(handler: BaseHTTPRequestHandler, payload: dict, status: int = 200) -> None:
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     handler.send_response(status)
@@ -1449,6 +1506,8 @@ def _status_payload() -> dict:
             "apply_attempts": row["apply_attempts"] or 0,
             "applied_at": row["applied_at"] or "",
             "rejected_at": row["rejected_at"] or "",
+            # The success metric. A job with this set needs no more attention.
+            "interview_at": (row["interview_at"] if "interview_at" in row.keys() else "") or "",
             "last_attempted_at": row["last_attempted_at"] or "",
             "materials": materials,
             "contacts": contacts,
@@ -2674,6 +2733,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/mark-submitted":
                 _json_response(self, _mark_submitted(data.get("url", "")))
+                return
+            if path == "/api/mark-interview":
+                _json_response(self, _mark_interview(data.get("url", "")))
+                return
+            if path == "/api/unmark-interview":
+                _json_response(self, _unmark_interview(data.get("url", "")))
                 return
             if path == "/api/mark-rejected":
                 _json_response(self, _mark_rejected(data.get("url", "")))

@@ -289,6 +289,16 @@ _ALL_COLUMNS: dict[str, str] = {
     "apply_task_id": "TEXT",
     "verification_confidence": "TEXT",
     "rejected_at": "TEXT",     # set when the user marks a job rejected (the "rejected pile")
+    # The actual success metric. Everything else in this schema measures effort — applications
+    # sent, emails sent, follow-ups due — and none of it is the thing you were trying to cause.
+    # A job with an interview booked needs no more attention: its row greys out, it leaves the
+    # aggregator, and its ladders stop, because chasing somebody after they agreed to meet is
+    # the one follow-up guaranteed to cost you something.
+    #
+    # Operator-asserted, like "Mark submitted". A cal.com booking IS detected automatically
+    # (networking/bookings.py) but a booked call is not always an interview, and §Lessons 19
+    # is explicit that the operator is the authority on what happened.
+    "interview_at": "TEXT",
 }
 
 

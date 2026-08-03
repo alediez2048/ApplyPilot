@@ -316,6 +316,28 @@ def mark_rejected(url: str, conn: sqlite3.Connection | None = None) -> str:
     return now
 
 
+def mark_interview(url: str, conn: sqlite3.Connection | None = None) -> str:
+    """Record that an interview is scheduled. Returns the timestamp.
+
+    Deliberately does NOT touch `apply_status`. Rejection overwrites it because a rejected job
+    has left the pipeline; an interview has not — you still applied, the materials still exist,
+    and the status strip should still read "Applied". Interview is a fact ON TOP of the state,
+    not a replacement for it, which is also what makes it undoable without having to remember
+    what the status used to be.
+    """
+    conn = _c(conn)
+    now = _now()
+    conn.execute("UPDATE jobs SET interview_at = ? WHERE url = ?", (now, url))
+    conn.commit()
+    return now
+
+
+def unmark_interview(url: str, conn: sqlite3.Connection | None = None) -> None:
+    conn = _c(conn)
+    conn.execute("UPDATE jobs SET interview_at = NULL WHERE url = ?", (url,))
+    conn.commit()
+
+
 def unmark_rejected(url: str, restored_status: str | None,
                     conn: sqlite3.Connection | None = None) -> None:
     conn = _c(conn)

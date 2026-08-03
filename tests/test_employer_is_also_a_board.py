@@ -133,3 +133,48 @@ def test_a_generic_subdomain_does_not_break_the_own_site_case():
     url = "https://careers.google.com/jobs/results/123-engineer/apply"
     job = {"url": url, "company": "Google", "site": "Google", "application_url": url}
     assert derive.derive_company(job) == "Google"
+
+
+# ── the rescue rule, and the line it must not cross ─────────────────────────
+
+def test_the_ownership_rule_reaches_the_host_label_step():
+    """§Lessons 20 wrote this rule down and only half of it was implemented.
+
+    `derive_company` step 1 applied `_company_owns_the_posting` to a STORED company name, and
+    step 4 (`_host_label`) did not — so google.com/about/careers resolved to no employer at all,
+    contact discovery never ran, and the row read "could not determine employer/domain" on a
+    role that had already been applied to. Fixing it surfaced 8 people already known at Google.
+    """
+    job = {"url": "https://www.google.com/about/careers/applications/jobs/results/126-x",
+           "application_url": None, "company": "Uploaded", "site": "Uploaded"}
+    assert derive.derive_company(job) == "Google"
+    assert derive.derive_domain(job) == "google.com"
+
+
+def test_a_board_showing_someone_elses_job_is_still_not_the_employer():
+    """The other half. Without this the rescue would hand outreach to Indeed's own staff."""
+    for url in ("https://www.indeed.com/viewjob?jk=abc",
+                "https://www.linkedin.com/jobs/view/123",
+                "https://www.ycombinator.com/jobs"):
+        job = {"url": url, "application_url": None, "company": None, "site": None}
+        assert derive.derive_company(job) is None, url
+
+
+def test_derive_domain_does_not_depend_on_the_caller_deriving_the_company_first():
+    """It reads the company off the raw row otherwise, which is "Uploaded" — so the domain came
+    back None unless the caller happened to resolve the employer first. A function whose
+    correctness depends on the order its caller does things is wrong from the second call site.
+    """
+    job = {"url": "https://www.google.com/about/careers/applications/jobs/results/126-x",
+           "application_url": None, "company": "Uploaded", "site": "Uploaded"}
+    assert derive.derive_domain(job) == derive.derive_domain(job, "Google") == "google.com"
+
+
+def test_the_two_label_sets_are_disjoint():
+    """Why `_host_label` needs no separate clause for generic portal words.
+
+    While these sets are disjoint, a generic label can never be in `_BOARD_HOSTS` and so can
+    never reach the rescue at all. An earlier version spelled the condition out anyway; it was
+    dead code, and both a mutation test and a test written to catch the mutation proved it.
+    If this assertion ever fails, that clause has to come back."""
+    assert not (derive._BOARD_HOSTS & derive._GENERIC_HOST_LABELS)

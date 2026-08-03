@@ -314,8 +314,12 @@ def _is_board_host(host: str) -> bool:
     return any(label in _BOARD_HOSTS for label in (host or "").lower().split("."))
 
 
-def _host_label(url: str | None) -> str | None:
-    """Return the registrable-ish label from a careers hostname, if it's an employer host."""
+def _host_label(url: str | None, job: dict | None = None) -> str | None:
+    """The registrable-ish label from a careers hostname, if it is an employer host.
+
+    `job` is only needed to decide whether a BOARD name is acting as the employer here
+    (google.com/about/careers is Google hiring; indeed.com/viewjob is not).
+    """
     if not url:
         return None
     try:
@@ -334,7 +338,24 @@ def _host_label(url: str | None) -> str | None:
     # careers-portal word ("job-boards.greenhouse.io" must not yield "Job Boards").
     unusable = _BOARD_HOSTS | _GENERIC_HOST_LABELS
     label = labels[-1] if labels[-1] not in unusable else (labels[0] if labels else None)
-    if not label or label in unusable:
+    if not label:
+        return None
+    if label in unusable:
+        # ...unless the board name IS the employer and this is their own careers site.
+        # `derive_company` step 1 already applies exactly this rule to a STORED company, and
+        # this step did not — so google.com/about/careers resolved to no employer at all and
+        # contact discovery never ran, on a role that had already been applied to. §Lessons 20
+        # wrote the rule down and one of its two call sites never got it.
+        #
+        # Only a BOARD name is rescued. A generic portal word ("careers", "ats", "boards") is
+        # never a company however the path reads — and it needs no clause of its own here,
+        # because the two sets are disjoint (pinned by
+        # `test_the_two_label_sets_are_disjoint`) and `_company_owns_the_posting` refuses one
+        # anyway. An earlier version spelled that condition out and it was dead code: a
+        # mutation deleting it passed the entire suite, and a test written to catch the
+        # mutation could not make it fire either.
+        if label in _BOARD_HOSTS and _company_owns_the_posting(label, job or {"url": url}):
+            return label
         return None
     return label
 
@@ -368,7 +389,8 @@ def derive_company(job: dict) -> str | None:
                 return name
 
     # 4. careers hostname from application_url (skip known board hosts)
-    host_label = _host_label(job.get("application_url")) or _host_label(job.get("url"))
+    host_label = (_host_label(job.get("application_url"), job)
+                  or _host_label(job.get("url"), job))
     if host_label:
         return host_label.capitalize()
 
@@ -383,7 +405,15 @@ def derive_company(job: dict) -> str | None:
 
 
 def derive_domain(job: dict, company: str | None = None) -> str | None:
-    """Best-effort employer domain for Apollo's q_organization_domains_list[]."""
+    """Best-effort employer domain for Apollo's q_organization_domains_list[].
+
+    Derives the company itself when the caller did not. The board-as-employer check below
+    needs a company name, and reading it off the raw row gets "Uploaded" — so a Google
+    careers URL yielded no domain unless the caller happened to have resolved the employer
+    first. A function whose correctness depends on the order its caller does things is a
+    function that will be wrong from the second call site.
+    """
+    company = company or derive_company(job)
     # Prefer an employer careers hostname that is not a board/ATS host.
     for key in ("application_url", "url"):
         url = job.get(key)

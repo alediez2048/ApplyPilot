@@ -38,6 +38,15 @@ Voice:
 - NEVER attach a number of years to a specific tool or framework unless the profile explicitly
   says so. A total career length is TOTAL experience, never "N years of PyTorch/LangChain/etc."
   Prefer honest framing like "the last few years focused on AI engineering" over false tenure.
+- SEVERAL PEOPLE AT THE SAME COMPANY GET THESE, AND THEY SIT NEAR EACH OTHER. Assume two
+  recipients will put your messages side by side. Anything identical across them, a subject
+  line, an opening, a call-to-action sentence, a sign-off, proves a machine wrote both, and
+  that costs the conversation far more than a slightly clumsier sentence would. Where the
+  ALREADY USED block below lists wording that has gone to this company, none of it may appear
+  again in any form close enough to recognise. Reach for a different sentence shape, not a
+  synonym swap.
+- These sign-offs are burned, never use them: "Looking forward to connecting", "Looking
+  forward to hearing from you", "Thanks in advance", "Best regards".
 
 Produce TWO things:
 
@@ -46,12 +55,14 @@ Produce TWO things:
    - Name the SPECIFIC role the sender applied to and the company, plus one real, relevant thing
      about the sender (from their profile).
    - CALL TO ACTION: invite them to a quick call to connect. If a SCHEDULING LINK is provided
-     below, weave it in naturally so they can grab a time directly (e.g. "if you're open to a
-     quick call, grab a time that works here: <link>"). If no link is provided, just suggest a
-     short call/chat. Keep it low-pressure, not pushy.
+     below, weave it in so they can book directly; the full URL must appear verbatim, but the
+     sentence around it is YOURS TO WRITE and must be different every time. If no link is
+     provided, just suggest a short call/chat. Keep it low-pressure, not pushy.
    - Sign off casually with the sender's first name only. No signature block. The ONLY link
      allowed is the scheduling link (when provided).
-   - Subject: short, casual, specific (e.g. "quick q about the <role> role").
+   - Subject: short, casual, specific to THIS person and what you actually wrote to them. Not a
+     formula with the role slotted into it. Several people at one company receive these, and a
+     shared subject line is visible in a forwarded message without anyone opening it.
 
 2. A LINKEDIN connection note (linkedin_note):
    - MUST be 300 characters or fewer (hard limit, count carefully, aim for ~230).
@@ -251,7 +262,8 @@ def draft_variant(*, warm: bool = False, noticed: bool = False, jd_chars: int = 
     return "+".join(bits)
 
 
-def draft_email(profile: dict, job: dict, contact: dict, style: str = "", warm: bool = False) -> dict:
+def draft_email(profile: dict, job: dict, contact: dict, style: str = "", warm: bool = False,
+                previous: list[dict] | None = None) -> dict:
     """Return {"subject": str, "body": str} for one contact. Raises on LLM/parse failure.
 
     `style` is an optional free-text directive (e.g. "keep it super casual", "mention I'm a
@@ -261,7 +273,14 @@ def draft_email(profile: dict, job: dict, contact: dict, style: str = "", warm: 
     `warm=True` = the HOT layer: this person is an EXISTING 1st-degree LinkedIn connection at the
     company. The copy should acknowledge the existing relationship (reconnect, not cold intro),
     and the LinkedIn note becomes a direct MESSAGE to a connection (not a connect request).
+
+    `previous` is what this employer has ALREADY been sent — `[{subject, body}]`. Without it the
+    model converges: measured across 189 live drafts, ten people at Google received the identical
+    subject line and one CTA sentence appeared 48 times. The caller passes it because the store
+    is where that lives; the prompt block is built in `domain/burned.py`, which explains why
+    deleting the worked examples was necessary and not sufficient.
     """
+    from applypilot.domain.burned import burned_block
     role = job.get("title") or "the role"
     company = contact.get("company") or job.get("company") or job.get("site") or "your company"
     sender_bits = sender_background(profile)
@@ -311,9 +330,10 @@ def draft_email(profile: dict, job: dict, contact: dict, style: str = "", warm: 
     deck = _intro_deck_url(profile, contact)
     deck_block = (
         f"INTRO DECK LINK (include in the EMAIL, not the LinkedIn note): {deck}\n"
-        f'Offer it as "{INTRO_DECK_SENTENCE.format(url=deck)}", or the same idea in your own '
-        "words, as long as the full URL appears verbatim. Put it near the call CTA, before the "
-        "sign-off.\n\n"
+        "Offer it in a sentence of YOUR OWN. The full URL must appear verbatim; the wording "
+        "around it must not. This line was previously quoted here as a model sentence and came "
+        "back in six of eight drafts at one company, which is the exact failure the ALREADY "
+        "USED block exists to stop. Put it near the call CTA, before the sign-off.\n\n"
         if deck else ""
     )
 
@@ -346,8 +366,12 @@ def draft_email(profile: dict, job: dict, contact: dict, style: str = "", warm: 
            "observation is a compliment, not an application.\n"
            "- If it does not fit this email naturally, leave it out entirely. A forced "
            "reference is worse than none.\n\n" if noticed else "")
-        + sched_block + deck_block + warm_block + style_block +
-        "Write the outreach email. Return the JSON."
+        + sched_block + deck_block + warm_block + style_block
+        # LAST, immediately before the instruction to write. A constraint placed above the
+        # scheduling and deck blocks competes with them and loses — §Lessons 40: two
+        # instructions in one prompt disagreeing is a code bug, not a wording problem.
+        + burned_block(previous)
+        + "Write the outreach email. Return the JSON."
     )
 
     client = get_client("light")
@@ -463,9 +487,10 @@ def draft_followup(profile: dict, job: dict, contact: dict, touch: int = 1,
            "and do NOT re-pitch it. You may refer to it in passing at most once (\"the deck I "
            "sent\"), and only if it is genuinely relevant to this message.\n\n" if deck_sent
            else (f"INTRO DECK LINK (include it, they have NOT been sent it): {deck}\n"
-                 f'Offer it as "{INTRO_DECK_SENTENCE.format(url=deck)}", or the same idea in '
-                 "fewer words, the full URL must appear verbatim. This is the concrete thing "
-                 "this follow-up offers, so lead with it rather than tacking it on.\n\n"
+                 "Offer it in a sentence of your own, in few words; the full URL must appear "
+                 "verbatim and the wording around it must not repeat anything already sent. "
+                 "This is the concrete thing this follow-up offers, so lead with it rather "
+                 "than tacking it on.\n\n"
                  if deck else ""))
         + (f"STYLE DIRECTION (follow closely):\n{directive}\n\n" if directive else "")
         + "Write the follow-up. Return the JSON."

@@ -28,7 +28,13 @@ def _draft_and_store(profile: dict, job: dict, contact: dict, warm: bool = False
     """
     from applypilot.networking import outreach
     try:
-        draft = outreach.draft_email(profile, job, contact, warm=warm)
+        # What this employer has ALREADY been sent, so the next one differs. Passed at BOTH
+        # call sites — a rule implemented at one of its two is not implemented (§Lessons 49),
+        # and this is the batch path, where a whole company gets drafted minutes apart.
+        previous = store.copy_already_sent_to_company(
+            contact.get("company") or job.get("company") or job.get("site") or "",
+            exclude_id=contact.get("id"))
+        draft = outreach.draft_email(profile, job, contact, warm=warm, previous=previous)
         store.upsert_contact({
             "id": contact.get("id"),
             "job_url": contact["job_url"],
@@ -70,7 +76,10 @@ def draft_for_contact(contact_id: str, style: str = "") -> dict | None:
     except Exception:  # noqa: BLE001
         profile = {}
     try:
-        draft = outreach.draft_email(profile, job, contact, style=style)
+        previous = store.copy_already_sent_to_company(
+            contact.get("company") or job.get("company") or job.get("site") or "",
+            exclude_id=contact_id, conn=conn)
+        draft = outreach.draft_email(profile, job, contact, style=style, previous=previous)
     except Exception as e:  # noqa: BLE001
         log.warning("Regenerate draft failed for %s: %s", contact_id, e)
         return None

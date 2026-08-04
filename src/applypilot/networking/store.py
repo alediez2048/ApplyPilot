@@ -242,6 +242,33 @@ def emails_sent_to_company(company: str, conn: sqlite3.Connection | None = None)
     return int(first) + int(later)
 
 
+def copy_already_sent_to_company(company: str, exclude_id: str | None = None,
+                                 conn: sqlite3.Connection | None = None) -> list[dict]:
+    """Subjects and bodies already drafted for this employer — so the next one can differ.
+
+    Per COMPANY for the same reason the cap is (`emails_sent_to_company`): that is the unit the
+    recipient experiences. Ten people at Google received the identical subject line, and a
+    subject is visible in a forwarded message without anyone opening it.
+
+    Includes DRAFTED as well as sent. A draft is what the next generation is competing with —
+    two drafts written in the same batch land minutes apart, and waiting for `submitted` would
+    let a whole batch repeat itself before any feedback existed.
+    """
+    if conn is None:
+        conn = get_connection()
+    init_contacts(conn)
+    key = (company or "").strip().lower()
+    if not key:
+        return []
+    rows = conn.execute(
+        "SELECT id, outreach_subject, outreach_message FROM contacts "
+        "WHERE LOWER(TRIM(COALESCE(company,''))) = ? "
+        "AND outreach_message IS NOT NULL AND TRIM(outreach_message) != '' "
+        "ORDER BY submitted_at DESC, discovered_at DESC LIMIT 40", (key,)).fetchall()
+    return [{"subject": r["outreach_subject"] or "", "body": r["outreach_message"] or ""}
+            for r in rows if r["id"] != exclude_id]
+
+
 def already_contacted_email(
     email: str, cooldown_days: int = 30, exclude_id: str | None = None,
     conn: sqlite3.Connection | None = None,

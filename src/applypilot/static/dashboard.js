@@ -2142,7 +2142,9 @@ function nextAction(j) {
   const waiting = j.awaiting_reply || [];
   if (waiting.length) {
     const w = waiting[0];
-    const ago = w.days >= 1 ? `${w.days}d` : `${w.hours || 0}h`;
+    // "0h" is not an age. Under an hour the row's own last-interaction line already says
+    // "just now", and the button disagreeing with it reads as two different facts.
+    const ago = w.days >= 1 ? `${w.days}d` : (w.hours >= 1 ? `${w.hours}h` : 'just now');
     const more = waiting.length > 1 ? ` +${waiting.length - 1}` : '';
     return `<button class="primary" onclick="openReply(${u},'${esc(w.id)}')">💬 Answer ${esc(firstName(w.full_name))} (${ago})${more}</button>`;
   }

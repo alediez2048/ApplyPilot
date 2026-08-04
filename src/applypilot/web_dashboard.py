@@ -50,7 +50,15 @@ EXT_TOKEN_HEADER = "X-ApplyPilot-Token"
 EXT_QUEUE_PATH = "/api/ext/queue"
 EXT_STATUS_PATH = "/api/ext/status"
 EXT_NOTE_PATH = "/api/ext/note"
+# Reading an open LinkedIn thread. `match` answers "who is this display name?"; `messages`
+# stores what was read. Both are POST so a display name never rides in a URL (query strings
+# get logged, and this one is a real person's name).
+EXT_MATCH_PATH = "/api/ext/match"
+EXT_MESSAGES_PATH = "/api/ext/messages"
 EXT_NOTE_MAX_LEN = 300
+#: One thread, one post. A LinkedIn conversation that is genuinely longer than this is not the
+#: case this was built for, and an unbounded batch is an unbounded write.
+EXT_MESSAGES_MAX = 100
 # The only dm_status values the extension may POST to /api/ext/status.
 _POSTABLE_DM_STATUSES = frozenset({"sent", "manual", "skipped"})
 
@@ -1613,6 +1621,12 @@ def _status_payload() -> dict:
         # "has this person done anything?" in a separate room from the person. Same single
         # query, attached where it is read.
         _attach_interactions(row["url"], contacts, conn)
+        # Hoisted out of the payload literal because the temperature reads them: how much of
+        # the plan is left is what separates a job worked this morning from one whose every
+        # email and follow-up was spent a fortnight ago. Both were computed here already —
+        # this is a reordering, not a new query.
+        job_checklist = _job_checklist(status, row["applied_at"] or "", contacts)
+        job_followups = _followup_panel(contacts, job_ladders)
         net_task = _net_tasks.get(row["url"], {})
         jobs.append({
             "url": row["url"],
@@ -1647,8 +1661,8 @@ def _status_payload() -> dict:
             "last_attempted_at": row["last_attempted_at"] or "",
             "materials": materials,
             "contacts": contacts,
-            "checklist": _job_checklist(status, row["applied_at"] or "", contacts),
-            "followups": _followup_panel(contacts, job_ladders),
+            "checklist": job_checklist,
+            "followups": job_followups,
             "conversations": job_threads,
             "awaiting_reply": _awaiting_us(contacts),
             "introductions": _pending_introductions(job_threads, raw_contacts),
@@ -1656,7 +1670,7 @@ def _status_payload() -> dict:
             # loaded above — no query of its own on a 2.5s path.
             "last_interaction": _last_interaction(row, contacts, job_ladders),
             # How the application is DOING, as opposed to how far it has travelled (UX-5).
-            "temperature": _temperature(row, contacts, job_ladders),
+            "temperature": _temperature(row, contacts, job_ladders, job_checklist, job_followups),
             "activity": _job_activity(row["url"], conn),
             "network_running": bool(net_task.get("running")),
             "network_note": net_task.get("note") or "",
@@ -1840,18 +1854,26 @@ def _awaiting_us(contacts: list[dict]) -> list[dict]:
             hrs = _hours_since(inbound[0].get("at", ""))
             out.append({"id": c.get("id"), "full_name": c.get("full_name", ""),
                         "days": int(hrs // 24) if hrs is not None else None,
-                        "hours": hrs, "channel": "linkedin"})
+                        # ROUNDED, the same as the email path. `conversation_state` rounds and
+                        # this one did not, so a LinkedIn message logged minutes earlier reached
+                        # the row's Next button as "Answer Anna (0.20683377833333333h)". A raw
+                        # float is not a duration; it is the arithmetic that produced one.
+                        "hours": None if hrs is None else round(hrs),
+                        "channel": "linkedin"})
     return sorted(out, key=lambda r: -(r["hours"] or 0))
 
 
 def _hours_since(ts: str) -> float | None:
-    """Whole hours since an ISO timestamp, or None. Naive rows exist (§Lessons 6)."""
-    from applypilot.domain.timeutil import parse_ts
+    """Hours since an ISO timestamp, or None. Naive rows exist (§Lessons 6).
+
+    Clamped at zero: a row stamped a few seconds into the future by clock skew must not read
+    as a negative age, which sorts to the bottom and renders as "-0h".
+    """
     from datetime import datetime, timezone
-    when = parse_ts(ts)
-    if not when:
-        return None
-    return max(0.0, (datetime.now(timezone.utc) - when).total_seconds() / 3600)
+
+    from applypilot.domain.timeutil import hours_since
+    hrs = hours_since(ts, datetime.now(timezone.utc))
+    return None if hrs is None else max(0.0, hrs)
 
 
 def _conversation_state(thread: list) -> dict | None:
@@ -1921,14 +1943,17 @@ def _last_interaction(row, contacts: list, ladders: dict | None) -> dict | None:
         return None
 
 
-def _temperature(row, contacts: list, ladders: dict | None) -> dict | None:
+def _temperature(row, contacts: list, ladders: dict | None,
+                 checklist: dict | None = None, followups: dict | None = None) -> dict | None:
     """UX-5. Never raises into the payload."""
     from applypilot.domain.temperature import temperature
     try:
         if (row["rejected_at"] or ""):
             return None            # left the pipeline; a reading would be permanently lit
+        plan = {"steps": (checklist or {}).get("steps") or [],
+                "due": (followups or {}).get("due_count") or 0}
         return temperature({"interview_at": row["interview_at"] or "",
-                            "applied_at": row["applied_at"] or ""}, contacts, ladders)
+                            "applied_at": row["applied_at"] or ""}, contacts, ladders, plan)
     except Exception:  # noqa: BLE001
         log.debug("Could not derive temperature", exc_info=True)
         return None
@@ -2747,6 +2772,86 @@ def _ext_note(data: dict) -> tuple[dict, int]:
     return {"ok": True, "note": note}, 200
 
 
+def _ext_match(data: dict) -> tuple[dict, int]:
+    """Who is this LinkedIn display name? Candidates, ranked, never auto-resolved.
+
+    Returning a list rather than a person is the point. Two contacts really are called Anna
+    Ruiz, and the extension shows a picker — silently choosing the first would file somebody's
+    reply against a stranger, and nothing downstream could tell.
+    """
+    from applypilot.domain.linkedin_thread import match_contact
+    from applypilot.networking import store
+
+    name = (data.get("name") or "").strip()
+    if not name:
+        return {"ok": False, "error": "name required"}, 400
+    store.init_contacts()
+    everyone = store.identities()
+    slim = [{"id": c["id"], "full_name": c.get("full_name") or "",
+             "company": c.get("company") or "", "job_url": c.get("job_url") or ""}
+            for c in everyone]
+    by_id = {c["id"]: c for c in slim}
+    # `all` rides along on the same query. Without it an unmatched name is a dead end whose
+    # only exit is the dashboard — which is the ten-step flow this endpoint exists to replace.
+    # `match_basis` rides along too: a first-name-only match is a weaker claim than a full one
+    # and a picker that renders them identically invites the wrong click.
+    return {"ok": True, "name": name,
+            "candidates": [{**by_id[c["id"]], "match_basis": c.get("match_basis")}
+                           for c in match_contact(name, everyone)],
+            "all": slim}, 200
+
+
+def _ext_messages(data: dict) -> tuple[dict, int]:
+    """Store a batch of LinkedIn messages read off an open thread.
+
+    Reuses `_log_interaction` per message rather than writing rows here. That function is
+    where an inbound message halts the LinkedIn ladder and where the text is capped at the
+    write — a second writer that only did the INSERT would look correct and quietly stop
+    doing both (§Lessons 49: a rule implemented at one of its two call sites is not
+    implemented).
+    """
+    from applypilot.domain import interactions as _ix
+    from applypilot.domain.linkedin_thread import dedupe_times
+
+    cid = (data.get("contact_id") or "").strip()
+    if not cid:
+        return {"ok": False, "error": "contact_id required"}, 400
+    raw = data.get("messages")
+    if not isinstance(raw, list) or not raw:
+        return {"ok": False, "error": "messages required"}, 400
+    if len(raw) > EXT_MESSAGES_MAX:
+        return {"ok": False, "error": f"at most {EXT_MESSAGES_MAX} messages per request"}, 400
+
+    allowed = {_ix.LINKEDIN_IN, _ix.LINKEDIN_OUT}
+    cleaned = []
+    for m in raw:
+        if not isinstance(m, dict):
+            return {"ok": False, "error": "each message must be an object"}, 400
+        kind = (m.get("kind") or "").strip()
+        if kind not in allowed:
+            # Named, not silently dropped. This endpoint exists to log a LinkedIn thread; an
+            # unexpected kind means the page was parsed wrong, and a partial success would
+            # store half a conversation and report success.
+            return {"ok": False, "error": f"{kind!r} is not a LinkedIn message"}, 400
+        if not (m.get("detail") or "").strip():
+            return {"ok": False, "error": "a message with no text cannot be logged"}, 400
+        cleaned.append({"kind": kind, "detail": m.get("detail"), "at": m.get("at") or ""})
+
+    stored, already, failed = 0, 0, []
+    for m in dedupe_times(cleaned):
+        r = _log_interaction({"contact_id": cid, **m})
+        if not r.get("ok"):
+            failed.append(r.get("message") or "failed")
+            continue
+        if "Already" in (r.get("message") or ""):
+            already += 1
+        else:
+            stored += 1
+    if failed and not stored and not already:
+        return {"ok": False, "error": failed[0]}, 400 if "not found" not in failed[0] else 404
+    return {"ok": True, "stored": stored, "already": already, "failed": failed}, 200
+
+
 def _start_prepare(min_score: int) -> tuple[bool, str]:
     args = [
         sys.executable, "-c",
@@ -2855,6 +2960,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             if path == EXT_NOTE_PATH:
                 payload, code = _ext_note(data)
+                _json_response(self, payload, code)
+                return
+            if path == EXT_MATCH_PATH:
+                payload, code = _ext_match(data)
+                _json_response(self, payload, code)
+                return
+            if path == EXT_MESSAGES_PATH:
+                payload, code = _ext_messages(data)
                 _json_response(self, payload, code)
                 return
         except Exception as exc:  # noqa: BLE001

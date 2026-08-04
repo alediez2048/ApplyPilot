@@ -210,8 +210,20 @@ def bulk_enrich(apollo_ids: list[str], *, reveal_personal_emails: bool = True) -
             "email": email,
             "email_status": _map_email_status(m.get("email_status"), email),
             "linkedin_url": m.get("linkedin_url"),
+            # Apollo's SEARCH redacts surnames — it returns `name: "Sage"` — and the enrichment
+            # response carries the whole one. Reading three fields off it and dropping the rest
+            # left **162 of 185 stored contacts first-name-only**, while their own email
+            # (sage.soronen@betterup.co) and LinkedIn slug (sage-soronen-01716b) spelled the
+            # surname out. The caller decides whether to take it; this only stops throwing it
+            # away.
+            "full_name": _full_name(m),
         }
     return result
+
+
+def _full_name(m: dict) -> str:
+    return (m.get("name") or " ".join(
+        x for x in (m.get("first_name"), m.get("last_name")) if x) or "").strip()
 
 
 def match_by_identity(people: list[dict], *, reveal_personal_emails: bool = True) -> dict[str, dict]:
@@ -260,5 +272,6 @@ def match_by_identity(people: list[dict], *, reveal_personal_emails: bool = True
             "email_status": _map_email_status(m.get("email_status"), email),
             "linkedin_url": m.get("linkedin_url") or p.get("linkedin_url"),
             "apollo_id": m.get("id"),
+            "full_name": _full_name(m),
         }
     return result

@@ -205,3 +205,127 @@ def test_it_reaches_the_payload_and_a_rejected_job_has_none(tmp_path, monkeypatc
     assert jobs, "empty payload — this test would measure nothing (§Lessons 13)"
     assert jobs["http://j/live"]["temperature"]["band"], "no reading on a live job"
     assert jobs["http://j/dead"]["temperature"] is None, "a rejected job still carries a reading"
+
+
+# ── runway: the fix for "recent jobs are marked cooling" ────────────────────
+#
+# Reported 2026-08-04. COOLING was the FALLBACK for every job with any effort and no reply —
+# there was no band between "nothing sent" and "cold" — so on the live board it caught 10 of
+# 22 jobs, including Visa, applied that morning with 6 of 8 emails already out. A band that
+# covers half the table and means "decaying" is worse than no band at all.
+
+def _plan(emailed=(0, 0), followup=(0, 0), linkedin=(0, 0), due=0):
+    def step(key, pair):
+        done, total = pair
+        state = "na" if not total else ("done" if done >= total else ("partial" if done else "todo"))
+        return {"key": key, "done": done, "total": total, "state": state}
+    return {"due": due, "steps": [step("emailed", emailed), step("linkedin", linkedin),
+                                  step("followup", followup)]}
+
+
+def _read(job=None, contacts=None, ladders=None, plan=None):
+    return tmp.temperature(job or _job(), contacts or [], ladders or {}, plan, now=NOW)
+
+
+def test_a_job_worked_today_with_outreach_left_is_active_not_cooling():
+    """The exact reported case: Visa, applied this morning, 6 of 8 emailed."""
+    got = _read(job=_job(applied_at=_at(0)),
+                contacts=[_c(submitted_at=_at(0))],
+                plan=_plan(emailed=(6, 8)))
+    assert got["band"] == tmp.ACTIVE, got
+    assert "2 more to email" in got["reason"], got["reason"]
+
+
+def test_a_spent_sequence_is_cooling():
+    """Webai: every email and every follow-up sent, nobody answered."""
+    got = _read(contacts=[_c(submitted_at=_at(13))],
+                ladders={("c1", "email"): {"count": 5, "last_sent_at": _at(3)}},
+                plan=_plan(emailed=(5, 5), followup=(5, 5)))
+    assert got["band"] == tmp.COOLING, got
+    assert "spent" in got["reason"] and "5 emails" in got["reason"], got["reason"]
+
+
+def test_finishing_the_plan_moves_a_job_DOWN():
+    """§Lessons 35, restated for the new input. Runway must not become a way for effort to buy
+    a better reading: the job that has sent MORE and has nothing left is the colder one."""
+    order = [tmp.COLD, tmp.COOLING, tmp.ACTIVE, tmp.WARM]
+    running = _read(contacts=[_c(submitted_at=_at(2))], plan=_plan(emailed=(2, 8)))["band"]
+    finished = _read(contacts=[_c(submitted_at=_at(2))],
+                     plan=_plan(emailed=(8, 8), followup=(8, 8)))["band"]
+    assert order.index(finished) < order.index(running), (
+        f"spending the whole sequence ({finished}) read warmer than barely starting ({running})")
+
+
+def test_runway_nobody_is_using_is_not_active():
+    """Unsent outreach on a job nobody has touched in a fortnight is an abandoned job, not a
+    plan in progress. Calling that `active` is the same lie as calling a fresh job `cooling`,
+    pointing the other way."""
+    got = _read(contacts=[_c(submitted_at=_at(30))], plan=_plan(emailed=(1, 9)))
+    assert got["band"] == tmp.COOLING, got
+    assert "nothing has been sent" in got["reason"], got["reason"]
+
+
+def test_cold_measures_silence_from_the_last_message_not_from_applied_at():
+    """Betterup: applied 15 days ago, sequence spent — but the last follow-up went yesterday.
+    The old reason said "no answer from anyone in 15 days" while we had messaged them the day
+    before, which is a different situation and the opposite instruction."""
+    fresh = _read(job=_job(applied_at=_at(15)), contacts=[_c(submitted_at=_at(15))],
+                  ladders={("c1", "email"): {"count": 4, "last_sent_at": _at(1)}},
+                  plan=_plan(emailed=(4, 4), followup=(4, 4)))
+    assert fresh["band"] == tmp.COOLING, fresh
+    assert "yesterday" in fresh["reason"], fresh["reason"]
+
+    stale = _read(job=_job(applied_at=_at(40)), contacts=[_c(submitted_at=_at(40))],
+                  ladders={("c1", "email"): {"count": 4, "last_sent_at": _at(21)}},
+                  plan=_plan(emailed=(4, 4), followup=(4, 4)))
+    assert stale["band"] == tmp.COLD, stale
+    assert "21 days" in stale["reason"], stale["reason"]
+
+
+def test_a_due_follow_up_is_runway():
+    got = _read(contacts=[_c(submitted_at=_at(3))],
+                ladders={("c1", "email"): {"count": 1, "last_sent_at": _at(3)}},
+                plan=_plan(emailed=(4, 4), due=2))
+    assert got["band"] == tmp.ACTIVE and "2 follow-ups due" in got["reason"], got
+
+
+def test_linkedin_invites_are_not_runway():
+    """`dm_status` is 'sent'|'manual', both meaning WE sent one; no `accepted` state exists
+    anywhere in the schema, so an uninvited contact is not a pending conversation (§Lessons 35).
+    Counting them also makes the band useless: measured live, LinkedIn steps sit at 3/16, 5/10
+    and 3/6, so every job on the board would have runway forever and nothing could read spent."""
+    got = _read(contacts=[_c(submitted_at=_at(4))],
+                ladders={("c1", "email"): {"count": 2, "last_sent_at": _at(4)}},
+                plan=_plan(emailed=(2, 2), followup=(2, 2), linkedin=(3, 16)))
+    assert got["band"] == tmp.COOLING, got
+
+
+def test_their_engagement_still_outranks_any_amount_of_runway():
+    """Runway can reach `active`. Only a person can reach `warm`."""
+    busy = _read(contacts=[_c(submitted_at=_at(0))], plan=_plan(emailed=(1, 20)))["band"]
+    answered = _read(contacts=[_c(interactions=[{"kind": ix.REPLIED, "at": _at(2)}])])["band"]
+    assert busy == tmp.ACTIVE and answered == tmp.WARM
+
+
+def test_no_plan_at_all_still_produces_a_band():
+    """`plan` is optional — `_temperature` catches everything and callers outside the dashboard
+    (the eval harness, `tick`) pass none."""
+    got = tmp.temperature(_job(), [_c(submitted_at=_at(3))], {}, None, now=NOW)
+    assert got["band"] in (tmp.COOLING, tmp.COLD) and got["reason"]
+
+
+def test_the_reason_never_says_1_days():
+    """It sits on the row and is read. "1 days", "today ago" and "in yesterday" are all what
+    ONE shared duration helper produces, which is why there are two.
+
+    The boundary is not decoration: the first version of this test asserted `"1 days" not in
+    reason` and failed on "21 days" — §Lessons 1 inside the test written to check the wording.
+    """
+    import re
+    for days in (0, 1, 2, 15, 21):
+        got = _read(job=_job(applied_at=_at(days)), contacts=[_c(submitted_at=_at(days))],
+                    ladders={("c1", "email"): {"count": 3, "last_sent_at": _at(days)}},
+                    plan=_plan(emailed=(3, 3), followup=(3, 3)))
+        assert not re.search(r"\b1 days\b", got["reason"]), got["reason"]
+        assert "today ago" not in got["reason"], got["reason"]
+        assert "in yesterday" not in got["reason"], got["reason"]

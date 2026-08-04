@@ -2,12 +2,12 @@
   "manifest_version": 3,
   "name": "ApplyPilot Contacts",
   "version": "0.5.0",
-  "description": "Pull your ApplyPilot outreach contacts, copy the drafted note, and open the right LinkedIn profile. Nothing else.",
+  "description": "Pull your ApplyPilot outreach contacts, copy the drafted note, open the right LinkedIn profile, and log an open conversation. Never sends anything.",
   "minimum_chrome_version": "116",
   "action": {
     "default_popup": "popup.html",
     "default_title": "ApplyPilot Contacts"
   },
-  "permissions": ["storage"],
+  "permissions": ["storage", "activeTab", "scripting"],
   "host_permissions": ["http://localhost:8765/*"]
 }

@@ -31,6 +31,25 @@
       <button id="refresh" class="btn btn--primary">↻ Refresh contacts</button>
       <button id="settings-toggle" class="btn btn--ghost" title="Change token">⚙</button>
     </div>
+
+    <!--
+      Reading the open thread. Shown ONLY when the active tab is a LinkedIn conversation —
+      a button that is present everywhere and works in one place reads as broken everywhere
+      else (§Lessons 43: four controls shipped in one day that nobody could find or that did
+      nothing visible). Nothing is read until this is clicked: `activeTab` is granted per
+      click, for that tab only.
+    -->
+    <section id="thread" class="thread" hidden>
+      <button id="thread-read" class="btn btn--primary btn--wide">📥 Read this thread</button>
+      <div id="thread-status" class="thread-status" hidden></div>
+      <div id="thread-who" class="thread-who" hidden>
+        <label for="thread-contact">Log against</label>
+        <select id="thread-contact" class="input"></select>
+      </div>
+      <div id="thread-msgs" class="thread-msgs"></div>
+      <button id="thread-save" class="btn btn--primary btn--wide" hidden>Log messages</button>
+    </section>
+
     <div id="count" class="count"></div>
     <div id="list" class="list"></div>
     <div id="empty" class="empty" hidden>
@@ -40,6 +59,7 @@
 
   <footer class="foot">Copy the note, open their LinkedIn, paste &amp; send. You stay in control.</footer>
 
+  <script src="thread_parser.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

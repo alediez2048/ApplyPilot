@@ -163,6 +163,26 @@ def test_it_reaches_the_counter(db):
     assert [w["id"] for w in job["awaiting_reply"]] == [cid]
 
 
+def test_the_age_it_reports_is_a_whole_number_of_hours(db):
+    """It reached the row's Next button as "Answer Anna (0.20683377833333333h)".
+
+    `conversation_state` rounds `hours` and this path, added later, handed over the raw
+    division. Both feed the same button, so one of them producing a float is not a formatting
+    preference — it is two writers disagreeing about what the field holds. Rounded here rather
+    than in the template because the JS also SORTS on it.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    cid = _contact(db)
+    at = (datetime.now(timezone.utc) - timedelta(hours=3, minutes=20)).isoformat()
+    wd._log_interaction({"contact_id": cid, "kind": ix.LINKEDIN_IN, "detail": "hi", "at": at})
+    job = next(j for j in wd._status_payload()["jobs"] if j["url"] == "http://j/1")
+    w = job["awaiting_reply"][0]
+    assert w["hours"] == 3, w["hours"]
+    assert isinstance(w["hours"], int) and not isinstance(w["hours"], bool)
+    assert w["days"] == 0
+
+
 def test_answering_them_clears_the_counter(db):
     cid = _contact(db)
     wd._log_interaction({"contact_id": cid, "kind": ix.LINKEDIN_IN, "detail": "hi",
@@ -198,3 +218,116 @@ def test_nothing_reads_linkedin():
     block = src[src.index("def _log_interaction"):]
     block = block[:block.index("\ndef ")]
     assert "linkedin.com" not in block and "requests" not in block
+
+
+# ── read from the extension, stored by the server (the batch path) ──────────
+#
+# The ten-step flow this replaces: switch tabs, select, copy, switch back, find the row,
+# expand it, People, expand the contact, LinkedIn, paste, pick a direction. Per message.
+
+def test_a_whole_thread_is_stored_in_one_post(db):
+    cid = _contact(db)
+    payload, code = wd._ext_messages({"contact_id": cid, "messages": [
+        {"kind": ix.LINKEDIN_IN, "detail": "what role was it?", "at": "2026-08-04T14:38:00+00:00"},
+        {"kind": ix.LINKEDIN_OUT, "detail": "the TPM one", "at": "2026-08-04T15:10:00+00:00"},
+    ]})
+    assert code == 200 and payload["stored"] == 2, payload
+    rows = interactions_store.for_job("http://j/1", db).get(cid, [])
+    assert {r["kind"] for r in rows} == {ix.LINKEDIN_IN, ix.LINKEDIN_OUT}
+
+
+def test_messages_sharing_a_displayed_time_all_survive(db):
+    """LinkedIn shows ONE time per group, and `interactions` keys a row on
+    sha256(contact|kind|at). Without de-collision this stores one row and loses two, with a
+    success response and no warning."""
+    cid = _contact(db)
+    same = "2026-08-04T14:38:00+00:00"
+    payload, code = wd._ext_messages({"contact_id": cid, "messages": [
+        {"kind": ix.LINKEDIN_IN, "detail": "first", "at": same},
+        {"kind": ix.LINKEDIN_IN, "detail": "second", "at": same},
+        {"kind": ix.LINKEDIN_IN, "detail": "third", "at": same},
+    ]})
+    assert code == 200, payload
+    rows = interactions_store.for_job("http://j/1", db).get(cid, [])
+    assert {r["detail"] for r in rows} == {"first", "second", "third"}, rows
+
+
+def test_re_reading_a_thread_stores_nothing_new(db):
+    """The normal case — you go back for the message at the bottom. A drifting timestamp would
+    append a duplicate of the whole conversation every time (§Lessons 22)."""
+    cid = _contact(db)
+    batch = {"contact_id": cid, "messages": [
+        {"kind": ix.LINKEDIN_IN, "detail": "a", "at": "2026-08-04T14:38:00+00:00"},
+        {"kind": ix.LINKEDIN_IN, "detail": "b", "at": "2026-08-04T14:38:00+00:00"},
+    ]}
+    wd._ext_messages(batch)
+    payload, _ = wd._ext_messages(batch)
+    assert payload["stored"] == 0 and payload["already"] == 2, payload
+    assert len(interactions_store.for_job("http://j/1", db).get(cid, [])) == 2
+
+
+def test_the_batch_path_stops_the_ladder_too(db):
+    """It reuses `_log_interaction` rather than writing rows itself, so halting the LinkedIn
+    ladder and capping the text at the write cannot be implemented on only one of the two
+    paths (§Lessons 49)."""
+    cid = _contact(db)
+    wd._ext_messages({"contact_id": cid,
+                      "messages": [{"kind": ix.LINKEDIN_IN, "detail": "hello"}]})
+    assert touches.ladder_state(cid, "linkedin", db)["sequence_status"] == "replied"
+
+
+def test_it_refuses_anything_that_is_not_a_linkedin_message(db):
+    """A wrong kind means the page was parsed wrong. Storing the rest and reporting success
+    would leave half a conversation on disk looking complete."""
+    cid = _contact(db)
+    payload, code = wd._ext_messages({"contact_id": cid, "messages": [
+        {"kind": ix.LINKEDIN_IN, "detail": "fine"},
+        {"kind": ix.REPLIED, "detail": "not a DM"},
+    ]})
+    assert code == 400 and "not a LinkedIn message" in payload["error"], payload
+    assert interactions_store.for_job("http://j/1", db).get(cid, []) == []
+
+
+def test_it_refuses_an_unknown_contact(db):
+    payload, code = wd._ext_messages(
+        {"contact_id": "nope", "messages": [{"kind": ix.LINKEDIN_IN, "detail": "hi"}]})
+    assert code == 404 and not payload["ok"], payload
+
+
+def test_it_refuses_an_empty_or_oversized_batch(db):
+    cid = _contact(db)
+    assert wd._ext_messages({"contact_id": cid, "messages": []})[1] == 400
+    assert wd._ext_messages({"contact_id": cid})[1] == 400
+    too_many = [{"kind": ix.LINKEDIN_IN, "detail": "x"}] * (wd.EXT_MESSAGES_MAX + 1)
+    assert wd._ext_messages({"contact_id": cid, "messages": too_many})[1] == 400
+
+
+def test_the_batch_path_never_writes_replied_at_either(db):
+    cid = _contact(db)
+    wd._ext_messages({"contact_id": cid,
+                      "messages": [{"kind": ix.LINKEDIN_IN, "detail": "hi"}]})
+    assert not (store.get_contact(cid, db).get("replied_at") or "")
+
+
+def test_match_finds_the_person_behind_a_decorated_linkedin_name(db):
+    _contact(db, full_name="Sarah Chen")
+    payload, code = wd._ext_match({"name": "Sarah Chen, PMP | Hiring"})
+    assert code == 200 and [c["full_name"] for c in payload["candidates"]] == ["Sarah Chen"]
+
+
+def test_match_offers_everyone_when_it_recognises_nobody(db):
+    """An unmatched name must not be a dead end whose only exit is the dashboard — that is the
+    flow this whole feature replaces."""
+    _contact(db, full_name="Sarah Chen")
+    payload, _ = wd._ext_match({"name": "Someone Unknown"})
+    assert payload["candidates"] == []
+    assert [c["full_name"] for c in payload["all"]] == ["Sarah Chen"]
+
+
+def test_match_reaches_a_contact_the_dm_queue_would_hide(db):
+    """The person whose reply you are logging is precisely the one already messaged, so reusing
+    `dm_queue` would exclude every contact this exists for."""
+    cid = _contact(db, full_name="Sarah Chen")
+    store.mark_dm_sent(cid, db)
+    payload, _ = wd._ext_match({"name": "Sarah Chen"})
+    assert [c["id"] for c in payload["candidates"]] == [cid]

@@ -130,8 +130,9 @@ harness no longer has to import a web server to test scheduling.
 | `deck.py` | Intro-deck links. `slugify`/`disambiguate` → `/intro/gina`, **not** `?v=<token>`. `relink()` rewrites an existing draft's link without regenerating the copy. |
 | `interactions.py` | What a contact has actually DONE, from several sources. Our own actions (an email sent, a LinkedIn invite) are context, never engagement. |
 | `authrealm.py` | **What one sign-in covers.** URL → the ATS tenant an account belongs to. `host_is_tenant` is load-bearing: every employer on `wd1.myworkdaysite.com` shares that host, so a cookie there proves nothing about any one of them. |
+| `linkedin_thread.py` | Reading an open LinkedIn thread: who a display name is (word-level, never substring) and de-colliding the one-time-per-GROUP timestamps that would otherwise destroy messages. |
 | `lastinteraction.py` | When something last happened on a job **and who did it**, from six sources that were never joined. Direction is the point — "you emailed them 6 days ago" and "they replied 6 days ago" are the same age and opposite situations. |
-| `temperature.py` | How an application is DOING, not how far it has travelled. **Only their actions raise it; ours can only lower it.** |
+| `temperature.py` | How an application is DOING, not how far it has travelled. Bands answer **is anything still in motion**, from an interview backwards. **Only a PERSON can reach `warm`**, and finishing the plan moves a job DOWN. §Lessons 54, 55. |
 
 **Adding a channel is one `Channel` entry plus one prompt** — executed, not claimed:
 `test_adding_a_channel_needs_no_schema_change` defines a channel that exists nowhere in the
@@ -170,9 +171,37 @@ works" has to name one that is actually unknown.** It is WhatsApp now.
 | `linkedin_agent.py` | Opt-in read-only LinkedIn augmentation. Never sends. |
 
 ### `extension/` (repo root)
-MV3 popup only — pulls the outreach queue from `:8765`, copies a note, opens the profile.
-**No LinkedIn host permission, no content script, no background worker** — structurally
-incapable of touching a LinkedIn page. See §Lessons.
+MV3 popup only — pulls the outreach queue from `:8765`, copies a note, opens the profile, and
+since 2026-08-04 **reads a LinkedIn thread you already have open** and logs it.
+
+**Still no `linkedin.com` host permission, no content script, no background worker.** The read
+runs on `activeTab` + `scripting`: Chrome grants `activeTab` for ONE tab, only on the click that
+opened the popup, only while it is open. The extension went from *cannot* touch a LinkedIn page
+to *cannot unless you click*, which is a real change and was the operator's call to make — it
+reads a page already on screen and never clicks, types, sends or requests anything.
+
+`thread_parser.js` is a separate file so it can run against a real DOM in the suite
+(`tests/test_linkedin_thread.py`, jsdom — a devDependency alongside eslint). Two properties of
+LinkedIn's markup, read off the live page rather than assumed, drive the whole design:
+
+- **Messages are GROUPED.** Consecutive messages from one person share one name and one
+  timestamp, carried only on the first. Reading per-message drops the sender on every
+  continuation, and a message with no sender cannot be given a direction — so a two-message
+  reply logs as one inbound and one outbound, i.e. as you having already answered.
+- **There is no machine-readable timestamp.** `<time>` carries a class and nothing else; no
+  element in the list holds an ISO string or an epoch. The date heading ("TODAY") and the group
+  time ("2:38 AM") are all there is, so `at` is DERIVED — which is why the popup shows the
+  resolved timestamp per message before anything is written, and says so when one is unreadable.
+
+**Direction is decided by matching the sender to the CONTACT**, not by LinkedIn's `--other`
+class: the thread has two participants, whoever is the contact is them and anyone else is you.
+That needs no selector for "me" and no stored copy of your own name, so it survives the rename
+that would break the class. Names match **word by word**, never by substring (§Lessons 1), and
+`domain/linkedin_thread.py` runs the same test server-side.
+
+`dedupe_times()` is not cosmetic: `interactions` keys a row on `sha256(contact|kind|at)`, so
+three messages in one group are ONE row with two silently overwritten. It is deterministic, so
+re-reading a thread you have already logged is a no-op rather than a duplicate.
 
 ---
 
@@ -269,9 +298,11 @@ payload already loads — no new query, budget unmoved:
 
 - **Temperature** — `warm · active · cooling · cold`, plus `won`, `undeliverable` and `new`,
   which are not temperatures. **A dot AND a word**, never colour alone, and every band carries
-  the sentence that produced it. First live reading: cooling 10 · new 6 · warm 4 · won 1 ·
-  cold 1. `undeliverable` and `new` were not in the ticket and both came from running it: a
-  bounce is not cold (opposite fixes), and a job imported this morning is not failing.
+  the sentence that produced it. `undeliverable` and `new` were not in the ticket and both came
+  from running it: a bounce is not cold (opposite fixes), and a job imported this morning is not
+  failing. **Rebuilt around RUNWAY on 2026-08-04 — see §Lessons 54.** First live reading was
+  cooling 10 · new 6 · warm 4 · won 1 · cold 1; it is now active 7 · new 6 · warm 4 · cooling 4
+  · won 1.
 - **Last interaction, with its DIRECTION** — `← Sarah replied · 2d ago` accented,
   `→ You emailed Sarah` faint. Same age, opposite situations.
 - **Search reaches people and whole postings.** It covered nine fields and never looked at
@@ -983,7 +1014,44 @@ company `"Jobs"` — the same substring bug class, inside the function written t
     exactly what it was told. Two searches with a minimum each, INTERLEAVED — front-loading one
     side rebuilds the imbalance as soon as verification drops anyone.
 
-## The CRM phase (2026-07-30, branch `crm-phase-1`)
+54. **A band that catches half the table is not a reading, it is a default.** `COOLING` was the
+    FALLBACK for every job with any effort and no reply — there was no band between "nothing
+    sent" and "cold" — so it caught **10 of 22 jobs**, including Visa, applied that morning with
+    six of eight emails already out. Reported as "weird, they are fairly recent", and the word
+    *cooling* is the whole problem: it means decaying, and nothing had had time to decay. What
+    was missing is **runway** — how much of the plan is left, which is what tells a sequence
+    still running from one that is finished. Visa (6/8 emailed, applied today) and Webai (5/5
+    emailed, 5/5 follow-ups, thirteen days) printed the same word and are opposite instructions.
+    Now active 7 · cooling 4 · cold 0. **This did NOT re-open §Lessons 35**, and that is the
+    part to keep: finishing the plan moves a job DOWN (`active` → `cooling`), so more messages
+    with no answer still never reads better than fewer, and only a PERSON can reach `warm`.
+    LinkedIn invites are excluded from runway for the same reason — `dm_status` has no
+    `accepted` state, and counting them means nothing is ever spent.
+
+55. **`cold` was measuring silence from `applied_at`, which is not when we last spoke.**
+    Betterup read *"no answer from anyone in 15 days"* while the final follow-up had gone out
+    **the day before**. Same job, opposite instruction: "give up" versus "you just nudged them,
+    wait". Measured from the last thing WE sent, across every channel and every ladder — not
+    from the one act at the start.
+
+56. **Rounding applied to one of two paths is not rounding.** `_awaiting_us` builds the Next
+    button's payload twice: the email path goes through `conversation_state`, which rounds, and
+    the LinkedIn path added by UX-2 handed over the raw division. It shipped to the row as
+    **`Answer Anna (0.20683377833333333h)`**. The helper's own docstring said "Whole hours" and
+    it never was. §Lessons 49 in a new place, and the fix belongs at the payload rather than in
+    the template because the JS also SORTS on that field. Second half: even a clean integer
+    renders `0h` under an hour, while the last-interaction line an inch away says *just now* —
+    one row, two facts.
+
+57. **Go and read the DOM before writing the parser.** Two properties of LinkedIn's messaging
+    markup decide the whole design of the thread reader, and neither is guessable: messages are
+    **grouped**, so only the first of a run carries the sender and the timestamp; and there is
+    **no machine-readable time anywhere** — `<time>` has a class and nothing else, no ISO
+    string, no epoch, on any element in the list. Guessing either one produces a parser that
+    looks right: continuations silently take the wrong direction (a two-message reply logs as
+    "they wrote, you answered"), and every message in a group collides on
+    `sha256(contact|kind|at)` so two of three vanish with a success response. One structural
+    probe, no message text read, settled both.
 
 Shipped in one session, in this order: **CRM-3a → CRM-1 → CRM-2 → CRM-3b → CRM-4a.**
 Tickets in `docs/tickets/CRM-*.md`; two of them had instructions that were factually wrong

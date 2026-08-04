@@ -719,6 +719,25 @@ def get_contacts_for_job(job_url: str, conn: sqlite3.Connection | None = None) -
 # `repo/contacts.py` — two abstractions over one table is the failure mode the ticket
 # explicitly warns about.
 
+def identities(conn: sqlite3.Connection | None = None) -> list[dict]:
+    """Everyone we know, identity columns only — for matching a name to a person.
+
+    Four columns, not `SELECT *`: this answers "who is Anna Ruiz?" and nothing downstream of
+    it needs the other thirty-eight. Deliberately NOT filtered by dm_status the way `dm_queue`
+    is — the person whose reply you are logging is precisely the one already messaged, so
+    reusing that queue would exclude every contact this feature exists for.
+    """
+    if conn is None:
+        conn = get_connection()
+    init_contacts(conn)
+    rows = conn.execute(
+        "SELECT id, full_name, company, job_url FROM contacts "
+        "WHERE full_name IS NOT NULL AND trim(full_name) != '' "
+        "ORDER BY discovered_at DESC"
+    ).fetchall()
+    return [dict(zip(r.keys(), r)) for r in rows]
+
+
 def contact_ref(contact_id: str, conn: sqlite3.Connection | None = None) -> dict | None:
     """Just identity: does this contact exist, and which job is it under?
 

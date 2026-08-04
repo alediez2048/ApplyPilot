@@ -28,4 +28,29 @@ export default [
       "prefer-const": "warn",
     },
   },
+  {
+    // The extension was popup-only markup and went unlinted for that reason. It now reads a
+    // page and writes to the local API, and a ReferenceError in a popup is exactly as silent
+    // as one in the dashboard (§Lessons 7 — it blanks the view and nothing reports it).
+    //
+    // `thread_parser.js` and `popup.js` are two classic scripts sharing one global scope, so
+    // each references names the other declares: `no-undef` is off here rather than papered
+    // over with per-file globals that would drift the moment a function is renamed. What
+    // resolves at runtime is proven by tests/test_linkedin_thread.py, which runs the parser.
+    files: ["extension/**/*.js"],
+    languageOptions: {
+      ecmaVersion: 2022,
+      sourceType: "script",
+      globals: { ...globals.browser, ...globals.webextensions, module: "readonly" },
+    },
+    rules: {
+      ...js.configs.recommended.rules,
+      "no-undef": "off",
+      // `catch (_e)` is the codebase's deliberate "this failure is handled by the fallback
+      // below" marker, and there are four of them in the popup alone.
+      "no-unused-vars": ["error", { vars: "local", args: "none", caughtErrors: "none" }],
+      eqeqeq: ["warn", "smart"],
+      "no-var": "error",
+    },
+  },
 ];

@@ -890,6 +890,36 @@ def test_an_unanswered_reply_outranks_every_follow_up(tmp_path):
         "the collapsed contact row does not show that they are waiting on you")
 
 
+@pytest.mark.skipif(not shutil.which("node"), reason="node not available")
+def test_a_message_that_just_arrived_does_not_read_as_zero_hours(tmp_path):
+    """The parenthetical is an AGE, and the same row already says "just now" beside it.
+
+    Reported live as `Answer Anna (0.20683377833333333h)` — the payload's fault, fixed there.
+    This guards the other half: even with a clean integer, `${w.hours}h` renders "0h" for
+    anything under an hour, which contradicts the last-interaction line one line above it.
+    """
+    fresh = _job(url="http://j/fresh",
+                 awaiting_reply=[{"id": "c4", "full_name": "Anna Ruiz", "days": 0, "hours": 0}])
+    aged = _job(url="http://j/aged",
+                awaiting_reply=[{"id": "c4", "full_name": "Anna Ruiz", "days": 0, "hours": 3}])
+
+    script = tmp_path / "fresh.mjs"
+    script.write_text(
+        _STUBS
+        + f"const SRC = {json.dumps(_page_js())};\n"
+        + f"const CASES = {json.dumps({'fresh': fresh, 'aged': aged})};\n"
+        + _NEXT_DRIVER
+    )
+    proc = subprocess.run(["node", str(script)], capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, f"node failed:\n{proc.stderr[:2000]}"
+    out = json.loads(proc.stdout.strip().splitlines()[-1])
+
+    assert "(just now)" in out["fresh"]["next"], out["fresh"]["next"]
+    assert "0h" not in out["fresh"]["next"]
+    # The hours branch must still work, or "just now" could be the answer for everything.
+    assert "(3h)" in out["aged"]["next"], out["aged"]["next"]
+
+
 _NOTE_DRIVER = """
 const F = (new Function(SRC + `; NET_AVAIL = true; return { findContactsPrompt };`))();
 const out = {};

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 
+from applypilot.domain import linkedin_thread as _lt
 from applypilot.networking import derive, providers, rank, store, verify
 
 log = logging.getLogger(__name__)
@@ -308,7 +309,12 @@ def find_contacts_for_job(
             rev = revealed.get(c.get("key"), {})
             contact = {
                 "job_url": job_url,
-                "full_name": c.get("full_name"),
+                # Enrichment knows the surname that search redacted. `better_name` takes it only
+                # when it is a strict EXTENSION of what we have — a looser rule lets a
+                # mismatched enrichment row rename a contact into a different person, which is
+                # worse than a missing surname: a wrong first name shows up in the greeting and
+                # a wrong full name does not.
+                "full_name": _lt.better_name(c.get("full_name") or "", rev.get("full_name") or ""),
                 "title": c.get("title"),
                 "company": company or c.get("company"),
                 "linkedin_url": rev.get("linkedin_url") or c.get("linkedin_url"),

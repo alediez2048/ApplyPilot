@@ -10,14 +10,29 @@ engaged" before anyone had done anything, while the honest number across every j
 A temperature built on effort is that bug with a colour on it — and worse, because a colour is
 read at a glance and trusted without checking.
 
-So: **only their actions can raise it. Ours can only lower it.** Sending twelve emails and
-hearing nothing is colder than sending one and getting an answer, and any design where those
-two compare the other way round is wrong regardless of how the numbers are tuned.
+So: **only their actions can reach `warm`.** Sending twelve emails and hearing nothing is
+colder than sending one and getting an answer, and any design where those two compare the other
+way round is wrong regardless of how the numbers are tuned.
 
-Bands rather than a percentage. The inputs are six booleans and a clock; a number out of 100
-implies a precision that is not there, and invites tuning the constant instead of answering the
-email. Every band carries the sentence that produced it — an unexplained colour is ignored
-within a week, which is the §Lessons 43 failure applied to information rather than controls.
+**What the first version got wrong** (reported 2026-08-04: "a number of applications marked
+cooling, which is weird because they are fairly recent"). `COOLING` was the FALLBACK for every
+job with any effort and no reply — there was no band between "nothing sent" and "cold". On the
+live board it was catching **10 of 22 jobs**, including one applied to that morning with six of
+eight emails already out. A band that covers half the table and means *decaying* is worse than
+no band at all, and the reading was not even wrong so much as absent: Visa on day zero and
+Webai with every email and every follow-up spent thirteen days earlier printed the same word.
+
+What was missing is **runway** — how much of the plan is left. That is what tells a sequence
+still running from one that is finished, and it is the difference between "wait" and "this one
+is over". So the bands now answer *is anything still in motion*, and they run from an interview
+backwards. Crucially this does NOT re-open §Lessons 35: finishing the plan moves a job DOWN
+(`active` → `cooling`), so more messages with no answer still never reads better than fewer.
+
+Bands rather than a percentage. The inputs are a handful of booleans and a clock; a number out
+of 100 implies a precision that is not there, and invites tuning the constant instead of
+answering the email. Every band carries the sentence that produced it — an unexplained colour
+is ignored within a week, which is the §Lessons 43 failure applied to information rather than
+controls.
 """
 
 from __future__ import annotations
@@ -41,9 +56,24 @@ WARM, ACTIVE, COOLING, COLD, NEW = "warm", "active", "cooling", "cold", "new"
 _WARM_DAYS = 10
 _ACTIVE_DAYS = 24
 
-#: Effort that has gone unanswered. Only ever lowers the reading (§Lessons 35).
-_COLD_TOUCHES = 3
+#: Silence after a SPENT sequence. Cooling is "we finished and heard nothing"; cold is that,
+#: for long enough that it is over.
 _COLD_DAYS = 14
+
+#: A plan with work left in it is only `active` while somebody is actually working it. Past
+#: this, unsent outreach is not runway — it is an abandoned job, and calling that active is the
+#: same lie in the other direction.
+_STALE_DAYS = 10
+
+#: The steps whose remaining work counts as runway toward a REPLY.
+#:
+#: LinkedIn invites are deliberately absent, and this is the §Lessons 35 line drawn once more.
+#: `dm_status` is 'sent' | 'manual', both meaning WE sent one; no `accepted` state exists
+#: anywhere in the schema, so an uninvited contact is not a pending conversation. Counting them
+#: also makes the band useless in practice — measured live, LinkedIn steps sit at 3/16, 5/10,
+#: 3/6, so every job on the board would have had runway forever and nothing could ever read as
+#: spent.
+_RUNWAY_STEPS = ("emailed", "followup")
 
 LABEL = {WON: "won", UNDELIVERABLE: "undeliverable", WARM: "warm", ACTIVE: "active",
          COOLING: "cooling", COLD: "cold", NEW: "new"}
@@ -92,12 +122,91 @@ def _effort(contacts: list[dict], ladders: dict | None) -> int:
     return n
 
 
-def temperature(job: dict, contacts: list[dict] | None = None,
-                ladders: dict | None = None, now: datetime | None = None) -> dict:
+def _last_effort(contacts: list[dict], ladders: dict | None) -> str:
+    """When WE last did something here. Distinguishes a plan in progress from an abandoned one.
+
+    Not `applied_at`: applying is one act at the start, and a job applied to yesterday whose
+    outreach nobody has touched since is exactly the case this has to catch.
+    """
+    ladders = ladders or {}
+    best = ""
+    for contact in contacts or []:
+        stamps = [contact.get("submitted_at") or "", contact.get("sms_sent_at") or "",
+                  contact.get("dm_sent_at") or ""]
+        for channel in ("email", "linkedin", "sms"):
+            stamps.append((ladders.get((contact.get("id"), channel)) or {}).get("last_sent_at") or "")
+        for s in stamps:
+            if s.strip() and parse_ts(s) and (not best or parse_ts(s) > parse_ts(best)):
+                best = s
+    return best
+
+
+def _runway(plan: dict | None) -> tuple[int, str]:
+    """Outreach still scheduled on this job, and how it reads.
+
+    This is the difference the band was blind to. Every job with a message sent and no reply
+    fell into one bucket called `cooling`, so a job applied to THIS MORNING with six of eight
+    emails out read the same as one whose every email and every follow-up had been spent
+    thirteen days earlier. Measured on the live board it was catching 10 of 22 jobs — a band
+    covering half the table and meaning "decaying" is worse than no band at all.
+    """
+    plan = plan or {}
+    due = int(plan.get("due") or 0)
+    left, bits = due, []
+    if due:
+        bits.append(f"{due} follow-up{'s' if due != 1 else ''} due")
+    for step in plan.get("steps") or []:
+        if step.get("key") not in _RUNWAY_STEPS or step.get("state") not in ("todo", "partial"):
+            continue
+        gap = int(step.get("total") or 0) - int(step.get("done") or 0)
+        if gap <= 0:
+            continue
+        left += gap
+        bits.append(f"{gap} {'more to email' if step['key'] == 'emailed' else 'follow-up to send'}"
+                    if gap == 1 else
+                    f"{gap} {'more to email' if step['key'] == 'emailed' else 'follow-ups to send'}")
+    return left, ", ".join(bits)
+
+
+def _spent(plan: dict | None) -> str:
+    """What the finished plan consisted of — "5 emails, 5 follow-ups"."""
+    parts = []
+    for step in (plan or {}).get("steps") or []:
+        done = int(step.get("done") or 0)
+        if not done:
+            continue
+        if step.get("key") == "emailed":
+            parts.append(f"{done} email{'s' if done != 1 else ''}")
+        elif step.get("key") == "followup":
+            parts.append(f"{done} follow-up{'s' if done != 1 else ''}")
+    return ", ".join(parts)
+
+
+def temperature(job: dict, contacts: list[dict] | None = None, ladders: dict | None = None,
+                plan: dict | None = None, now: datetime | None = None) -> dict:
     """`{band, label, icon, reason}` — how this application is doing, and why.
 
-    `reason` is not decoration. A band with no explanation is a colour, and a colour nobody can
-    interrogate stops being read.
+    The bands run from an interview backwards, and the question each one answers is **is
+    anything still in motion**:
+
+        won         an interview is scheduled                       (terminal)
+        warm        they did something, recently
+        active      something is moving — either they engaged a while back, or the
+                    outreach plan is still running and being worked
+        cooling     nothing is moving: the plan is spent, or stalled, or their last
+                    move is old
+        cold        spent, and silent long enough that it is over
+        new         nothing sent yet
+        undeliverable   mail is bouncing — not cold, and the opposite fix
+
+    §Lessons 35 still holds and is what makes this safe: **only their actions can reach
+    `warm`.** Effort cannot buy the top band, and FINISHING the plan moves a job DOWN
+    (`active` → `cooling`), so more messages with no answer never reads better than fewer.
+    What `plan` adds is the runway — a job with six of eight emails still to send has
+    somewhere to go, and one that has spent every email and every follow-up does not.
+
+    `reason` is not decoration. A band with no explanation is a colour, and a colour nobody
+    can interrogate stops being read.
     """
     contacts = contacts or []
 
@@ -133,11 +242,44 @@ def temperature(job: dict, contacts: list[dict] | None = None,
         return _band(NEW, "Nothing sent yet." if not contacts else
                      "Contacts found, nothing sent yet.")
 
-    applied_days = _days_since(job.get("applied_at") or "", now)
-    waited = int(applied_days) if applied_days is not None else 0
-    if effort >= _COLD_TOUCHES and waited >= _COLD_DAYS:
-        return _band(COLD, f"{effort} messages sent, no answer from anyone in {waited} days.")
-    return _band(COOLING, f"{effort} message{'s' if effort != 1 else ''} sent, no reply yet.")
+    # Nobody has engaged. What separates these jobs is whether the plan has anywhere left to
+    # go, and whether anyone is still working it.
+    left, what_is_left = _runway(plan)
+    quiet = _days_since(_last_effort(contacts, ladders), now)
+    idle = int(quiet) if quiet is not None else 0
+
+    if left and idle < _STALE_DAYS:
+        moved = "sent today" if idle < 1 else f"last sent {_when(idle)}"
+        return _band(ACTIVE, f"Outreach still running — {what_is_left}, {moved}.")
+    if left:
+        # Runway with nobody using it. Calling this active would be the same lie as calling a
+        # fresh job cooling, pointing the other way.
+        return _band(COOLING, f"{what_is_left}, but nothing has been sent in {_ago(idle)}.")
+
+    # Both of these say what was spent AND when the last message went, because those are two
+    # different facts and only naming one misleads. A job applied to a fortnight ago whose last
+    # follow-up went yesterday is not "no answer in 15 days" — it is a sequence that has just
+    # finished, and the difference is whether there is anything left to wait for.
+    spent = _spent(plan) or f"{effort} message{'s' if effort != 1 else ''}"
+    if idle >= _COLD_DAYS:
+        return _band(COLD, f"Everything planned here is spent ({spent}) and nothing has been "
+                           f"sent or answered in {_ago(idle)}.")
+    return _band(COOLING, f"Everything planned here is spent ({spent}). Last message "
+                          f"{_when(idle)}, no answer.")
+
+
+def _ago(days: int) -> str:
+    """A DURATION: "today" / "1 day" / "9 days". Reads after "in ..."."""
+    return "today" if days < 1 else ("1 day" if days == 1 else f"{days} days")
+
+
+def _when(days: int) -> str:
+    """A POINT: "today" / "yesterday" / "9 days ago". Reads after "last message ...".
+
+    Two helpers rather than one because "today ago" and "in yesterday" are both what a single
+    one produces, and this string sits on the row where it is actually read.
+    """
+    return "today" if days < 1 else ("yesterday" if days == 1 else f"{days} days ago")
 
 
 def _band(band: str, reason: str) -> dict:

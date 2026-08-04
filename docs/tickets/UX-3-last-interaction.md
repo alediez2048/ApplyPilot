@@ -1,6 +1,6 @@
 # UX-4 — "Last interaction" on the row
 
-**Size:** M (~half a day) · **Depends on:** UX-3 (LinkedIn events feed it) · **Status:** Todo
+**Size:** M (~half a day) · **Depends on:** UX-2 (LinkedIn events feed it) · **Status:** Todo
 
 ## Diagnosis
 
@@ -15,7 +15,7 @@ Every fact needed is already stored, in six places, none of them joined:
 | email sent | `contacts.submitted_at` |
 | follow-up sent | `touches.sent_at` (any channel) |
 | they replied | `messages` (inbound) / `contacts.replied_at` |
-| LinkedIn invite / message | `contacts.dm_sent_at`, and UX-3's `interactions` |
+| LinkedIn invite / message | `contacts.dm_sent_at`, and UX-2's `interactions` |
 | text sent | `contacts.sms_sent_at` |
 | deck opened / call booked | `contacts.deck_last_at`, `interactions` |
 

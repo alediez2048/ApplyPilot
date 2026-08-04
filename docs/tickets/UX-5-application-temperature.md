@@ -1,6 +1,6 @@
 # UX-5 — Application temperature
 
-**Size:** M (~1d) · **Depends on:** UX-4 (last interaction is an input) · **Status:** Todo
+**Size:** M (~1d) · **Depends on:** UX-3 (last interaction is an input) · **Status:** Todo
 
 ## Diagnosis
 

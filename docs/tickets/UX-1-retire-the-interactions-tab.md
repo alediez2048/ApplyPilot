@@ -1,6 +1,6 @@
 # UX-2 — Retire the Interactions tab, keep the ledger
 
-**Size:** S (~2h) · **Depends on:** UX-3 (do not delete the only logging affordance first)
+**Size:** S (~2h) · **Depends on:** UX-2 (do not delete the only logging affordance first)
 **Status:** Todo · **Reported:** 2026-08-04 ("offering no real value")
 
 ## Diagnosis
@@ -15,7 +15,7 @@ room you have to remember to visit.
 
 **But do not delete the capability.** `interactionsPane` holds the app's only manual-log
 button ("🔗 Note: they viewed my LinkedIn"), and the `interactions` store is the correct home
-for UX-3 (LinkedIn messages) and the source of truth for UX-4 (last interaction). Deleting the
+for UX-2 (LinkedIn messages) and the source of truth for UX-3 (last interaction). Deleting the
 tab and the ledger together would remove the foundation of the next two tickets.
 
 This is the §Lessons 35 tab — the one that answered its own question "yes" by counting our own
@@ -31,7 +31,7 @@ was nothing to show.
       `/api/contact/interaction` and `logInteraction()`.
 - [ ] Move the per-person engagement rows into the expanded contact card, under the channel
       tabs, where the rest of that person's history already lives.
-- [ ] Move the "profile view" log button onto the contact's **🔗 LinkedIn** tab (UX-3 gives it
+- [ ] Move the "profile view" log button onto the contact's **🔗 LinkedIn** tab (UX-2 gives it
       neighbours there).
 - [ ] Keep the "what is detected vs noted" note, once, on the LinkedIn tab rather than per job.
 

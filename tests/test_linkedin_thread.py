@@ -289,7 +289,10 @@ def test_the_parser_says_so_when_it_finds_nothing():
     show — never an empty success. "No messages" and "I could not read the page" are opposite
     findings, and §Lessons 44 is what happens when a failure takes the success branch."""
     out = _run_parser("<div class='msg-s-not-the-class'></div>")
-    assert out["ok"] is False and "conversation" in out["error"], out
+    assert out["ok"] is False, out
+    # It is now the ONLY gate — the URL check no longer pre-judges — so the message has to
+    # tell the operator what to do, not merely that something failed.
+    assert "conversation" in out["error"] and "Messaging" in out["error"], out
 
 
 @pytest.mark.skipif(not shutil.which("node") or not _have_jsdom(),
@@ -328,29 +331,39 @@ def test_a_withheld_url_leaves_the_button_ENABLED():
 
 
 @pytest.mark.skipif(not shutil.which("node"), reason="node not available")
-def test_a_conversation_enables_it():
-    assert _panel_state('"https://www.linkedin.com/messaging/thread/2-abc/"')["enabled"] is True
+def test_ANY_linkedin_page_enables_it():
+    """The second report, and the same mistake as the first pointing the other way.
+
+    Gating on `/messaging/` disabled the button on pages where a conversation is genuinely
+    readable: LinkedIn opens threads in an OVERLAY from a profile, from search and from the
+    feed, and the address bar never changes. A URL can honestly answer "are we on LinkedIn";
+    only the DOM can answer "is a thread open", and `readLinkedInThread` does.
+    """
+    for url in ('"https://www.linkedin.com/messaging/thread/2-abc/"',
+                '"https://www.linkedin.com/feed/"',
+                '"https://www.linkedin.com/in/someone"',
+                '"https://www.linkedin.com/search/results/people/"',
+                '"https://linkedin.com/"'):
+        assert _panel_state(url)["enabled"] is True, url
 
 
 @pytest.mark.skipif(not shutil.which("node"), reason="node not available")
-def test_anywhere_else_is_DISABLED_WITH_A_REASON_never_hidden():
+def test_off_linkedin_is_DISABLED_WITH_A_REASON_never_hidden():
     """Both halves matter. Disabled alone is the §Lessons 41 failure (a control described
     rather than shown); a reason alone would still leave a button that does nothing."""
-    for url in ('"https://www.linkedin.com/feed/"',
-                '"https://www.linkedin.com/in/someone"',
-                '"https://mail.google.com/"',
-                '"chrome://extensions/"'):
+    for url in ('"https://mail.google.com/"', '"chrome://extensions/"',
+                '"https://notlinkedin.com/messaging/"'):
         got = _panel_state(url)
         assert got["enabled"] is False, url
         assert got["hint"], f"disabled with no reason: {url}"
 
 
 @pytest.mark.skipif(not shutil.which("node"), reason="node not available")
-def test_the_reason_is_specific_on_linkedin_itself():
-    """"Open a LinkedIn conversation" is unhelpful when you are already on LinkedIn."""
-    on_li = _panel_state('"https://www.linkedin.com/feed/"')["hint"]
-    off_li = _panel_state('"https://mail.google.com/"')["hint"]
-    assert on_li != off_li and "Messaging" in on_li
+def test_a_lookalike_host_does_not_count_as_linkedin():
+    """§Lessons 1. `linkedin.com` must be the HOST, not a substring of one."""
+    for url in ('"https://notlinkedin.com/messaging/"',
+                '"https://linkedin.com.evil.test/messaging/"'):
+        assert _panel_state(url)["enabled"] is False, url
 
 
 def test_the_popup_never_hides_the_thread_panel():

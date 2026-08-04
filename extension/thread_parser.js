@@ -73,8 +73,15 @@ function readLinkedInThread() {
       .toISOString();
   };
 
-  const root = document.querySelector('.msg-s-message-list-content');
-  if (!root) return { ok: false, error: 'no LinkedIn conversation is open in this tab' };
+  // Anywhere in the document, not under a fixed ancestor. LinkedIn renders the same
+  // `msg-s-*` components on the full Messaging page and inside the chat OVERLAY it opens from
+  // a profile or the feed, and the overlay is exactly the case a URL check gets wrong.
+  const root = document.querySelector('.msg-s-message-list-content, .msg-s-message-list');
+  if (!root) {
+    return { ok: false,
+             error: 'No open conversation found on this page. Open the thread in LinkedIn '
+                    + 'Messaging (or in the chat window), then try again.' };
+  }
 
   // The other participant, from the thread header — so the popup can name them before a single
   // message is classified. Falls back to the senders found below.
@@ -142,11 +149,20 @@ function linkedInDirection(senderName, contactName, markedOther) {
 
 /* Whether the read button can work here, and what to say when it cannot.
  *
- * The first version HID the whole panel unless the active tab was a LinkedIn conversation, and
- * it was reported as "not seeing the button" within minutes. That is §Lessons 43 — a control
- * nobody can find is a broken feature — repeated in the file whose header quotes it. An absent
- * control teaches you the feature does not exist; a disabled one with a reason teaches you what
- * to do next.
+ * **The URL only decides whether we are on LinkedIn. It does NOT decide whether a thread is
+ * open** — `readLinkedInThread` reads the DOM and knows that for certain, while a URL pattern
+ * can only guess. Two reports in one afternoon came from that guess, and both were the same
+ * mistake pointing different ways:
+ *
+ *   1. The panel was HIDDEN off a messaging URL, so it read as missing (§Lessons 43, in the
+ *      file whose header quotes it).
+ *   2. Then it was DISABLED on `/messaging/`-less LinkedIn URLs — and a conversation is
+ *      readable from plenty of them. LinkedIn opens threads in an overlay from a profile,
+ *      from search, from the feed, and the address bar never changes.
+ *
+ * So this answers the one question a URL can honestly answer, and the parser answers the rest:
+ * on LinkedIn it is enabled, and a click either reads a conversation or says there is none.
+ * Guessing earlier only let the guess be wrong.
  *
  * `url` is UNDEFINED whenever Chrome has not granted access to the tab yet: with `activeTab`
  * and no host permission, `chrome.tabs.query` returns a tab whose url is withheld. Treating
@@ -157,11 +173,8 @@ function threadPanelState(url) {
   if (url === undefined || url === null || url === '') {
     return { enabled: true, hint: '' };
   }
-  if (/^https:\/\/([a-z]+\.)?linkedin\.com\/messaging\//i.test(url)) {
+  if (/^https:\/\/([a-z]+\.)?linkedin\.com(\/|$)/i.test(url)) {
     return { enabled: true, hint: '' };
-  }
-  if (/^https:\/\/([a-z]+\.)?linkedin\.com\//i.test(url)) {
-    return { enabled: false, hint: 'Open a conversation in LinkedIn Messaging to read it.' };
   }
   return { enabled: false, hint: 'Open a LinkedIn conversation in this tab to read it.' };
 }

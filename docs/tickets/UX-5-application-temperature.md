@@ -1,6 +1,6 @@
 # UX-5 — Application temperature
 
-**Size:** M (~1d) · **Depends on:** UX-3 (last interaction is an input) · **Status:** Todo
+**Size:** M · **Depends on:** UX-3 · **Status:** DONE 2026-08-04
 
 ## Diagnosis
 
@@ -31,16 +31,34 @@ Signals available today, all of them theirs:
 
 ## Design
 
-- [ ] Four bands, not a percentage: **warm · active · cooling · cold** (plus **won** for
-      interview/booked, which is terminal and not on the scale). A percentage implies a
-      precision that is not there and invites tuning instead of acting.
-- [ ] **The band shows its reason on hover** — "cooling: 3 follow-ups, no reply in 9 days".
-      An unexplained colour gets ignored within a week.
-- [ ] Colour is not the only channel. A dot plus a word: colour-blind readers, and a screenshot
-      pasted into a doc, both still work.
-- [ ] Rejected and won are excluded from the scale, same as the 🔔 counter — a permanently lit
-      indicator trains you to ignore it.
-- [ ] Renders on the collapsed row AND in the summary strip.
+- [x] Bands, not a percentage: **warm · active · cooling · cold**, plus three that are not
+      temperatures at all — **won**, **undeliverable**, **new**.
+- [x] Every band carries the sentence that produced it, in the `title`.
+- [x] A dot AND a word, so colour is never the only channel.
+- [x] A rejected job gets `None` — no reading at all rather than a permanent grey chip.
+- [x] On the collapsed row, before the last-interaction line.
+
+### Two bands the ticket did not anticipate
+
+**`undeliverable`** — a bounce is not cold. "Nobody is answering" and "nothing is arriving"
+have opposite fixes, and calling the second one cold hides an address to correct. Only when
+EVERY emailed address on the job is bouncing; one bad address among several is not the job's
+problem.
+
+**`new`** — a job imported this morning has sent nothing and is not failing. Without it the
+whole table reads amber on day one, which trains the operator to ignore the colour. Six of the
+current 22 are in this state.
+
+### Live reading, first run
+
+    cooling 10 · new 6 · warm 4 · won 1 · cold 1
+
+    Betterup   cold     12 messages sent, no answer from anyone in 14 days.
+    Salesforce warm     Gina replied 4d ago.
+    Zendesk    warm     Anna viewed your profile today.
+    WRITER     won      An interview is scheduled.
+
+Betterup being the only `cold` is the number worth looking at: 12 messages into total silence.
 
 ## Explicitly not
 
@@ -51,9 +69,10 @@ Signals available today, all of them theirs:
 
 ## Tests
 
-- [ ] `test_our_own_effort_never_raises_the_temperature` — the §Lessons 35 mutation. Send 12
-      emails, receive nothing, assert it reads colder than a job with 1 email and 1 reply.
-- [ ] `test_a_reply_beats_everything` — one reply outranks any amount of outbound.
-- [ ] `test_it_decays` — the same reply at 2 days and 40 days lands in different bands.
-- [ ] `test_a_bounce_is_terminal_not_cold`.
-- [ ] `test_every_band_states_its_reason` — a band with no explanation is a colour.
+17 tests in `tests/test_temperature.py` plus a render test. Mutation-verified: letting our own
+sends count as engagement, removing the decay, treating a bounce as cold, and dropping the
+reason each kill a test.
+
+`test_every_band_states_its_reason` also asserts the cases produce **at least five distinct
+bands** — otherwise a version where everything collapses to one band passes every other
+assertion in the file.

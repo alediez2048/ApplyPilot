@@ -1135,3 +1135,22 @@ def test_last_interaction_renders_on_the_collapsed_row(tmp_path):
     assert "lastix in" in out["a"], "an inbound event is not marked as inbound"
     assert "lastix out" in out["b"], "an outbound event is not marked as outbound"
     assert got_in and got_out
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node not available")
+def test_the_temperature_chip_renders_with_its_reason(tmp_path):
+    """Colour is never the only channel — a dot AND a word, so a colour-blind reader and a
+    screenshot pasted into a document both survive. The reason rides in the title: a band
+    nobody can interrogate stops being read (§Lessons 43)."""
+    j = _ux1_job(temperature={"band": "warm", "label": "warm", "icon": "●",
+                              "reason": "Sarah replied 2d ago."})
+    script = tmp_path / "temp.mjs"
+    script.write_text(_STUBS + f"const SRC = {json.dumps(_page_js())};\n"
+                      + "const F = (new Function(SRC + `; return { stepStrip };`))();\n"
+                      + f"const J = {json.dumps(j)};\n"
+                      + "console.log(JSON.stringify({strip: F.stepStrip(J)}));")
+    strip = json.loads(subprocess.run(["node", str(script)], capture_output=True, text=True,
+                                      timeout=60).stdout.strip().splitlines()[-1])["strip"]
+    assert 'class="temp warm"' in strip, "the temperature is not on the row"
+    assert "warm" in strip and "●" in strip, "colour is the only channel"
+    assert "Sarah replied 2d ago." in strip, "the band does not carry its reason"

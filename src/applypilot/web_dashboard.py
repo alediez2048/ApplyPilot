@@ -1655,6 +1655,8 @@ def _status_payload() -> dict:
             # When something last happened, and who did it (UX-3). Derived from data already
             # loaded above — no query of its own on a 2.5s path.
             "last_interaction": _last_interaction(row, contacts, job_ladders),
+            # How the application is DOING, as opposed to how far it has travelled (UX-5).
+            "temperature": _temperature(row, contacts, job_ladders),
             "activity": _job_activity(row["url"], conn),
             "network_running": bool(net_task.get("running")),
             "network_note": net_task.get("note") or "",
@@ -1916,6 +1918,19 @@ def _last_interaction(row, contacts: list, ladders: dict | None) -> dict | None:
         return last_interaction({"applied_at": row["applied_at"] or ""}, contacts, ladders)
     except Exception:  # noqa: BLE001
         log.debug("Could not derive last interaction", exc_info=True)
+        return None
+
+
+def _temperature(row, contacts: list, ladders: dict | None) -> dict | None:
+    """UX-5. Never raises into the payload."""
+    from applypilot.domain.temperature import temperature
+    try:
+        if (row["rejected_at"] or ""):
+            return None            # left the pipeline; a reading would be permanently lit
+        return temperature({"interview_at": row["interview_at"] or "",
+                            "applied_at": row["applied_at"] or ""}, contacts, ladders)
+    except Exception:  # noqa: BLE001
+        log.debug("Could not derive temperature", exc_info=True)
         return None
 
 

@@ -2020,10 +2020,22 @@ function stepStrip(j) {
   return `<div class="strip">
       <button class="strip-toggle" onclick="onPanelToggle(${u})" title="${open ? 'Collapse' : 'Open details'}">${open ? '▾' : '▸'}</button>
       <div class="steps">${steps}</div>
-      ${lastInteraction(j)}
+      ${tempChip(j)}${lastInteraction(j)}
       <div class="next">${na ? `<span class="next-label">Next</span>${na}` : `<span class="next-done">🏆 fully worked</span>`}${signinButton(j)}${interviewButton(j)}${restartButton(j)}${rowMenu(j)}</div>
     </div>${signinBar(j)}${hint ? `<div class="strip-hint">${hint}</div>` : ''}`;
 }
+// How the application is DOING, not how far it has travelled (UX-5).
+//
+// A dot AND a word, never colour alone: colour-blind readers and screenshots pasted into a
+// document both have to survive. The `title` carries the sentence that produced the band —
+// an unexplained colour stops being read within a week, which is §Lessons 43 applied to
+// information rather than to controls.
+function tempChip(j) {
+  const t = j.temperature;
+  if (!t || !t.band) return '';
+  return `<span class="temp ${esc(t.band)}" title="${esc(t.reason)}">${t.icon} ${esc(t.label)}</span>`;
+}
+
 // When something last happened, and WHO did it (UX-3).
 //
 // On the COLLAPSED row on purpose. The strip says how far a job has travelled and never said

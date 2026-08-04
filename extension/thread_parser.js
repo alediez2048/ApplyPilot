@@ -140,6 +140,32 @@ function linkedInDirection(senderName, contactName, markedOther) {
   return markedOther ? 'linkedin_in' : 'linkedin_out';
 }
 
+/* Whether the read button can work here, and what to say when it cannot.
+ *
+ * The first version HID the whole panel unless the active tab was a LinkedIn conversation, and
+ * it was reported as "not seeing the button" within minutes. That is §Lessons 43 — a control
+ * nobody can find is a broken feature — repeated in the file whose header quotes it. An absent
+ * control teaches you the feature does not exist; a disabled one with a reason teaches you what
+ * to do next.
+ *
+ * `url` is UNDEFINED whenever Chrome has not granted access to the tab yet: with `activeTab`
+ * and no host permission, `chrome.tabs.query` returns a tab whose url is withheld. Treating
+ * that as "not LinkedIn" would disable the button exactly when it would have worked, so an
+ * unknown url stays ENABLED and the click reports whatever really happens.
+ */
+function threadPanelState(url) {
+  if (url === undefined || url === null || url === '') {
+    return { enabled: true, hint: '' };
+  }
+  if (/^https:\/\/([a-z]+\.)?linkedin\.com\/messaging\//i.test(url)) {
+    return { enabled: true, hint: '' };
+  }
+  if (/^https:\/\/([a-z]+\.)?linkedin\.com\//i.test(url)) {
+    return { enabled: false, hint: 'Open a conversation in LinkedIn Messaging to read it.' };
+  }
+  return { enabled: false, hint: 'Open a LinkedIn conversation in this tab to read it.' };
+}
+
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { readLinkedInThread, linkedInDirection };
+  module.exports = { readLinkedInThread, linkedInDirection, threadPanelState };
 }

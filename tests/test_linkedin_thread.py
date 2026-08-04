@@ -301,3 +301,62 @@ def test_renaming_one_class_is_visible_rather_than_silent():
     out = _run_parser(broken)
     assert out["ok"] and out["messages"] == [], out
 
+
+
+# ── the button has to be FINDABLE ───────────────────────────────────────────
+#
+# The first version hid the whole panel unless the active tab was a LinkedIn conversation, and
+# was reported as "not seeing the button" the same afternoon. §Lessons 43, in the feature whose
+# own source quotes it: an absent control teaches you the feature does not exist. Nothing tested
+# the visibility decision, which is why there was nothing to break.
+
+def _panel_state(url_js: str) -> dict:
+    src = (_EXT / "thread_parser.js").read_text(encoding="utf-8")
+    script = f"{src}\nconsole.log(JSON.stringify(threadPanelState({url_js})));"
+    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr[:2000]
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node not available")
+def test_a_withheld_url_leaves_the_button_ENABLED():
+    """With `activeTab` and no host permission, `chrome.tabs.query` returns a tab whose url is
+    withheld. Treating that as "not LinkedIn" disables the button exactly when it would have
+    worked — so an unknown url is attempted and the injection reports what really happened."""
+    for js in ("undefined", "null", '""'):
+        assert _panel_state(js)["enabled"] is True, js
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node not available")
+def test_a_conversation_enables_it():
+    assert _panel_state('"https://www.linkedin.com/messaging/thread/2-abc/"')["enabled"] is True
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node not available")
+def test_anywhere_else_is_DISABLED_WITH_A_REASON_never_hidden():
+    """Both halves matter. Disabled alone is the §Lessons 41 failure (a control described
+    rather than shown); a reason alone would still leave a button that does nothing."""
+    for url in ('"https://www.linkedin.com/feed/"',
+                '"https://www.linkedin.com/in/someone"',
+                '"https://mail.google.com/"',
+                '"chrome://extensions/"'):
+        got = _panel_state(url)
+        assert got["enabled"] is False, url
+        assert got["hint"], f"disabled with no reason: {url}"
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node not available")
+def test_the_reason_is_specific_on_linkedin_itself():
+    """"Open a LinkedIn conversation" is unhelpful when you are already on LinkedIn."""
+    on_li = _panel_state('"https://www.linkedin.com/feed/"')["hint"]
+    off_li = _panel_state('"https://mail.google.com/"')["hint"]
+    assert on_li != off_li and "Messaging" in on_li
+
+
+def test_the_popup_never_hides_the_thread_panel():
+    """The regression itself, asserted against the source: the panel is revealed on every sync
+    and there is no path that hides it. A `hidden = true` here is the reported bug returning."""
+    js = (_EXT / "popup.js").read_text(encoding="utf-8")
+    assert "el.thread.hidden = false" in js
+    assert "el.thread.hidden = true" not in js
+    assert "el.thread.hidden = !" not in js, "the panel is conditionally hidden again"

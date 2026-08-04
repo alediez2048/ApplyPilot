@@ -228,17 +228,24 @@ function activeTab() {
   });
 }
 
-const isThreadUrl = (u) => /^https:\/\/([a-z]+\.)?linkedin\.com\/messaging\//i.test(u || "");
-
-// Show the control only where it works. Everywhere else it is absent, not disabled-and-silent.
+// ALWAYS visible, disabled with the reason where it cannot work. Hiding it was the first
+// version and it was reported as "not seeing the button" the same afternoon — §Lessons 43, in
+// the feature whose own source quotes it. An absent control teaches you the feature does not
+// exist; a disabled one tells you what to do next.
 async function syncThreadPanel() {
   const tab = await activeTab();
-  el.thread.hidden = !(tab && isThreadUrl(tab.url));
+  const state = threadPanelState(tab && tab.url);
+  el.thread.hidden = false;
+  el.threadRead.disabled = !state.enabled;
+  if (state.hint) threadSay(state.hint);
+  else threadSay("");
 }
 
 async function readThread() {
   const tab = await activeTab();
-  if (!tab || !isThreadUrl(tab.url)) {
+  // The url may be withheld rather than wrong (activeTab, no host permission), so this does
+  // not pre-judge: an unknown url is attempted, and the injection reports what really happened.
+  if (!tab || !threadPanelState(tab.url).enabled) {
     threadSay("Open a LinkedIn conversation in this tab first.", true);
     return;
   }
@@ -455,7 +462,6 @@ async function load() {
     setConn(true);
     showMain();
     render(contacts);
-    await syncThreadPanel();
   } catch (e) {
     setConn(false);
     // If the token is bad, drop back to setup; a network error keeps the main view with a note.
@@ -470,6 +476,10 @@ async function load() {
         "Couldn't reach ApplyPilot on localhost:8765. Is the dashboard running? (" + e.message + ")";
     }
   }
+  // Outside the try, and after BOTH branches. Hanging it off the success path meant a
+  // dashboard that was briefly unreachable took the button away with it — the same
+  // "the feature vanished" report, arriving by a different route.
+  await syncThreadPanel();
 }
 
 // ---- events --------------------------------------------------------------

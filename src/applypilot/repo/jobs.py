@@ -147,7 +147,7 @@ def dashboard_rows(limit: int = 500, conn: sqlite3.Connection | None = None) -> 
         SELECT url, title, site, salary, location, full_description, application_url, detail_error,
                fit_score, score_reasoning, tailored_resume_path, cover_letter_path,
                apply_status, apply_error, apply_attempts, applied_at,
-               last_attempted_at, apply_duration_ms, rejected_at
+               last_attempted_at, apply_duration_ms, rejected_at, interview_at
         FROM jobs
         WHERE {QUEUE_SQL}
         ORDER BY

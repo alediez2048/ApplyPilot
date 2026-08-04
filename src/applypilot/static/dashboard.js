@@ -1821,6 +1821,7 @@ async function markInterview(url, btn) {
 }
 async function unmarkInterview(url, btn) {
   btn.disabled = true;
+  btn.textContent = 'Undoing…';
   const r = await post('/api/unmark-interview', {url});
   if (r.ok) refresh(); else { btn.disabled = false; alert(r.message || 'Failed'); }
 }
@@ -2397,8 +2398,14 @@ async function signinDone(url, fill, btn) {
 // the 🎯 chip, and a second control saying the same thing is noise. Undo lives in the ⋯ menu,
 // which is the right home for a rare, corrective action.
 function interviewButton(j) {
-  if (j.interview_at || j.status === 'rejected' || j.status === 'in_progress') return '';
+  if (j.status === 'rejected' || j.status === 'in_progress') return '';
   const u = `decodeURIComponent('${encodeURIComponent(j.url)}')`;
+  // The undo lives HERE, not only in the ⋯ menu. Marking an interview is the one action that
+  // halts every sequence on a job, so misclicking it is expensive — and the revert was buried
+  // in the same overflow menu the 🎯 button itself had to be dragged out of (§Lessons 43).
+  if (j.interview_at)
+    return `<button class="won-btn undo" onclick="unmarkInterview(${u}, this)"
+      title="Scheduled ${esc(fmtDate(j.interview_at))} — undo. Sequences this stopped stay stopped; reopen any you want back.">↩ Not scheduled</button>`;
   return `<button class="won-btn" onclick="markInterview(${u}, this)"
     title="Greys this row and stops every follow-up sequence for this job">🎯 Interview</button>`;
 }

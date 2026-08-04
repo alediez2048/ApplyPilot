@@ -1628,9 +1628,17 @@ def _status_payload() -> dict:
             "rejected_at": row["rejected_at"] or "",
             # Surfaced so the Job tab can say WHY there is no description and offer the
             # paste box. Silent before: a scrape that read nothing looked like a healthy row.
-            "detail_error": (row["detail_error"] if "detail_error" in row.keys() else "") or "",
+            #
+            # NOTE both of these are read WITHOUT an `if "x" in row.keys()` guard, deliberately.
+            # `interview_at` carried one and was missing from `dashboard_rows()`'s SELECT, so
+            # the payload shipped "" forever: the row never greyed, the 🎯 chip never rendered,
+            # Next never said "Interview scheduled" and the ⋯ menu never offered the revert —
+            # while the column was being written correctly the whole time. The guard turned a
+            # KeyError into a plausible value and cost two rounds of fixing the wrong layer.
+            # A column the payload needs belongs in the SELECT; if it is absent, crash.
+            "detail_error": row["detail_error"] or "",
             # The success metric. A job with this set needs no more attention.
-            "interview_at": (row["interview_at"] if "interview_at" in row.keys() else "") or "",
+            "interview_at": row["interview_at"] or "",
             "last_attempted_at": row["last_attempted_at"] or "",
             "materials": materials,
             "contacts": contacts,

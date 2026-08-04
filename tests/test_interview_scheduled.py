@@ -160,7 +160,7 @@ def _js(driver, tmp_path, **payload):
     script.write_text(
         _STUBS + f"const SRC = {json.dumps(src)};\n"
         + "const F = (new Function(SRC + '; return { pendingActions, needsYou, nextAction, "
-          "rowMenu, stepStrip, PANEL_OPEN };'))();\n"
+          "rowMenu, stepStrip, interviewButton, PANEL_OPEN };'))();\n"
         + "".join(f"const {k} = {json.dumps(v)};\n" for k, v in payload.items()) + driver)
     proc = subprocess.run(["node", str(script)], capture_output=True, text=True, timeout=60)
     assert proc.returncode == 0, proc.stderr[:1500]
@@ -217,20 +217,34 @@ def test_the_button_is_on_the_row_not_only_in_the_menu(tmp_path):
     session placed somewhere invisible. `restartButton` already carried the lesson in a comment
     ("burying it made it unfindable") and it was repeated anyway.
 
-    Once set, nothing renders: `nextAction` replaces the whole Next slot with the chip, and a
-    second control saying the same thing is noise.
+    Once set, the row offers the UNDO in the same place (UX-1). It used to render nothing there
+    and put the undo in `⋯` — the same overflow menu the 🎯 button itself had to be dragged out
+    of. Marking an interview halts every ladder on the job, so a misclick is expensive and its
+    reversal is not "a second control saying the same thing".
     """
     out = _js("""
         const won = Object.assign({}, J, { interview_at: '2026-08-03T00:00:00+00:00' });
-        console.log(JSON.stringify({ strip: F.stepStrip(J), wonStrip: F.stepStrip(won) }));
+        console.log(JSON.stringify({
+          strip: F.stepStrip(J), wonStrip: F.stepStrip(won),
+          // The ROW control alone. Asserting on the whole strip cannot tell "on the row" from
+          // "in the ⋯ menu", because the menu is INSIDE the strip — a mutation that moved the
+          // undo back into the menu passed the first version of this test.
+          rowBtn: F.interviewButton(J), wonRowBtn: F.interviewButton(won) }));
         """, tmp_path, J=_job())
     # `won-btn`, not `markInterview`: "unmarkInterview" CONTAINS "markInterview", so the
     # substring check reported the button as present on a job whose menu only offered undo.
     # §Lessons 1, in the test written to guard the placement.
-    assert "won-btn" in out["strip"], "the success metric is only reachable through the ⋯ menu"
-    assert "won-btn" not in out["wonStrip"], "it still offers to mark an already-won job"
+    #
+    # Match on `onclick="markInterview(` — the opening quote is what stops it matching
+    # `unmarkInterview(`, which is the very substring bug this comment describes.
+    assert 'onclick="markInterview(' in out["strip"], (
+        "the success metric is only reachable through the ⋯ menu")
+    assert 'onclick="markInterview(' not in out["wonStrip"], (
+        "it still offers to mark an already-won job")
     assert "Interview scheduled" in out["wonStrip"]
-    assert "unmarkInterview" in out["wonStrip"], "no way to undo it"
+    assert 'onclick="unmarkInterview(' in out["wonRowBtn"], (
+        "the undo is not on the row — being somewhere in the strip includes the ⋯ menu")
+    assert 'onclick="markInterview(' in out["rowBtn"], "the mark is not on the row"
 
 
 def test_the_won_row_is_visibly_different():
@@ -279,3 +293,53 @@ def test_the_frontend_and_backend_agree_on_the_endpoints():
     for route in ("/api/mark-interview", "/api/unmark-interview"):
         assert route in js, f"{route} is never called by the frontend"
         assert f'path == "{route}"' in py, f"{route} has no handler"
+
+
+# ── UX-1: the state has to REACH the browser, and the engine ────────────────
+
+def test_interview_at_is_in_the_dashboard_payload(db):
+    """The bug, reported three times as "the button does nothing".
+
+    `dashboard_rows()` never selected `interview_at`, so the payload shipped "" forever and
+    every downstream branch was dead: the row never greyed, the 🎯 chip never rendered, Next
+    never said "Interview scheduled", and the ⋯ menu never flipped to offer the revert. The
+    WRITE was correct the whole time — two jobs in the live DB carried a timestamp.
+
+    Asserted on the payload, not on the SQL string: the point is what the browser receives.
+    """
+    db.execute("UPDATE jobs SET strategy = 'dashboard_upload' WHERE url = ?", ("http://j/1",))
+    db.commit()
+    jobsrepo.mark_interview("http://j/1", db)
+
+    jobs = wd._status_payload()["jobs"]
+    assert jobs, "empty payload — this test would measure nothing (§Lessons 13)"
+    job = next(j for j in jobs if j["url"] == "http://j/1")
+    assert job["interview_at"], "the interview state never reaches the browser"
+
+
+def test_no_payload_key_is_silently_optional():
+    """What hid it for two rounds of fixing the wrong layer:
+
+        "interview_at": (row["interview_at"] if "interview_at" in row.keys() else "") or ""
+
+    A guard that turns a KeyError into a plausible empty string. Without it this would have
+    500'd on the first render. A column the payload needs belongs in the SELECT; if it is
+    missing, the right behaviour is to crash.
+    """
+    import pathlib
+    src = pathlib.Path(wd.__file__).read_text(encoding="utf-8")
+    offenders = [ln.strip()[:90] for ln in src.splitlines()
+                 if "in row.keys()" in ln and not ln.lstrip().startswith("#")]
+    assert not offenders, (
+        "a payload key is being read defensively instead of being SELECTed:\n  "
+        + "\n  ".join(offenders))
+
+
+def test_the_undo_is_on_the_row_not_only_in_the_overflow_menu(db):
+    """§Lessons 43, fifth occurrence. The 🎯 button itself had to be dragged out of the ⋯ menu
+    after being reported missing; its undo was left behind in the same menu."""
+    import pathlib
+    src = pathlib.Path(wd._STATIC_DIR / "dashboard.js").read_text(encoding="utf-8")
+    block = src[src.index("function interviewButton"):]
+    block = block[:block.index("\nfunction ")]
+    assert "unmarkInterview" in block, "the undo is not on the row"

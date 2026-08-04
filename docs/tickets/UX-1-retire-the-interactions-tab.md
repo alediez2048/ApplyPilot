@@ -1,7 +1,7 @@
 # UX-2 — Retire the Interactions tab, keep the ledger
 
-**Size:** S (~2h) · **Depends on:** UX-2 (do not delete the only logging affordance first)
-**Status:** Todo · **Reported:** 2026-08-04 ("offering no real value")
+**Size:** S · **Depends on:** nothing — the constraint below is met by MOVING, not deferring
+**Status:** DONE 2026-08-04 · **Reported:** 2026-08-04 ("offering no real value")
 
 ## Diagnosis
 
@@ -24,20 +24,37 @@ was nothing to show.
 
 ## Scope / tasks
 
-- [ ] Remove `interactions` from the tab list (`dashboard.js:2021`) and the
-      `t === 'interactions'` branch (`:2187`).
-- [ ] Delete `interactionsPane()` and its CSS.
-- [ ] **Keep** `_interactions_for_job`, `domain/interactions.py`, `interactions_store.py`,
+- [x] Removed `interactions` from the tab list and the `jobPane` dispatch.
+- [x] Deleted `interactionsPane()` and the six CSS rules only it used.
+- [x] **Kept** `_interactions_for_job`, `domain/interactions.py`, `interactions_store.py`,
       `/api/contact/interaction` and `logInteraction()`.
-- [ ] Move the per-person engagement rows into the expanded contact card, under the channel
-      tabs, where the rest of that person's history already lives.
-- [ ] Move the "profile view" log button onto the contact's **🔗 LinkedIn** tab (UX-2 gives it
-      neighbours there).
-- [ ] Keep the "what is detected vs noted" note, once, on the LinkedIn tab rather than per job.
+- [x] `_attach_interactions()` hangs each person's rows on that person in the payload; the
+      job-level `interactions` key is gone. Same single query — verified by a test that counts.
+- [x] `engagementLog(c)` renders on the contact's **🔗 LinkedIn** tab, with the log button.
+- [x] The detected-vs-noted explanation is one line under the button instead of a paragraph
+      per job.
+
+### Live after the change
+
+87 people now carry engagement rows on their own card. The tab that displayed this had two
+rows in its own table across all of them, because it only counted `interactions` — the derived
+signals (a reply, a deck open) were computed at render time and never stored, which is
+deliberate (`test_derived_facts_are_not_copied_into_the_table`) and is why the tab looked
+empty while the data existed.
 
 ## Tests
 
-- [ ] `test_the_interactions_tab_is_gone` — asserted on the rendered tab list.
-- [ ] `test_engagement_still_renders_on_the_contact_card` — the events survive the move. Assert
-      the ROW exists, not that some copy is present (§Lessons 41).
-- [ ] `test_the_interaction_endpoint_still_works` — the store outlives its tab.
+- [x] `test_the_interactions_tab_is_gone` — and that removing it took no other tab with it.
+- [x] `test_engagement_still_renders_on_the_person` — asserts the ROW exists, not that some
+      copy is right (§Lessons 41).
+- [x] `test_the_only_manual_log_button_survived_the_move`.
+- [x] `test_a_person_with_no_engagement_says_so` — an empty block reads as broken.
+- [x] `test_engagement_is_attached_to_the_contact_not_the_job` — payload-level.
+- [x] `test_attaching_it_is_still_one_query_for_the_whole_job` — the N+1 guard.
+- [x] Mutation-verified: restoring the tab, dropping `engagementLog`, and removing
+      `_attach_interactions` each kill a test.
+
+**Note on the second payload test:** its first run asserted against an empty payload, because
+the fixture creates no job and `QUEUE_SQL` only returns operator-added rows. Caught by the
+"empty payload" guard in the test itself — §Lessons 13, which is why that guard is written
+before the real assertions.

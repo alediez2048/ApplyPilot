@@ -222,3 +222,63 @@ def test_booking_detection_is_off_without_the_content_scope(monkeypatch):
     monkeypatch.setattr(gmail_read, "can_read_content", lambda: (False, "off"))
     assert bookings.find_for_contacts([{"id": "c1", "email": "g@co.com"}]) == []
     assert bookings.poll()["ok"] is False
+
+
+# ── UX-1: engagement is attached to the person, not to a tab ────────────────
+
+def test_engagement_is_attached_to_the_contact_not_the_job(db, monkeypatch):
+    """The tab is gone; the ledger is not. Every event now rides on the person it belongs to,
+    which is also where UX-2 (LinkedIn messages) and UX-3 (last interaction) will read it.
+    """
+    from applypilot import web_dashboard as wd
+    from applypilot.networking import store
+
+    # The fixture creates no job — QUEUE_SQL only returns operator-added rows, so without
+    # this the payload is empty and every assertion below measures nothing (§Lessons 13).
+    db.execute("INSERT INTO jobs (url, title, site, strategy, applied_at) VALUES (?,?,?,?,?)",
+               ("http://j/1", "PM", "Greenhouse", "dashboard_upload",
+                "2026-07-20T10:00:00+00:00"))
+    db.commit()
+    cid = store.upsert_contact({"job_url": "http://j/1", "full_name": "Ada",
+                                "email": "a@x.com", "replied_at": "2026-08-01T10:00:00+00:00"},
+                               db)
+
+    payload = wd._status_payload()
+    jobs = payload["jobs"]
+    assert jobs, "empty payload — this test would measure nothing (§Lessons 13)"
+    job = next(j for j in jobs if j["url"] == "http://j/1")
+
+    assert "interactions" not in job, "the job-level interactions key outlived its tab"
+    contact = next(c for c in job["contacts"] if c["id"] == cid)
+    assert isinstance(contact.get("interactions"), list), "engagement never reached the person"
+    assert contact["engaged"] is True, "a reply is engagement and was not counted"
+
+
+def test_attaching_it_is_still_one_query_for_the_whole_job(db):
+    """`/api/status` re-renders every 2.5s against an 80-statement budget. Moving this onto the
+    contact must not turn one query into one per contact — the N+1 the original payload was
+    written to avoid (§Lessons 11)."""
+    from applypilot import web_dashboard as wd
+    from applypilot.networking import store
+
+    db.execute("INSERT INTO jobs (url, title, site, strategy) VALUES (?,?,?,?)",
+               ("http://j/1", "PM", "Greenhouse", "dashboard_upload"))
+    for i in range(6):
+        store.upsert_contact({"job_url": "http://j/1", "full_name": f"P{i}",
+                              "email": f"p{i}@x.com"}, db)
+    db.commit()
+
+    seen = []
+    original = db.execute
+
+    def counting(sql, *a, **k):
+        if "interactions" in sql.lower():
+            seen.append(sql)
+        return original(sql, *a, **k)
+
+    db.execute = counting
+    try:
+        wd._attach_interactions("http://j/1", [{"id": "x"}] * 6, db)
+    finally:
+        db.execute = original
+    assert len(seen) <= 1, f"{len(seen)} interaction queries for one job"

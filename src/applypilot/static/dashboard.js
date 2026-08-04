@@ -1245,7 +1245,38 @@ function emailChannel(c) {
     return followupCard(c, {touch: (c.followup_count || 0) + 1}, c.followup_total);
   return draftBlock(c, true);
 }
-function linkedinChannel(c) { return draftBlock(c, false, true) + noticedBox(c); }
+function linkedinChannel(c) {
+  return draftBlock(c, false, true) + noticedBox(c) + engagementLog(c);
+}
+
+// What this person has actually DONE, and the one thing about them that cannot be detected.
+//
+// Lives on the LinkedIn tab because the only manual entry here IS a LinkedIn signal: profile
+// views are absent from LinkedIn's data export and generate no notification email, so the only
+// source is their UI — which this project abandoned automating twice (§Lessons 3). Everything
+// else on the list arrives by itself.
+//
+// Our own actions are never engagement. `dm_status` is sent|manual, both meaning WE sent it,
+// and counting those is how the retired tab reported "3/3 engaged" when the honest number
+// across every job was 2 of 58 (§Lessons 35).
+function engagementLog(c) {
+  const rows = (c.interactions || []).map(r => `
+    <div class="ix-row ${esc(r.kind)}">
+      <span class="ix-icon">${r.icon}</span>
+      <span class="ix-label">${esc(r.label)}</span>
+      <span class="ix-when">${esc(shortDate(r.at))}</span>
+      ${r.detail ? `<span class="ix-detail">${esc(r.detail)}</span>` : ''}
+      ${r.source === 'manual' ? `<span class="ix-manual" title="Logged by you, not detected">noted</span>` : ''}
+    </div>`).join('');
+  return `<div class="ix-block">
+      <div class="d-label">Engagement${c.engaged ? '' : ' <span class="ix-none">nothing yet</span>'}</div>
+      ${rows || `<div class="ix-row empty">Replies, booked calls and intro-deck opens appear here by themselves.</div>`}
+      <div class="ix-log">
+        <button class="linklike" onclick="logInteraction('${esc(c.id)}','profile_view')">🔗 Note: they viewed my LinkedIn</button>
+        <span class="ix-why">LinkedIn does not export profile views or email about them, so this one is by hand.</span>
+      </div>
+    </div>`;
+}
 
 // The personalisation input, placed where you are already standing. "Copy note + open LinkedIn"
 // puts you ON their profile — this is the box for what you see there. Deliberately NOT scraped:
@@ -2019,8 +2050,10 @@ function jobTabs(j) {
     ['followups', 'Follow-ups', dueByChannel(j).total, dueByChannel(j).total > 0],
     ['materials', 'Materials',  (j.materials || []).length, false],
     ['activity',  'Activity',   (j.activity || []).length, false],
-    ['interactions', 'Interactions', (j.interactions || {}).total || 0,
-      !!((j.interactions || {}).engaged)],
+    // No 'interactions' tab. Engagement lives on the PERSON now (UX-1) — it answered
+    // "has anyone engaged?" in a different room from the people, and had two rows to show
+    // across 187 contacts. The ledger underneath it is kept: it is the only record of an
+    // operator-noted event and the source UX-2 and UX-3 build on.
     ['job',       'Job',        0, false],
   ];
   return `<div class="tabs">` + defs.map(([k, label, n, due]) =>
@@ -2127,52 +2160,6 @@ async function toggleJobDesc(url, btn) {
 //
 // People with NO engagement are listed too, and say so. A tab showing only the people who did
 // something cannot answer "has anyone?", which is the question being asked.
-function interactionsPane(j) {
-  const ix = j.interactions || {};
-  const people = ix.people || [];
-  if (!people.length) return `<div class="pane-empty">No contacts yet.</div>`;
-
-  const head = `<div class="ix-head">${ix.engaged
-    ? `<strong>${ix.engaged} of ${people.length}</strong> ${ix.engaged === 1 ? 'person has' : 'people have'} engaged · ${ix.total} interaction${ix.total === 1 ? '' : 's'}`
-    : `Nobody has engaged yet — ${people.length} contact${people.length === 1 ? '' : 's'} tracked`}</div>`;
-
-  const body = people.map(p => {
-    const rows = (p.rows || []).map(r => `
-      <div class="ix-row ${esc(r.kind)}">
-        <span class="ix-icon">${r.icon}</span>
-        <span class="ix-label">${esc(r.label)}</span>
-        <span class="ix-when">${esc(shortDate(r.at))}</span>
-        ${r.detail ? `<span class="ix-detail">${esc(r.detail)}</span>` : ''}
-        ${r.source === 'manual' ? `<span class="ix-manual" title="Logged by you, not detected">noted</span>` : ''}
-      </div>`).join('');
-    const badge = p.engaged
-      ? `<span class="ix-top">${p.icon} ${esc(p.label)}</span>`
-      : `<span class="ix-none">no engagement yet</span>`;
-    return `<div class="ix-person">
-        <div class="ix-who"><strong>${esc(p.full_name)}</strong>
-          <span class="ix-title">${esc(p.title)}</span>${badge}</div>
-        ${rows || `<div class="ix-row empty">Nothing recorded.</div>`}
-        <div class="ix-log">
-          <button class="linklike" onclick="logInteraction('${esc(p.id)}','profile_view')">🔗 Note: they viewed my LinkedIn</button>
-        </div>
-      </div>`;
-  }).join('');
-
-  // Said once, at the bottom, rather than beside every button: LinkedIn profile views are not
-  // in the data export and generate no notification email, so there is nothing to detect from.
-  // Say what runs by itself and what does not. Offering a "they booked a call" BUTTON next to
-  // an automatic detector is what made this look manual-first — the affordance contradicted
-  // the design. Bookings are detected; only the undetectable one is a button.
-  return `${head}${body}
-    <div class="ix-note">
-      <strong>Detected automatically</strong>, every ${Math.round((POLL_EVERY_S || 300) / 60)} minutes while this dashboard is open:
-      replies, booked calls (from the scheduler's confirmation email), and intro-deck opens
-      (once the collector is deployed).<br>
-      <strong>LinkedIn profile views are the exception</strong> — LinkedIn does not put them in
-      the data export and sends no email about them, so there is nothing to read. Note those by
-      hand; they are tagged <span class="ix-manual">noted</span> so they never read as detected.
-    </div>`;
-}
 async function logInteraction(cid, kind) {
   const detail = kind === 'profile_view'
     ? prompt('Anything to remember? (optional — e.g. "saw it in LinkedIn notifications")') : '';
@@ -2185,7 +2172,6 @@ async function logInteraction(cid, kind) {
 
 function jobPane(j) {
   const t = activeTab(j);
-  if (t === 'interactions') return interactionsPane(j);
   if (t === 'job')       return jobDetail(j);
   if (t === 'activity')  return `<div class="timeline">${activityHtml(j.activity)}</div>`;
   if (t === 'materials') return materialLinks(j.materials) || `<div class="pane-empty">No materials generated yet.</div>`;

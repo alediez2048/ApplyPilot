@@ -1608,6 +1608,11 @@ def _status_payload() -> dict:
         contacts = [_contact_payload(c, contact_company, job_ladders, job_matches,
                                      thread=job_threads.get(c.get("id")) or [])
                     for c in raw_contacts]
+        # Engagement moves ONTO the person (UX-1). It used to be a job-level `interactions`
+        # key feeding a tab of its own, which across 187 contacts had 2 rows to show — and put
+        # "has this person done anything?" in a separate room from the person. Same single
+        # query, attached where it is read.
+        _attach_interactions(row["url"], contacts, conn)
         net_task = _net_tasks.get(row["url"], {})
         jobs.append({
             "url": row["url"],
@@ -1647,7 +1652,6 @@ def _status_payload() -> dict:
             "conversations": job_threads,
             "awaiting_reply": _awaiting_us(contacts),
             "introductions": _pending_introductions(job_threads, raw_contacts),
-            "interactions": _interactions_for_job(row["url"], contacts, conn),
             "activity": _job_activity(row["url"], conn),
             "network_running": bool(net_task.get("running")),
             "network_note": net_task.get("note") or "",
@@ -1874,6 +1878,26 @@ def _sync_all_gmail(data: dict) -> dict:
                   f"Pulled {res['messages']} message(s) across {res['threads']} Gmail "
                   f"conversation(s) with {contact.get('full_name') or cid}.", conn)
     return res
+
+
+def _attach_interactions(job_url: str, contacts: list, conn) -> None:
+    """Hang each person's engagement events on that person, in place.
+
+    The Interactions TAB is gone (UX-1) but the ledger under it is not: it is the only record
+    of an operator-noted event, it is where LinkedIn messages will live (UX-2), and it is one
+    of the sources "last interaction" reads (UX-3). What was wrong was the container — a tab
+    that answered "has anyone engaged?" in a different room from the people, and that across
+    187 contacts had two rows to show.
+
+    Still ONE query for the whole job. `/api/status` re-renders every 2.5s and is held to an
+    80-statement budget; this must not become per-contact.
+    """
+    payload = _interactions_for_job(job_url, contacts, conn)
+    by_id = {p.get("id"): p for p in payload.get("people", [])}
+    for contact in contacts:
+        person = by_id.get(contact.get("id")) or {}
+        contact["interactions"] = person.get("rows") or []
+        contact["engaged"] = bool(person.get("engaged"))
 
 
 def _interactions_for_job(job_url: str, contacts: list, conn) -> dict:

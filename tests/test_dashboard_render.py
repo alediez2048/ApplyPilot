@@ -1008,3 +1008,81 @@ def test_the_row_menu_opens_inward_not_off_the_edge():
     assert "left:0" not in body[0].replace(" ", ""), f"still opens rightward: {body[0]}"
     assert any("flip-up" in ln and "bottom:24px" in ln.replace(" ", "")
                for ln in css.splitlines()), "no .flip-up rule to flip the menu upward"
+
+
+# ── UX-1: the Interactions tab is retired, the ledger is not ────────────────
+
+_UX1_DRIVER = """
+const F = (new Function(SRC + `; return { jobTabs, contactRow, CONTACT_OPEN, CHANNEL_TAB };`))();
+F.CONTACT_OPEN.add(C.id);
+F.CHANNEL_TAB.set(C.id, 'linkedin');
+console.log(JSON.stringify({ tabs: F.jobTabs(J), card: F.contactRow(C) }));
+"""
+
+
+def _ux1(tmp_path, job, contact):
+    script = tmp_path / "ux1.mjs"
+    script.write_text(_STUBS + f"const SRC = {json.dumps(_page_js())};\n"
+                      + f"const J = {json.dumps(job)};\nconst C = {json.dumps(contact)};\n"
+                      + _UX1_DRIVER)
+    proc = subprocess.run(["node", str(script)], capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, f"node failed:\n{proc.stderr[:2000]}"
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+def _ux1_job(**over):
+    j = {"url": "http://j/1", "title": "PM", "company": "Acme", "status": "applied",
+         "contacts": [], "materials": [], "activity": [], "awaiting_reply": [],
+         "checklist": {"steps": []}, "interview_at": "",
+         "followups": {"due_count": 0, "li_due_count": 0, "sms_due_count": 0}}
+    j.update(over)
+    return j
+
+
+def _ux1_contact(**over):
+    c = {"id": "c1", "full_name": "Sarah Chen", "title": "Director", "email": "s@acme.com",
+         "linkedin_url": "https://linkedin.com/in/sarah", "email_status": "verified",
+         "interactions": [], "engaged": False, "noticed": "", "ladder": {}}
+    c.update(over)
+    return c
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node not available")
+def test_the_interactions_tab_is_gone(tmp_path):
+    """It answered "has anyone engaged?" in a different room from the people, and across 187
+    contacts had two rows to show."""
+    out = _ux1(tmp_path, _ux1_job(), _ux1_contact())
+    assert "Interactions" not in out["tabs"], "the Interactions tab is still offered"
+    for expected in ("People", "Follow-ups", "Materials", "Activity", "Job"):
+        assert expected in out["tabs"], f"removing it took {expected} with it"
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node not available")
+def test_engagement_still_renders_on_the_person(tmp_path):
+    """Retiring the tab must not retire the ledger — it is the only record of an
+    operator-noted event, and what UX-2 and UX-3 build on. Assert the ROW exists rather than
+    that some copy is right (§Lessons 41)."""
+    c = _ux1_contact(engaged=True, interactions=[
+        {"kind": "replied", "icon": "↩", "label": "Replied", "at": "2026-08-01T10:00:00+00:00",
+         "detail": "", "source": "gmail"}])
+    card = _ux1(tmp_path, _ux1_job(), c)["card"]
+    assert "ix-block" in card, "engagement disappeared with the tab"
+    assert "ix-row replied" in card, "the event itself is not rendered"
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node not available")
+def test_the_only_manual_log_button_survived_the_move(tmp_path):
+    """Profile views are absent from LinkedIn's export and generate no email, so this is the
+    one signal that can only be typed in. Deleting the tab it lived on would have removed the
+    single manual affordance in the app."""
+    card = _ux1(tmp_path, _ux1_job(), _ux1_contact())["card"]
+    assert "logInteraction(" in card and "profile_view" in card, (
+        "the manual log button went out with the tab")
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node not available")
+def test_a_person_with_no_engagement_says_so(tmp_path):
+    """An empty block that renders nothing reads as broken. It has to state that the automatic
+    signals land here by themselves (§Lessons 41)."""
+    card = _ux1(tmp_path, _ux1_job(), _ux1_contact())["card"]
+    assert "ix-block" in card and "ix-row empty" in card

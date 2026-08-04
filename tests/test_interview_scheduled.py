@@ -343,3 +343,22 @@ def test_the_undo_is_on_the_row_not_only_in_the_overflow_menu(db):
     block = src[src.index("function interviewButton"):]
     block = block[:block.index("\nfunction ")]
     assert "unmarkInterview" in block, "the undo is not on the row"
+
+
+def test_the_undo_is_not_dimmed_into_invisibility():
+    """It rendered correctly and was reported missing anyway.
+
+    `tr.row-won + tr.job-foot .step-strip { opacity:.7 }` fades the whole strip on a won row,
+    controls included — and the undo was --muted text on --surface, i.e. grey on a grey-green
+    #eef2ee row at 70%. Present in the DOM and imperceptible, which is the same as absent.
+
+    Second time on this one feature: the first won row was greyed #f8f9fa against white, a 2.7%
+    difference, and was also reported as "the button does nothing". §Lessons 43.
+    """
+    from applypilot import web_dashboard as wd
+    css = (wd._STATIC_DIR / "dashboard.css").read_text(encoding="utf-8")
+    assert "tr.row-won + tr.job-foot .step-strip button { opacity:1; }" in css, (
+        "the won-row fade dims its own escape hatch")
+    undo = next(ln for ln in css.splitlines() if ln.strip().startswith(".won-btn.undo {"))
+    assert "background:#fff" in undo, (
+        f"the undo has no contrasting ground against the #eef2ee won row: {undo.strip()}")

@@ -268,6 +268,12 @@
   tr.row-won .desc-text, tr.row-won .job-co { opacity:.6; }
   tr.row-won + tr.job-foot td { background:#eef2ee; box-shadow:inset 4px 0 0 var(--green); }
   tr.row-won + tr.job-foot .step-strip { opacity:.7; }
+  /* ...but never the CONTROLS. The fade means "this job is finished"; the undo is how you say
+     it is not, and dimming it hid the only way back. Reported as "can we add a way to undo
+     this?" about a button that was already rendering — §Lessons 43 again, and the second time
+     on this exact feature: the first was a won row greyed 2.7% off white. Present in the DOM
+     and imperceptible is the same as absent. */
+  tr.row-won + tr.job-foot .step-strip button { opacity:1; }
   .won-chip {
     display:inline-block; font:700 11px/1.6 var(--font); padding:2px 10px; margin-left:6px;
     border-radius:999px; background:var(--green); color:#fff;
@@ -282,9 +288,11 @@
     border:1px solid #bfe3cd; background:var(--green-soft); color:var(--green); font-weight:600;
   }
   .won-btn:hover { background:#cdeeda; box-shadow:inset 0 0 0 1px #a9d9bd; }
-  /* The undo reads as a way BACK, not as another success. Green on a greyed row would look
-     like the thing that is already done rather than the escape from it. */
-  .won-btn.undo { border-color:var(--line2); background:var(--surface); color:var(--muted); }
+  /* The undo reads as a way BACK, not as another success — green would look like the thing
+     already done rather than the escape from it. But it sits on a #eef2ee row, so it needs a
+     WHITE ground and readable text to be seen at all; --muted on --surface was grey on
+     grey-green and disappeared. */
+  .won-btn.undo { border:1px solid var(--line2); background:#fff; color:var(--soft); }
   .won-btn.undo:hover { background:rgba(0,0,0,.05); box-shadow:inset 0 0 0 1px var(--line2); }
 
   .jd-paste { border:1px solid #f0c890; background:var(--yellow-soft); border-radius:8px; padding:12px 14px; }

@@ -61,13 +61,22 @@ def test_served_html_has_a_resolved_cache_buster():
 
 
 def test_cache_buster_changes_when_an_asset_changes(monkeypatch):
-    """Version alone doesn't move during development; mtime does."""
+    """Version alone doesn't move during development; mtime does.
+
+    Bump past the NEWEST asset, not past this file's own mtime. `_asset_version` is a max over
+    every asset, so bumping dashboard.js by 60s does nothing whenever dashboard.css happens to
+    be more than 60s newer — which it is, every time the last edit was to the CSS. This test
+    had been passing on the incidental fact that the JS was usually touched last, and started
+    failing the first time a change was CSS-only.
+    """
+    import os
+
     before = w._asset_version()
     js = w._STATIC_DIR / "dashboard.js"
     original = js.stat().st_mtime
+    newest = max((w._STATIC_DIR / name).stat().st_mtime for name, _ in w._STATIC_ASSETS.values())
     try:
-        import os
-        os.utime(js, (original + 60, original + 60))
+        os.utime(js, (newest + 60, newest + 60))
         assert w._asset_version() != before
     finally:
         os.utime(js, (original, original))

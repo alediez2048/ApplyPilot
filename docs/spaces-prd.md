@@ -345,3 +345,111 @@ two Spaces matters, or duplicates become annoying. Not before.
 3. Business identities are **Google Workspace**; OAuth mandatory, SMTP unavailable.
 4. Limits move from Space to **Identity** (correction to v1).
 5. Templates 2 and 3 share one shape; the third template is a config row, not a build.
+6. A Space's **`id` is immutable**; its `name` is free (§13.2).
+7. Adding a *capability* is code; adding a *combination* is config (§13.1).
+
+---
+
+## 13. Editing a Space
+
+### 13.1 Three tiers of change
+
+The manifest makes **combinations** of existing capabilities free. It does not make new
+capabilities free, and being clear about that now is what stops this being disappointing in
+three months.
+
+| Tier | What | Who | Cost |
+|---|---|---|---|
+| **1 — Config** | tone, offer, cadence, channels, caps, deck on/off, docs on/off, autosend, display name | the operator, in the UI | seconds, no restart |
+| **2 — A new knob** | something the engine already does, but globally: "attach a proposal PDF instead of a résumé" | a developer | ~an hour: one manifest field, one call site |
+| **3 — A new capability** | something the engine cannot do at all | a developer | real work — **and then it becomes a Tier-1 flag for every Space, forever** |
+
+Tier 3 is the same shape as the follow-up channels: SMS was a real build, after which a
+fourth channel is a registry row. The rule of thumb: **anything reusing the
+contact/message/ladder spine is cheap; anything needing a new pipeline stage is not.**
+
+Worked example, because it is cheaper than it looks — *"log a phone call and have the next
+draft know about it"*: `interactions` already exists, `kind` is an open TEXT column and
+`record(contact_id, kind, detail)` accepts anything (it holds `booked` events today). So it is
+a button, a prompt block and a manifest field — no migration. Against that, *"score
+partnership fit 1–10 like job fit"* is days: a new prompt, a new column, a new stage, and no
+evaluation set to say whether the numbers mean anything.
+
+### 13.2 What is editable, and what is frozen
+
+**Freely editable:** `name`, `tone`, `offer`, `channels`, `schedules`, `tailor_docs`,
+`offer_deck`, `company_cap`, `terminal`, nav `position`.
+
+**Frozen after creation:**
+
+- **`id`.** For a `pipeline/targets` Space the contact anchor is `target:<space_id>:<slug>`,
+  and that string is hashed into every `contact_id`. Renaming the id would re-key every
+  contact in the Space and detach its touches, sequences and messages — the same failure the
+  §6 migration is designed to avoid. **Rename the `name`; the `id` is permanent.** The UI must
+  not offer it.
+- **`shape`.** A `pipeline/jobs` Space holds job rows; a `pipeline/targets` Space holds
+  company rows. Flipping it has no meaning for rows already stored. Create a new Space
+  instead.
+- **`identity_id` once anything has been sent.** Threads, `rfc_message_id`s and reply polling
+  all belong to the mailbox that sent them. Changing it would orphan every live conversation.
+  Editable only while the Space has zero sent messages.
+
+### 13.3 Two behaviours to decide rather than discover
+
+**Changing cadence mid-ladder re-times pending touches and never retro-sends.** The schedule
+resolves at render time (`channel_schedule()` reads the registry) rather than being baked in
+when a sequence starts, so shortening a schedule can make a touch due immediately — it will
+never make three touches due at once retroactively. This is existing behaviour and worth
+keeping.
+
+**Turning `can_autosend` ON is a confirmation, not a toggle.** It is the one setting whose
+entire job is to stop the operator doing something at 11pm that cannot be undone. Off → on
+requires an explicit confirm naming the Space; on → off is immediate.
+
+---
+
+## 14. The flow
+
+What the operator actually does, end to end, in a `pipeline/targets` Space. The jobs flow is
+unchanged and not repeated here.
+
+**1. Create it.** Top nav → `+ New Space` → pick a template → name it → choose an identity.
+Templates pre-fill the manifest; everything stays editable per §13.2.
+
+**2. Write the offer.** One paragraph, once (§7.1). This is the field with no analogue in the
+jobs pipeline: there, the description varies per row and the pitch is constant. Here it
+inverts — **the pitch is constant and their situation varies.**
+
+**3. Add a target.** No URL to paste. Type `Sarah Chen — Ridgeline Logistics`, or import a
+directory CSV. Note that this path is *simpler* than the jobs one: `derive.py` exists solely
+to reverse-engineer an employer out of a job URL, and it is what produced the employers
+"Ouryahoo", "Edu", "Ats", "Hr" and "Uploaded". Here the company is stated, so none of that
+machinery runs.
+
+**4. Find contacts.** Unchanged. The peer/recruiter split becomes decision-maker/operator —
+the C-suite contact plus whoever owns the workflow being proposed.
+
+**5. Draft.** Same engine, different inputs:
+
+```
+jobs:    role_essentials(JD) + what you noticed + intro deck
+targets: what THEIR company does + the Space's offer + the identity's deck
+```
+
+**6. Send, from the right address.** The identity is resolved from the Space at send time,
+never from a global, and the from-address is **drawn on screen next to Send** — same reasoning
+as the Cc chips in §Lessons 29. Sending business mail from a personal address and sending it
+correctly render an identical success screen, which makes it exactly the class of error that
+has to be shown before it is committed, not reported after.
+
+**7. Follow up.** The existing ladder, slower for a C-suite pitch: 5 days then 12, versus
+2/4/7 for a job. A schedule override, not new code.
+
+**8. The status strip** reads `Added → Researched → Emailed → Follow up → Reply → 📞 Call
+booked`, with `terminal="booked"` replacing `terminal="interview"`. Booking detection already
+exists and is already automatic — cal.com mails the host and the 5-minute poller catches it,
+so the success metric for this shape is instrumented before the shape is built.
+
+**9. It goes quiet, or it converts.** A reply stops the ladder (existing). A booking marks the
+row won and halts every sequence for it (existing, `🎯` becomes `📞`). Neither needs work
+beyond pointing at a different terminal state.

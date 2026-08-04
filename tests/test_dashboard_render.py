@@ -1015,8 +1015,12 @@ def test_the_row_menu_opens_inward_not_off_the_edge():
 _UX1_DRIVER = """
 const F = (new Function(SRC + `; return { jobTabs, contactRow, CONTACT_OPEN, CHANNEL_TAB };`))();
 F.CONTACT_OPEN.add(C.id);
-F.CHANNEL_TAB.set(C.id, 'linkedin');
-console.log(JSON.stringify({ tabs: F.jobTabs(J), card: F.contactRow(C) }));
+const byChannel = {};
+for (const ch of ['email', 'linkedin', 'phone']) {
+  F.CHANNEL_TAB.set(C.id, ch);
+  byChannel[ch] = F.contactRow(C);
+}
+console.log(JSON.stringify({ tabs: F.jobTabs(J), card: byChannel.linkedin, byChannel }));
 """
 
 
@@ -1078,6 +1082,25 @@ def test_the_only_manual_log_button_survived_the_move(tmp_path):
     card = _ux1(tmp_path, _ux1_job(), _ux1_contact())["card"]
     assert "logInteraction(" in card and "profile_view" in card, (
         "the manual log button went out with the tab")
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node not available")
+def test_engagement_shows_on_every_channel_not_just_one(tmp_path):
+    """The first attempt at this ticket rendered the block inside `linkedinChannel`, so on a
+    contact open at Email — which is the default whenever they have an address — it was one
+    click away and invisible. Reported as "this looks the same".
+
+    A reply, a deck open and a booked call belong to the PERSON. Hiding them behind one channel
+    is the retired Interactions tab's mistake at contact scale: the answer to "has this person
+    engaged?" in a different room from the person.
+    """
+    c = _ux1_contact(engaged=True, phone="+15551234", interactions=[
+        {"kind": "replied", "icon": "↩", "label": "Replied", "at": "2026-08-01T10:00:00+00:00",
+         "detail": "", "source": "gmail"}])
+    out = _ux1(tmp_path, _ux1_job(), c)
+    for channel, html in out["byChannel"].items():
+        assert "ix-block" in html, f"engagement is hidden on the {channel} tab"
+        assert "ix-row replied" in html, f"the reply is not visible on the {channel} tab"
 
 
 @pytest.mark.skipif(not shutil.which("node"), reason="node not available")

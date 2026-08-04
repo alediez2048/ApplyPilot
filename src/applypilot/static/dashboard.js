@@ -1204,6 +1204,7 @@ function contactPanel(c) {
       </div>
       <div class="chan">${tab('email','✉ Email')}${tab('linkedin','🔗 LinkedIn')}${tab('phone','💬 Text' + (c.sms_sent_at ? ' ✓' : ''))}</div>
       ${body}
+      ${engagementLog(c)}
       <div class="crow-del"><button class="link-danger" onclick="deleteContact('${esc(c.id)}', decodeURIComponent('${encodeURIComponent(c.full_name || '')}'), ${!!c.emailed})">🗑 Not at this company — remove</button></div>
     </div>`;
 }
@@ -1245,16 +1246,19 @@ function emailChannel(c) {
     return followupCard(c, {touch: (c.followup_count || 0) + 1}, c.followup_total);
   return draftBlock(c, true);
 }
-function linkedinChannel(c) {
-  return draftBlock(c, false, true) + noticedBox(c) + engagementLog(c);
-}
+function linkedinChannel(c) { return draftBlock(c, false, true) + noticedBox(c); }
 
-// What this person has actually DONE, and the one thing about them that cannot be detected.
+// What this person has actually DONE.
 //
-// Lives on the LinkedIn tab because the only manual entry here IS a LinkedIn signal: profile
-// views are absent from LinkedIn's data export and generate no notification email, so the only
-// source is their UI — which this project abandoned automating twice (§Lessons 3). Everything
-// else on the list arrives by itself.
+// OUTSIDE the channel tabs, deliberately. A reply, a deck open and a booked call belong to the
+// PERSON, not to email or LinkedIn — putting the timeline behind one channel means the answer
+// to "has this person engaged?" is one click away and invisible from the other two, which is
+// the exact failure the retired Interactions tab had at job level. First attempt at this
+// ticket put it on the LinkedIn tab and it was reported as unchanged from the Email tab.
+//
+// The one manual button lives here too: profile views are absent from LinkedIn's data export
+// and generate no notification email, so the only source is their UI — which this project
+// abandoned automating twice (§Lessons 3). Everything else on the list arrives by itself.
 //
 // Our own actions are never engagement. `dm_status` is sent|manual, both meaning WE sent it,
 // and counting those is how the retired tab reported "3/3 engaged" when the honest number

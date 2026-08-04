@@ -305,6 +305,17 @@ _ALL_COLUMNS: dict[str, str] = {
     # (networking/bookings.py) but a booked call is not always an interview, and §Lessons 19
     # is explicit that the operator is the authority on what happened.
     "interview_at": "TEXT",
+    # Which Space this row belongs to (SPACE-1a D2). The ONLY key that decides which panel a
+    # row appears in — `strategy` keeps meaning provenance ("how did this row arrive") and is
+    # never consulted for membership, because two partition keys over one table is §Lessons 49
+    # waiting to happen.
+    #
+    # The DEFAULT is doing the backfill. Every existing row becomes 'job-search' as a property
+    # of the ALTER itself, which means no UPDATE to run, nothing to re-run, and no ordering
+    # dependency on the migration runner — and code that has never heard of Spaces still writes
+    # a valid row. A migration that backfills with an UPDATE misses whatever is inserted while
+    # it runs; a column default cannot.
+    "space_id": "TEXT NOT NULL DEFAULT 'job-search'",
 }
 
 

@@ -273,7 +273,11 @@ def test_a_migrated_database_has_no_ladder_columns_left(db):
     # `draft_variant` records WHAT PRODUCED a draft, so reply rate can be attributed. Without it
     # reply rate is one number that moves for reasons nobody can name.
     assert "draft_variant" in cols
-    assert len(cols) == 40, f"unexpected contacts columns: {sorted(cols)}"
+    # SPACE-1a: membership, and the only key that decides which panel a row appears in. NOT
+    # ladder state and not part of `contact_id` — hashing it would re-key every contact and
+    # detach exactly the touches this test exists to protect.
+    assert "space_id" in cols
+    assert len(cols) == 41, f"unexpected contacts columns: {sorted(cols)}"
 
 
 def test_backfill_moves_state_and_verifies_clean(db):

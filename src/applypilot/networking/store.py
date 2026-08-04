@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from hashlib import sha1
 
 from applypilot.database import get_connection, schema_ready
+from applypilot.repo import spaces as _spaces
 
 _DELIM = "\x1f"  # unit separator — avoids hash collisions across concatenated fields
 
@@ -98,6 +99,17 @@ _CONTACT_COLUMNS: dict[str, str] = {
     "deck_views": "INTEGER",      # how many times
     "discovered_at": "TEXT",
     "updated_at": "TEXT",
+    # Which Space this contact belongs to (SPACE-1a D2). Mirrors `jobs.space_id`, and the
+    # DEFAULT is the backfill — all 196 existing contacts become 'job-search' as a property of
+    # the ALTER, with no UPDATE to miss a row written while it ran.
+    #
+    # NOT part of the identity. `contact_id()` below hashes (job_url, linkedin_url, name) and
+    # deliberately does not hash this: adding it would re-key all 196 contacts and detach their
+    # touches, sequences, messages and interactions. Space scoping for targets rows is carried
+    # by the ANCHOR instead (`target:<space_id>:<slug>`, spaces-prd §5), which is already inside
+    # the hash. Two people at one company pursued in two Spaces are two rows because their
+    # anchors differ, not because this column does.
+    "space_id": "TEXT NOT NULL DEFAULT 'job-search'",
 }
 
 
@@ -172,6 +184,17 @@ def upsert_contact(contact: dict, conn: sqlite3.Connection | None = None) -> str
     else:
         row["discovered_at"] = now
         row.setdefault("outreach_status", "none")
+        # A column DEFAULT only applies when the column is OMITTED from the INSERT, and this
+        # one names every column in `_CONTACT_COLUMNS` — so a caller that has never heard of
+        # Spaces passes space_id=None explicitly and hits the NOT NULL. Filled here rather than
+        # by relaxing the constraint: the invariant "every contact belongs to a Space" is worth
+        # having the database enforce.
+        #
+        # INSERT ONLY. Doing it in `row` above would put 'job-search' into every UPDATE too
+        # (the update path drops None values, so it currently cannot), and a contact in a
+        # targets Space would be dragged back to the job search by any unrelated write.
+        if not row.get("space_id"):
+            row["space_id"] = _spaces.DEFAULT_SPACE_ID
         cols = ["id"] + list(row.keys())
         placeholders = ", ".join("?" for _ in cols)
         conn.execute(

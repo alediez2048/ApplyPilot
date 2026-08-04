@@ -147,6 +147,24 @@ sign-in walls. It *adds* one field, §7's offer.
 
 ## 6. Data model
 
+> **Revised by `SPACE-1a` (2026-08-04), which is the authority where the two disagree.** Three
+> things below were checked against the code and did not survive:
+>
+> 1. **`space_id` ships in the additive column dicts, not in a migration.** `_ALL_COLUMNS` and
+>    `_CONTACT_COLUMNS` already express a default, and the dicts RACE a numbered migration —
+>    `get_connection()` does not call `init_db`, so `ensure_contacts_columns` can run first. A
+>    migration touching a column the dicts declare is a duplicate-column error on one ordering
+>    and a NOT-NULL-without-default error on the other. The column DEFAULT also does the
+>    backfill, which an `UPDATE` cannot do without a window.
+> 2. **The `job_url` → `anchor` rename is split out to `SPACE-1b` and recommended deferred.** It
+>    is 169 references across 18 source files plus 140 in tests, it leaves `messages.job_url` and
+>    `job_events.job_url` disagreeing with it, and it buys nothing functional — `contact_id()`
+>    hashes the value and has never cared what the column is called. It is also the only step in
+>    this document that can destroy data.
+> 3. **Migration 003 is therefore only `spaces` + `identities` + their seed rows.** Shipped and
+>    verified live: 196 contact ids, 55 touches, 142 messages, 24 sequences and 25 job urls all
+>    byte-identical afterwards.
+
 Two new tables, one renamed column.
 
 ```sql
@@ -254,7 +272,9 @@ personal identity that is already connected.
 | Ticket | What | Notes |
 |---|---|---|
 | **SPACE-0** | Archive terminal rows | Independent, ships first. §8.1 |
-| **SPACE-1** | Migration 003 + manifests, backfilled to one Space | Invisible on screen |
+| **SPACE-1a** ✅ | Where a target row lives; `space_id` vs `strategy`; migration 003 | **Shipped 2026-08-04.** Zero code changes downstream of it — it exists so the tickets below can be estimated at all |
+| **SPACE-1** | Manifests, and the stage queues gated on shape | Invisible on screen |
+| **SPACE-1b** | `job_url` → `anchor`, converge-not-rename | Optional. Hygiene, and the only step that can lose data — decide on its own merits |
 | **SPACE-2** | Nav, `?space=`, `/api/status` filtering | Job Search only; structural |
 | **SPACE-3** | `pipeline/targets` panel + target import + the offer field | Template 2 exists |
 | **SPACE-4** | Manifest actually applied: tone, cadence, docs, deck, terminal state | |

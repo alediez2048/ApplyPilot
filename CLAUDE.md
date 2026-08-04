@@ -12,8 +12,8 @@ campaign happens to be a job search** — see `docs/crm-prd.md` for where that g
 - **Packaging:** Hatchling, `src/` layout, single package `applypilot`
 - **Entry point:** `applypilot = "applypilot.cli:app"` (Typer CLI)
 - **License:** AGPL-3.0-only · **Version:** 0.4.0 (`pyproject.toml`)
-- **Tests:** 1073 passing (`tests/`, 66 files) · ruff clean (line-length 120, py311) · ESLint clean
-- **Schema version:** 2 (`applypilot migrate --status`) · **Settings:** 45 declared in `settings.py`
+- **Tests:** 1261 passing (`tests/`, 74 files) · ruff clean (line-length 120, py311) · ESLint clean
+- **Schema version:** 2 (`applypilot migrate --status`) · **Settings:** 47 declared in `settings.py`
 
 ## Quick orientation
 
@@ -54,7 +54,7 @@ stops the moment a job hands over — see §Lessons 8, which cost two filled app
 | `database.py` | SQLite layer. Owns `jobs` + `job_events`. Thread-local WAL, additive column pass, then numbered migrations. `get_connection()` returns a subclass carrying a per-connection schema memo — see §Lessons 11. |
 | `llm.py` | Multi-provider client (round-robin + failover: OpenAI/Gemini/Anthropic/local). |
 | `view.py` | Static HTML results export. |
-| `web_dashboard.py` | **The operator dashboard.** 2,900 lines, **zero SQL** — data access goes through `repo/` and `store.py` (ARCH-4). |
+| `web_dashboard.py` | **The operator dashboard.** 3,141 lines, **zero SQL** — data access goes through `repo/` and `store.py` (ARCH-4). |
 | `repo/jobs.py` | Every `jobs` query as a named function. Owns `QUEUE_SQL` (what counts as an operator-added job). |
 | `scoring/resume_sections.py` | Parses the BASE résumé into its own sections. The base résumé is the template; tailoring rewrites content inside it. |
 | `settings.py` | **Every env var, one registry.** Types, defaults, validators, secret flags. Malformed values fail at startup naming the variable. `.env.example` is generated from it. |
@@ -129,7 +129,9 @@ harness no longer has to import a web server to test scheduling.
 | `metrics.py` | CRM-2 funnel + reply rates. Every rate carries its `n`; bounces leave the denominator. |
 | `deck.py` | Intro-deck links. `slugify`/`disambiguate` → `/intro/gina`, **not** `?v=<token>`. `relink()` rewrites an existing draft's link without regenerating the copy. |
 | `interactions.py` | What a contact has actually DONE, from several sources. Our own actions (an email sent, a LinkedIn invite) are context, never engagement. |
-| `intent.py` | What a reply wants — rejection / not now / interested / introduction / question / auto-reply. Rule-based and quick to say `unknown`. |
+| `authrealm.py` | **What one sign-in covers.** URL → the ATS tenant an account belongs to. `host_is_tenant` is load-bearing: every employer on `wd1.myworkdaysite.com` shares that host, so a cookie there proves nothing about any one of them. |
+| `lastinteraction.py` | When something last happened on a job **and who did it**, from six sources that were never joined. Direction is the point — "you emailed them 6 days ago" and "they replied 6 days ago" are the same age and opposite situations. |
+| `temperature.py` | How an application is DOING, not how far it has travelled. **Only their actions raise it; ours can only lower it.** |
 
 **Adding a channel is one `Channel` entry plus one prompt** — executed, not claimed:
 `test_adding_a_channel_needs_no_schema_change` defines a channel that exists nowhere in the
@@ -178,7 +180,7 @@ incapable of touching a LinkedIn page. See §Lessons.
 
 | Table | Owner | Purpose |
 |-------|-------|---------|
-| `jobs` (33 cols) | `database.py` | The 6-stage state machine. `_ALL_COLUMNS` is its source of truth. |
+| `jobs` (34 cols) | `database.py` | The 6-stage state machine. `_ALL_COLUMNS` is its source of truth. |
 | `contacts` (40 cols) | `networking/store.py` | People per job + outreach + verification. |
 | `touches` | `networking/touches.py` | One follow-up touch per row, ANY channel. `seq` is per (contact, channel). |
 | `sequences` | `networking/touches.py` | Terminal state per (contact, channel): `stopped` / `replied`. |
@@ -187,11 +189,16 @@ incapable of touching a LinkedIn page. See §Lessons.
 | `interactions` | `networking/interactions_store.py` | Events with nowhere else to live: a detected booking, an operator-logged LinkedIn profile view. Derived facts are NOT copied here — they are computed at render time so they cannot drift. |
 | `job_events` | `database.py` | Per-job activity log. Append is best-effort, never raises. |
 
+| `ats_accounts` | `repo/accounts.py` | One row per **auth realm** — the thing one sign-in covers. `have_account` (about us) is deliberately separate from `kind` (about the site). |
 | `schema_migrations` | `migrations/` | Version, status, `claimed_at` lease. See §Lessons on the 300s lease. |
 
-Live counts (2026-08-03): jobs 19 (15 applied, **1 interview scheduled**), contacts 66
-(**34 emailed, 3 replied, 1 bounced**, 54 with a deck slug), 47 follow-ups sent, messages 90,
+Live counts (2026-08-04): jobs 22 (20 applied, **1 interview scheduled**), contacts **185**
+(64 emailed, 3 replied, 1 bounced), 52 follow-ups sent, messages 112, interactions 5,
 connections 899. **Schema version 2**.
+
+Contacts nearly tripled on 2026-08-04 — 66 → 185 — because employer resolution was broken in
+three separate ways and every one of them returned zero people rather than an error. See
+§Contact discovery.
 
 **77 emails for 2 replies** was the number that prompted the 2026-08-03 audit. Engineering
 quality scored 9/10 and outcomes about 3/10, and the gap was the whole finding: the system
@@ -221,7 +228,8 @@ operator(`phone,notes`) · verification(`confidence,verify_note`) · SMS(`sms_se
 Localhost-only (`127.0.0.1:8765`), Origin/CSRF-guarded. Restructured 2026-07-28 from four
 sibling accordions into:
 
-**Six tabs** (2026-07-31): People · Follow-ups · Materials · Activity · **Interactions** · **Job**.
+**Five tabs**: People · Follow-ups · Materials · Activity · **Job**. The Interactions tab was
+retired 2026-08-04 (UX-1) — see §The row, and §Lessons on why its ledger was kept.
 
 **The 🔔 counter, top right** (2026-08-02) — every outstanding action across every application,
 grouped and ORDERED. A flat count of 49 tells you nothing, and a list putting "3 LinkedIn
@@ -255,6 +263,37 @@ sat collapsed below it. A sent email cannot be edited: offering it as a form is 
 action that does not exist, and it pushed the only actionable thing off screen. `hasConversation()`
 is the single branch — timeline first, composer anchored under it, the sent outreach as one entry
 in that timeline. §Lessons 31.
+
+**The row carries three derived things** (UX-3/5/6, 2026-08-04), all computed from data the
+payload already loads — no new query, budget unmoved:
+
+- **Temperature** — `warm · active · cooling · cold`, plus `won`, `undeliverable` and `new`,
+  which are not temperatures. **A dot AND a word**, never colour alone, and every band carries
+  the sentence that produced it. First live reading: cooling 10 · new 6 · warm 4 · won 1 ·
+  cold 1. `undeliverable` and `new` were not in the ticket and both came from running it: a
+  bounce is not cold (opposite fixes), and a job imported this morning is not failing.
+- **Last interaction, with its DIRECTION** — `← Sarah replied · 2d ago` accented,
+  `→ You emailed Sarah` faint. Same age, opposite situations.
+- **Search reaches people and whole postings.** It covered nine fields and never looked at
+  `j.contacts`, so a recruiter's name returned nothing while the dashboard displayed that name
+  one click away; and `j.description` is a 900-char excerpt. Full text arrives from
+  `/api/job-descriptions` **once per session on the first keystroke** — 132KB measured, which
+  is what shipping it on the 2.5s refresh would have added forever. A row matched through a
+  person says **"matched: Sarah Chen"**, or it reads as a bug.
+
+**Engagement lives on the PERSON, not in a tab** (UX-1). The Interactions tab held 2 rows across
+185 contacts — because replies and deck opens are derived at render time and deliberately never
+stored — while asking "has anyone engaged?" in a different room from the people. The ledger
+under it was KEPT: it is the only record of an operator-noted event and the home for LinkedIn
+messages. First attempt put the block on the LinkedIn tab, which reproduced the same bug one
+level down and was reported as unchanged.
+
+**LinkedIn messages are logged by hand** (UX-2). `messages` is keyed on Gmail's own message id
+and carries `thread_id` / `rfc_message_id` / `from_addr` — a DM has none, and faking them would
+corrupt reply detection. `dm_status` only ever recorded what WE sent. So both directions go in
+`interactions`, and an inbound one **stops the LinkedIn ladder only** and reaches the 🔔 counter
+**without writing `replied_at`** — that field means a DETECTED email reply and is what
+`metrics.by_variant` divides by.
 
 - **Status strip** (always visible, never a toggle) — a left-to-right path
   `✓ Found → ✓ Applied → ✓ Emailed 4/4 → ↻ Follow up 0/4 → · Reply`, first unfinished step
@@ -475,6 +514,60 @@ confirmed, never for an unanchored keyword search.
 
 **Every exit logs.** A search that found nobody used to log nothing, making a completed run
 byte-identical to a dead button (§Lessons 15).
+
+### Three ways the employer was wrong, all returning zero instead of an error (2026-08-04)
+
+Contacts went **66 → 185** the day these were fixed. Each produced a truthful "0 found", which
+is why none of them looked like a bug.
+
+| Stored as | Should be | Cause |
+|---|---|---|
+| **Ouryahoo** | Yahoo | the Workday TENANT SLUG is not the company name |
+| **Edu** | Stanford | `.edu` missing from `_TLD_LABELS` — third after "Ats" and "Hr" |
+| **Uploaded** | Google | the board-owns-the-posting rule was applied at one of its two call sites |
+
+**A tenant slug is chosen by an HR team and wraps the real name** — `ouryahoo`,
+`WellsFargoJobs`, `acme-external`. Measured live: `company_lookup("Ouryahoo")` returns nothing,
+`company_lookup("Yahoo")` returns six organizations. Trimming affixes blind is not acceptable —
+**OurCrowd is a real company** — so `refine_company_from_posting()` accepts a variant only when
+the POSTING'S OWN TEXT names it as a whole word. The first version tested `variant in text` and
+turned OurCrowd into "Crowd": §Lessons 1, inside the function written to respect it.
+
+**`derive_company` step 1 applied `_company_owns_the_posting` to a stored name; `_host_label`
+never did**, so `google.com/about/careers` resolved to no employer at all — on a job already
+applied to, with **8 known connections at Google** sitting unsearched. §Lessons 20 wrote the
+rule down and half of it was implemented.
+
+**A zero result now says WHICH zero it is.** `no candidates from apollo (coverage or plan/key)`
+named three unrelated problems and pointed at none; a missing API key printed the identical
+sentence as an unknown company, which cost a wrong diagnosis. Three distinct messages now, with
+a test that they cannot collapse back into one.
+
+### Colleagues and recruiters are separate searches (2026-08-04)
+
+Reported as "too many talent acquisition people". Measured against the live API on a Yahoo job:
+
+    blended query (role + recruiter titles)  ->  25 candidates, 0 peers, 25 recruiters
+    "AI Operations Strategist"               ->   0
+    "Strategist"                             ->  25 peers
+
+**A bespoke multi-word title matches nobody** — employers invent titles, Apollo indexes what
+people put on LinkedIn — so the recruiter titles took every slot and `select()` was choosing
+five recruiters out of five. **One query cannot produce a mix, because the provider decides the
+composition.** Two searches now, `OUTREACH_MIN_PEERS` / `OUTREACH_MIN_RECRUITERS` (4 each),
+results **interleaved** rather than scored into one list: the caller drops whoever fails
+verification, so front-loading four peers rebuilds the bug one step later.
+
+**`peer_titles()` widens from the FRONT** — "AI Operations Strategist" → "Operations
+Strategist" → "Strategist" — because English puts the qualifier first and the function last.
+It never widens to a bare rank ("Manager" is a level, not a role).
+
+**Every pasted job was titled `"{company} uploaded job"`** and nothing ever replaced it, so the
+peer search was looking for the word **"job"** and duly found people at Yahoo titled "Job",
+"Student Job" and "No job". `collect_detail_intelligence` had captured `page_title` since it was
+written and no caller had ever read it. The scrape now recovers the real role and overwrites
+**only** the placeholder. Backfilled 17 of 22 jobs; the 5 that failed are expired postings and
+auth walls, which is the honest answer.
 
 ## Correctness: verify + evals
 
@@ -833,6 +926,63 @@ company `"Jobs"` — the same substring bug class, inside the function written t
 
 ---
 
+47. **A defensive read turns a missing column into a plausible value.** The interview button was
+    reported broken three times. `dashboard_rows()` never SELECTed `interview_at`, so the
+    payload shipped `""` forever and every downstream branch was dead — no grey row, no chip,
+    no undo in the menu — while the WRITE worked perfectly and two live jobs carried a
+    timestamp. What hid it for two rounds:
+    `(row["interview_at"] if "interview_at" in row.keys() else "")`. Without that guard it
+    would have 500'd on the first render and been fixed in a minute. **A column the payload
+    needs belongs in the SELECT; if it is absent, crash.** Both earlier "fixes" — moving the
+    button, changing the grey — were real improvements to code that was never running.
+
+48. **A correct grep can support a wrong inference.** The same ticket claimed the follow-up
+    ladders never stop, because `interview_at` appears in ZERO Python follow-up paths. True,
+    and the conclusion was wrong: the stopping is imperative at mark time in
+    `_mark_interview`, and more careful than the replacement written for it — it halts only
+    channels with a real ladder. The duplicate also resurrected a sequence stopped by a REPLY,
+    contradicting a tested decision. Two existing tests killed it on the first run. **Grep
+    proves where a string is, not what the code does.**
+
+49. **A rule implemented at one of its two call sites is not implemented.** §Lessons 20 wrote
+    down that a board name counts as the employer when `_company_owns_the_posting` agrees.
+    `derive_company` step 1 applied it to a stored name; `_host_label` never did. So
+    `google.com/about/careers` resolved to no employer at all, on a job already applied to,
+    with **8 known connections at Google** never searched. The rule had been written down for
+    six days.
+
+50. **Zero meant "unlimited" in two settings and "send nothing" in a third.** Asked to remove
+    the outreach caps. `_COMPANY_CAP` was guarded by `> 0` and a zero-day cooldown matches
+    nothing — but the daily limit compared `sent_today() >= 0`, which is true before the first
+    email of the day. Setting it to 0 to turn the limit OFF would have blocked every send, and
+    the refusal would have read *"daily send limit reached (0)"* — a message describing a cap
+    that had just been switched off.
+
+51. **A failure is not a verdict.** Reported as "the pipeline is fully broken" on a posting that
+    scraped clean 90 seconds later: **13,602 characters, 5.1s, tier 1**. One 45-second timeout
+    had stamped `detail_scraped_at`, which is what `queue_needing_detail` uses to decide a row
+    is done — so a network blip retired a job permanently, and the run reported returncode 0.
+    §Lessons 44's twin: that fix routed the empty-description case INTO a branch that was
+    itself a dead end. Transient failures now stay queued; and **one run may only spend part of
+    the retry budget**, or a thirty-second outage retires the entire queue at once.
+
+52. **An ATS tenant slug is not the employer's name.** "There's no way Apollo has no contacts
+    for Yahoo" — Apollo was right. The job was stored as **Ouryahoo**, read off
+    `ouryahoo.wd5.myworkdayjobs.com`, and no such company exists. Slugs are chosen by an HR
+    team and wrap the real name (`ouryahoo`, `WellsFargoJobs`, `acme-external`). Trimming
+    affixes blind is not acceptable — **OurCrowd is a real company** — so a variant is accepted
+    only when the posting's own text names it as a WHOLE WORD. The first version tested
+    `variant in text` and produced "Crowd", which is §Lessons 1 inside the function written to
+    respect it, and worse than the bug it fixed: it would have mailed strangers with more
+    confidence than the wrong name had.
+
+53. **A blended query cannot produce a mix, because the provider decides the composition.**
+    "Too many talent acquisition people" — measured, the one query asking for the role title OR
+    recruiter titles returned **25 recruiters and 0 peers**, because a bespoke multi-word title
+    matches nobody. The ranking stage was then choosing five recruiters out of five and doing
+    exactly what it was told. Two searches with a minimum each, INTERLEAVED — front-loading one
+    side rebuilds the imbalance as soon as verification drops anyone.
+
 ## The CRM phase (2026-07-30, branch `crm-phase-1`)
 
 Shipped in one session, in this order: **CRM-3a → CRM-1 → CRM-2 → CRM-3b → CRM-4a.**
@@ -981,6 +1131,35 @@ nothing. `git checkout <old-commit> -- netlify/functions/` is the obvious move a
 **Never open your own `/intro/<name>` link** — it records that person opening the deck. Any
 made-up name returns 200 and matches nobody.
 
+## Sign-in walls are a per-EMPLOYER cost (2026-08-03)
+
+**5 of the first 19 applications died at one** — Arm, Salesforce, Deloitte, Google, Yahoo — and
+every one was treated as a per-JOB failure. It is not. **An account is per ATS tenant**: one
+Salesforce Workday account covers every Salesforce job forever, and Greenhouse, Lever and Ashby
+need none at all.
+
+| | |
+|---|---|
+| `domain/authrealm.py` | URL → the realm one account covers. Pure. |
+| `repo/accounts.py` | `ats_accounts`. `kind` (does this site wall you) is separate from `have_account` (do we have one) — a registration and an expired session look identical in the browser and are not the same problem. |
+| `apply/accounts.py` | `preflight()` before the agent launches; `note_wall()` learns from one. |
+| `apply/profile_scan.py` | Reads the apply browser for evidence. **Never reads a password value** — the queries select `origin_url` and the column name appears nowhere in the file. |
+
+**Seeded from the browser, which already knew.** Saved credentials proved accounts at Google,
+Yahoo and Salesforce — three of the five employers that had blocked an application — and
+nothing had ever asked. **Cookies are NOT accepted as proof**: Workday sets one on an anonymous
+job view, so a cookie is a hint to ask the operator about, never an answer (§Lessons 34).
+
+**`preflight` skips the launch entirely** when a realm needs an account we do not have. Before
+it, that discovery cost a Chrome launch, a Claude run and 59 seconds — repeated for every job at
+the same employer, because the finding was recorded on the JOB.
+
+**The apply profile no longer carries credentials.** `chrome.py:setup_worker_profile` copies the
+operator's real Chrome profile, which is how sessions persist — and was also copying **682 saved
+passwords, 2 credit cards and 831 autofill entries** into the browser the agent drives with
+`bypassPermissions` on attacker-controlled careers pages. Excluded from the copy and purgeable
+from the Accounts panel. **Cookies stay**, so no wall is paid twice.
+
 ## The human-in-the-loop apply model (2026-07-30)
 
 **The agent never submits. The operator always does.** Every path ends at `Mark submitted ✓`.
@@ -1061,7 +1240,17 @@ What the ARCH set *did* buy became visible immediately afterwards: the first rea
 apply surfaced three bugs (§Lessons 8–10), and every one was diagnosable in minutes because
 the data layer, the query budget and the validators existed to measure against.
 
-`docs/crm-prd.md` — the multi-campaign "Spaces" direction. **After** the above.
+**`docs/spaces-prd.md` is the current plan** (v2, 2026-08-04): three templates, two shapes,
+N identities. Job search, business outreach and a business CRM — the last two are the SAME
+machine, so the third template is a config row, not a build. The expensive part is identity:
+`TOKEN_PATH` is one file, from/signature are global env vars, `INTRO_DECK_URL` is one site.
+`SPACE-0` (archive terminal rows) is independent and ships first.
+
+`docs/crm-prd.md` is the larger person-as-root version of the same idea. Not superseded — it is
+the upgrade path §11 of the Spaces PRD points at. Do the graph when a real question needs it.
+
+`docs/tickets/UX-README.md` — six dashboard defects reported 2026-08-04, **all six shipped**.
+Three were the same failure: a value one layer computes that the other cannot see.
 
 ## Known debt
 
@@ -1095,11 +1284,11 @@ What is actually open now, ordered by leverage:
    that eventually gets closed by a restart. A tab-title badge is near-free and covers most of
    it; a desktop notification behind an opt-in toggle covers the rest.
 
-3. **`derive_company` returns None for some employers' own careers sites.** `google.com/about/
-   careers/...` and a bare uploaded URL both import as **"Uploaded uploaded job"**, and the
-   résumé and cover letter are then written against a company called "Uploaded". §Lessons 20's
-   table says that host should resolve to Google. Found 2026-08-03, not fixed. This is the
-   highest-value small bug open.
+3. ~~**`derive_company` returns None for some employers' own careers sites.**~~ **CLOSED
+   2026-08-04** — §Lessons 49. Kept for the shape: the rule had been written down in §Lessons
+   20 for six days and was implemented at one of its two call sites, so a job already applied
+   to had 8 known connections at Google sitting unsearched. Fixing it, plus the tenant-slug and
+   `.edu` bugs, took contacts from **66 to 185**.
 
 4. **15 modules still execute SQL directly** (was 21) — `apply/launcher.py`,
    `enrichment/detail.py`, `view.py`, `cli.py`, `pipeline.py`, the three discovery scrapers,
@@ -1107,14 +1296,15 @@ What is actually open now, ordered by leverage:
    `test_sql_lives_only_in_the_data_layer` names the remainder in an allowlist, so the list can
    only shrink and no NEW module can join it. Deliberately deferred; see ARCH-4's ticket.
 
-5. **`web_dashboard.py` is 2,900 lines**, all Python, zero SQL. ~430 lines are pipeline
+5. **`web_dashboard.py` is 3,141 lines**, all Python, zero SQL. ~430 lines are pipeline
    orchestration (`run_dashboard_prepare/apply/fill_one/restart/continue`) that are not HTTP
    concerns. Extracting them is the natural companion to debt item 1.
 
 6. ~~**No per-company outreach cap.**~~ **CLOSED 2026-08-03** (`OUTREACH_COMPANY_CAP`, default
    8). Kept for the number: six companies were already OVER the cap the moment it shipped, three
    of them at 10 emails. Nothing had counted per employer, because the daily limit is global and
-   the cooldown is per address.
+   the cooldown is per address. **All three caps are set to 0 (unlimited) on this machine since
+   2026-08-04, deliberately** — see §Lessons 50 for what 0 used to mean.
 
 7. **`@react-pdf` is a major version behind** (3.4.5 installed, 4.5.1 current). The textkit
    layout crash in §Lessons 10 may be fixed upstream; the renderer now survives it either way,
@@ -1156,9 +1346,19 @@ hook, including 5 benign edits that must NOT be blocked — a noisy guard gets `
 of habit. It found a bug in itself on first use: the `PRIVATE KEY` pattern starts with `-`, so
 grep parsed it as an option and that check had never run.
 
+**The apply browser no longer carries credentials** (2026-08-03). `setup_worker_profile` was
+copying the operator's whole Chrome profile — **682 saved passwords, 2 credit cards, 831
+autofill entries**, including a bank and an Apple ID — into the browser the agent drives with
+`bypassPermissions` on attacker-controlled careers pages. `Login Data`, `Web Data` and the
+autofill databases are excluded from the copy and purgeable from the Accounts panel. **Cookies
+stay**, so sessions persist and no sign-in wall is paid twice. `apply/profile_scan.py` never
+reads a password VALUE — its queries select `origin_url`, and the column name appears nowhere
+in the file, which is a property a reader can check rather than an intention.
+
 **What remains genuinely exposed:** the token is unencrypted on disk (`chmod 600` + FileVault
 is the whole protection, so anything running as this user can read it), and the DB now holds
-correspondence snippets. Kill switch: <https://myaccount.google.com/permissions>.
+correspondence snippets — including, since UX-2, pasted LinkedIn messages. Kill switch:
+<https://myaccount.google.com/permissions>.
 
 ## Environment (this machine)
 
@@ -1226,8 +1426,8 @@ change still needs the `pip install` above — but that copy gives the file a ne
   Run the install alone, and verify with `python -c "import applypilot; print(applypilot.__version__)"`.
 - **Check for in-flight applies before ANY restart or reinstall.** The apply is a child of the
   dashboard, so it dies with the server. This happened three times on 2026-07-30 alone.
-- Working tree clean. **`main` is at `b3ff9f5`**; 7 commits ahead of it locally as of
-  2026-08-03 (ATS, interview, empty-scrape, renderer dashes).
+- Working tree clean; `main` pushed through **`4cad9dd`** (2026-08-04). Tags: `stable-arch2/3/5/6`
+  · `stable-e2e-20260730` · `stable-crm-20260731`.
 - **`applypilot ats`** is the fastest way to check a résumé is readable and see keyword gaps.
 - **All 28 existing résumé PDFs carry an em dash** from the old renderer and need a re-render;
   nothing rewrites a PDF in place.

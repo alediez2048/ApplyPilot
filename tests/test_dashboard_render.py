@@ -1109,3 +1109,29 @@ def test_a_person_with_no_engagement_says_so(tmp_path):
     signals land here by themselves (§Lessons 41)."""
     card = _ux1(tmp_path, _ux1_job(), _ux1_contact())["card"]
     assert "ix-block" in card and "ix-row empty" in card
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node not available")
+def test_last_interaction_renders_on_the_collapsed_row(tmp_path):
+    """On the collapsed row deliberately (§Lessons 27) — a state you must expand a job to
+    discover goes unnoticed for days. And inbound must be visually distinct from outbound:
+    same age, opposite situations."""
+    j_in = _ux1_job(last_interaction={"at": "2026-08-03T10:00:00+00:00", "kind": "replied",
+                                      "direction": "in", "who": "Sarah",
+                                      "label": "Sarah replied"})
+    j_out = _ux1_job(last_interaction={"at": "2026-08-03T10:00:00+00:00", "kind": "sent",
+                                       "direction": "out", "who": "Sarah",
+                                       "label": "You emailed Sarah"})
+    got_in = _ux1(tmp_path, j_in, _ux1_contact())
+    got_out = _ux1(tmp_path, j_out, _ux1_contact())
+    script = tmp_path / "strip.mjs"
+    script.write_text(_STUBS + f"const SRC = {json.dumps(_page_js())};\n"
+                      + "const F = (new Function(SRC + `; return { stepStrip };`))();\n"
+                      + f"const A = {json.dumps(j_in)};\nconst B = {json.dumps(j_out)};\n"
+                      + "console.log(JSON.stringify({a: F.stepStrip(A), b: F.stepStrip(B)}));")
+    out = json.loads(subprocess.run(["node", str(script)], capture_output=True, text=True,
+                                    timeout=60).stdout.strip().splitlines()[-1])
+    assert "Sarah replied" in out["a"], "last interaction is not on the row"
+    assert "lastix in" in out["a"], "an inbound event is not marked as inbound"
+    assert "lastix out" in out["b"], "an outbound event is not marked as outbound"
+    assert got_in and got_out

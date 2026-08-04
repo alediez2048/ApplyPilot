@@ -814,6 +814,11 @@
   .sync-gm.off code { font-style:normal; background:var(--surface2); padding:0 4px; border-radius:3px; }
   .sync-note { color:#046c3c; }
   .sync-note.bad { color:#92400e; }
+  /* Last interaction (UX-3). Inbound carries weight; outbound is context. The asymmetry IS
+     the information — same age, opposite situations. */
+  .lastix { font-size:11.5px; white-space:nowrap; padding:0 10px; color:var(--faint); }
+  .lastix.in { color:var(--accent); font-weight:600; }
+
   /* LinkedIn messages, typed in. `messages` is Gmail-keyed and cannot hold a DM (UX-2). */
   .li-thread { margin-bottom:10px; }
   .li-msg { border-left:3px solid var(--line2); padding:4px 0 4px 9px; margin:5px 0; }

@@ -1652,6 +1652,9 @@ def _status_payload() -> dict:
             "conversations": job_threads,
             "awaiting_reply": _awaiting_us(contacts),
             "introductions": _pending_introductions(job_threads, raw_contacts),
+            # When something last happened, and who did it (UX-3). Derived from data already
+            # loaded above — no query of its own on a 2.5s path.
+            "last_interaction": _last_interaction(row, contacts, job_ladders),
             "activity": _job_activity(row["url"], conn),
             "network_running": bool(net_task.get("running")),
             "network_note": net_task.get("note") or "",
@@ -1904,6 +1907,16 @@ def _sync_all_gmail(data: dict) -> dict:
                   f"Pulled {res['messages']} message(s) across {res['threads']} Gmail "
                   f"conversation(s) with {contact.get('full_name') or cid}.", conn)
     return res
+
+
+def _last_interaction(row, contacts: list, ladders: dict | None) -> dict | None:
+    """UX-3. Never raises into the payload — a missing timestamp must not blank the table."""
+    from applypilot.domain.lastinteraction import last_interaction
+    try:
+        return last_interaction({"applied_at": row["applied_at"] or ""}, contacts, ladders)
+    except Exception:  # noqa: BLE001
+        log.debug("Could not derive last interaction", exc_info=True)
+        return None
 
 
 def _attach_interactions(job_url: str, contacts: list, conn) -> None:

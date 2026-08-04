@@ -2020,9 +2020,39 @@ function stepStrip(j) {
   return `<div class="strip">
       <button class="strip-toggle" onclick="onPanelToggle(${u})" title="${open ? 'Collapse' : 'Open details'}">${open ? '▾' : '▸'}</button>
       <div class="steps">${steps}</div>
+      ${lastInteraction(j)}
       <div class="next">${na ? `<span class="next-label">Next</span>${na}` : `<span class="next-done">🏆 fully worked</span>`}${signinButton(j)}${interviewButton(j)}${restartButton(j)}${rowMenu(j)}</div>
     </div>${signinBar(j)}${hint ? `<div class="strip-hint">${hint}</div>` : ''}`;
 }
+// When something last happened, and WHO did it (UX-3).
+//
+// On the COLLAPSED row on purpose. The strip says how far a job has travelled and never said
+// when it last moved, and a state you must expand a job to discover goes unnoticed for days —
+// which is the whole argument of §Lessons 27.
+//
+// Direction is the information. "You emailed them 6 days ago" and "they replied 6 days ago"
+// are the same age and opposite situations: one is work done, the other is work owed. So
+// inbound gets weight and outbound is muted, rather than both being a grey timestamp.
+function lastInteraction(j) {
+  const li = j.last_interaction;
+  if (!li || !li.at) return '';
+  return `<span class="lastix ${li.direction === 'in' ? 'in' : 'out'}"
+    title="${esc(li.label)} — ${esc(fmtDate(li.at))}">${li.direction === 'in' ? '←' : '→'} ${esc(li.label)} · ${esc(agoShort(li.at))}</span>`;
+}
+
+// "2d", "3h", "just now" — a table row has no space for "2 days ago" next to everything else.
+function agoShort(iso) {
+  const t = Date.parse(iso);
+  if (!t) return '';
+  const mins = Math.max(0, (Date.now() - t) / 60000);
+  if (mins < 60) return 'just now';
+  const hrs = mins / 60;
+  if (hrs < 24) return `${Math.floor(hrs)}h ago`;
+  const days = hrs / 24;
+  if (days < 30) return `${Math.floor(days)}d ago`;
+  return `${Math.floor(days / 30)}mo ago`;
+}
+
 // The ONE thing to do next, in priority order. Returns '' when the job is fully worked.
 function nextAction(j) {
   const u = `decodeURIComponent('${encodeURIComponent(j.url)}')`;

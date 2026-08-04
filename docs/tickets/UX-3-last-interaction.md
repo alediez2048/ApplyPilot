@@ -1,6 +1,6 @@
 # UX-4 — "Last interaction" on the row
 
-**Size:** M (~half a day) · **Depends on:** UX-2 (LinkedIn events feed it) · **Status:** Todo
+**Size:** M · **Depends on:** UX-2 (LinkedIn events feed it) · **Status:** DONE 2026-08-04
 
 ## Diagnosis
 
@@ -29,20 +29,36 @@ timestamp with no direction is the flat-count mistake the 🔔 counter already a
 
 ## Scope / tasks
 
-- [ ] `domain/lastinteraction.py` — pure. In: job + contacts + touches + messages +
-      interactions. Out: `{at, kind, direction: 'in'|'out', who, label}`.
-- [ ] Label reads as a sentence, not a field: *"Sarah replied · 2 days ago"*,
-      *"You followed up · 6 days ago"*, *"Applied · 12 days ago"*.
-- [ ] Render on the **collapsed** row, next to the status strip. A state you must expand a job
-      to discover is a state nobody sees for days (§Lessons 27).
-- [ ] Inbound gets visual weight; outbound is muted. The asymmetry IS the information.
-- [ ] Budget: one query per payload, joined in Python from data `/api/status` already loads.
-      `tests/test_query_budget.py` must not move.
+- [x] `domain/lastinteraction.py` — pure, asserted by a test that greps it for `sqlite3`,
+      `execute(` and any HTTP client.
+- [x] Reads as a sentence: *"Sarah replied · 2d ago"*, *"You invited Joshua on LinkedIn"*.
+      First name only — this sits on a table row, and "Sarah Chen-Okonkwo" does not fit.
+- [x] On the collapsed row, between the steps and Next.
+- [x] Inbound is accent-coloured and bold with a `←`; outbound is faint with a `→`.
+- [x] Zero extra queries — reuses the contact timeline `_attach_interactions` already builds
+      and the ladder states `_followup_panel` already loads. Query budget unmoved at 8 tests.
+
+### Two things the build turned up
+
+**Follow-ups are not in the interaction timeline.** `domain/interactions.for_contact` derives
+from contact COLUMNS; a follow-up lives in `touches`, keyed per (contact, channel). Without
+reading the ladders too, a job whose only recent activity was a third follow-up would report
+the original email from two weeks earlier. Pinned by a test.
+
+**Direction reuses `ix.ENGAGEMENT`** rather than listing kinds again. A signal cannot be
+"engagement" in one module and "our own action" in another, and a second list is the copy that
+falls behind — which is exactly what ARCH-3 removed for follow-up channels.
+
+### Live after the change
+
+20 of 22 jobs report one: 17 outbound, 3 inbound. The three inbound are the ones worth seeing —
+including a Zendesk contact whose profile view was the most recent thing that happened on
+that job and was previously invisible on the row.
 
 ## Tests
 
-- [ ] `test_it_reports_the_most_recent_event_across_all_sources` — one per source, shuffled.
-- [ ] `test_direction_is_carried` — an inbound and an outbound at the same instant render
-      differently. Assert the direction field, not the copy.
-- [ ] `test_a_job_with_no_contacts_still_reports_applied`.
-- [ ] `test_it_costs_no_extra_queries` — the budget test, unchanged.
+13 tests in `tests/test_last_interaction.py` plus a render test. Mutation-verified: dropping
+direction, ignoring `touches`, and removing it from the strip each kill a test.
+
+Includes the naive-timestamp case (§Lessons 6 — an unparseable value is dropped, never
+compared) and "it never invents a time": a row with no timestamp must not become "just now".

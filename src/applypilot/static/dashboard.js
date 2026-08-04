@@ -1246,7 +1246,48 @@ function emailChannel(c) {
     return followupCard(c, {touch: (c.followup_count || 0) + 1}, c.followup_total);
   return draftBlock(c, true);
 }
-function linkedinChannel(c) { return draftBlock(c, false, true) + noticedBox(c); }
+function linkedinChannel(c) {
+  return linkedinThread(c) + draftBlock(c, false, true) + noticedBox(c);
+}
+
+// The middle of the conversation. `dm_status` is 'sent'|'manual' — both meaning WE sent an
+// invite — so nothing recorded what THEY sent back, and `messages` cannot hold it: that table
+// is keyed on Gmail's own message id and carries thread_id, rfc_message_id and from_addr, none
+// of which a DM has. Faking them to fit would corrupt the join reply detection runs on.
+//
+// So these live in `interactions`, typed in. Nothing reads LinkedIn — automating it was
+// abandoned twice (§Lessons 3) and it risks the account the whole outreach ladder runs on.
+function linkedinThread(c) {
+  const msgs = (c.interactions || []).filter(r => r.kind === 'linkedin_in' || r.kind === 'linkedin_out');
+  const rows = msgs.slice().reverse().map(m => `
+    <div class="li-msg ${m.kind === 'linkedin_in' ? 'them' : 'us'}">
+      <div class="li-who">${m.kind === 'linkedin_in' ? esc(firstName(c.full_name)) : 'You'}
+        <span class="li-when">${esc(shortDate(m.at))}</span></div>
+      <div class="li-text">${esc(m.detail)}</div>
+    </div>`).join('');
+  return `<div class="li-thread">
+      <div class="d-label">LinkedIn messages${msgs.length ? '' : ' <span class="ix-none">none logged</span>'}</div>
+      ${rows}
+      <textarea class="li-paste" id="lip-${esc(c.id)}" rows="2"
+        placeholder="Paste what they wrote, or what you sent — LinkedIn cannot be read from here, so this is by hand."></textarea>
+      <div class="dbtns">
+        <button onclick="logLinkedinMsg('${esc(c.id)}','linkedin_in', this)">They messaged me</button>
+        <button onclick="logLinkedinMsg('${esc(c.id)}','linkedin_out', this)">I replied</button>
+        <span class="ix-why">Logging an inbound message stops the LinkedIn follow-up ladder.</span>
+      </div>
+    </div>`;
+}
+
+async function logLinkedinMsg(cid, kind, btn) {
+  const box = document.getElementById('lip-' + cid);
+  const detail = (box && box.value || '').trim();
+  if (!detail) { alert('Paste the message first.'); return; }
+  btn.disabled = true;
+  const r = await post('/api/contact/interaction', {contact_id: cid, kind, detail});
+  if (!r.ok) { btn.disabled = false; alert(r.message || 'Failed'); return; }
+  if (box) box.value = '';
+  refresh();
+}
 
 // What this person has actually DONE.
 //

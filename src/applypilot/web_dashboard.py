@@ -1814,13 +1814,39 @@ def _awaiting_us(contacts: list[dict]) -> list[dict]:
     somebody who replied outranks somebody who did not, and no ladder should be able to
     outshout them.
     """
+    from applypilot.domain import interactions as _ix
+
     out = []
     for c in contacts:
         conv = c.get("conversation") or {}
         if conv.get("state") == "awaiting_us":
             out.append({"id": c.get("id"), "full_name": c.get("full_name", ""),
                         "days": conv.get("days"), "hours": conv.get("hours")})
+            continue
+        # Somebody writing to you on LinkedIn is the same act as somebody writing to you by
+        # email, and it should reach the 🔔 counter the same way (UX-2). It is joined HERE and
+        # not by writing `replied_at`, which means specifically a DETECTED email reply and is
+        # what `metrics.by_variant` divides by — a typed-in number mixed into a measured one
+        # makes the copy experiment unreadable.
+        rows = c.get("interactions") or []
+        inbound = [r for r in rows if r.get("kind") == _ix.LINKEDIN_IN]
+        answered = [r for r in rows if r.get("kind") == _ix.LINKEDIN_OUT]
+        if inbound and (not answered or answered[0].get("at", "") < inbound[0].get("at", "")):
+            hrs = _hours_since(inbound[0].get("at", ""))
+            out.append({"id": c.get("id"), "full_name": c.get("full_name", ""),
+                        "days": int(hrs // 24) if hrs is not None else None,
+                        "hours": hrs, "channel": "linkedin"})
     return sorted(out, key=lambda r: -(r["hours"] or 0))
+
+
+def _hours_since(ts: str) -> float | None:
+    """Whole hours since an ISO timestamp, or None. Naive rows exist (§Lessons 6)."""
+    from applypilot.domain.timeutil import parse_ts
+    from datetime import datetime, timezone
+    when = parse_ts(ts)
+    if not when:
+        return None
+    return max(0.0, (datetime.now(timezone.utc) - when).total_seconds() / 3600)
 
 
 def _conversation_state(thread: list) -> dict | None:
@@ -1932,7 +1958,8 @@ def _log_interaction(data: dict) -> dict:
     kind = (data.get("kind") or "").strip()
     if not cid:
         return {"ok": False, "message": "contact_id required"}
-    if kind not in (_ix.PROFILE_VIEW, _ix.NOTE, _ix.BOOKED):
+    if kind not in (_ix.PROFILE_VIEW, _ix.NOTE, _ix.BOOKED,
+                    _ix.LINKEDIN_IN, _ix.LINKEDIN_OUT):
         return {"ok": False, "message": f"cannot log {kind!r} by hand"}
 
     conn = get_connection()
@@ -1942,14 +1969,28 @@ def _log_interaction(data: dict) -> dict:
         return {"ok": False, "message": "contact not found"}
 
     at = (data.get("at") or "").strip()
-    detail = (data.get("detail") or "").strip()
+    # Correspondence, in an unencrypted file. Capped at the same ceiling as a pasted email
+    # body, and capped at the WRITE — trimming at render time would leave the whole thing on
+    # disk, which is the opposite of the point.
+    from applypilot.networking.messages import PASTED_MAX
+    detail = (data.get("detail") or "").strip()[:PASTED_MAX]
+    if kind in (_ix.LINKEDIN_IN, _ix.LINKEDIN_OUT) and not detail:
+        return {"ok": False, "message": "paste the message first"}
     is_new = interactions_store.record(cid, kind, at=at, detail=detail, source="manual",
                                        job_url=contact.get("job_url") or "", conn=conn)
     who = contact.get("full_name") or cid
     if is_new:
         log_event(contact.get("job_url", ""), "outreach", "ok",
                   f"Noted: {who} — {_ix.LABEL.get(kind, kind)}"
-                  + (f" ({detail})" if detail else "") + ".", conn)
+                  + (f" ({detail[:120]})" if detail else "") + ".", conn)
+    # An inbound LinkedIn message halts that ladder, exactly as a detected email reply halts
+    # the email one. Reusing `sequences` rather than adding a second terminal-state mechanism:
+    # one engine already decides whether a ladder is live, and `tick` reads it.
+    if is_new and kind == _ix.LINKEDIN_IN:
+        from applypilot.networking import touches as _t
+        _t.init_touches(conn)
+        _t.set_sequence_status(cid, "linkedin", "replied",
+                               note="they messaged on LinkedIn", conn=conn)
     return {"ok": True, "message": f"Noted for {who}." if is_new else "Already recorded."}
 
 

@@ -814,6 +814,17 @@
   .sync-gm.off code { font-style:normal; background:var(--surface2); padding:0 4px; border-radius:3px; }
   .sync-note { color:#046c3c; }
   .sync-note.bad { color:#92400e; }
+  /* LinkedIn messages, typed in. `messages` is Gmail-keyed and cannot hold a DM (UX-2). */
+  .li-thread { margin-bottom:10px; }
+  .li-msg { border-left:3px solid var(--line2); padding:4px 0 4px 9px; margin:5px 0; }
+  .li-msg.them { border-left-color:var(--accent); }
+  .li-who { font-size:11px; font-weight:600; color:var(--soft); }
+  .li-msg.them .li-who { color:var(--accent); }
+  .li-when { font-weight:400; color:var(--faint); margin-left:6px; font-variant-numeric:tabular-nums; }
+  .li-text { font-size:12px; color:var(--text); white-space:pre-wrap; margin-top:2px; }
+  .li-paste { width:100%; font-size:12px; padding:6px 8px; border:1px solid var(--line2);
+    border-radius:5px; font-family:inherit; resize:vertical; margin-top:4px; }
+
   /* Engagement, on the person. Was a job-level tab; the tab is gone (UX-1), the ledger is not. */
   .ix-block { border-top:1px solid var(--line); margin-top:10px; padding-top:9px; }
   .ix-none { font-size:11px; color:var(--faint); font-style:italic; font-weight:400; }

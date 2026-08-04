@@ -27,12 +27,23 @@ from __future__ import annotations
 #: read (you cannot tell a fast reply from a slow one), but it never counts as a signal.
 BOOKED, REPLIED, DECK, PROFILE_VIEW, CONNECTED, SENT, NOTE = (
     "booked", "replied", "deck", "profile_view", "connected", "sent", "note")
+#: A LinkedIn message, either direction, typed in by the operator (UX-2). There is nowhere else
+#: for these: `messages` is keyed on Gmail's own message id and carries `thread_id`,
+#: `rfc_message_id` and `from_addr`, none of which a DM has — inventing them to fit would
+#: corrupt the join reply detection runs on. And `contacts.dm_status` is 'sent'|'manual', both
+#: meaning WE sent an invite, so nothing recorded what they sent back.
+LINKEDIN_IN, LINKEDIN_OUT = "linkedin_in", "linkedin_out"
 
-WEIGHT = {BOOKED: 5, REPLIED: 4, PROFILE_VIEW: 3, DECK: 2, CONNECTED: 0, SENT: 0, NOTE: 0}
+#: `LINKEDIN_IN` sits with REPLIED: someone writing to you on LinkedIn is the same act as
+#: someone writing to you by email, and it is the strongest signal short of booking time.
+WEIGHT = {BOOKED: 5, REPLIED: 4, LINKEDIN_IN: 4, PROFILE_VIEW: 3, DECK: 2,
+          CONNECTED: 0, SENT: 0, LINKEDIN_OUT: 0, NOTE: 0}
 
 LABEL = {
     BOOKED: "Booked a call",
     REPLIED: "Replied",
+    LINKEDIN_IN: "Messaged you on LinkedIn",
+    LINKEDIN_OUT: "You replied on LinkedIn",
     DECK: "Opened the intro deck",
     PROFILE_VIEW: "Viewed your LinkedIn profile",
     CONNECTED: "You sent a LinkedIn invite",
@@ -40,8 +51,8 @@ LABEL = {
     NOTE: "Note",
 }
 
-ICON = {BOOKED: "📅", REPLIED: "💬", DECK: "👁", PROFILE_VIEW: "🔗", CONNECTED: "🤝",
-        SENT: "✉", NOTE: "📝"}
+ICON = {BOOKED: "📅", REPLIED: "💬", LINKEDIN_IN: "🔗", LINKEDIN_OUT: "↪", DECK: "👁",
+        PROFILE_VIEW: "🔗", CONNECTED: "🤝", SENT: "✉", NOTE: "📝"}
 
 #: Signals that mean the PERSON did something. Our own actions are context, not engagement.
 #:
@@ -51,7 +62,19 @@ ICON = {BOOKED: "📅", REPLIED: "💬", DECK: "👁", PROFILE_VIEW: "🔗", CON
 #: contact engaged the moment an invite went out: three live jobs read "3/3 engaged", "5/5
 #: engaged" before anyone had done a thing, which is a tab that answers its own question with
 #: yes and is therefore worth nothing.
-ENGAGEMENT = (BOOKED, REPLIED, DECK, PROFILE_VIEW)
+ENGAGEMENT = (BOOKED, REPLIED, LINKEDIN_IN, DECK, PROFILE_VIEW)
+
+#: They wrote to us, on any channel. Separate from `replied_at`, which means specifically a
+#: DETECTED email reply and is what `metrics.by_variant` divides by — mixing a typed-in number
+#: into a measured one makes the copy experiment unreadable. The 🔔 counter joins the two;
+#: the reply RATE does not.
+INBOUND = (REPLIED, LINKEDIN_IN)
+
+
+def has_inbound(rows: list[dict] | None) -> bool:
+    """True if this person has written to us on any channel. Reads a rendered timeline, so it
+    needs no new column and cannot drift from one."""
+    return any(r.get("kind") in INBOUND for r in (rows or []))
 
 
 def _row(kind: str, at: str, detail: str = "", source: str = "detected") -> dict:

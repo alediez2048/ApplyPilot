@@ -534,7 +534,8 @@ def draft_for_channel(channel: str, profile: dict, job: dict, contact: dict,
     """
     if channel == "linkedin":
         return {"subject": "", "body": draft_linkedin_followup(
-            profile, job, contact, touch=touch, style=style)["message"]}
+            profile, job, contact, touch=touch, style=style,
+            messages=contact.get("interactions"))["message"]}
     if channel == "sms":
         return {"subject": "", "body": draft_sms(
             profile, job, contact, touch=touch, style=style, thread=thread)["message"]}
@@ -717,13 +718,33 @@ def draft_reply(profile: dict, job: dict, contact: dict, thread: list | None = N
     return {"subject": out_subject, "body": body, "intent": label["intent"]}
 
 
+def _li_state(contact: dict, sent_on: str, messages: list | None) -> str:
+    """What is actually true about this LinkedIn conversation, in one line for the prompt."""
+    logged = [m for m in (messages or []) if m.get("kind") in ("linkedin_in", "linkedin_out")]
+    if not logged:
+        return (f"They accepted the invite{f' around {sent_on}' if sent_on else ''} "
+                f"and have not replied.")
+    lines = "\n".join(
+        f"  {'THEM' if m.get('kind') == 'linkedin_in' else 'YOU'}: "
+        f"{(m.get('detail') or '')[:400]}"
+        for m in reversed(logged))
+    return ("You have already exchanged messages on LinkedIn. Do NOT re-introduce yourself and "
+            "do NOT repeat anything below:\n" + lines)
+
+
 def draft_linkedin_followup(profile: dict, job: dict, contact: dict, touch: int = 1,
-                            style: str = "") -> dict:
+                            style: str = "", messages: list | None = None) -> dict:
     """Draft LinkedIn follow-up #`touch` for a contact who connected but went quiet.
 
     Returns {"message": str}. This is a DIRECT MESSAGE to an existing 1st-degree
     connection, so the 300-char connection-note cap does NOT apply, but brevity still
     matters far more than in email, because it lands in a chat window.
+
+    `messages` is the operator-logged LinkedIn exchange (UX-2). Without it this prompt states
+    "they have not replied" unconditionally — which is a claim, not an observation, and becomes
+    false the moment anything is logged. Two instructions in one prompt disagreeing is a code
+    bug, not a wording problem (§Lessons 40): the fix is to describe the actual state, not to
+    say the other side louder.
     """
     role = job.get("title") or "the role"
     company = contact.get("company") or job.get("company") or job.get("site") or "the company"
@@ -738,7 +759,7 @@ def draft_linkedin_followup(profile: dict, job: dict, contact: dict, touch: int 
         f"ROLE APPLIED FOR: {role}\n"
         f"CONNECTION NOTE THEY ALREADY READ (do NOT repeat it):\n"
         f"{(contact.get('linkedin_message') or '')[:400]}\n"
-        f"They accepted the invite{f' around {sent_on}' if sent_on else ''} and have not replied.\n\n"
+        f"{_li_state(contact, sent_on, messages)}\n\n"
         f"THIS MESSAGE: {intent}\n\n"
         + (f"INTRO DECK LINK (include it): {deck}\n"
            "This is a DM to an existing connection, so a link is fine here, LinkedIn only "

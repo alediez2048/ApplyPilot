@@ -140,6 +140,23 @@ def queue_for_apply(limit: int, max_attempts: int,
         "ORDER BY discovered_at DESC, rowid DESC LIMIT ?", (max_attempts, limit)).fetchall())
 
 
+def all_descriptions(conn: sqlite3.Connection | None = None) -> dict[str, str]:
+    """{url: full_description} for every operator-added job, in ONE query.
+
+    Search needs the whole text — `/api/status` ships a 900-char excerpt, so a term in
+    paragraph six of a posting was unfindable. Shipping the full text on that payload instead
+    would add ~130KB to a refresh that runs every 2.5 seconds, for a field used only while
+    typing. Fetched once per session on the first search instead (UX-6).
+    """
+    rows = _c(conn).execute(
+        f"SELECT url, full_description FROM jobs WHERE {QUEUE_SQL}").fetchall()
+    out = {}
+    for r in rows:
+        text = (r["full_description"] or "").strip()
+        out[r["url"]] = "" if text.lower() == "null" else text
+    return out
+
+
 def dashboard_rows(limit: int = 500, conn: sqlite3.Connection | None = None) -> list:
     """The main table. Returns raw Rows — the caller reads columns by name and the
     ordering below is UI precedence, not a data rule."""

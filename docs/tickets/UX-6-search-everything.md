@@ -1,6 +1,6 @@
 # UX-6 — Search that finds contacts and full descriptions
 
-**Size:** S (~3h) · **Depends on:** nothing · **Status:** Todo
+**Size:** S · **Depends on:** nothing · **Status:** DONE 2026-08-04
 **Reported:** 2026-08-04 ("only filtering by job name")
 
 ## Diagnosis
@@ -43,23 +43,32 @@ excerpt, which is what it does today.
 
 ## Scope / tasks
 
-- [ ] Add contacts to the haystack: `full_name`, `title`, `email`, `company`.
-- [ ] **Say what matched.** When a job matches only via a contact, the row should show
-      *"matched: Sarah Chen"* — otherwise it looks like a bug, since the visible row contains
-      none of the search text.
-- [ ] Lazy full-description cache per option (c), keyed by URL, invalidated on refresh only if
-      the description changed.
-- [ ] Keep the AND-across-terms behaviour: `google engineer` means both.
-- [ ] Leave the search box as STATIC markup. `refresh()` replaces `#jobs` wholesale every
-      2.5s; anything rendered into the toolbar is destroyed mid-keystroke (already documented
-      in `index.html`).
+- [x] Contacts in the haystack: `full_name`, `title`, `email`, `company`.
+- [x] `matchedVia(j)` renders *"matched: Sarah Chen"* under the title, and ONLY when the row
+      matched through a person — a row matched on its own fields must not claim one.
+- [x] Option (c): `/api/job-descriptions` returns every posting in ONE query, fetched once per
+      session on the first keystroke, into the `JOB_DESC` map the Job tab already uses.
+      Measured live: **22 descriptions, 132KB, one request** — which is exactly the number
+      option (a) would have added to every 2.5-second refresh, forever.
+- [x] AND is now per TERM rather than per field: a term may be satisfied by the job OR by any
+      one person, so `saronic sarah` matches even though no single field holds both. Adding a
+      word still only ever narrows.
+- [x] Search box untouched; still static markup.
+
+### It degrades to the old behaviour, not to nothing
+
+Until the warm-up lands, search covers the 900-char excerpt — which is what it did before. A
+failed fetch resets the guard so the next keystroke retries.
 
 ## Tests
 
-- [ ] `test_search_matches_a_contact_name` — the reported case.
-- [ ] `test_search_matches_deep_in_a_full_description` — a term past the 900-char excerpt.
-- [ ] `test_a_contact_match_says_so` — assert the "matched:" element EXISTS, not that some copy
-      is right (§Lessons 41).
-- [ ] `test_search_does_not_refetch_status` — typing must not hit `/api/status`; it re-filters
-      `LAST_JOBS` (§Lessons 11, 26 — 50 SQL statements behind a keystroke).
-- [ ] `test_the_query_budget_does_not_move`.
+7 new tests in `tests/test_job_tags_and_search.py`, all running the real functions under node.
+Mutation-verified: dropping contacts from the haystack, dropping the cached description,
+removing the matched-via chip, and calling `refresh()` on every keystroke each kill a test.
+
+`test_typing_never_refetches_the_status_payload` counts actual `fetch` calls across four
+keystrokes: zero to `/api/status`, at most one to the bulk endpoint. §Lessons 11 and 26 — 50
+SQL statements behind a keystroke.
+
+`test_the_bulk_description_endpoint_is_one_query` also pins that the literal string `"null"`,
+which scrapers write, never reaches search as text.

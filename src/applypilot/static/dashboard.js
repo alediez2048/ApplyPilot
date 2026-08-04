@@ -360,19 +360,73 @@ function jobMatchesTags(j) {
 // Search covers what is ON the row plus the description, because "the one about the drone
 // startup" is how you actually remember a job. Every term must match somewhere (AND), so
 // adding a word always narrows.
-function jobMatchesQuery(j) {
+// Search covered nine fields and never looked at CONTACTS — so a recruiter's name returned
+// nothing while the dashboard was displaying that name one click away. It also searched
+// `j.description`, which is a 900-char EXCERPT, so a term in paragraph six of a posting was
+// unfindable. Both were reported as "it only filters by job name".
+//
+// Returns WHY it matched, not just whether: a row whose visible text contains none of the
+// search terms looks like a bug unless it says "matched: Sarah Chen".
+function jobSearchMatch(j) {
   const q = JOB_QUERY.trim().toLowerCase();
-  if (!q) return true;
-  const hay = [j.title, j.company, j.location, j.salary, j.description, j.status,
-               j.url, j.application_url, ...jobTags(j).map(t => t.value)]
+  if (!q) return { hit: true, via: [] };
+  const terms = q.split(/\s+/);
+  const jobHay = [j.title, j.company, j.location, j.salary, j.description, j.status,
+                  j.url, j.application_url, JOB_DESC.get(j.url) || '',
+                  ...jobTags(j).map(t => t.value)]
     .filter(Boolean).join(' ').toLowerCase();
-  return q.split(/\s+/).every(term => hay.includes(term));
+
+  const people = (j.contacts || []).map(c => ({
+    name: c.full_name || '',
+    hay: [c.full_name, c.title, c.email, c.company].filter(Boolean).join(' ').toLowerCase(),
+  }));
+
+  // AND across terms, but a term may be satisfied by the job OR by any one person — otherwise
+  // "google sarah" fails, since no single field holds both.
+  const via = new Set();
+  for (const term of terms) {
+    if (jobHay.includes(term)) continue;
+    const who = people.filter(p => p.hay.includes(term));
+    if (!who.length) return { hit: false, via: [] };
+    who.forEach(p => { if (p.name) via.add(p.name); });
+  }
+  return { hit: true, via: [...via] };
+}
+
+function jobMatchesQuery(j) { return jobSearchMatch(j).hit; }
+
+// Why this row is here, when nothing visible on it contains what was typed. Searching a
+// recruiter's name and getting back a list of jobs that do not mention them reads as broken
+// unless the row says which person matched.
+function matchedVia(j) {
+  const via = jobSearchMatch(j).via;
+  if (!via.length) return '';
+  return `<div class="matched-via">matched: ${esc(via.slice(0, 3).join(', '))}${via.length > 3 ? ` +${via.length - 3}` : ''}</div>`;
+}
+
+// One request, once per session, the first time anything is typed. The two rejected options
+// were shipping every full description on the 2.5s refresh (~130KB forever) and a round trip
+// per keystroke-batch. Until it lands, search covers the excerpt — which is what it did
+// before, so it degrades to the old behaviour rather than to nothing.
+let JOB_DESC_LOADED = false;
+async function warmDescriptions() {
+  if (JOB_DESC_LOADED) return;
+  JOB_DESC_LOADED = true;
+  const r = await post('/api/job-descriptions', {});
+  if (!r.ok) { JOB_DESC_LOADED = false; return; }
+  for (const [url, text] of Object.entries(r.descriptions || {})) {
+    if (!JOB_DESC.has(url)) JOB_DESC.set(url, text || '');
+  }
+  rerenderJobs();
 }
 
 function onJobSearch(v) {
   JOB_QUERY = v || '';
   const clear = document.getElementById('jobSearchClear');
   if (clear) clear.hidden = !JOB_QUERY;
+  // Never refetch /api/status while typing — that path is 50 SQL statements (§Lessons 11, 26).
+  // This is a different endpoint, guarded to run at most once.
+  if (JOB_QUERY) warmDescriptions();
   rerenderJobs();
 }
 function clearJobSearch() {
@@ -1827,7 +1881,7 @@ function renderJobsTable(allJobs, editing) {
     return `
     <tr class="${j.interview_at ? 'row-won' : ''}">
       <td class="status-cell"><div class="status-head">${badge(j.status)}${j.interview_at ? ` <span class="won-chip" title="Interview scheduled ${esc(fmtDate(j.interview_at))}">🎯 interview</span>` : ''}</div>${j.status === 'rejected' && j.rejected_at ? `<div class="rejected-on">Rejected ${fmtDate(j.rejected_at)}</div>` : (j.applied_at ? `<div class="applied-on">Applied ${fmtDate(j.applied_at)}</div>` : '')}</td>
-      <td class="job-cell"><div class="job-title">${esc(j.title)}</div><div class="job-co">${esc(j.company)}</div></td>
+      <td class="job-cell"><div class="job-title">${esc(j.title)}</div><div class="job-co">${esc(j.company)}</div>${matchedVia(j)}</td>
       <td class="desc"><div class="desc-text">${esc(j.description)}</div></td>
       <td class="tags-cell">${jobTags(j).map(t =>
         `<button class="tag-chip${TAG_FILTER.has(t.k) ? ' on' : ''}" onclick="event.stopPropagation();toggleTag(${tagArg(t.k)})" title="Filter by ${esc(t.value)}">${esc(t.label)}</button>`

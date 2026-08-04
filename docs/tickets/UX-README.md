@@ -7,12 +7,14 @@ different tickets to the two of us.
 
 | # | Ticket | Size | Kind | Status |
 |---|---|---|---|---|
-| 1 | `UX-1` retire the Interactions tab | S | cleanup | Todo |
-| 2 | `UX-2` log a LinkedIn message | M | gap | Todo |
-| 3 | `UX-3` last interaction on the row | M | gap | Todo |
+| 1 | `UX-1` retire the Interactions tab | S | cleanup | **DONE** 2026-08-04 |
+| 2 | `UX-2` log a LinkedIn message | M | gap | **DONE** 2026-08-04 |
+| 3 | `UX-3` last interaction on the row | M | gap | **DONE** 2026-08-04 |
 | 4 | `UX-4` interview state is real | S | **bug** | **DONE** 2026-08-04 |
-| 5 | `UX-5` application temperature | M | feature | Todo |
-| 6 | `UX-6` search everything | S | gap | Todo |
+| 5 | `UX-5` application temperature | M | feature | **DONE** 2026-08-04 |
+| 6 | `UX-6` search everything | S | gap | **DONE** 2026-08-04 |
+
+**All six shipped 2026-08-04.**
 
 ## The one real ordering constraint
 

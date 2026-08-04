@@ -44,7 +44,8 @@ globalThis.confirm = () => true;
 """
 
 _EXPORTS = """; return { jobTags, salaryTag, locationTag, tagArg, TAG_FILTER,
-  toggleTag, clearTags, jobMatchesTags, jobMatchesQuery, onJobSearch, renderJobsTable };"""
+  toggleTag, clearTags, jobMatchesTags, jobMatchesQuery, jobSearchMatch, matchedVia,
+  onJobSearch, renderJobsTable, JOB_DESC };"""
 
 
 def _js() -> str:
@@ -241,3 +242,138 @@ def test_the_links_column_is_gone_and_the_tab_still_has_the_urls():
     src = _js()
     assert "links-cell" not in src, "the old links cell is still rendered"
     assert "jd-url" in src, "the Job tab no longer shows the full application URL"
+
+
+# ── UX-6: it searches people and whole postings ─────────────────────────────
+
+def _person(**over):
+    c = {"id": "c1", "full_name": "Sarah Chen", "title": "Technical Recruiter",
+         "email": "sarah@saronic.com", "company": "Saronic"}
+    c.update(over)
+    return c
+
+
+def test_search_matches_a_contact_name(tmp_path):
+    """The reported case. `j.contacts` is on the wire — the People tab renders from it — and
+    search never looked at it, so a recruiter's name returned nothing while the dashboard was
+    displaying that name one click away."""
+    out = _run(
+        """
+        const r = {};
+        for (const q of ['sarah', 'sarah chen', 'recruiter', 'sarah@saronic.com', 'nobody']) {
+          F.onJobSearch(q);
+          r[q] = [JOB].filter(F.jobMatchesQuery).length;
+        }
+        console.log(JSON.stringify(r));
+        """, tmp_path, JOB=_job(title="X", company="Y", location="", salary="",
+                                description="", contacts=[_person()]))
+    assert out["sarah"] == 1, "a contact's name is still not searched"
+    assert out["sarah chen"] == 1
+    assert out["recruiter"] == 1, "a contact's title is not searched"
+    assert out["sarah@saronic.com"] == 1, "a contact's email is not searched"
+    assert out["nobody"] == 0
+
+
+def test_a_term_may_be_satisfied_by_the_job_or_by_a_person(tmp_path):
+    """"google sarah" has to work even though no single field holds both — the company is on
+    the job and the name is on a contact. ANDing per FIELD instead of per TERM would fail it."""
+    out = _run(
+        """
+        F.onJobSearch('saronic sarah');
+        console.log(JSON.stringify([JOB].filter(F.jobMatchesQuery).length));
+        """, tmp_path, JOB=_job(contacts=[_person()]))
+    assert out == 1
+
+
+def test_terms_are_still_ANDed_when_people_are_involved(tmp_path):
+    """Adding a word must never widen the result. That was the whole point of AND."""
+    out = _run(
+        """
+        F.onJobSearch('sarah nonsense');
+        console.log(JSON.stringify([JOB].filter(F.jobMatchesQuery).length));
+        """, tmp_path, JOB=_job(contacts=[_person()]))
+    assert out == 0
+
+
+def test_a_contact_match_says_who(tmp_path):
+    """A row whose visible text contains none of the search terms looks like a bug. Assert the
+    ELEMENT exists rather than that some copy is right (§Lessons 41)."""
+    out = _run(
+        """
+        F.onJobSearch('sarah');
+        const viaPerson = F.matchedVia(JOB);
+        F.onJobSearch('saronic');
+        const viaJob = F.matchedVia(JOB);
+        console.log(JSON.stringify({viaPerson, viaJob}));
+        """, tmp_path, JOB=_job(contacts=[_person()]))
+    assert "matched-via" in out["viaPerson"] and "Sarah Chen" in out["viaPerson"]
+    assert out["viaJob"] == "", "a row matched on its own fields should not claim a person"
+
+
+def test_search_reaches_the_full_description_not_only_the_excerpt(tmp_path):
+    """`j.description` is a 900-char EXCERPT, so a term in paragraph six was unfindable — the
+    other half of "job description, nothing shows up". The full text arrives once per session
+    into JOB_DESC and search reads it from there."""
+    out = _run(
+        """
+        const r = {};
+        F.onJobSearch('sonar');
+        r.before = [JOB].filter(F.jobMatchesQuery).length;
+        F.JOB_DESC.set(JOB.url, 'a long posting that mentions sonar deep inside it');
+        r.after = [JOB].filter(F.jobMatchesQuery).length;
+        console.log(JSON.stringify(r));
+        """, tmp_path, JOB=_job(title="X", company="Y", location="", salary="", description=""))
+    assert out["before"] == 0
+    assert out["after"] == 1, "the cached full description is not searched"
+
+
+def test_typing_never_refetches_the_status_payload(tmp_path):
+    """`/api/status` is 50 SQL statements and re-renders every 2.5s; putting it behind a
+    keystroke is §Lessons 11 and 26. The description warm-up is a DIFFERENT endpoint and runs
+    at most once."""
+    out = _run(
+        """
+        const calls = [];
+        globalThis.fetch = async (u) => { calls.push(String(u));
+          return { json: async () => ({ok: true, descriptions: {}}) }; };
+        for (const q of ['a', 'ab', 'abc', 'abcd']) F.onJobSearch(q);
+        await new Promise(r => process.nextTick(r));
+        console.log(JSON.stringify({
+          status: calls.filter(u => u.includes('/api/status')).length,
+          bulk: calls.filter(u => u.includes('/api/job-descriptions')).length}));
+        """, tmp_path, JOB=_job())
+    assert out["status"] == 0, "typing refetched /api/status"
+    assert out["bulk"] <= 1, f"the description warm-up ran {out['bulk']} times"
+
+
+def test_the_bulk_description_endpoint_is_one_query(tmp_path, monkeypatch):
+    """Three options were on the table: ship every full description on the 2.5s refresh
+    (~130KB forever), a round trip per keystroke-batch, or one request per session. This is the
+    third — so it must not become one query per job, and it must not touch `/api/status`.
+    """
+    import applypilot.database as database
+    from applypilot import web_dashboard as wd
+    from applypilot.repo import jobs as jobsrepo
+
+    path = tmp_path / "t.db"
+    monkeypatch.setattr(database, "DB_PATH", path)
+    database.close_connection(path)
+    database.init_db(path)
+    conn = database.get_connection(path)
+    for i in range(5):
+        conn.execute("INSERT INTO jobs (url, title, site, strategy, full_description) "
+                     "VALUES (?,?,?,?,?)",
+                     (f"http://j/{i}", "PM", "GH", "dashboard_upload", f"posting {i} sonar"))
+    conn.execute("INSERT INTO jobs (url, title, site, strategy, full_description) "
+                 "VALUES (?,?,?,?,?)", ("http://j/null", "PM", "GH", "dashboard_upload", "null"))
+    conn.commit()
+
+    seen = []
+    original = conn.execute
+    monkeypatch.setattr(conn, "execute", lambda sql, *a, **k: (seen.append(sql), original(sql, *a, **k))[1])
+    out = jobsrepo.all_descriptions(conn)
+    assert len(seen) == 1, f"{len(seen)} queries for the whole table"
+
+    assert len(out) == 6 and out["http://j/2"].endswith("sonar")
+    assert out["http://j/null"] == "", "the literal string 'null' reached search as text"
+    assert wd._all_job_descriptions()["ok"]

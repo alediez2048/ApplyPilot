@@ -814,6 +814,9 @@
   .sync-gm.off code { font-style:normal; background:var(--surface2); padding:0 4px; border-radius:3px; }
   .sync-note { color:#046c3c; }
   .sync-note.bad { color:#92400e; }
+  /* Why a row survived the search when nothing visible on it holds the query (UX-6). */
+  .matched-via { font-size:11px; color:var(--accent); margin-top:2px; }
+
   /* Temperature (UX-5). Semantic colour, separate from the accent — this says how a thing is
      doing, which is a different axis from what is clickable. */
   .temp { font-size:11px; font-weight:600; padding:1px 9px; border-radius:999px;

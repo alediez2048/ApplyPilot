@@ -2022,6 +2022,17 @@ def _log_interaction(data: dict) -> dict:
     return {"ok": True, "message": f"Noted for {who}." if is_new else "Already recorded."}
 
 
+def _all_job_descriptions() -> dict:
+    """Every posting's full text, once per session, for search (UX-6).
+
+    Not on `/api/status`: ~130KB added to a 2.5-second refresh for a field only used while
+    typing. This is the third option in the ticket — the two rejected were shipping it on every
+    refresh, and a round trip per keystroke-batch.
+    """
+    init_db()
+    return {"ok": True, "descriptions": _jobs.all_descriptions(get_connection())}
+
+
 def _job_description(data: dict) -> dict:
     """The full posting text for ONE job, on demand.
 
@@ -2912,6 +2923,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if path == "/api/job-description/save":
                 _json_response(self, _save_job_description(
                     data.get("url", ""), data.get("description", "")))
+                return
+            if path == "/api/job-descriptions":
+                _json_response(self, _all_job_descriptions())
                 return
             if path == "/api/job-description":
                 _json_response(self, _job_description(data))

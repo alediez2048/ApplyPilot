@@ -1773,7 +1773,7 @@ def _status_payload(space: str = "") -> dict:
         "claude_log": claude_log,
         "app_dir": str(config.APP_DIR),
         "networking_available": _networking_available(),
-        "metrics": _metrics_payload(rows, conn),
+        "metrics": _metrics_payload(rows, conn, space_id),
         "replies": _replies.status(),
         "gmail_available": _gmail_available(),
         # Whether the token carries gmail.readonly, so the UI can offer "Fetch from Gmail"
@@ -2425,7 +2425,7 @@ def _conversations_for_job(job_url: str, conn) -> dict:
         return {}
 
 
-def _metrics_payload(job_rows: list, conn) -> dict:
+def _metrics_payload(job_rows: list, conn, space_id: str | None = None) -> dict:
     """CRM-2 aggregates for the dashboard panel.
 
     Three narrow reads and one pass of pure aggregation — `domain.metrics` does the arithmetic,
@@ -2437,7 +2437,16 @@ def _metrics_payload(job_rows: list, conn) -> dict:
     from applypilot.domain.timeutil import parse_ts
 
     try:
-        contacts = _store.all_contacts_for_metrics(conn)
+        contacts = _store.all_contacts_for_metrics(conn, space_id=space_id)
+        # Touches are passed WHOLE, deliberately. `metrics.by_touch` buckets CONTACTS by how
+        # many touches each one received, looking every touch up by `contact_id` — so a touch
+        # belonging to another Space's contact can never land in a bucket here, and filtering
+        # the list first cannot change a single number.
+        #
+        # A filter was written here and then removed: a mutation deleting it changed no test
+        # and no output, which is the honest signal that it was doing nothing. Code that looks
+        # like a scoping guarantee while the guarantee actually comes from somewhere else is
+        # worse than no code, because the next reader trusts the wrong line.
         touch_rows = _touches.all_sent_touches(conn)
         jobs = [dict(zip(r.keys(), r)) if not isinstance(r, dict) else r for r in job_rows]
         return metrics_mod.summary(jobs, contacts, touch_rows, parse_ts)

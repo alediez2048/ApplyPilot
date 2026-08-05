@@ -276,3 +276,62 @@ def test_every_status_read_goes_through_statusUrl():
     js = (wd._STATIC_DIR / "dashboard.js").read_text(encoding="utf-8")
     assert "fetch('/api/status')" not in js, "a bare /api/status fetch is back"
     assert js.count("fetch(statusUrl())") >= 4
+
+
+# ── the Outcomes panel ──────────────────────────────────────────────────────
+
+def test_outcomes_are_scoped_to_the_campaign(db):
+    """Reported by the operator: a Partnerships Space showed the job search's reply rate.
+
+    The funnel above it was already scoped — it is built from `dashboard_rows` — while the
+    rates underneath came from every contact in the database. Two halves of one panel
+    describing two different campaigns, which is worse than either being wrong: the numbers
+    look consistent because they are both real.
+    """
+    from applypilot.networking import store
+    store.upsert_contact({"job_url": "http://j/1", "space_id": "job-search",
+                          "full_name": "Jo Blue", "email": "jo@x.test",
+                          "sent_message_id": "gid1", "submitted_at": "2026-08-01T10:00:00+00:00",
+                          "replied_at": "2026-08-02T10:00:00+00:00"}, db)
+    store.upsert_contact({"job_url": "target:partnerships:acme", "space_id": "partnerships",
+                          "full_name": "Ada Green", "email": "ada@y.test",
+                          "sent_message_id": "gid2",
+                          "submitted_at": "2026-08-01T10:00:00+00:00"}, db)
+
+    # A SENT touch on the job-search contact. Without one the touch filter is untested — a
+    # mutation removing it passed, because filtering an empty list changes nothing.
+    from applypilot.networking import touches
+    touches.init_touches(db)
+    jo = [c for c in store.all_contacts_for_metrics(db, space_id="job-search")][0]["id"]
+    touches.record_sent(jo, "email", conn=db)
+    assert touches.all_sent_touches(db), "no touch recorded — the assertion below is vacuous"
+
+    jobs = wd._status_payload("job-search")["metrics"]
+    partners = wd._status_payload("partnerships")["metrics"]
+    assert jobs and partners, "the panel returned nothing — the assertions below prove nothing"
+    assert jobs != partners, "both Spaces reported the same numbers"
+
+    # The job search has the only reply; Partnerships has none. If the scoping is dropped,
+    # Partnerships inherits that reply and reads as a campaign that is working.
+    assert json.dumps(partners).count('"replied": 1') == 0
+    assert '"replied": 1' in json.dumps(jobs)
+
+    # The touch aggregate follows the CONTACTS, structurally: `by_touch` buckets contacts and
+    # looks each one's touches up by id, so scoping the contact list is what scopes it. There
+    # is deliberately no filter on the touch list itself — one was written, and a mutation
+    # deleting it changed nothing, which is what proved it was doing nothing.
+    labels = {r["label"] for r in jobs.get("by_touch") or []}
+    assert "+1 follow-up" in labels, f"the job search lost its follow-up bucket: {labels}"
+    assert "+1 follow-up" not in {r["label"] for r in partners.get("by_touch") or []}, \
+        "Partnerships inherited the job search's follow-up history"
+
+
+def test_a_contact_in_another_space_does_not_count_here(db):
+    """The narrower half: one contact, counted once, in one campaign."""
+    from applypilot.networking import store
+    store.upsert_contact({"job_url": "target:partnerships:acme", "space_id": "partnerships",
+                          "full_name": "Ada Green", "email": "ada@y.test"}, db)
+    from applypilot.networking import store as st
+    assert len(st.all_contacts_for_metrics(db, space_id="partnerships")) == 1
+    assert len(st.all_contacts_for_metrics(db, space_id="job-search")) == 0
+    assert len(st.all_contacts_for_metrics(db)) == 1, "no space_id must still mean everything"

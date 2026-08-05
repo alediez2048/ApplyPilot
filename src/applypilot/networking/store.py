@@ -801,19 +801,28 @@ def contact_ref(contact_id: str, conn: sqlite3.Connection | None = None) -> dict
     return dict(zip(row.keys(), row)) if row else None
 
 
-def all_contacts_for_metrics(conn: sqlite3.Connection | None = None) -> list[dict]:
+def all_contacts_for_metrics(conn: sqlite3.Connection | None = None,
+                             space_id: str | None = None) -> list[dict]:
     """Every contact, with only the columns metrics reads (CRM-2).
 
     A narrow projection on purpose: the panel runs on every /api/status, and `SELECT *` over a
     33-column table 50 rows deep every 2.5 seconds is exactly the kind of cost the query budget
     exists to catch.
+
+    `space_id` scopes it to one campaign. Without it the Outcomes panel showed the job search's
+    reply rate on a Partnerships Space — the funnel above it was already scoped (it is built
+    from `dashboard_rows`) while the rates underneath came from every contact in the database,
+    so two halves of one panel described two different campaigns. Reported by the operator, on
+    a screenshot I had already looked at.
     """
     if conn is None:
         conn = get_connection()
     init_contacts(conn)
+    scope = " WHERE space_id = ?" if space_id else ""
     rows = conn.execute(
         "SELECT id, job_url, company, source, confidence, email_status, "
-        "sent_message_id, submitted_at, replied_at FROM contacts"
+        "sent_message_id, submitted_at, replied_at FROM contacts" + scope,
+        (space_id,) if space_id else ()
     ).fetchall()
     return [dict(zip(r.keys(), r)) for r in rows]
 

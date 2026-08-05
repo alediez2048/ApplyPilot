@@ -14,15 +14,31 @@ import sqlite3
 from datetime import datetime, timezone
 
 from applypilot.database import get_connection
+from applypilot.repo import spaces as _spaces
 
 # Jobs the operator added by hand. Discovery-sourced rows are deliberately excluded from
 # the dashboard's prepare/apply queues (DISC-1 will give them their own bucket).
+#
+# PROVENANCE, not membership (SPACE-1a D2). This says how a row arrived; `space_id` says where
+# it belongs, and the two are never asked to do each other's job. A target row keeps
+# `dashboard_upload` — the operator did paste it in — which is why the shape gate below exists
+# rather than a private strategy value that would make targets invisible to `delete_job`.
 QUEUE_STRATEGIES = ("dashboard_upload", "manual_url_batch")
 QUEUE_SQL = "strategy IN ('dashboard_upload', 'manual_url_batch')"
 
 
 def _c(conn: sqlite3.Connection | None) -> sqlite3.Connection:
     return conn if conn is not None else get_connection()
+
+
+def _in_spaces(ids: list[str]) -> tuple[str, list[str]]:
+    """`AND space_id IN (?, ?)` plus its bindings, for the pipeline stage queues.
+
+    Built rather than interpolated because a Space id is operator-supplied text. It is also
+    never empty: `repo/spaces` raises rather than handing back `[]`, so there is no path here
+    that produces `IN ()` and silently selects nothing.
+    """
+    return " AND space_id IN (" + ", ".join("?" for _ in ids) + ")", list(ids)
 
 
 def _dicts(rows) -> list[dict]:
@@ -100,29 +116,36 @@ def queued_for_delete(url: str, conn: sqlite3.Connection | None = None) -> dict 
 # ── queue reads (the prepare pipeline) ──────────────────────────────────────
 
 def queue_needing_detail(limit: int = 0, conn: sqlite3.Connection | None = None) -> list[dict]:
-    rows = _c(conn).execute(
-        f"SELECT url, title, site FROM jobs WHERE {QUEUE_SQL} AND detail_scraped_at IS NULL "
-        f"ORDER BY discovered_at DESC, rowid DESC").fetchall()
+    c = _c(conn)
+    scope, ids = _in_spaces(_spaces.jobs_shaped_ids(c))
+    rows = c.execute(
+        f"SELECT url, title, site FROM jobs WHERE {QUEUE_SQL}{scope} "
+        f"AND detail_scraped_at IS NULL "
+        f"ORDER BY discovered_at DESC, rowid DESC", ids).fetchall()
     return _dicts(rows[:limit] if limit > 0 else rows)
 
 
 def queue_for_tailor(limit: int = 0, max_attempts: int = 5,
                      conn: sqlite3.Connection | None = None) -> list[dict]:
-    rows = _c(conn).execute(
-        f"SELECT * FROM jobs WHERE {QUEUE_SQL} AND full_description IS NOT NULL "
+    c = _c(conn)
+    scope, ids = _in_spaces(_spaces.document_making_ids(c))
+    rows = c.execute(
+        f"SELECT * FROM jobs WHERE {QUEUE_SQL}{scope} AND full_description IS NOT NULL "
         f"AND tailored_resume_path IS NULL AND COALESCE(tailor_attempts, 0) < ? "
-        f"ORDER BY discovered_at DESC, rowid DESC", (max_attempts,)).fetchall()
+        f"ORDER BY discovered_at DESC, rowid DESC", (*ids, max_attempts)).fetchall()
     return _dicts(rows[:limit] if limit > 0 else rows)
 
 
 def queue_for_cover(limit: int = 0, max_attempts: int = 5,
                     conn: sqlite3.Connection | None = None) -> list[dict]:
-    rows = _c(conn).execute(
-        f"SELECT * FROM jobs WHERE {QUEUE_SQL} AND full_description IS NOT NULL "
+    c = _c(conn)
+    scope, ids = _in_spaces(_spaces.document_making_ids(c))
+    rows = c.execute(
+        f"SELECT * FROM jobs WHERE {QUEUE_SQL}{scope} AND full_description IS NOT NULL "
         f"AND tailored_resume_path IS NOT NULL "
         f"AND (cover_letter_path IS NULL OR cover_letter_path = '') "
         f"AND COALESCE(cover_attempts, 0) < ? "
-        f"ORDER BY discovered_at DESC, rowid DESC", (max_attempts,)).fetchall()
+        f"ORDER BY discovered_at DESC, rowid DESC", (*ids, max_attempts)).fetchall()
     return _dicts(rows[:limit] if limit > 0 else rows)
 
 
@@ -130,14 +153,17 @@ def queue_for_apply(limit: int, max_attempts: int,
                     conn: sqlite3.Connection | None = None) -> list[dict]:
     """Deliberately narrower than the others: 'dashboard_upload' only, and it leaves
     `in_progress` and attempt-exhausted jobs alone so a retry never double-applies."""
-    return _dicts(_c(conn).execute(
-        "SELECT url, title, site FROM jobs "
-        "WHERE strategy = 'dashboard_upload' AND tailored_resume_path IS NOT NULL "
-        "AND applied_at IS NULL "
-        "AND (apply_status IS NULL OR apply_status = '' OR apply_status = 'failed' "
-        "     OR apply_status = 'dryrun') "
-        "AND COALESCE(apply_attempts, 0) < ? "
-        "ORDER BY discovered_at DESC, rowid DESC LIMIT ?", (max_attempts, limit)).fetchall())
+    c = _c(conn)
+    scope, ids = _in_spaces(_spaces.jobs_shaped_ids(c))
+    return _dicts(c.execute(
+        f"SELECT url, title, site FROM jobs "
+        f"WHERE strategy = 'dashboard_upload'{scope} AND tailored_resume_path IS NOT NULL "
+        f"AND applied_at IS NULL "
+        f"AND (apply_status IS NULL OR apply_status = '' OR apply_status = 'failed' "
+        f"     OR apply_status = 'dryrun') "
+        f"AND COALESCE(apply_attempts, 0) < ? "
+        f"ORDER BY discovered_at DESC, rowid DESC LIMIT ?",
+        (*ids, max_attempts, limit)).fetchall())
 
 
 def all_descriptions(conn: sqlite3.Connection | None = None) -> dict[str, str]:
@@ -246,11 +272,13 @@ def bypass_scoring(conn: sqlite3.Connection | None = None) -> int:
     Returns the number of rows marked.
     """
     conn = _c(conn)
+    scope, ids = _in_spaces(_spaces.jobs_shaped_ids(conn))
     n = conn.execute(
         f"UPDATE jobs SET fit_score = 10, "
         f"score_reasoning = 'User-imported URL. Fit scoring intentionally bypassed.', "
-        f"scored_at = ? WHERE {QUEUE_SQL} AND full_description IS NOT NULL AND fit_score IS NULL",
-        (_now(),)).rowcount
+        f"scored_at = ? WHERE {QUEUE_SQL}{scope} "
+        f"AND full_description IS NOT NULL AND fit_score IS NULL",
+        (_now(), *ids)).rowcount
     conn.commit()
     return n
 

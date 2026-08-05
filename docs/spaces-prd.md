@@ -224,9 +224,18 @@ class Space:
     tailor_docs: bool = True       # résumé + cover generation and attachment
     offer_deck: bool = True
     can_autosend: bool = True
-    company_cap: int = 0           # 0 = unlimited
     terminal: str = "interview"    # 'interview' | 'booked' — what success means
 ```
+
+> **`company_cap` was removed from this manifest when SPACE-1 built it.** It is the same
+> mistake §Headline 4 already corrected for the daily send limit: the cap exists because a
+> company sees one sender, not seven threads, and *the recipient does not know what a Space
+> is*. Two Spaces on one mailbox each capped at 8 would send 16 emails to one employer. It
+> belongs on the identity, with the other limit.
+>
+> Also note `_COMPANY_CAP` and `_COOLDOWN_DAYS` are module constants read at import
+> (`gmail_send.py`), so §13.1's promise that caps are editable in "seconds, no restart" is
+> false for them today. Whichever object they end up on, they have to stop being constants.
 
 The three templates as data:
 
@@ -273,7 +282,7 @@ personal identity that is already connected.
 |---|---|---|
 | **SPACE-0** | Archive terminal rows | Independent, ships first. §8.1 |
 | **SPACE-1a** ✅ | Where a target row lives; `space_id` vs `strategy`; migration 003 | **Shipped 2026-08-04.** Zero code changes downstream of it — it exists so the tickets below can be estimated at all |
-| **SPACE-1** | Manifests, and the stage queues gated on shape | Invisible on screen |
+| **SPACE-1** ✅ | Manifests, and the stage queues gated on shape | **Shipped 2026-08-05.** Invisible on screen. `domain/space.py` is pure; `UNAPPLIED` names the seven fields nothing reads yet, and a test holds that list honest |
 | **SPACE-1b** | `job_url` → `anchor`, converge-not-rename | Optional. Hygiene, and the only step that can lose data — decide on its own merits |
 | **SPACE-2** | Nav, `?space=`, `/api/status` filtering | Job Search only; structural |
 | **SPACE-3** | `pipeline/targets` panel + target import + the offer field | Template 2 exists |

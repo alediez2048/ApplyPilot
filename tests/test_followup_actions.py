@@ -122,13 +122,18 @@ def test_draft_uses_the_channel_drafter_and_stores_the_result(db, cid, monkeypat
     from applypilot.networking import outreach
     seen = {}
 
-    def fake(channel, profile, job, contact, touch=1, style="", thread=None, touches=None):
-        seen.update(channel=channel, touch=touch, thread=thread, touches=touches)
+    def fake(channel, profile, job, contact, touch=1, style="", thread=None, touches=None,
+             space=None):
+        seen.update(channel=channel, touch=touch, thread=thread, touches=touches, space=space)
         return {"subject": f"S{touch}", "body": f"B{touch}"}
     monkeypatch.setattr(outreach, "draft_for_channel", fake)
 
     r = act(contact_id=cid, action="li_draft")
     assert r["ok"] and seen["channel"] == "linkedin" and seen["touch"] == 1
+    # SPACE-4: the Space decides which prompt writes a follow-up. Passed from the CONTACT, so
+    # this endpoint answers the same way the auto-send gate does rather than relying on a
+    # caller to remember (§Lessons 49).
+    assert seen["space"] is not None, "the follow-up drafter was given no manifest"
     # The conversation is loaded ONLY for the channel that reads it. A thread here would mean
     # every LinkedIn and email draft pays for a messages query it never looks at.
     assert seen["thread"] is None, "loaded a thread for a channel that does not use one"

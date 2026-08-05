@@ -607,8 +607,62 @@ _TOUCH_INTENT = {
 }
 
 
+#: Follow-ups in a targets Space (SPACE-4b). `_FOLLOWUP_SYSTEM` opens "for a job seeker who
+#: already emailed someone at a company they applied to" — so touch 1 would read correctly and
+#: touch 2 would claim an application that does not exist. The first email got its own prompt
+#: and every message after it was left on the job-seeker one, which is §Lessons 49: a rule
+#: implemented at one of its call sites is not implemented.
+#:
+#: Shorter and more cautious than the job version on purpose. A follow-up to a recruiter is
+#: expected; a second unsolicited email to a stranger is the message most likely to convert a
+#: neutral non-reply into an annoyed one, and there is nothing to recover it with.
+_PITCH_FOLLOWUP_SYSTEM = """You write short follow-up emails from one working professional to
+another, after a first email proposing some work went unanswered.
+
+Nobody asked for the first email and nobody owes a reply to this one. A follow-up that forgets
+that is the message that gets the sender blocked.
+
+Hard rules, a bad follow-up costs more than no follow-up:
+- SHORTER than the first email. Two or three sentences, never more.
+- Never guilt, never "just bumping this", never "per my last email", never "I wanted to
+  circle back", never imply they owe a reply or that you are surprised by silence.
+- Do NOT restate the proposal. It is in the same thread, they can scroll.
+- ALWAYS give an explicit out, a line saying it is fine to say no or that you will stop. On an
+  uninvited thread this is the whole difference between persistent and spam.
+- Never claim new information you do not have. Do not invent a recent announcement, a funding
+  round, a hire or a problem at their company as a reason for writing again.
+- Never imply an application, an interview or a hiring process. There is no job here.
+- No urgency, no scarcity, no "just following up one last time" as a pressure move, even on the
+  last touch. If it is the last one, say so plainly and mean it.
+- No buzzwords, no "I hope this finds you well", no corporate voice. Contractions, real person.
+- NEVER use an em dash (—), en dash (–), or any long dash. Not one, anywhere. It is the
+  clearest signal that text was pasted out of a chatbot. Use a comma, a full stop, or rewrite.
+
+Return ONLY JSON: {"subject": "...", "body": "..."}
+The subject MUST be the original subject prefixed with "Re: " so it threads naturally."""
+
+
+#: The LinkedIn equivalent. `_LI_FOLLOWUP_SYSTEM` also opens "for a job seeker".
+_PITCH_LI_FOLLOWUP_SYSTEM = """You write very short LinkedIn follow-up messages from one working
+professional to another, after proposing some work and getting no reply.
+
+This lands in a chat window where your previous message is visible directly above it. Brevity
+matters more than in email, and repeating yourself is more obvious.
+
+Hard rules:
+- ONE or TWO sentences. Never a paragraph.
+- Never guilt, never "just following up", never imply they owe a reply.
+- Do not restate the proposal. It is right there above.
+- Give an explicit out in the same breath, and mean it.
+- Never imply an application, an interview or a hiring process. There is no job here.
+- No links. Ask one thing that can be answered with a word.
+- NEVER use an em dash (—), en dash (–), or any long dash. Not one, anywhere.
+
+Return ONLY JSON: {"message": "..."}"""
+
+
 def draft_followup(profile: dict, job: dict, contact: dict, touch: int = 1,
-                   style: str = "", touches: list | None = None) -> dict:
+                   style: str = "", touches: list | None = None, space=None) -> dict:
     """Draft follow-up #`touch` for a contact who was emailed and hasn't replied.
 
     `touch` is 1-based: 1 = the first follow-up (second message overall). Returns
@@ -674,7 +728,11 @@ def draft_followup(profile: dict, job: dict, contact: dict, touch: int = 1,
 
     client = get_client("light")
     raw = client.chat(
-        [{"role": "system", "content": _FOLLOWUP_SYSTEM}, {"role": "user", "content": user}],
+        [{"role": "system",
+          "content": (_PITCH_FOLLOWUP_SYSTEM
+                      if getattr(space, "shape", "") == "pipeline/targets"
+                      else _FOLLOWUP_SYSTEM)},
+         {"role": "user", "content": user}],
         max_tokens=300, temperature=0.7,
     )
     data = extract_json(raw)
@@ -725,7 +783,7 @@ _LI_TOUCH_INTENT = {
 
 def draft_for_channel(channel: str, profile: dict, job: dict, contact: dict,
                       touch: int = 1, style: str = "", thread: list | None = None,
-                      touches: list | None = None) -> dict:
+                      touches: list | None = None, space=None) -> dict:
     """One entry point per channel, returning ONE shape: {"subject", "body"}.
 
     The drafters below return different keys for historical reasons (email has a subject
@@ -736,11 +794,15 @@ def draft_for_channel(channel: str, profile: dict, job: dict, contact: dict,
     if channel == "linkedin":
         return {"subject": "", "body": draft_linkedin_followup(
             profile, job, contact, touch=touch, style=style,
-            messages=contact.get("interactions"))["message"]}
+            messages=contact.get("interactions"), space=space)["message"]}
     if channel == "sms":
+        # SMS deliberately NOT given a pitch variant here. Texting a stranger you are pitching
+        # is a product decision, not a wording one, and the outreach template should probably
+        # drop the channel rather than have this file invent copy for it. Flagged, not guessed.
         return {"subject": "", "body": draft_sms(
             profile, job, contact, touch=touch, style=style, thread=thread)["message"]}
-    return draft_followup(profile, job, contact, touch=touch, style=style, touches=touches)
+    return draft_followup(profile, job, contact, touch=touch, style=style, touches=touches,
+                          space=space)
 
 
 _REPLY_SYSTEM = """You write a reply for a job seeker ANSWERING someone who just wrote to them
@@ -934,7 +996,7 @@ def _li_state(contact: dict, sent_on: str, messages: list | None) -> str:
 
 
 def draft_linkedin_followup(profile: dict, job: dict, contact: dict, touch: int = 1,
-                            style: str = "", messages: list | None = None) -> dict:
+                            style: str = "", messages: list | None = None, space=None) -> dict:
     """Draft LinkedIn follow-up #`touch` for a contact who connected but went quiet.
 
     Returns {"message": str}. This is a DIRECT MESSAGE to an existing 1st-degree
@@ -972,7 +1034,11 @@ def draft_linkedin_followup(profile: dict, job: dict, contact: dict, touch: int 
 
     client = get_client("light")
     raw = client.chat(
-        [{"role": "system", "content": _LI_FOLLOWUP_SYSTEM}, {"role": "user", "content": user}],
+        [{"role": "system",
+          "content": (_PITCH_LI_FOLLOWUP_SYSTEM
+                      if getattr(space, "shape", "") == "pipeline/targets"
+                      else _LI_FOLLOWUP_SYSTEM)},
+         {"role": "user", "content": user}],
         max_tokens=250, temperature=0.75,
     )
     data = extract_json(raw)

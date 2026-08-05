@@ -2769,9 +2769,13 @@ def _followup_action(data: dict) -> dict:
             # first email, so touch 2 did not know what touch 1 said — three messages making the
             # same offer in slightly different words, which is what "it repeats itself" was.
             prior = touches.sent_touches(cid, channel.name, conn)
+            # The Space decides which prompt writes this. Resolved from the CONTACT, the same
+            # way the auto-send gate is, so both answer from the row rather than from whatever
+            # the caller remembered to pass (§Lessons 49).
             d = outreach.draft_for_channel(channel.name, profile, job, contact,
                                            touch=touch, style=(data.get("style") or "").strip(),
-                                           thread=thread, touches=prior)
+                                           thread=thread, touches=prior,
+                                           space=_space_of_contact(cid, conn))
         except Exception as e:  # noqa: BLE001
             return {"ok": False, "message": f"draft failed: {e}"}
         touches.set_draft(cid, channel.name, d["subject"], d["body"])

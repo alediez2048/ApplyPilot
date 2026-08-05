@@ -366,3 +366,68 @@ def test_the_signoff_guard_uses_the_same_name_as_the_prompt():
     assert "Sender first name:" in got["user"]
     body = "Hi Sarah,\n\nSome text.\n\nAlejandro"
     assert outreach.ensure_sender_signoff(body, outreach._sender_name(profile)) == body
+
+
+# ── follow-ups, which the first pass left on the job-seeker prompt ───────────
+
+def _followup_system(space, channel="email"):
+    """The system prompt `draft_for_channel` would send for one follow-up."""
+    import applypilot.networking.outreach as o
+    captured = {}
+
+    class _Client:
+        def chat(self, messages, **_):
+            captured["system"] = messages[0]["content"]
+            return ('{"message":"m"}' if channel == "linkedin"
+                    else '{"subject":"Re: x","body":"b"}')
+
+    real = o.get_client
+    o.get_client = lambda *_a, **_k: _Client()
+    try:
+        o.draft_for_channel(channel, PROFILE, TARGET_JOB,
+                            dict(CONTACT, outreach_subject="x", outreach_message="first email",
+                                 submitted_at="2026-01-01T00:00:00+00:00",
+                                 linkedin_url="https://l/in/s", dm_status="sent"),
+                            touch=2, space=space)
+    finally:
+        o.get_client = real
+    return captured["system"]
+
+
+@pytest.mark.parametrize("channel", ["email", "linkedin"])
+def test_a_targets_followup_does_not_claim_an_application(channel):
+    """The gap the first pass left, and the worse half of it.
+
+    `draft_email` got its own prompt while every message AFTER it stayed on the job-seeker one
+    — so touch 1 would read correctly and touch 2 would say it was following up on an
+    application that does not exist. §Lessons 49: a rule implemented at one of its call sites.
+    """
+    system = _followup_system(_pitch_space(), channel)
+    assert "job seeker" not in system.lower()
+    assert "they applied to" not in system.lower()
+    assert "Never imply an application" in system
+
+
+@pytest.mark.parametrize("channel", ["email", "linkedin"])
+def test_a_jobs_followup_is_untouched(channel):
+    """The negative control. A filter that changes both shapes is not the fix."""
+    system = _followup_system(sp.from_template("s", "S", "jobs"), channel)
+    assert "job seeker" in system.lower()
+
+
+@pytest.mark.parametrize("channel", ["email", "linkedin"])
+def test_no_space_still_means_the_job_prompt(channel):
+    """Every caller that has not been taught about Spaces keeps what it had."""
+    assert "job seeker" in _followup_system(None, channel).lower()
+
+
+def test_the_pitch_followup_prompts_ban_the_dash():
+    for prompt in (outreach._PITCH_FOLLOWUP_SYSTEM, outreach._PITCH_LI_FOLLOWUP_SYSTEM):
+        assert "em dash" in prompt.lower()
+        assert "—" not in prompt.replace("(—)", "")
+
+
+def test_the_pitch_followup_demands_an_explicit_out():
+    """On an uninvited thread this is the whole difference between persistent and spam."""
+    assert "explicit out" in outreach._PITCH_FOLLOWUP_SYSTEM.lower()
+    assert "explicit out" in outreach._PITCH_LI_FOLLOWUP_SYSTEM.lower()

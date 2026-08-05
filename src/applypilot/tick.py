@@ -88,12 +88,34 @@ def _due_followups(conn) -> list[dict]:
     if not contacts:
         return []
     ladders = touches.ladder_states([c["id"] for c in contacts], conn)
-    panel = followup_panel(contacts, ladders=ladders)
+
+    # ONE panel PER SPACE, not one for everybody (SPACE-4). A Space may set its own cadence
+    # and its own channel set, and a single call for every contact at once resolves the
+    # schedule exactly once — from the globals — so a 5d/12d campaign would be nudged on the
+    # job search's 2d/4d/7d and nothing would say so. The dashboard already passes the
+    # manifest; this is the same rule at its other call site (§Lessons 49).
+    from applypilot.repo import spaces as _spaces
+    by_space: dict[str, list[dict]] = {}
+    for c in contacts:
+        by_space.setdefault(c.get("space_id") or _spaces.DEFAULT_SPACE_ID, []).append(c)
 
     # The panel is FLAT and prefixed per channel — `due` for email, `li_due` for LinkedIn —
     # not nested under a "channels" key. Reading a key that does not exist would make this
     # silently find nothing and look like "no follow-ups are ever due".
     by_id = {c["id"]: c for c in contacts}
+    out = []
+    for space_id, group in by_space.items():
+        try:
+            manifest = _spaces.load(space_id, conn)
+        except Exception:  # noqa: BLE001
+            manifest = None      # degrade to the global cadence rather than skip the Space
+        panel = followup_panel(group, ladders=ladders, space=manifest)
+        out.extend(_due_from_panel(panel, ladders, by_id, CHANNELS))
+    return out
+
+
+def _due_from_panel(panel, ladders, by_id, CHANNELS) -> list[dict]:
+    """Pull the due rows out of one Space's panel."""
     out = []
     for channel in CHANNELS:
         for row in panel.get(f"{channel.prefix}due", []) or []:
@@ -132,6 +154,7 @@ def _step_draft_followups(conn, dry_run: bool, limit: int = 10) -> dict:
 
     from applypilot.config import load_profile
     from applypilot.networking import outreach, touches
+    from applypilot.networking import service as _service
     from applypilot.repo import jobs as _jobs
     try:
         profile = load_profile()
@@ -143,7 +166,11 @@ def _step_draft_followups(conn, dry_run: bool, limit: int = 10) -> dict:
         c = item["contact"]
         job = _jobs.get(c["job_url"], conn) or {"url": c["job_url"]}
         try:
-            d = outreach.draft_for_channel(item["channel"], profile, job, c, touch=item["touch"])
+            # `_jobs.get` is SELECT *, so the row carries `space_id` — the manifest decides
+            # which prompt writes this. Without it a targets follow-up uses the job-seeker
+            # prompt and claims an application that does not exist.
+            d = outreach.draft_for_channel(item["channel"], profile, job, c, touch=item["touch"],
+                                           space=_service.space_for(job, conn))
             touches.set_draft(c["id"], item["channel"], d.get("subject", ""), d["body"], conn)
             drafted += 1
         except Exception:  # noqa: BLE001

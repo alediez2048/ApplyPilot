@@ -359,3 +359,81 @@ def test_the_undo_is_not_dimmed_into_invisibility():
     undo = next(ln for ln in css.splitlines() if ln.strip().startswith(".won-btn.undo {"))
     assert "background:#fff" in undo, (
         f"the undo has no contrasting ground against the #eef2ee won row: {undo.strip()}")
+
+
+# ── "Mark as applied" (operator-asserted, distinct from Mark submitted ✓) ────
+
+def test_marking_applied_by_hand_works_on_a_job_the_agent_never_touched(tmp_path, monkeypatch):
+    """The case the OTHER button's guard exists to block, and the operator legitimately needs.
+
+    `/api/mark-submitted` gates on `was_attempted` — right for a control that appears
+    automatically in the co-pilot flow, where blessing an unopened job would be an accident.
+    This one is for applying on the company's own site, where the app never ran at all.
+    Refusing it leaves a true fact unrecordable, which is the corner §Lessons 19 describes.
+    """
+    import applypilot.database as database
+    from applypilot import web_dashboard as wd
+    from applypilot.repo import jobs as repo
+
+    path = tmp_path / "t.db"
+    monkeypatch.setattr(database, "DB_PATH", path)
+    database.close_connection(path)
+    database.init_db(path)
+    conn = database.get_connection(path)
+    conn.execute("INSERT INTO jobs (url, title, site, strategy) VALUES (?,?,?,?)",
+                 ("http://j/hand", "PM", "Greenhouse", "dashboard_upload"))
+    conn.commit()
+
+    assert repo.was_attempted("http://j/hand", conn) is False
+    # The co-pilot confirmation refuses it, correctly.
+    assert wd._mark_submitted("http://j/hand")["ok"] is False
+    # The operator's assertion does not.
+    assert wd._mark_applied_manually("http://j/hand")["ok"] is True
+    assert repo.apply_status("http://j/hand", conn) == "applied"
+
+
+def test_it_is_reversible_and_keeps_the_agent_run_history(tmp_path, monkeypatch):
+    """A state change with no way back is a trap.
+
+    And the undo must not be `reset_apply_state`, which also wipes attempts and errors —
+    that history is the only account of what a real agent run did.
+    """
+    import applypilot.database as database
+    from applypilot import web_dashboard as wd
+    from applypilot.repo import jobs as repo
+
+    path = tmp_path / "t.db"
+    monkeypatch.setattr(database, "DB_PATH", path)
+    database.close_connection(path)
+    database.init_db(path)
+    conn = database.get_connection(path)
+    conn.execute("INSERT INTO jobs (url, title, site, strategy, apply_attempts, apply_error) "
+                 "VALUES (?,?,?,?,?,?)",
+                 ("http://j/hand", "PM", "Greenhouse", "dashboard_upload", 2, "captcha"))
+    conn.commit()
+
+    wd._mark_applied_manually("http://j/hand")
+    assert wd._unmark_applied("http://j/hand")["ok"] is True
+    row = repo.get("http://j/hand", conn)
+    assert row["applied_at"] is None and row["apply_status"] is None
+    assert row["apply_attempts"] == 2, "the undo erased the agent's run history"
+    # `apply_error` is cleared by mark_applied, not by the undo, and that is pre-existing and
+    # right: once you have applied, "captcha" is a stale description of a state that no longer
+    # obtains. `apply_attempts` is what carries the fact that an agent ran, and it survives.
+    assert row["apply_error"] is None
+
+
+def test_marking_it_twice_is_refused(tmp_path, monkeypatch):
+    import applypilot.database as database
+    from applypilot import web_dashboard as wd
+
+    path = tmp_path / "t.db"
+    monkeypatch.setattr(database, "DB_PATH", path)
+    database.close_connection(path)
+    database.init_db(path)
+    conn = database.get_connection(path)
+    conn.execute("INSERT INTO jobs (url, title, site, strategy) VALUES (?,?,?,?)",
+                 ("http://j/hand", "PM", "Greenhouse", "dashboard_upload"))
+    conn.commit()
+    assert wd._mark_applied_manually("http://j/hand")["ok"] is True
+    assert wd._mark_applied_manually("http://j/hand")["ok"] is False

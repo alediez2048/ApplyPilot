@@ -414,6 +414,19 @@ def mark_applied(url: str, conn: sqlite3.Connection | None = None) -> str:
     return now
 
 
+def unmark_applied(url: str, conn: sqlite3.Connection | None = None) -> None:
+    """Undo an operator-asserted "applied". Clears the stamp, keeps everything else.
+
+    Deliberately NOT `reset_apply_state`, which also wipes `apply_attempts`, `agent_id` and
+    `apply_error` because Re-apply is about to overwrite them anyway. Undoing a misclick must
+    not also erase the record that an agent ran and what happened to it — that history is the
+    only account of a real attempt.
+    """
+    conn = _c(conn)
+    conn.execute("UPDATE jobs SET apply_status = NULL, applied_at = NULL WHERE url = ?", (url,))
+    conn.commit()
+
+
 def mark_rejected(url: str, conn: sqlite3.Connection | None = None) -> str:
     conn = _c(conn)
     now = _now()

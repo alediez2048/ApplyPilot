@@ -2810,6 +2810,17 @@ function rowMenu(j) {
   items.push(j.interview_at
     ? `<button onclick="unmarkInterview(${u}, this)">↩ Not scheduled after all<span>Sequences stay stopped</span></button>`
     : `<button onclick="markInterview(${u}, this)">🎯 Interview scheduled<span>Greys the row and stops every sequence</span></button>`);
+  // "I applied to this myself." Distinct from the strip's "Mark submitted ✓", which confirms a
+  // co-pilot run the agent actually filled — that one is gated on the job having been attempted
+  // and refuses a job ApplyPilot never opened. This is for the case that gate exists to block
+  // and the operator legitimately needs: applied by hand, on the company's own site.
+  //
+  // Not offered on a targets row: there is no application to have submitted.
+  if (!isTargetRow(j)) {
+    items.push(j.applied_at
+      ? `<button onclick="unmarkApplied(${u}, this)">↩ Not applied<span>Undo — keeps the agent's run history</span></button>`
+      : `<button onclick="markApplied(${u}, this)">✅ Mark as applied<span>You applied to this yourself</span></button>`);
+  }
   items.push(j.status === 'rejected'
     ? `<button onclick="unmarkRejected(${u}, this)">↩ Restore<span>Move back out of the rejected pile</span></button>`
     : `<button onclick="markRejected(${u}, this)">✕ Mark rejected<span>Move to the rejected pile</span></button>`);
@@ -2861,6 +2872,26 @@ async function continueJob(url, btn) {
   await pollCommandUntilDone('Continue');
   await refresh();
 }
+async function markApplied(url, btn) {
+  // The confirm names what is being asserted. "Mark applied?" invites a reflex yes; saying it
+  // back as a claim about the outside world is what makes it a decision.
+  if (!confirm('Record that YOU applied to this yourself, outside ApplyPilot?\n\n'
+             + 'Use this for applications you submitted on the company\'s own site. It is '
+             + 'reversible from the same menu.')) return;
+  btn.disabled = true;
+  btn.textContent = 'Saving…';
+  const r = await post('/api/mark-applied', {url});
+  if (r.ok) refresh();
+  else { btn.disabled = false; btn.textContent = '✅ Mark as applied'; alert(r.message || 'Failed'); }
+}
+
+async function unmarkApplied(url, btn) {
+  btn.disabled = true;
+  btn.textContent = 'Undoing…';
+  const r = await post('/api/unmark-applied', {url});
+  if (r.ok) refresh(); else { btn.disabled = false; alert(r.message || 'Failed'); }
+}
+
 async function markSubmitted(url, btn) {
   // The user has reviewed + submitted the filled application in the open Chrome window.
   if (!confirm('Confirm you reviewed and submitted this application in the browser?')) return;

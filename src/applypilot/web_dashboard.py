@@ -1098,6 +1098,57 @@ def _mark_submitted(url: str) -> dict:
     return {"ok": True, "message": "Marked as submitted ✓"}
 
 
+def _mark_applied_manually(url: str) -> dict:
+    """Record that the OPERATOR applied to this themselves, outside ApplyPilot.
+
+    Deliberately a different action from `_mark_submitted`, which confirms a co-pilot run the
+    agent actually filled and therefore gates on `was_attempted`. That gate is right for that
+    button: it appears automatically in the apply flow, where blessing a job nobody opened
+    would be an accident, and it would quietly turn the button into a way to fabricate a record.
+
+    This one is the opposite situation and needs the opposite rule. The operator opened the
+    company's site and applied by hand; the app never ran. Refusing that leaves a true fact
+    about the world unrecordable, which is the same corner §Lessons 19 describes — a real
+    Salesforce application stuck as a failure with no UI path out because one guard only
+    accepted one exact state.
+
+    So there is no `was_attempted` check here. What keeps it from being a rubber stamp is that
+    it is explicit rather than automatic: buried in the ⋯ menu, confirmed, reversible, and
+    logged as operator-asserted so the activity trail never claims an agent did it.
+    """
+    from applypilot.database import log_event
+    if not url:
+        return {"ok": False, "message": "url required"}
+    init_db()
+    conn = get_connection()
+    if not _jobs.exists(url, conn):
+        return {"ok": False, "message": "job not found"}
+    if _jobs.apply_status(url, conn) == "applied":
+        return {"ok": False, "message": "already marked as applied"}
+    _jobs.mark_applied(url, conn)
+    log_event(url, "apply", "ok", "You recorded applying to this yourself, outside ApplyPilot.",
+              conn)
+    return {"ok": True, "message": "Marked as applied ✓"}
+
+
+def _unmark_applied(url: str) -> dict:
+    """Undo the above. Present because a state change with no way back is a trap, not a feature.
+
+    Keeps `apply_attempts` / `agent_id` / `apply_error`: undoing a misclick must not also erase
+    the record of a real agent run, which is the only account of what actually happened.
+    """
+    from applypilot.database import log_event
+    if not url:
+        return {"ok": False, "message": "url required"}
+    init_db()
+    conn = get_connection()
+    if not _jobs.exists(url, conn):
+        return {"ok": False, "message": "job not found"}
+    _jobs.unmark_applied(url, conn)
+    log_event(url, "apply", "info", "You undid the applied mark.", conn)
+    return {"ok": True, "message": "No longer marked as applied"}
+
+
 def _mark_rejected(url: str) -> dict:
     """Move a job to the rejected pile (apply_status='rejected' + rejected_at). Keeps applied_at
     so the record that you DID apply survives. Logs a rejection to the activity timeline."""
@@ -3358,6 +3409,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 copilot = str(data.get("copilot", "1")).lower() in {"1", "true", "yes", "on"}
                 ok, msg = _start_apply(limit, min_score, dry_run, copilot)
                 _json_response(self, {"ok": ok, "message": msg}, 200 if ok else 409)
+                return
+            if path == "/api/mark-applied":
+                _json_response(self, _mark_applied_manually(data.get("url", "")))
+                return
+            if path == "/api/unmark-applied":
+                _json_response(self, _unmark_applied(data.get("url", "")))
                 return
             if path == "/api/mark-submitted":
                 _json_response(self, _mark_submitted(data.get("url", "")))

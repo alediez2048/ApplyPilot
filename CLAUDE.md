@@ -12,13 +12,16 @@ campaign happens to be a job search** — see `docs/crm-prd.md` for where that g
 - **Packaging:** Hatchling, `src/` layout, single package `applypilot`
 - **Entry point:** `applypilot = "applypilot.cli:app"` (Typer CLI)
 - **License:** AGPL-3.0-only · **Version:** 0.4.0 (`pyproject.toml`)
-- **Tests:** 1261 passing (`tests/`, 74 files) · ruff clean (line-length 120, py311) · ESLint clean
-- **Schema version:** 2 (`applypilot migrate --status`) · **Settings:** 47 declared in `settings.py`
+- **Tests:** 1481 passing (`tests/`, 82 files) · ruff clean (line-length 120, py311) · ESLint clean
+- **Schema version:** 3 (`applypilot migrate --status`) · **Settings:** 47 declared in `settings.py`
+- **Branch:** the Spaces work lives on `spaces`, **12 commits ahead of `main` and unmerged**.
+  Check `git log --oneline -1` before believing anything here (§Dev workflow).
 
 ## Quick orientation
 
-A **6-stage pipeline over a SQLite `jobs` table**. Each stage reads rows at one state and
-writes columns that advance them. Stages are idempotent and independently runnable.
+A **6-stage pipeline over a SQLite `jobs` table**, now scoped by **Space** (§Spaces). Each
+stage reads rows at one state and writes columns that advance them. Stages are idempotent and
+independently runnable.
 
 ```
 discover → enrich → score → tailor → cover → pdf →  [apply]
@@ -28,7 +31,8 @@ discover → enrich → score → tailor → cover → pdf →  [apply]
 Surfaces:
 - `applypilot run [stages...]` — prep pipeline, sequential or `--stream`
 - `applypilot apply` — browser submission (Tier 3); `--copilot` fills and stops
-- `applypilot dashboard --serve` — the operator UI, and where you actually live
+- `applypilot dashboard --serve` — the operator UI, and where you actually live. Multi-Space
+  since SPACE-2: a tab strip, `?space=<id>`, and a `＋` that creates one from a template
 - `applypilot network` — contact discovery + outreach
 - `applypilot migrate --status` · `applypilot doctor --config` — schema version, settings
 
@@ -54,11 +58,12 @@ stops the moment a job hands over — see §Lessons 8, which cost two filled app
 | `database.py` | SQLite layer. Owns `jobs` + `job_events`. Thread-local WAL, additive column pass, then numbered migrations. `get_connection()` returns a subclass carrying a per-connection schema memo — see §Lessons 11. |
 | `llm.py` | Multi-provider client (round-robin + failover: OpenAI/Gemini/Anthropic/local). |
 | `view.py` | Static HTML results export. |
-| `web_dashboard.py` | **The operator dashboard.** 3,141 lines, **zero SQL** — data access goes through `repo/` and `store.py` (ARCH-4). |
-| `repo/jobs.py` | Every `jobs` query as a named function. Owns `QUEUE_SQL` (what counts as an operator-added job). |
+| `web_dashboard.py` | **The operator dashboard.** 3,568 lines, **zero SQL** — data access goes through `repo/` and `store.py` (ARCH-4). |
+| `repo/jobs.py` | Every `jobs` query as a named function. Owns `QUEUE_SQL` (provenance — how a row arrived) and `_in_spaces` / `_one_space` (membership — which panel it is in). Those two never do each other's job (SPACE-1a D2). |
+| `repo/spaces.py` | The `spaces` / `identities` registries. `jobs_shaped_ids()` and `document_making_ids()` gate the pipeline stages and RAISE on an empty registry rather than returning `[]`. |
 | `scoring/resume_sections.py` | Parses the BASE résumé into its own sections. The base résumé is the template; tailoring rewrites content inside it. |
 | `settings.py` | **Every env var, one registry.** Types, defaults, validators, secret flags. Malformed values fail at startup naming the variable. `.env.example` is generated from it. |
-| `migrations/` | Numbered `mNNN_*.py` with `up(conn)`, run at startup after the additive column pass. **Migrations must be idempotent** — this app gets killed mid-operation. `001` = the ARCH-3 touches backfill. |
+| `migrations/` | Numbered `mNNN_*.py` with `up(conn)`, run at startup after the additive column pass. **Migrations must be idempotent** — this app gets killed mid-operation. `001` = the ARCH-3 touches backfill, `002` = messages per contact, `003` = the `spaces` / `identities` registries. **A migration must never touch a column the additive dicts declare** — they race (§Spaces). |
 | `static/` | `index.html` · `dashboard.css` · `dashboard.js`. Served from `/static/…?v=<version>-<mtime>`; the page itself is `no-store`. One **classic** script, not a module — ~56 inline `onclick=` attributes resolve against the global object. |
 
 ### `discovery/` · `enrichment/` · `scoring/`
@@ -132,6 +137,8 @@ harness no longer has to import a web server to test scheduling.
 | `authrealm.py` | **What one sign-in covers.** URL → the ATS tenant an account belongs to. `host_is_tenant` is load-bearing: every employer on `wd1.myworkdaysite.com` shares that host, so a cookie there proves nothing about any one of them. |
 | `linkedin_thread.py` | Reading an open LinkedIn thread: who a display name is (word-level, never substring) and de-colliding the one-time-per-GROUP timestamps that would otherwise destroy messages. |
 | `lastinteraction.py` | When something last happened on a job **and who did it**, from six sources that were never joined. Direction is the point — "you emailed them 6 days ago" and "they replied 6 days ago" are the same age and opposite situations. |
+| `space.py` | **What a Space IS** — a frozen manifest, shaped after `followup.Channel`. `shape` + `tailor_docs` gate the pipeline queues; `tone`/`offer` reach the prompts; `schedules`/`channels` drive the ladders; `offer_deck` and `can_autosend` gate the deck link and the send path. Everything but the five COLUMNS rides in a `config` JSON blob, so a new field is never a schema change. |
+| `target.py` | A company you STATE, not an employer recovered from a URL. `anchor(space, name)` → `target:<space>:<slug>`, hashed into every contact key. `parse_input()` returns rejects rather than dropping them. |
 | `temperature.py` | How an application is DOING, not how far it has travelled. Bands answer **is anything still in motion**, from an interview backwards. **Only a PERSON can reach `warm`**, and finishing the plan moves a job DOWN. §Lessons 54, 55. |
 
 **Adding a channel is one `Channel` entry plus one prompt** — executed, not claimed:
@@ -209,8 +216,8 @@ re-reading a thread you have already logged is a no-op rather than a duplicate.
 
 | Table | Owner | Purpose |
 |-------|-------|---------|
-| `jobs` (34 cols) | `database.py` | The 6-stage state machine. `_ALL_COLUMNS` is its source of truth. |
-| `contacts` (40 cols) | `networking/store.py` | People per job + outreach + verification. |
+| `jobs` (35 cols) | `database.py` | The 6-stage state machine. `_ALL_COLUMNS` is its source of truth. Holds **targets too** — a targets row is a `jobs` row keyed `target:<space>:<slug>` (SPACE-1a D1). |
+| `contacts` (41 cols) | `networking/store.py` | People per job + outreach + verification. |
 | `touches` | `networking/touches.py` | One follow-up touch per row, ANY channel. `seq` is per (contact, channel). |
 | `sequences` | `networking/touches.py` | Terminal state per (contact, channel): `stopped` / `replied`. |
 | `connections` | `networking/connections.py` | Imported LinkedIn CSV. |
@@ -219,11 +226,16 @@ re-reading a thread you have already logged is a no-op rather than a duplicate.
 | `job_events` | `database.py` | Per-job activity log. Append is best-effort, never raises. |
 
 | `ats_accounts` | `repo/accounts.py` | One row per **auth realm** — the thing one sign-in covers. `have_account` (about us) is deliberately separate from `kind` (about the site). |
+| `spaces` | `repo/spaces.py` | One row per campaign. Five columns + a `config` JSON blob. Seeded by migration 003. |
+| `identities` | `repo/spaces.py` | One row per SENDER (mailbox, from-name, deck, limits). Created by 003, **read by nothing yet** — ID-1. |
 | `schema_migrations` | `migrations/` | Version, status, `claimed_at` lease. See §Lessons on the 300s lease. |
 
-Live counts (2026-08-04): jobs 22 (20 applied, **1 interview scheduled**), contacts **185**
-(64 emailed, 3 replied, 1 bounced), 52 follow-ups sent, messages 112, interactions 5,
-connections 899. **Schema version 2**.
+Live counts (2026-08-05, a snapshot — these move within minutes of real use, so treat them as
+orders of magnitude and re-measure before reasoning from one): jobs **27** (27 applied,
+**1 interview scheduled**), contacts **206**
+(113 emailed, **5 replied**), touches 69, messages 182, interactions 10, connections 899,
+**2 recorded deck opens** (the first ever — see §Engagement signals). Three Spaces: `job-search`,
+`partnerships`, `gauntlet`. **Schema version 3**.
 
 Contacts nearly tripled on 2026-08-04 — 66 → 185 — because employer resolution was broken in
 three separate ways and every one of them returned zero people rather than an error. See
@@ -274,7 +286,7 @@ fields already on the wire, so a tag cannot drift from its job. Clicking one fil
 rather than OR, because with OR a second click returns MORE rows and reads as broken. The search
 box is STATIC markup — `refresh()` replaces `#jobs` wholesale every 2.5s, so anything rendered
 into it is destroyed mid-keystroke. Typing re-filters from `LAST_JOBS` and never refetches
-`/api/status` (§Lessons 11, 26 — 50 SQL statements behind a keystroke).
+`/api/status` (§Lessons 11, 26 — 74 SQL statements behind a keystroke).
 
 **🎯 Interview scheduled is the success metric** (2026-08-03), on the row next to Re-apply. Every
 other number counts EFFORT; this is the only outcome, and the funnel now ends at it. It is also
@@ -351,14 +363,64 @@ corrupt reply detection. `dm_status` only ever recorded what WE sent. So both di
 The 2.5s refresh replaces `#jobs` wholesale, so `refresh()` **skips while any input in that
 subtree has focus** — otherwise it eats what you're typing.
 
-`/api/status` costs **50 SQL statements** (was 313 before ARCH-4 measured it — 199 of those
-were `CREATE TABLE IF NOT EXISTS` re-run every request). `tests/test_query_budget.py` holds
-the line and fails on a per-contact N+1. Batch a new query; don't raise the budget.
+`/api/status` costs **74 SQL statements against a budget of 80** (was 313 before ARCH-4
+measured it — 199 of those were `CREATE TABLE IF NOT EXISTS` re-run every request). This file
+said "50" for two sessions while the test said 80; check `MAX_STATEMENTS` in
+`tests/test_query_budget.py`, not this line. It holds the line and fails on a per-contact N+1.
+Batch a new query; don't raise the budget.
+
+**Six statements of headroom is thin.** Spaces cost exactly ONE — the nav list — because the
+Space manifest is built from the row `_resolve_space` already read rather than by calling
+`load()` again, and `_registered()` memoises its TRUE answer per connection. Anything added
+here needs the same treatment.
 
 **That budget counts SQL and nothing else**, which is exactly how CRM-4a slipped a Gmail HTTP
 call per job onto this path and took the endpoint to **2.4s against a 2.5s refresh** — see
 §Lessons 26. Now **0.043s**, with a test that counts network round-trips too. Anything you add
 here that touches the network needs the same treatment.
+
+---
+
+## Spaces (SPACE-1a … SPACE-4b, 2026-08-04/05 — branch `spaces`, unmerged)
+
+**A Space is a manifest, not a fork** — a row of config over one shared engine, shaped after
+`domain/followup.Channel` because that pattern already made a third follow-up channel cost one
+column. `docs/spaces-prd.md` is the plan; `docs/tickets/SPACE-1a-*.md` is the authority where
+they disagree, because three of the PRD's claims did not survive contact with the code.
+
+**Two shapes.** `pipeline/jobs` (rows are postings) and `pipeline/targets` (rows are companies
+you pitch). Three templates, two of which share the targets shape — that is the central claim,
+and `test_adding_a_space_needs_no_schema_change` is where it gets falsified: it defines a Space
+named `lighthouse-tenders`, drives it end to end, and asserts no migration ran. A second test
+asserts that name appears nowhere in the codebase, because the channel version of this test
+originally named SMS and silently broke when SMS shipped.
+
+| Decision | Why |
+|---|---|
+| A target row lives in `jobs`, keyed `target:<space>:<slug>` | Almost nothing reads the table — the anchor travels as an opaque string. A separate table forks every join. 20 dead columns is the cheaper half. |
+| `space_id` alone decides membership; `strategy` keeps meaning provenance | Two partition keys over one table is §Lessons 49 waiting. A target keeps `dashboard_upload` — a private strategy would hide it from `delete_job`. |
+| `space_id` ships in the additive DICTS, never a migration | They RACE: `get_connection()` does not call `init_db`, so `ensure_contacts_columns` can run first. A migration touching a declared column is a duplicate-column error one way and a NOT-NULL-without-default error the other. The column DEFAULT also does the backfill, which no `UPDATE` can do without a window. |
+| `company_cap` is NOT on the manifest | Same mistake §Headline 4 corrected for the daily limit: the cap exists because a company sees one sender, and **the recipient does not know what a Space is**. |
+| `job_url` → `anchor` was NOT renamed | 169 refs in 18 source files, 140 in tests, and it leaves `messages.job_url` disagreeing with it. Pure hygiene, and the only step that can destroy data. SPACE-1b, deferred. |
+
+**The manifest reaches everything, and the guarantee is a golden file.** A targets Space gets
+its OWN system prompt (`_PITCH_SYSTEM`), not the job-seeker one with caveats appended —
+§Lessons 40. Follow-ups too (`_PITCH_FOLLOWUP_SYSTEM`), which the first pass forgot, so touch 1
+read correctly and touch 2 claimed an application that does not exist.
+`tests/golden/jobs_outreach_prompt.txt` pins the jobs prompt byte-for-byte. **Its first version
+was vacuous**: it compared `space=None` against a default manifest and passed under a mutation
+that leaked a field into BOTH paths. Two things moving together is not a regression test.
+
+**Creating a Space is a `＋` on the nav strip.** Two templates offered, not three — `business`
+differs from `outreach` by `identity_id` alone, that field FREEZES after the first send, and
+ID-1 has not shipped, so a business Space made today would send from the personal mailbox
+forever. The refusal says so. The nav shows from ONE Space up, because the `＋` lives in it and
+hiding the strip below two hid the only way to make a second.
+
+**Not built:** ID-1/ID-2 (per-identity mailbox, deck, limits — `identities` exists and is read
+by nothing), SPACE-0 (archive terminal rows), SPACE-6 (the business Space as a falsifier).
+Copy debt: the bucket filters still say "In progress / Applied / Rejected" and the search
+placeholder names salary, both wrong words in a targets Space.
 
 ---
 
@@ -1053,6 +1115,48 @@ company `"Jobs"` — the same substring bug class, inside the function written t
     `sha256(contact|kind|at)` so two of three vanish with a success response. One structural
     probe, no message text read, settled both.
 
+58. **The deck beacon existed, was deployed, and could not see the name.** "Nobody has opened
+    the deck" after ~98 emails was not false, it was UNKNOWABLE. Netlify rewrites `/intro/*` to
+    `/intro/index.html` with a 200, so the browser keeps the name — then Gatsby hydrates, does
+    not recognise `/intro/gina` as a route, and **replaces the URL with `/intro/`**. Measured:
+    the tab title still read `/intro/zzprobe-live-check-b2` while `location.pathname` was
+    already `/intro/`. The component's `useEffect` ran after that, hit its own
+    `seg === "intro"` guard, and sent nothing. Two real browser loads produced zero hits while
+    direct POSTs to the same endpoint landed fine.
+    The README offered an inline `<script>` "or as a `useEffect` in the component". **The
+    inline one runs at parse time and would have worked**; the parenthetical is the broken
+    option. Fix: capture the slug before hydration (`gatsby-ssr.js` → `window.__deckSlug`).
+    Live since 2026-08-05 — the first two real opens ever recorded arrived minutes later.
+
+59. **I diagnosed that by grepping the HTML, and the HTML was the wrong artifact.** A `useEffect`
+    compiles into a LAZILY-LOADED page chunk that the document references only by hash through
+    the webpack runtime. Grepping the served HTML — and even the four `<script src>` bundles —
+    reports "no beacon" against a working one. §Lessons 46 again, two commits after writing a
+    check whose whole purpose was to stop exactly this. Resolve the chunk the way the framework
+    does (`page-data.json` → `componentChunkName` → runtime id → hash), never by pattern.
+
+60. **A regression test comparing two moving things proves nothing.**
+    `test_a_default_space_changes_the_prompt_by_nothing` compared `space=None` against a default
+    manifest and PASSED under a mutation that leaked a manifest field into both paths. It proved
+    they were equal to each other, not that either matched what shipped. A golden FILE fixed it.
+    The same shape as §Lessons 13, one level up: the baseline has to be still.
+
+61. **A guard against a field being used must not grep for one spelling of it.** `UNAPPLIED`
+    names manifest fields nothing reads yet, and its test looked for the literal `space.<field>`
+    — surviving a mutation that read `manifest.tone`, which is the real holder's name in
+    `_status_payload`. §Lessons 48 INSIDE the guard written to stop a field being declared and
+    quietly used. It parses attribute access now.
+
+62. **`hidden` is a user-agent rule, so any author `display` beats it.** `.controls{display:grid}`
+    kept the jobs console on screen in a targets Space with `hidden` correctly set. The Node
+    test asserted the PROPERTY, which was true and did nothing — §Lessons 41's shape. One line
+    (`[hidden]{display:none !important}`) kills the whole class.
+
+63. **I restarted the dashboard while an apply was running**, after the check printed
+    `in_progress: 1`, because the check was chained into the same command as the restart instead
+    of gating it. The documented failure, walked into with the warning on screen. `pgrep -fl
+    "applypilot apply"` before ANY restart, as a separate step whose output you actually read.
+
 Shipped in one session, in this order: **CRM-3a → CRM-1 → CRM-2 → CRM-3b → CRM-4a.**
 Tickets in `docs/tickets/CRM-*.md`; two of them had instructions that were factually wrong
 before being revised (they told you to write `followup_status`, removed by ARCH-3).
@@ -1164,7 +1268,7 @@ Established by LOOKING at the real mailbox, not by guessing:
 |---|---|---|
 | Replied | `messages` | automatic |
 | **Booked a call** | cal.com emails the host — verified (`hello@cal.com`, "30 Min Meeting between …") | automatic |
-| **Opened the intro deck** | first-party beacon on the sender's OWN site → Netlify Blobs → polled every 5 min | **automatic, live 2026-08-01** |
+| **Opened the intro deck** | first-party beacon on the sender's OWN site → Netlify Blobs → polled every 5 min | **genuinely live 2026-08-05.** It was believed live from 2026-08-01 and recorded nothing for five days and ~98 emails — §Lessons 58. Verify with `sh scripts/deck-check.sh --probe`, which loads the real page in a real browser; every API-level check passed the whole time it was broken |
 | **Viewed your LinkedIn profile** | **not detectable** — absent from the LinkedIn data export AND no notification email exists. Only LinkedIn's UI has it, and automating that was abandoned twice (§Lessons 3) | operator-logged, tagged `noted` |
 
 **Email OPEN tracking was rejected outright.** A pixel fires when Gmail proxies and caches the
@@ -1308,11 +1412,16 @@ What the ARCH set *did* buy became visible immediately afterwards: the first rea
 apply surfaced three bugs (§Lessons 8–10), and every one was diagnosable in minutes because
 the data layer, the query budget and the validators existed to measure against.
 
-**`docs/spaces-prd.md` is the current plan** (v2, 2026-08-04): three templates, two shapes,
-N identities. Job search, business outreach and a business CRM — the last two are the SAME
-machine, so the third template is a config row, not a build. The expensive part is identity:
-`TOKEN_PATH` is one file, from/signature are global env vars, `INTRO_DECK_URL` is one site.
-`SPACE-0` (archive terminal rows) is independent and ships first.
+**`docs/spaces-prd.md` is largely BUILT** (v2, 2026-08-04): SPACE-1a, 1, 2, 3, 3b, 4 and 4b all
+shipped 2026-08-04/05 on the `spaces` branch — see §Spaces. Read `docs/tickets/SPACE-1a-*.md`
+first: it is the authority where it and the PRD disagree, and three of the PRD's claims did not
+survive contact with the code.
+
+Still open, in the order they matter: **ID-1/ID-2** (per-identity mailbox, deck and limits — the
+`identities` table exists and is read by nothing, and until it is wired a business Space cannot
+exist), **SPACE-0** (archive terminal rows, independent, half a day, and it is the
+endless-scroll complaint that started all of this), **SPACE-6** (the business Space as a
+falsifier — if it costs code, the PRD's central claim was wrong and should say so).
 
 `docs/crm-prd.md` is the larger person-as-root version of the same idea. Not superseded — it is
 the upgrade path §11 of the Spaces PRD points at. Do the graph when a real question needs it.
@@ -1364,9 +1473,17 @@ What is actually open now, ordered by leverage:
    `test_sql_lives_only_in_the_data_layer` names the remainder in an allowlist, so the list can
    only shrink and no NEW module can join it. Deliberately deferred; see ARCH-4's ticket.
 
-5. **`web_dashboard.py` is 3,141 lines**, all Python, zero SQL. ~430 lines are pipeline
+5. **`web_dashboard.py` is 3,568 lines**, all Python, zero SQL. ~430 lines are pipeline
    orchestration (`run_dashboard_prepare/apply/fill_one/restart/continue`) that are not HTTP
    concerns. Extracting them is the natural companion to debt item 1.
+
+9. **`identities` exists and nothing reads it.** Created by migration 003 with `token_path`,
+   `from_name`, `deck_base_url`, `daily_limit` and the collector columns; ID-1 is what wires
+   them. Until then every Space sends from the one personal mailbox, and `identity_id` freezes
+   on first send — so **do not create a business Space yet**.
+
+10. **The `spaces` branch is 12 commits ahead of `main` and unmerged.** Everything above is on
+    it. `main` has none of it.
 
 6. ~~**No per-company outreach cap.**~~ **CLOSED 2026-08-03** (`OUTREACH_COMPANY_CAP`, default
    8). Kept for the number: six companies were already OVER the cap the moment it shipped, three
@@ -1492,10 +1609,17 @@ change still needs the `pip install` above — but that copy gives the file a ne
   `ImportError: cannot import name '__version__' from 'applypilot' (unknown location)`, buried
   in a command log nobody opens. Recovery: `rm -rf` both directories in site-packages, reinstall.
   Run the install alone, and verify with `python -c "import applypilot; print(applypilot.__version__)"`.
-- **Check for in-flight applies before ANY restart or reinstall.** The apply is a child of the
-  dashboard, so it dies with the server. This happened three times on 2026-07-30 alone.
-- Working tree clean; `main` pushed through **`4cad9dd`** (2026-08-04). Tags: `stable-arch2/3/5/6`
-  · `stable-e2e-20260730` · `stable-crm-20260731`.
+- **Check for in-flight applies before ANY restart or reinstall, as a SEPARATE command whose
+  output you read.** The apply is a child of the dashboard, so it dies with the server. Three
+  times on 2026-07-30, and again on 2026-08-05 — that time the check printed `in_progress: 1`
+  and the restart ran anyway, because both were in one chained command (§Lessons 63). Use
+  `pgrep -fl "applypilot apply"`; recover an orphaned lock with
+  `release_stale_locks(max_age_minutes=0)` and ONLY after pgrep comes back empty.
+- **On branch `spaces`, 12 commits ahead of `main`, unmerged and unpushed** (2026-08-05).
+  `main` last pushed at **`e1f0be6`**. Tags: `stable-arch2/3/5/6` · `stable-e2e-20260730` ·
+  `stable-crm-20260731`.
+- **Deck tracking has its own check**: `sh scripts/deck-check.sh --probe`. It tests the page,
+  not the API — every API-level check passed for the five days it was broken.
 - **`applypilot ats`** is the fastest way to check a résumé is readable and see keyword gaps.
 - **All 28 existing résumé PDFs carry an em dash** from the old renderer and need a re-render;
   nothing rewrites a PDF in place.

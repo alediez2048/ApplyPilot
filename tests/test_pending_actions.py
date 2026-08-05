@@ -20,6 +20,8 @@ import pytest
 
 from applypilot import web_dashboard
 
+from browser_stubs import BROWSER_GLOBALS
+
 pytestmark = pytest.mark.skipif(not shutil.which("node"), reason="node not available")
 
 _STUBS = """
@@ -29,15 +31,7 @@ const el = () => ({ innerHTML:'', textContent:'', hidden:false, value:'', style:
   classList:{toggle(){},add(){},remove(){}}, addEventListener(){}, appendChild(){}, dataset:{} });
 globalThis.document = { getElementById: el, querySelectorAll: ()=>[], querySelector: el,
   addEventListener(){}, activeElement:null, body: el(), hasFocus: () => false };
-globalThis.window = { open(){}, location:{href:''} };
-Object.defineProperty(globalThis, "navigator",
-  { value:{ clipboard:{ writeText(){} } }, configurable:true });
-globalThis.setInterval = () => 0;
-globalThis.setTimeout = () => 0;
-globalThis.fetch = async () => ({ json: async () => ({}) });
-globalThis.alert = () => {};
-globalThis.confirm = () => true;
-"""
+""" + BROWSER_GLOBALS
 
 _EXPORTS = ("; return { pendingActions, dueByChannel, needsYou, nextAction, jobTabs, "
             "activeTab, FOLLOWUP_CHANNELS, PANEL_OPEN, TAB_OPEN };")

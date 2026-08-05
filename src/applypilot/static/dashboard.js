@@ -1,3 +1,53 @@
+// ---- Spaces (SPACE-2) ----
+//: Which Space is on screen. Seeded from ?space= so a bookmark or a reload lands where you
+//: left off, then owned here. The SERVER decides whether the id is real — an unknown one comes
+//: back with `space_note` explaining the fallback rather than an empty table, which would be
+//: indistinguishable from a Space with nothing in it.
+let SPACE_ID = new URLSearchParams(location.search).get('space') || '';
+
+//: Every read of /api/status goes through this. There are four call sites and a rule applied to
+//: three of them is not applied (§Lessons 49) — the one that got missed would silently show
+//: another Space's counts in the apply guard.
+function statusUrl() {
+  return SPACE_ID ? `/api/status?space=${encodeURIComponent(SPACE_ID)}` : '/api/status';
+}
+
+// Switching Space is a different working set, not a filter over the current one. So the caches
+// that hold the previous Space's rows are dropped: LAST_JOBS feeds click handlers that run
+// after render, and JOB_DESC is the ~130KB search corpus fetched once per session (UX-6) — one
+// per SESSION was right when there was one Space, and is a cross-Space leak now.
+function switchSpace(id) {
+  if (!id || id === SPACE_ID) return;
+  SPACE_ID = id;
+  LAST_JOBS = [];
+  JOB_DESC.clear();
+  JOB_DESC_LOADED = false;
+  const url = new URL(location.href);
+  url.searchParams.set('space', id);
+  history.replaceState(null, '', url);   // replace, not push: the back button should leave the
+  refresh();                             // dashboard, not walk a tab history nobody asked for
+}
+
+function renderSpaceNav(spaces, current, note) {
+  const nav = document.getElementById('spaceNav');
+  const noteEl = document.getElementById('spaceNote');
+  if (noteEl) {
+    noteEl.textContent = note || '';
+    noteEl.hidden = !note;
+  }
+  if (!nav) return;
+  const list = spaces || [];
+  // One tab is furniture. Hidden rather than disabled, because there is nothing to choose —
+  // the disabled-with-a-reason rule (§Lessons 43) is for controls that WOULD do something.
+  nav.hidden = list.length < 2;
+  if (nav.hidden) { nav.innerHTML = ''; return; }
+  nav.innerHTML = list.map(s => {
+    const on = s.id === current;
+    return `<button class="space-tab${on ? ' on' : ''}" ${on ? 'aria-current="page"' : ''}`
+         + ` onclick="switchSpace('${esc(s.id)}')">${esc(s.name)}</button>`;
+  }).join('');
+}
+
 async function post(path, payload) {
   const res = await fetch(path, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload || {})});
   const data = await res.json();
@@ -70,7 +120,7 @@ function advanceStagesFromLog(lines) {
 async function pollCommandUntilDone(label) {
   const cmdEl = document.getElementById('command');
   for (let i = 0; i < 600; i++) { // ~20 min ceiling (2s * 600)
-    const data = await (await fetch('/api/status')).json();
+    const data = await (await fetch(statusUrl())).json();
     const c = data.command || {};
     PIPE_STATS = data.stats || {};
     pipeRenderLog(c.log || []);
@@ -105,7 +155,7 @@ async function applyJobs() {
   const cmdEl = document.getElementById('command');
   // Guard: apply only works on jobs that are already prepared (tailored + cover). If none are
   // Ready, launching apply just silently does nothing — so tell the user instead of no-op'ing.
-  const status = await (await fetch('/api/status')).json();
+  const status = await (await fetch(statusUrl())).json();
   const ready = (status.stats || {}).ready || 0;
   const dryRun = document.getElementById('dryRun').checked;
   if (ready < 1) {
@@ -170,7 +220,7 @@ async function runEverything() {
 
     // 3) Apply — co-pilot mode: fill the form in Chrome, then STOP and leave it open for you to
     //    review + submit. Only runs if something's Ready (else say so, don't launch a no-op).
-    const status = await (await fetch('/api/status')).json();
+    const status = await (await fetch(statusUrl())).json();
     const ready = (status.stats || {}).ready || 0;
     if (ready < 1) { cmdEl.textContent = 'Materials prepared, but no jobs are Ready to apply.'; return; }
     const dryRun = document.getElementById('dryRun').checked;
@@ -412,7 +462,7 @@ let JOB_DESC_LOADED = false;
 async function warmDescriptions() {
   if (JOB_DESC_LOADED) return;
   JOB_DESC_LOADED = true;
-  const r = await post('/api/job-descriptions', {});
+  const r = await post('/api/job-descriptions', {space: SPACE_ID});
   if (!r.ok) { JOB_DESC_LOADED = false; return; }
   for (const [url, text] of Object.entries(r.descriptions || {})) {
     if (!JOB_DESC.has(url)) JOB_DESC.set(url, text || '');
@@ -1911,7 +1961,26 @@ async function refresh() {
   // the cursor in a notes field and switch tabs, and the badge CRM-3a exists to raise never
   // appears. The guard belongs on the one write that would destroy what you are typing.
   const editing = isEditingJobs();
-  const data = await (await fetch('/api/status')).json();
+  // Which Space this response will be ABOUT. Captured before the await, because a refresh is in
+  // flight for ~100ms and the 2.5s poller means there is almost always one.
+  const asked = SPACE_ID;
+  const data = await (await fetch(statusUrl())).json();
+  // Drop a response for a Space we have since left. Every field in it is stale, not just this
+  // one — the rows, the counts and the 🔔 aggregate all describe the panel you just navigated
+  // away from.
+  //
+  // Found in a browser, not in a test: clicking a tab set SPACE_ID and called refresh(), and
+  // then the poller's ALREADY-IN-FLIGHT response landed, said `space: 'job-search'`, and the
+  // line below adopted it — so the URL read ?space=tmp-preview while the panel, the counts and
+  // the highlighted tab all snapped back and STAYED back. Sticky, not transient, because
+  // statusUrl() then kept asking for the old Space. No Node test can see this: they call the
+  // renderers directly, with no second request racing the first.
+  if (asked !== SPACE_ID) return;
+  // The server is the authority on which Space is on screen — it may have fallen back from an
+  // id that does not resolve — so adopting its answer keeps `statusUrl()` and the highlighted
+  // tab from disagreeing on the next tick.
+  if (data.space) SPACE_ID = data.space;
+  renderSpaceNav(data.spaces, data.space, data.space_note);
   document.getElementById('appDir').textContent = data.app_dir;
   const s = data.stats || {};
   const stats = [['URL Jobs',s.total],['URL Applied',s.applied],['Lifetime Applied',s.lifetime_applied],['Enriched',s.enriched],['User-approved',s.scored],['Tailored',s.tailored],['Covers',s.covers],['Ready',s.ready],['Errors',s.errors]];

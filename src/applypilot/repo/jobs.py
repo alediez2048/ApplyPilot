@@ -166,7 +166,8 @@ def queue_for_apply(limit: int, max_attempts: int,
         (*ids, max_attempts, limit)).fetchall())
 
 
-def all_descriptions(conn: sqlite3.Connection | None = None) -> dict[str, str]:
+def all_descriptions(conn: sqlite3.Connection | None = None,
+                     space_id: str | None = None) -> dict[str, str]:
     """{url: full_description} for every operator-added job, in ONE query.
 
     Search needs the whole text — `/api/status` ships a 900-char excerpt, so a term in
@@ -174,8 +175,9 @@ def all_descriptions(conn: sqlite3.Connection | None = None) -> dict[str, str]:
     would add ~130KB to a refresh that runs every 2.5 seconds, for a field used only while
     typing. Fetched once per session on the first search instead (UX-6).
     """
+    scope, args = _one_space(space_id)
     rows = _c(conn).execute(
-        f"SELECT url, full_description FROM jobs WHERE {QUEUE_SQL}").fetchall()
+        f"SELECT url, full_description FROM jobs WHERE {QUEUE_SQL}{scope}", args).fetchall()
     out = {}
     for r in rows:
         text = (r["full_description"] or "").strip()
@@ -183,16 +185,34 @@ def all_descriptions(conn: sqlite3.Connection | None = None) -> dict[str, str]:
     return out
 
 
-def dashboard_rows(limit: int = 500, conn: sqlite3.Connection | None = None) -> list:
+def _one_space(space_id: str | None) -> tuple[str, list[str]]:
+    """`AND space_id = ?` plus its binding, or nothing at all when no Space is named.
+
+    Distinct from `_in_spaces`, and the difference is which question is being asked. The stage
+    queues ask *may the pipeline touch this row* and have no safe empty answer, so they resolve
+    a list from the registry and raise when it is empty. This asks *which panel is on screen*,
+    where "all of them" is a legitimate answer and is what every caller predating Spaces means.
+    """
+    return (" AND space_id = ?", [space_id]) if space_id else ("", [])
+
+
+def dashboard_rows(limit: int = 500, conn: sqlite3.Connection | None = None,
+                   space_id: str | None = None) -> list:
     """The main table. Returns raw Rows — the caller reads columns by name and the
-    ordering below is UI precedence, not a data rule."""
+    ordering below is UI precedence, not a data rule.
+
+    `space_id` is a WHERE clause and nothing more (SPACE-2). The budget test holds at 80
+    because filtering costs no statement — the cost of Spaces on this path is resolving the nav
+    list, which is one SELECT whatever the number of Spaces.
+    """
+    scope, args = _one_space(space_id)
     return _c(conn).execute(f"""
         SELECT url, title, site, salary, location, full_description, application_url, detail_error,
                fit_score, score_reasoning, tailored_resume_path, cover_letter_path,
                apply_status, apply_error, apply_attempts, applied_at,
                last_attempted_at, apply_duration_ms, rejected_at, interview_at
         FROM jobs
-        WHERE {QUEUE_SQL}
+        WHERE {QUEUE_SQL}{scope}
         ORDER BY
           CASE
             WHEN apply_status = 'rejected' THEN 6            -- rejected pile sinks to the bottom
@@ -208,7 +228,7 @@ def dashboard_rows(limit: int = 500, conn: sqlite3.Connection | None = None) -> 
           discovered_at DESC,
           fit_score DESC NULLS LAST
         LIMIT ?
-    """, (limit,)).fetchall()
+    """, (*args, limit)).fetchall()
 
 
 def in_progress(conn: sqlite3.Connection | None = None) -> list[dict]:
@@ -236,7 +256,10 @@ def awaiting_human(conn: sqlite3.Connection | None = None) -> list[dict]:
 
 # ── aggregates ──────────────────────────────────────────────────────────────
 
-def queue_stats(conn: sqlite3.Connection | None = None) -> dict:
+def queue_stats(conn: sqlite3.Connection | None = None,
+                space_id: str | None = None) -> dict:
+    """Counts for the status strip. Scoped to one Space when the panel is."""
+    scope, args = _one_space(space_id)
     return _dict(_c(conn).execute(f"""
         SELECT
           COUNT(*) AS total,
@@ -249,8 +272,8 @@ def queue_stats(conn: sqlite3.Connection | None = None) -> dict:
           SUM(CASE WHEN apply_error IS NOT NULL THEN 1 ELSE 0 END) AS errors,
           SUM(CASE WHEN apply_status = 'in_progress' THEN 1 ELSE 0 END) AS in_progress
         FROM jobs
-        WHERE {QUEUE_SQL}
-    """).fetchone())
+        WHERE {QUEUE_SQL}{scope}
+    """, args).fetchone())
 
 
 def lifetime_stats(conn: sqlite3.Connection | None = None) -> dict:

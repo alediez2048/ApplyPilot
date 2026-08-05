@@ -116,10 +116,17 @@ const el = () => ({ innerHTML:'', textContent:'', hidden:false, value:'', style:
   setAttribute(){}, getAttribute:()=>null, removeAttribute(){}, focus(){},
   scrollIntoView(){},
   classList:{toggle(){},add(){},remove(){}}, addEventListener(){}, appendChild(){}, dataset:{} });
+// A vm context starts EMPTY — it does not inherit Node's globals, so `URL` and
+// `URLSearchParams` have to be handed in even though they exist in the outer process. The Space
+// nav parses `?space=` at module load, and without these the script throws before a single
+// handler is defined, which reads as every handler having gone missing at once.
 const ctx = vm.createContext({
   document: { getElementById: el, querySelectorAll: ()=>[], querySelector: el,
               addEventListener(){}, activeElement:null, body: el() },
+  location: { href:'http://localhost:8765/', search:'' },
+  history: { replaceState(){}, pushState(){} },
   window: { open(){}, location:{href:''} },
+  URL, URLSearchParams,
   navigator: { clipboard: { writeText(){} } },
   setInterval: () => 0, setTimeout: () => 0, clearTimeout: () => {},
   fetch: async () => ({ ok:true, json: async () => ({}) }),

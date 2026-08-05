@@ -15,6 +15,8 @@ import applypilot.database as database
 from applypilot.domain.followup import EMPTY_LADDER, exhausted
 from applypilot.networking import store, touches
 
+from browser_stubs import BROWSER_GLOBALS
+
 NOW = datetime(2026, 8, 2, 12, 0, tzinfo=timezone.utc)
 
 
@@ -212,12 +214,7 @@ const el = () => ({ innerHTML:'', textContent:'', hidden:false, value:'', style:
   classList:{toggle(){},add(){},remove(){}}, addEventListener(){}, appendChild(){}, dataset:{} });
 globalThis.document = { getElementById: el, querySelectorAll: ()=>[], querySelector: el,
   addEventListener(){}, activeElement:null, body: el(), hasFocus: () => false };
-globalThis.window = { open(){}, location:{href:''} };
-Object.defineProperty(globalThis,"navigator",{value:{clipboard:{writeText(){}}},configurable:true});
-globalThis.setInterval = () => 0; globalThis.setTimeout = () => 0;
-globalThis.fetch = async () => ({ json: async () => ({}) });
-globalThis.alert = () => {}; globalThis.confirm = () => true;
-"""
+""" + BROWSER_GLOBALS
 
 
 def _panel(contacts, tmp_path, network_running=False):

@@ -21,6 +21,8 @@ import pytest
 
 from applypilot import web_dashboard
 
+from browser_stubs import BROWSER_GLOBALS
+
 _STUBS = """
 const el = () => ({ innerHTML:'', textContent:'', hidden:false, value:'', style:{},
   closest:()=>el(), querySelector:()=>el(), querySelectorAll:()=>[],
@@ -30,15 +32,7 @@ const el = () => ({ innerHTML:'', textContent:'', hidden:false, value:'', style:
 globalThis.document = { title: '', hasFocus: () => FOCUSED.value,
   getElementById: el, querySelectorAll: ()=>[], querySelector: el,
   addEventListener(){}, activeElement:null, body: el() };
-globalThis.window = { open(){}, location:{href:''} };
-globalThis.setInterval = () => 0;
-globalThis.setTimeout = () => 0;
-globalThis.fetch = async () => ({ json: async () => ({}) });
-globalThis.alert = () => {};
-globalThis.confirm = () => true;
-Object.defineProperty(globalThis, "navigator",
-  { value:{ clipboard:{ writeText(){} } }, configurable:true });
-"""
+""" + BROWSER_GLOBALS
 
 _DRIVER = """
 const F = (new Function(SRC + `; return { updateNeedsYouBadge, needsYou };`))();

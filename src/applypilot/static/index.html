@@ -34,6 +34,15 @@
   </div>
 </header>
 <main>
+  <!-- SPACE-2. Rendered from /api/status. Hidden while there is only one Space, because a tab
+       strip with one tab is furniture that teaches you to stop looking at it — the same
+       reasoning as the 🔔 badge not counting rows that are permanently actionable.
+       Static markup: refresh() writes INTO these nodes and never replaces them. -->
+  <nav id="spaceNav" class="space-nav" hidden aria-label="Spaces"></nav>
+  <!-- Why the panel on screen is not the one that was asked for. Separate from the nav so it
+       shows even with one Space, which is exactly when a bad ?space= is least explicable. -->
+  <div id="spaceNote" class="space-note" hidden></div>
+
   <div class="stats" id="stats"></div>
 
   <hr class="section-sep">

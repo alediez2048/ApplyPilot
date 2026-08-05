@@ -35,6 +35,7 @@ from applypilot.database import get_connection, init_db
 from applypilot.networking import store as _store
 from applypilot.networking import touches as _touches
 from applypilot.repo import jobs as _jobs
+from applypilot.repo import spaces as _spaces
 
 console = Console()
 
@@ -1549,7 +1550,29 @@ def _contact_payload(c: dict, company: str | None = None, ladders: dict | None =
     }
 
 
-def _status_payload() -> dict:
+def _resolve_space(requested: str, conn) -> tuple[str, list[dict], str]:
+    """(the Space on screen, the nav list, a note when the request could not be honoured).
+
+    An unknown or archived id falls back to the first Space **and says so**. Serving an empty
+    table for a `?space=` typo would be indistinguishable from a Space with nothing in it —
+    §Lessons 15, and the reason `network_note` exists three tabs away.
+
+    Returns `("", [...], "")` when the registry is missing, which means "do not filter" and is
+    exactly what every caller predating Spaces meant.
+    """
+    nav = _spaces.all_spaces(conn=conn)
+    if not nav:
+        return "", [], ""
+    known = {s["id"] for s in nav}
+    if requested and requested in known:
+        return requested, nav, ""
+    fallback = nav[0]["id"]
+    if requested:
+        return fallback, nav, (f"No Space called “{requested}”. Showing {nav[0]['name']}.")
+    return fallback, nav, ""
+
+
+def _status_payload(space: str = "") -> dict:
     init_db()
     conn = get_connection()
     from applypilot.networking.store import init_contacts, get_contacts_for_job
@@ -1557,10 +1580,12 @@ def _status_payload() -> dict:
     init_contacts(conn)
     _net_tasks = _network.statuses()
 
-    stats = _jobs.queue_stats(conn)
+    space_id, space_nav, space_note = _resolve_space(space, conn)
+
+    stats = _jobs.queue_stats(conn, space_id=space_id)
     lifetime = _jobs.lifetime_stats(conn)
 
-    rows = _jobs.dashboard_rows(conn=conn)
+    rows = _jobs.dashboard_rows(conn=conn, space_id=space_id)
 
     jobs: list[dict] = []
     # Connection counts for every company up front: one scan of the 899-row connections
@@ -1711,6 +1736,14 @@ def _status_payload() -> dict:
         # Employers whose sign-in wall is unpaid. ONE query — the realm list is refreshed and
         # the browser is scanned by the background poller, never here.
         "accounts": _accounts_payload(conn),
+        # SPACE-2. The nav list is ONE query however many Spaces there are, and the filter
+        # itself is a WHERE clause costing none — so the budget does not move (§Lessons 26 is
+        # about what gets ADDED to this path, and this adds one statement, not one per job).
+        "space": space_id,
+        "spaces": [{"id": s["id"], "name": s["name"], "shape": s["shape"]} for s in space_nav],
+        # Says WHY the panel is not the one that was asked for. An unhonoured `?space=` that
+        # silently rendered the default would be a Space that quietly does not exist.
+        "space_note": space_note,
     }
 
 
@@ -2047,15 +2080,20 @@ def _log_interaction(data: dict) -> dict:
     return {"ok": True, "message": f"Noted for {who}." if is_new else "Already recorded."}
 
 
-def _all_job_descriptions() -> dict:
+def _all_job_descriptions(data: dict | None = None) -> dict:
     """Every posting's full text, once per session, for search (UX-6).
 
     Not on `/api/status`: ~130KB added to a 2.5-second refresh for a field only used while
     typing. This is the third option in the ticket — the two rejected were shipping it on every
     refresh, and a round trip per keystroke-batch.
+
+    Scoped to the Space on screen (SPACE-2). Search that reached across Spaces would return
+    rows the table cannot show, and a result you cannot click is worse than no result.
     """
     init_db()
-    return {"ok": True, "descriptions": _jobs.all_descriptions(get_connection())}
+    conn = get_connection()
+    space_id, _, _ = _resolve_space((data or {}).get("space", ""), conn)
+    return {"ok": True, "descriptions": _jobs.all_descriptions(conn, space_id=space_id)}
 
 
 def _job_description(data: dict) -> dict:
@@ -2912,7 +2950,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if _serve_static(self, path):
             return
         if path == "/api/status":
-            _json_response(self, _status_payload())
+            _json_response(self, _status_payload(
+                parse_qs(parsed.query).get("space", [""])[0]))
             return
         if path == "/api/material":
             query = parse_qs(parsed.query)
@@ -3038,7 +3077,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     data.get("url", ""), data.get("description", "")))
                 return
             if path == "/api/job-descriptions":
-                _json_response(self, _all_job_descriptions())
+                _json_response(self, _all_job_descriptions(data))
                 return
             if path == "/api/job-description":
                 _json_response(self, _job_description(data))

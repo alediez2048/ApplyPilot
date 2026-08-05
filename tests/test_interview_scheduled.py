@@ -23,6 +23,8 @@ from applypilot.domain import metrics
 from applypilot.networking import store, touches
 from applypilot.repo import jobs as jobsrepo
 
+from browser_stubs import BROWSER_GLOBALS
+
 
 @pytest.fixture()
 def db(tmp_path, monkeypatch):
@@ -145,12 +147,7 @@ const el = () => ({ innerHTML:'', textContent:'', hidden:false, value:'', style:
   classList:{toggle(){},add(){},remove(){}}, addEventListener(){}, appendChild(){}, dataset:{} });
 globalThis.document = { getElementById: el, querySelectorAll: ()=>[], querySelector: el,
   addEventListener(){}, activeElement:null, body: el(), hasFocus: () => false };
-globalThis.window = { open(){}, location:{href:''} };
-Object.defineProperty(globalThis,"navigator",{value:{clipboard:{writeText(){}}},configurable:true});
-globalThis.setInterval = () => 0; globalThis.setTimeout = () => 0;
-globalThis.fetch = async () => ({ json: async () => ({}) });
-globalThis.alert = () => {}; globalThis.confirm = () => true;
-"""
+""" + BROWSER_GLOBALS
 
 
 def _js(driver, tmp_path, **payload):

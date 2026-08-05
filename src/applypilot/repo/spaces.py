@@ -54,8 +54,27 @@ def _dicts(rows) -> list[dict]:
 
 
 def _registered(conn: sqlite3.Connection) -> bool:
-    return conn.execute(
+    """Whether the registry table exists. Memoised per connection, once it is true.
+
+    `all_spaces()` runs on `/api/status`, which re-renders every 2.5 seconds and is held to 80
+    statements — it was measured at 75 when this shipped, so a second statement per render for a
+    question whose answer never changes is exactly the waste §Lessons 11 found (313 statements
+    per request, 199 of them re-running schema setup nothing needed).
+
+    Only the TRUE answer is cached. Tables get created and never dropped, so a False must stay
+    live or a connection opened before migration 003 would report "no registry" for the life of
+    the process.
+    """
+    if getattr(conn, "_spaces_table", False):
+        return True
+    found = conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='spaces'").fetchone() is not None
+    if found:
+        try:
+            conn._spaces_table = True
+        except AttributeError:
+            pass        # a plain sqlite3.Connection takes no attributes; it just re-checks
+    return found
 
 
 # ── reads ───────────────────────────────────────────────────────────────────

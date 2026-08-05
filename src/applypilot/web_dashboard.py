@@ -1804,6 +1804,9 @@ def _status_payload(space: str = "") -> dict:
         "space_shape": shape,
         "space_offer": (manifest.offer if manifest else ""),
         "space_terminal": terminal,
+        # What the + button offers. On the payload rather than a second endpoint: it is three
+        # short strings and the panel already re-renders every 2.5s.
+        "space_templates": _space_templates()["templates"],
         # Says WHY the panel is not the one that was asked for. An unhonoured `?space=` that
         # silently rendered the default would be a Space that quietly does not exist.
         "space_note": space_note,
@@ -2188,6 +2191,61 @@ def _add_targets(data: dict) -> dict:
     return {"ok": bool(added or already), "added": len(added), "skipped": len(already),
             "rejected": rejected,
             "message": " · ".join(bits) or "Nothing recognisable in that."}
+
+
+def _create_space(data: dict) -> dict:
+    """Create a Space from a template (the + button).
+
+    Refuses rather than disambiguating a clashing id. `partnerships-2` would be a Space whose
+    permanent key does not match its name, chosen silently, on the one value the operator can
+    never change afterwards (§13.2) — and unlike a deck slug, nobody outside this machine has
+    seen it yet, so there is nothing to preserve by inventing one.
+    """
+    from applypilot.database import log_event
+    from applypilot.domain import space as sp
+
+    init_db()
+    conn = get_connection()
+    name = (data.get("name") or "").strip()[:60]
+    template = (data.get("template") or "").strip()
+
+    if not name:
+        return {"ok": False, "message": "Give the Space a name."}
+    if template not in sp.OFFERED_TEMPLATES:
+        # `business` lands here on purpose while ID-1 is unbuilt. Saying WHY beats a generic
+        # rejection: the operator asked for three templates and needs to know this one is
+        # waiting on a mailbox, not broken.
+        why = (" Business Spaces need their own mailbox (ID-1), which is not built yet."
+               if template == "business" else "")
+        return {"ok": False, "message": f"Unknown template {template!r}.{why}"}
+
+    space_id = sp.slug_id(name)
+    if not space_id:
+        return {"ok": False, "message": f"“{name}” has no letters or numbers to build an id from."}
+    if _spaces.get_space(space_id, conn):
+        return {"ok": False,
+                "message": f"A Space with the id “{space_id}” already exists. Pick another name."}
+
+    try:
+        created = _spaces.create_space(space_id, name, template, conn=conn)
+    except ValueError as e:
+        return {"ok": False, "message": str(e)}
+    log_event("", "system", "ok", f"Space created: {name} ({space_id}, {template})", conn)
+    return {"ok": True, "id": created.id, "name": created.name, "shape": created.shape,
+            "message": f"Created “{created.name}”."}
+
+
+def _space_templates() -> dict:
+    """What the picker offers, described by the module that builds them.
+
+    Served rather than hardcoded in the HTML so the picker cannot describe a template
+    differently from what `TEMPLATE_DEFAULTS` actually produces — the two would drift the first
+    time a default changed, and the operator would be choosing from a menu that lies.
+    """
+    from applypilot.domain import space as sp
+    return {"ok": True, "templates": [
+        {"id": t, "name": sp.TEMPLATE_BLURB[t][0], "blurb": sp.TEMPLATE_BLURB[t][1]}
+        for t in sp.OFFERED_TEMPLATES]}
 
 
 def _save_offer(data: dict) -> dict:
@@ -3235,6 +3293,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/space/offer":
                 _json_response(self, _save_offer(data))
+                return
+            if path == "/api/space/create":
+                _json_response(self, _create_space(data))
                 return
             if path == "/api/job-description":
                 _json_response(self, _job_description(data))

@@ -34,11 +34,25 @@
   </div>
 </header>
 <main>
-  <!-- SPACE-2. Rendered from /api/status. Hidden while there is only one Space, because a tab
-       strip with one tab is furniture that teaches you to stop looking at it — the same
-       reasoning as the 🔔 badge not counting rows that are permanently actionable.
+  <!-- SPACE-2, revised by SPACE-3b. Rendered from /api/status and shown from ONE Space up,
+       because the + button lives here. It used to hide below two Spaces on the grounds that a
+       lone tab is furniture — true of the tab, false of the button beside it, and hiding both
+       left a fresh install with one Space and no way to make another. With one Space the tab
+       renders as a label rather than a button, so nothing offers a switch that does not exist.
        Static markup: refresh() writes INTO these nodes and never replaces them. -->
   <nav id="spaceNav" class="space-nav" hidden aria-label="Spaces"></nav>
+  <!-- The + button's form. Static markup so `refresh()` cannot replace it mid-typing, and
+       hidden rather than absent so the field keeps focus across the 2.5s tick. -->
+  <div id="newSpaceForm" class="new-space" hidden>
+    <div class="ns-row">
+      <input id="newSpaceName" type="text" maxlength="60" placeholder="Name it — “Partnerships”, “Contract work”"
+             oninput="previewSpaceId()" onkeydown="onNewSpaceKey(event)">
+      <button class="ghost" onclick="toggleNewSpace(false)">Cancel</button>
+    </div>
+    <div id="newSpaceId" class="ns-id"></div>
+    <div id="newSpaceTemplates" class="ns-templates"></div>
+    <div id="newSpaceStatus" class="ns-status"></div>
+  </div>
   <!-- Why the panel on screen is not the one that was asked for. Separate from the nav so it
        shows even with one Space, which is exactly when a bad ?space= is least explicable. -->
   <div id="spaceNote" class="space-note" hidden></div>

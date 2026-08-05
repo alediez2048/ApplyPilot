@@ -141,6 +141,7 @@ const note = document.getElementById('spaceNote');
 
 F.renderSpaceNav([{id:'job-search',name:'Job Search'}], 'job-search', '');
 out.oneSpaceHidden = nav.hidden;
+out.oneSpaceHtml = nav.innerHTML;
 
 F.renderSpaceNav([{id:'job-search',name:'Job Search'},{id:'partnerships',name:'Partnerships'}],
                  'partnerships', '');
@@ -192,10 +193,22 @@ const SRC = """ + json.dumps(src) + ";\n" + driver,
 
 
 @pytest.mark.skipif(not shutil.which("node"), reason="node not available")
-def test_the_nav_appears_only_when_there_is_a_choice(tmp_path):
+def test_the_nav_is_shown_from_one_space_up_because_the_plus_lives_there(tmp_path):
+    """Revised by SPACE-3b. The first version hid the strip below two Spaces.
+
+    A lone tab IS furniture — that reasoning was right — but the + button sits beside it, and
+    hiding both meant a fresh install had one Space and nowhere to create another. §Lessons 43
+    with a twist: the control could not be found because it was inside something that hid
+    itself. With one Space the tab renders as a LABEL rather than a button, so nothing on
+    screen offers a switch that does not exist.
+    """
     out = _run_js(tmp_path, _DRIVER)
-    assert out["oneSpaceHidden"] is True, "a tab strip with one tab is furniture"
+    assert out["oneSpaceHidden"] is False, "one Space meant no + button and no way to add one"
+    assert "space-add" in out["oneSpaceHtml"], "the nav rendered without the + button"
+    assert "switchSpace" not in out["oneSpaceHtml"], \
+        "a lone Space offered a switch to itself"
     assert out["twoSpacesHidden"] is False, "the nav never appeared with two Spaces"
+    assert "space-add" in out["navHtml"], "the + button vanished once there were two Spaces"
     assert "Partnerships" in out["navHtml"]
     assert "space-tab on" in out["navHtml"], "no tab is marked current"
     assert "switchSpace(&#39;partnerships&#39;)" in out["navHtml"] \
@@ -335,3 +348,57 @@ def test_a_contact_in_another_space_does_not_count_here(db):
     assert len(st.all_contacts_for_metrics(db, space_id="partnerships")) == 1
     assert len(st.all_contacts_for_metrics(db, space_id="job-search")) == 0
     assert len(st.all_contacts_for_metrics(db)) == 1, "no space_id must still mean everything"
+
+
+# ── creating a Space ────────────────────────────────────────────────────────
+
+def test_the_plus_button_creates_a_space_from_a_template(db):
+    r = wd._create_space({"name": "Contract work", "template": "outreach"})
+    assert r["ok"] and r["id"] == "contract-work"
+    made = spaces.load("contract-work", db)
+    assert made.shape == spaces.TARGETS_SHAPE and made.terminal == "booked"
+    assert made.tailor_docs is False
+
+
+def test_a_new_space_starts_empty(db):
+    """The whole point of a fresh template: no rows, no contacts, no inherited outcomes."""
+    wd._create_space({"name": "Contract work", "template": "outreach"})
+    p = wd._status_payload("contract-work")
+    assert p["jobs"] == [] and p["stats"]["total"] == 0
+    assert (p["metrics"].get("overall") or {}).get("n", 0) == 0
+    assert p["space_offer"] == ""
+
+
+def test_business_is_refused_and_says_why(db):
+    """Not a generic rejection. The operator asked for three templates and needs to know this
+    one is waiting on a mailbox rather than broken."""
+    r = wd._create_space({"name": "Acme", "template": "business"})
+    assert r["ok"] is False
+    assert "mailbox" in r["message"] and "ID-1" in r["message"]
+    assert spaces.get_space("acme", db) is None
+
+
+def test_a_clashing_id_is_refused_not_disambiguated(db):
+    """`partnerships-2` would be a permanent key that does not match its name, chosen silently.
+
+    Unlike a deck slug there is nothing already in the world to preserve, so refusing costs
+    nothing and guessing costs forever (§13.2).
+    """
+    r = wd._create_space({"name": "Partnerships", "template": "outreach"})
+    assert r["ok"] is False and "already exists" in r["message"]
+    assert len(spaces.all_spaces(conn=db)) == 2
+
+
+@pytest.mark.parametrize("name", ["", "   ", "!!!", "、、"])
+def test_a_name_with_no_id_in_it_is_refused(db, name):
+    assert wd._create_space({"name": name, "template": "outreach"})["ok"] is False
+
+
+def test_the_picker_is_described_by_the_module_that_builds_the_templates(db):
+    """So the menu cannot describe a template differently from what it actually produces."""
+    from applypilot.domain import space as sp
+    offered = wd._status_payload("job-search")["space_templates"]
+    assert [t["id"] for t in offered] == list(sp.OFFERED_TEMPLATES)
+    assert "business" not in [t["id"] for t in offered]
+    for t in offered:
+        assert t["blurb"] and t["name"]

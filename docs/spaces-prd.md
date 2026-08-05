@@ -285,7 +285,7 @@ personal identity that is already connected.
 | **SPACE-1** ✅ | Manifests, and the stage queues gated on shape | **Shipped 2026-08-05.** Invisible on screen. `domain/space.py` is pure; `UNAPPLIED` names the seven fields nothing reads yet, and a test holds that list honest |
 | **SPACE-1b** | `job_url` → `anchor`, converge-not-rename | Optional. Hygiene, and the only step that can lose data — decide on its own merits |
 | **SPACE-2** ✅ | Nav, `?space=`, `/api/status` filtering | **Shipped 2026-08-05.** Budget 74/80 — Spaces cost ONE statement per render. The nav hides itself below two Spaces |
-| **SPACE-3** ✅ | `pipeline/targets` panel + target import + the offer field | **Shipped 2026-08-05.** Budget unmoved at 74. Remaining copy debt: the bucket filters still say "In progress / Applied / Rejected" and the search placeholder names salary |
+| **SPACE-3** ✅ | `pipeline/targets` panel + target import + the offer field | **Shipped 2026-08-05.** Budget unmoved at 74. The `+ New Space` button shipped as SPACE-3b. Remaining copy debt: the bucket filters still say "In progress / Applied / Rejected" and the search placeholder names salary |
 | **SPACE-4** ✅ | Manifest actually applied: tone, cadence, docs, deck, terminal state | **Shipped 2026-08-05.** `UNAPPLIED` is empty. A separate `_PITCH_SYSTEM`, not the job-seeker prompt with caveats. A golden file pins the jobs prompt byte-for-byte |
 | **ID-1** | `identities` table; per-identity token path, from, signature, limits | The real work |
 | **ID-2** | Per-identity reply polling + a second deck collector | §8.2 |

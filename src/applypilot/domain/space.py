@@ -36,6 +36,29 @@ SHAPES = (JOBS_SHAPE, TARGETS_SHAPE)
 #: pointed at the same kind of row, and the difference between them is who is sending.
 TEMPLATES = ("jobs", "outreach", "business")
 
+#: The templates the UI offers TODAY. `business` is deliberately not among them: it differs
+#: from `outreach` by `identity_id` and wording alone, `identity_id` is frozen once a Space has
+#: sent anything (§13.2), and ID-1 has not shipped — so a business Space created now would send
+#: from the personal mailbox permanently. That is not the business Space anyone wanted, and a
+#: button that produces it is worse than a missing button. Unlocked by ID-1, which is one entry
+#: in this tuple.
+OFFERED_TEMPLATES = ("jobs", "outreach")
+
+#: What each template is FOR, in the operator's words. Lives here rather than in the HTML so the
+#: picker cannot describe a template differently from what `TEMPLATE_DEFAULTS` actually builds.
+TEMPLATE_BLURB = {
+    "jobs": ("Job search",
+             "Rows are job postings. Tailored résumé and cover letter per row, "
+             "the apply agent, follow-ups at 2/4/7 days. Success is an interview."),
+    "outreach": ("Partnerships",
+                 "Rows are companies you want to work with. You write one offer, "
+                 "used in every draft. Slower follow-ups at 5/12 days. "
+                 "Success is a booked call."),
+    "business": ("Business",
+                 "The same machine as Partnerships, sending as the business. "
+                 "Needs a separate mailbox (ID-1), so it is not offered yet."),
+}
+
 #: What success MEANS. The only two outcomes in this system that mean stop — everything else
 #: counts effort. `interview` for a job search, `booked` for a pitch.
 TERMINALS = ("interview", "booked")
@@ -214,6 +237,24 @@ TEMPLATE_DEFAULTS: dict[str, dict] = {
         "tone": "Writing as the business, not personally.",
     },
 }
+
+
+def slug_id(name: str | None) -> str:
+    """A Space name as a permanent id: "Partnerships" -> "partnerships".
+
+    Deliberately NOT `domain/target.slug`, which strips company suffixes — that function would
+    turn a Space called "Design Co" into "design", and unlike a company name a Space name has no
+    legal form to remove. Two functions because they answer two questions, and sharing one would
+    make a rule about companies silently apply to campaign names.
+
+    This is PERMANENT once a Space exists: for a targets Space it is hashed into every
+    `contact_id` via the anchor (§13.2). The UI derives it from the name and then shows it,
+    because a value the operator can never change should not be invisible when it is chosen.
+    """
+    import re
+    import unicodedata
+    folded = unicodedata.normalize("NFKD", (name or "").strip()).encode("ascii", "ignore").decode()
+    return "-".join(p for p in re.split(r"[^a-z0-9]+", folded.lower()) if p)[:48].strip("-")
 
 
 def from_template(space_id: str, name: str, template: str, **overrides) -> Space:

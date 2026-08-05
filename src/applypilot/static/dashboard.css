@@ -955,3 +955,61 @@
   color: var(--yellow);
   font-size: 13px;
 }
+
+/* ---- Creating a Space (the + button, SPACE-3b) ---------------------------- */
+.space-add {
+  appearance: none;
+  background: transparent;
+  border: 1px dashed var(--line2);
+  border-radius: 6px;
+  margin: 0 0 4px 8px;
+  padding: 4px 10px;
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.2;
+  color: var(--muted);
+  cursor: pointer;
+}
+.space-add:hover { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+.space-add:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* The lone-Space label. Reads as the current tab, but is not a button: with one Space there is
+   nothing to switch to, and a control that does nothing when clicked is worse than a label. */
+.space-tab.solo { cursor: default; }
+
+.new-space {
+  margin: 0 0 14px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+.ns-row { display: flex; gap: 8px; align-items: center; }
+.ns-row input {
+  flex: 1;
+  padding: 9px 12px;
+  border: 1px solid var(--line2);
+  border-radius: 6px;
+  font: inherit;
+  font-size: 15px;
+}
+.ns-id { margin: 6px 2px 0; font-size: 12px; color: var(--faint); font-family: ui-monospace, monospace; }
+/* Two cards, side by side, each saying what you actually get. A template picker that lists
+   names alone makes the operator guess at the difference, and the difference is the point. */
+.ns-templates { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; margin-top: 12px; }
+.ns-template {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  text-align: left;
+  padding: 12px 14px;
+  border: 1px solid var(--line2);
+  border-radius: 8px;
+  background: var(--surface2);
+  font: inherit;
+  cursor: pointer;
+}
+.ns-template:hover { border-color: var(--accent); background: var(--accent-soft); }
+.ns-template:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.ns-t-name { font-weight: 700; font-size: 14px; color: var(--text); }
+.ns-t-blurb { font-size: 12.5px; line-height: 1.45; color: var(--muted); }
+.ns-status { margin-top: 10px; font-size: 13px; font-weight: 600; color: var(--yellow); }

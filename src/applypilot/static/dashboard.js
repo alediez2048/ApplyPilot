@@ -28,6 +28,10 @@ function switchSpace(id) {
   refresh();                             // dashboard, not walk a tab history nobody asked for
 }
 
+//: The templates the + button offers, from /api/status. The server owns this list so the
+//: picker cannot describe a template differently from what the manifest actually builds.
+let SPACE_TEMPLATES = [];
+
 function renderSpaceNav(spaces, current, note) {
   const nav = document.getElementById('spaceNav');
   const noteEl = document.getElementById('spaceNote');
@@ -37,15 +41,82 @@ function renderSpaceNav(spaces, current, note) {
   }
   if (!nav) return;
   const list = spaces || [];
-  // One tab is furniture. Hidden rather than disabled, because there is nothing to choose —
-  // the disabled-with-a-reason rule (§Lessons 43) is for controls that WOULD do something.
-  nav.hidden = list.length < 2;
+  // Shown from ONE Space up, because the + lives here. The first version hid the whole strip
+  // below two Spaces on the grounds that a lone tab is furniture — true of the tab, false of
+  // the button beside it, and hiding both meant a fresh install had exactly one Space and
+  // nowhere to make another. §Lessons 43: a control nobody can find is a broken feature, and
+  // this one could not be found because it was inside something that hid itself.
+  nav.hidden = list.length < 1;
   if (nav.hidden) { nav.innerHTML = ''; return; }
-  nav.innerHTML = list.map(s => {
+  const tabs = list.length > 1 ? list.map(s => {
     const on = s.id === current;
     return `<button class="space-tab${on ? ' on' : ''}" ${on ? 'aria-current="page"' : ''}`
          + ` onclick="switchSpace('${esc(s.id)}')">${esc(s.name)}</button>`;
-  }).join('');
+  }).join('') : `<span class="space-tab on solo">${esc((list[0] || {}).name || '')}</span>`;
+  nav.innerHTML = tabs
+    + `<button class="space-add" onclick="toggleNewSpace()" title="New Space">＋</button>`;
+}
+
+// ---- Creating a Space (the + button) ----
+
+function toggleNewSpace(show) {
+  const form = document.getElementById('newSpaceForm');
+  if (!form) return;
+  form.hidden = show === false ? true : !form.hidden;
+  document.getElementById('newSpaceStatus').textContent = '';
+  if (!form.hidden) {
+    renderTemplatePicker();
+    const box = document.getElementById('newSpaceName');
+    box.value = '';
+    previewSpaceId();
+    box.focus();
+  }
+}
+
+// Enter picks the FIRST template. Named rather than an inline `if` in the attribute: every
+// other handler here is a single named call, and the scope probe parses those attributes with
+// a regex that read `if` as the handler's name and tried to resolve it.
+function onNewSpaceKey(event) {
+  if (event && event.key === 'Enter') {
+    const first = document.querySelector('#newSpaceTemplates .ns-template');
+    if (first) first.click();
+  }
+}
+
+function renderTemplatePicker() {
+  const el = document.getElementById('newSpaceTemplates');
+  if (!el) return;
+  el.innerHTML = (SPACE_TEMPLATES || []).map(t =>
+    `<button class="ns-template" onclick="createSpace(this, '${esc(t.id)}')">`
+    + `<span class="ns-t-name">${esc(t.name)}</span>`
+    + `<span class="ns-t-blurb">${esc(t.blurb)}</span></button>`).join('');
+}
+
+// The id is derived from the name and SHOWN, because it is permanent: for a targets Space it
+// is hashed into every contact key (§13.2). A value the operator can never change should not
+// be invisible at the moment it is chosen.
+function previewSpaceId() {
+  const name = (document.getElementById('newSpaceName').value || '').trim();
+  const id = name.normalize('NFKD').replace(/[^ -~]/g, '')
+    .toLowerCase().split(/[^a-z0-9]+/).filter(Boolean).join('-').slice(0, 48);
+  const el = document.getElementById('newSpaceId');
+  el.textContent = id ? `id: ${id} — permanent, the name stays editable` : '';
+  return id;
+}
+
+async function createSpace(btn, template) {
+  const name = (document.getElementById('newSpaceName').value || '').trim();
+  const out = document.getElementById('newSpaceStatus');
+  if (!name) { out.textContent = 'Give it a name first.'; return; }
+  btn.disabled = true;
+  const r = await post('/api/space/create', {name, template});
+  btn.disabled = false;
+  out.textContent = r.message || '';
+  if (!r.ok) return;
+  toggleNewSpace(false);
+  // Land IN the new Space. Creating one and staying where you were means the only feedback is
+  // a tab appearing somewhere above, which reads as nothing having happened.
+  switchSpace(r.id);
 }
 
 //: The shape of the Space on screen. Rows carry it too (`j.shape`), because a renderer that
@@ -2032,6 +2103,7 @@ async function refresh() {
   // tab from disagreeing on the next tick.
   if (data.space) SPACE_ID = data.space;
   renderSpaceNav(data.spaces, data.space, data.space_note);
+  SPACE_TEMPLATES = data.space_templates || SPACE_TEMPLATES;
   renderSpaceShape(data.space_shape, data.space_offer);
   document.getElementById('appDir').textContent = data.app_dir;
   const s = data.stats || {};

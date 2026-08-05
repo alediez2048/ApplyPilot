@@ -34,7 +34,8 @@ def _draft_and_store(profile: dict, job: dict, contact: dict, warm: bool = False
         previous = store.copy_already_sent_to_company(
             contact.get("company") or job.get("company") or job.get("site") or "",
             exclude_id=contact.get("id"))
-        draft = outreach.draft_email(profile, job, contact, warm=warm, previous=previous)
+        draft = outreach.draft_email(profile, job, contact, warm=warm, previous=previous,
+                                     space=space_for(job))
         store.upsert_contact({
             "id": contact.get("id"),
             "job_url": contact["job_url"],
@@ -49,6 +50,21 @@ def _draft_and_store(profile: dict, job: dict, contact: dict, warm: bool = False
         })
     except Exception as e:  # noqa: BLE001
         log.debug("Outreach draft failed for %s: %s", contact.get("full_name"), e)
+
+
+def space_for(job: dict, conn=None):
+    """The manifest of the Space a row belongs to. None when Spaces are not set up.
+
+    Resolved from the ROW rather than passed down from the dashboard, because both drafting
+    paths are also reachable from the CLI and from `tick`, and a manifest that only arrives via
+    the web layer is a rule implemented at one of its call sites (§Lessons 49). Never raises:
+    drafting must degrade to the pre-Spaces behaviour rather than fail.
+    """
+    try:
+        from applypilot.repo import spaces as _sp
+        return _sp.load((job or {}).get("space_id") or _sp.DEFAULT_SPACE_ID, conn)
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def draft_for_contact(contact_id: str, style: str = "") -> dict | None:
@@ -67,7 +83,8 @@ def draft_for_contact(contact_id: str, style: str = "") -> dict | None:
         return None
     contact = dict(zip(row.keys(), row))
     jrow = conn.execute(
-        "SELECT url, title, company, site, full_description FROM jobs WHERE url = ?",
+        # space_id: the Space decides which prompt writes this email (SPACE-4).
+        "SELECT url, title, company, site, full_description, space_id FROM jobs WHERE url = ?",
         (contact["job_url"],),
     ).fetchone()
     job = dict(zip(jrow.keys(), jrow)) if jrow else {"title": contact.get("title")}
@@ -79,7 +96,8 @@ def draft_for_contact(contact_id: str, style: str = "") -> dict | None:
         previous = store.copy_already_sent_to_company(
             contact.get("company") or job.get("company") or job.get("site") or "",
             exclude_id=contact_id, conn=conn)
-        draft = outreach.draft_email(profile, job, contact, style=style, previous=previous)
+        draft = outreach.draft_email(profile, job, contact, style=style, previous=previous,
+                                     space=space_for(job, conn))
     except Exception as e:  # noqa: BLE001
         log.warning("Regenerate draft failed for %s: %s", contact_id, e)
         return None

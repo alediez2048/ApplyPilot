@@ -40,27 +40,25 @@ TEMPLATES = ("jobs", "outreach", "business")
 #: counts effort. `interview` for a job search, `booked` for a pitch.
 TERMINALS = ("interview", "booked")
 
-#: Declared here and read by nothing yet (SPACE-4 wires them). Named rather than left implicit
-#: because a field that is accepted but never used is a lie the caller cannot see — §Lessons 39,
-#: where `conversation_transcript` took a `thread` it only read two fields from and the SMS draft
-#: for someone who had replied could restate but never continue.
+#: Manifest fields declared but read by nothing yet. EMPTY as of SPACE-4 — every field is now
+#: wired — and kept as a mechanism rather than deleted, because the next field will be declared
+#: before it is used and this is what stops that being invisible.
 #:
-#: `test_unapplied_fields_are_really_unapplied` holds the line: reading one of these anywhere is
-#: what removes it from this tuple. The list can only shrink.
-#:
-#: `offer` left it in SPACE-3, which is the mechanism working: the panel now renders an editor
-#: for it and the payload carries it. It is still not fed to any PROMPT — that is SPACE-4, and
-#: the distinction is worth keeping straight, because "the operator can write it" and "it
-#: changes what gets sent" are different claims and only the first is true today.
-UNAPPLIED = ("tone", "channels", "schedules", "offer_deck", "can_autosend")
+#: A field that is accepted but never read is a lie the caller cannot see (§Lessons 39, where
+#: `conversation_transcript` took a `thread` it barely used and the resulting draft could
+#: restate but never continue). `test_unapplied_fields_are_really_unapplied` parses attribute
+#: access to hold the line — its first version grepped for the literal `space.<field>` and
+#: survived a mutation reading `manifest.tone`, which is §Lessons 48 inside the guard itself.
+UNAPPLIED: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
 class Space:
     """One row of configuration over one shared engine.
 
-    `shape` and `tailor_docs` are load-bearing TODAY — together they are what keeps the
-    six-stage job pipeline off a target row. Everything in `UNAPPLIED` is declared and inert.
+    Every field is read by something as of SPACE-4: `shape` and `tailor_docs` gate the pipeline
+    queues, `tone`/`offer` reach the drafting prompts, `schedules`/`channels` drive the ladders,
+    `offer_deck` gates the intro-deck link and `can_autosend` gates the send path itself.
     """
 
     id: str
@@ -74,8 +72,11 @@ class Space:
     #: Gates `queue_for_tailor` / `queue_for_cover`, so this is checked on every prepare run.
     tailor_docs: bool = True
 
-    # ── declared, not yet read (see UNAPPLIED) ──
+    #: The campaign's standing voice, injected into every draft in the Space (SPACE-4).
+    #: Distinct from the per-run `style` an operator types for one regeneration.
     tone: str = ""
+    #: The constant pitch (§7.1). In a job search the DESCRIPTION varies per row and the pitch
+    #: is constant; in an outreach Space that inverts, so this lives here and not on a row.
     offer: str = ""
     channels: tuple[str, ...] = ("email", "linkedin", "sms")
     schedules: dict = field(default_factory=dict)

@@ -109,8 +109,16 @@ def channel_by_name(name: str) -> Channel | None:
     return next((c for c in CHANNELS if c.name == name), None)
 
 
-def channel_schedule(channel: Channel) -> list[int]:
+def channel_schedule(channel: Channel, space=None) -> list[int]:
     """Hours after the previous message that each touch comes due.
+
+    A Space may override the cadence per channel (SPACE-4). A C-suite pitch nudged at 48h
+    reads as pressure from a stranger, where the same cadence to a recruiter is normal — so
+    `schedules={"email": [120, 288]}` on the manifest replaces the global for that Space only.
+
+    The override wins over the environment, which is the right precedence and worth stating:
+    the env var is the default for every campaign, the manifest is this campaign's decision,
+    and a stored decision that a global could silently override is not a decision.
 
     Parsing and validation live in `settings.py` (ARCH-6). This still falls back to the
     channel default on a bad value, because by the time the ladder is being computed the
@@ -118,6 +126,9 @@ def channel_schedule(channel: Channel) -> list[int]:
     something set the variable after startup, and dropping follow-ups is worse than using
     the documented default.
     """
+    override = (getattr(space, "schedules", None) or {}).get(channel.name)
+    if override:
+        return [int(h) for h in override]
     from applypilot import settings
     values, _ = settings.resolve()
     got = values.get(channel.env_var)
@@ -151,7 +162,7 @@ def _is_ready(contact: dict, channel: Channel) -> bool:
 
 
 def exhausted(contact: dict, ladders: dict[str, dict] | None = None,
-              now: datetime | None = None) -> bool:
+              now: datetime | None = None, space=None) -> bool:
     """Has every channel we actually used run out, with nothing to show for it?
 
     "No response" — the honest end state of an outreach attempt. Distinct from every other
@@ -178,9 +189,9 @@ def exhausted(contact: dict, ladders: dict[str, dict] | None = None,
     contact = normalize_for_ladder(contact)
 
     used_any = False
-    for channel in CHANNELS:
+    for channel in channels_for(space):
         ladder = ladders.get(channel.name) or EMPTY_LADDER
-        state, _ = touch_state(contact, channel, channel_schedule(channel), now, ladder)
+        state, _ = touch_state(contact, channel, channel_schedule(channel, space), now, ladder)
         if not state:
             continue                       # channel never applied to this person
         used_any = True
@@ -189,6 +200,25 @@ def exhausted(contact: dict, ladders: dict[str, dict] | None = None,
         if state != "finished" and state != "stopped":
             return False                   # still due or waiting — the attempt is not over
     return used_any
+
+
+def channels_for(space=None) -> tuple:
+    """The channels a Space offers, in registry order.
+
+    A Space may narrow the set (SPACE-4) — a business campaign that never texts should not show
+    a Text tab or count an SMS ladder as outstanding work. Names that match no registered
+    channel are IGNORED rather than raising: a manifest is operator-editable config, and a typo
+    must not take the follow-up engine down for every Space at once.
+
+    An EMPTY result falls back to all channels, deliberately. A Space with no channels can send
+    nothing, and silently offering nothing is the failure §Lessons 15 is about — the panel would
+    render empty and look identical to one where nobody is due.
+    """
+    names = getattr(space, "channels", None)
+    if not names:
+        return CHANNELS
+    chosen = tuple(c for c in CHANNELS if c.name in set(names))
+    return chosen or CHANNELS
 
 
 def touch_state(contact: dict, channel: Channel, schedule: list[int], now: datetime,
@@ -217,7 +247,7 @@ def touch_state(contact: dict, channel: Channel, schedule: list[int], now: datet
 
 
 def followup_panel(contacts: list[dict], now: datetime | None = None,
-                   ladders: dict[tuple[str, str], dict] | None = None) -> dict:
+                   ladders: dict[tuple[str, str], dict] | None = None, space=None) -> dict:
     """Who is owed a follow-up, per channel.
 
     `ladders` maps (contact_id, channel_name) -> ladder state, exactly what
@@ -230,9 +260,10 @@ def followup_panel(contacts: list[dict], now: datetime | None = None,
     """
     now = now or datetime.now(timezone.utc)
     ladders = ladders or {}
-    schedules = {c.name: channel_schedule(c) for c in CHANNELS}
+    active = channels_for(space)
+    schedules = {c.name: channel_schedule(c, space) for c in active}
     buckets: dict[str, dict[str, list[dict]]] = {
-        c.name: {"due": [], "waiting": [], "finished": [], "stopped": []} for c in CHANNELS
+        c.name: {"due": [], "waiting": [], "finished": [], "stopped": []} for c in active
     }
 
     # Normalise ONCE, here, rather than at each call site: the dashboard passes UI payloads
@@ -241,7 +272,7 @@ def followup_panel(contacts: list[dict], now: datetime | None = None,
     contacts = [normalize_for_ladder(c) for c in contacts]
 
     for contact in contacts:
-        for channel in CHANNELS:
+        for channel in active:
             ladder = ladders.get((contact.get("id"), channel.name)) or EMPTY_LADDER
             pre = channel.prefix
             state, due_in = touch_state(contact, channel, schedules[channel.name], now, ladder)
@@ -278,7 +309,7 @@ def followup_panel(contacts: list[dict], now: datetime | None = None,
     # already shipped. `li_finished` / `li_stopped` are new and additive — no consumer reads a
     # key it did not before.
     out: dict = {}
-    for channel in CHANNELS:
+    for channel in active:
         b, pre = buckets[channel.name], channel.prefix
         out.update({
             f"{pre}due": brief(b["due"], channel),

@@ -1389,7 +1389,24 @@ def _job_checklist(job_status: str, applied_at: str, contacts: list[dict],
     return job_checklist(job_status, applied_at, contacts, shape=shape)
 
 
-def _followup_panel(contacts: list[dict], ladders: dict | None = None) -> dict:
+def _space_of_contact(contact_id: str, conn=None):
+    """The manifest of the Space a CONTACT belongs to. None when Spaces are not set up.
+
+    Resolved from the contact rather than handed in by the caller, because the send endpoint is
+    reachable directly and a gate that only works when the UI remembers to pass a manifest is
+    not a gate (§Lessons 49). Never raises: refusing to send is a decision, and crashing on the
+    way to making it is not the same thing.
+    """
+    try:
+        from applypilot.networking import store as _st
+        from applypilot.repo import spaces as _sp
+        row = _st.get_contact(contact_id, conn) or {}
+        return _sp.load(row.get("space_id") or _sp.DEFAULT_SPACE_ID, conn)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _followup_panel(contacts: list[dict], ladders: dict | None = None, space=None) -> dict:
     """Thin delegate — the rule lives in applypilot.domain.followup.
 
     Ladder state comes from `touches` (ARCH-3), loaded in ONE bulk query rather than per
@@ -1398,7 +1415,7 @@ def _followup_panel(contacts: list[dict], ladders: dict | None = None) -> dict:
     from applypilot.domain import followup_panel
     if ladders is None:
         ladders = _ladder_states([c.get("id") for c in contacts if c.get("id")])
-    return followup_panel(contacts, ladders=ladders)
+    return followup_panel(contacts, ladders=ladders, space=space)
 
 
 def _ladder_states(contact_ids: list[str]) -> dict:
@@ -1676,7 +1693,7 @@ def _status_payload(space: str = "") -> dict:
         # email and follow-up was spent a fortnight ago. Both were computed here already —
         # this is a reordering, not a new query.
         job_checklist = _job_checklist(status, row["applied_at"] or "", contacts, shape)
-        job_followups = _followup_panel(contacts, job_ladders)
+        job_followups = _followup_panel(contacts, job_ladders, manifest)
         net_task = _net_tasks.get(row["url"], {})
         jobs.append({
             "url": row["url"],
@@ -2761,6 +2778,15 @@ def _followup_action(data: dict) -> dict:
         return {"ok": True, "subject": d["subject"], "body": d["body"], "touch": touch}
 
     if verb == "send":
+        # The SPACE's switch, checked before the channel's. `can_autosend=False` is the one
+        # setting whose entire job is to stop the operator doing something at 11pm that cannot
+        # be undone (`spaces-prd.md` §13.3), so it is enforced at the send path rather than by
+        # hiding a button — a hidden button is not a guarantee, and this endpoint is reachable
+        # without one.
+        space = _space_of_contact(cid, conn)
+        if space is not None and not space.can_autosend:
+            return {"ok": False, "message": f"“{space.name}” has auto-send off — "
+                                            "copy the draft and send it yourself"}
         if not channel.can_autosend:
             # Structural, not a policy string: driving LinkedIn from outside the browser
             # was abandoned twice (CLAUDE.md §Lessons 3).

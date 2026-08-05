@@ -65,7 +65,11 @@ def find_by_any_url(url: str, conn: sqlite3.Connection | None = None) -> dict | 
     An operator may paste either one, and imports store both.
     """
     return _dict(_c(conn).execute(
-        "SELECT url, title, company, site, application_url, full_description "
+        # `space_id` is here because DRAFTING reads it: the Space decides which prompt writes
+        # the email. It was left out of this SELECT first, and the effect was a targets contact
+        # drafted with the job-seeker prompt — §Lessons 47, a column the caller needs missing
+        # from the query while the write side worked perfectly.
+        "SELECT url, title, company, site, application_url, full_description, space_id "
         "FROM jobs WHERE url = ? OR application_url = ? LIMIT 1", (url, url)).fetchone())
 
 

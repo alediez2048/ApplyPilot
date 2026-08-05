@@ -1,0 +1,21 @@
+SENDER:
+Sender name: Alejandro Diez
+Sender first name: Alejandro
+Sender target role: 
+Total years of experience: 
+Sender skills: 
+
+TARGET CONTACT:
+Name: Sarah Chen
+Title: Head of Engineering
+Relationship: works at the company
+
+JOB APPLIED TO:
+Role: Applied AI Engineer
+Company: Acme
+WHAT THE ROLE ACTUALLY INVOLVES (from the posting, the specific thing to react to):
+You will build agent pipelines end to end.
+
+SCHEDULING LINK: none provided, invite a quick call/chat without a link.
+
+Write the outreach email. Return the JSON.

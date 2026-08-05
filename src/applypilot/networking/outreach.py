@@ -190,6 +190,40 @@ def _sender_name(profile: dict) -> str:
     return full.split()[0] if full else "there"
 
 
+def ensure_sender_signoff(body: str, first_name: str) -> str:
+    """Make the sign-off say the sender's actual name. Belt and braces, like the deck link.
+
+    Found by GENERATING against real data rather than by reading the prompt (§Lessons 42): the
+    third of three live pitch drafts was signed **"Alexander"**. The sender is Alejandro, and the
+    prompt states his name and his first name on the first two lines. The model simply drifted on
+    a proper noun.
+
+    That is not a copy-quality problem, it is a factual error about the sender, sent to a
+    stranger, in the one line they are most likely to read twice. And it is invisible in review:
+    a wrong name looks exactly as fluent as a right one, which is the §Lessons 29 property —
+    the dangerous half of a feature is the half that looks identical when it is wrong.
+
+    Deliberately narrow. It rewrites the LAST line and only when that line is short enough to be
+    a sign-off and does not already contain the first name, so "Thanks for reading, Sarah" from a
+    body that ends mid-sentence is left alone. A prompt instruction is not a guarantee
+    (§Lessons 9, 12) and this is the same shape as `ensure_intro_deck`.
+    """
+    name = (first_name or "").strip()
+    if not name or not (body or "").strip():
+        return body
+    lines = body.rstrip().split("\n")
+    last = lines[-1].strip()
+    # A sign-off is short. Anything longer is a sentence, and rewriting a sentence would do more
+    # damage than the wrong name does.
+    if not last or len(last.split()) > 3:
+        return body
+    if name.lower() in last.lower():
+        return body
+    # Keep whatever punctuation shape the model chose ("Best,\nAlejandro" vs "Alejandro").
+    lines[-1] = name
+    return "\n".join(lines)
+
+
 def sender_background(profile: dict) -> list[str]:
     """Real, groundable facts about the sender, for any prompt that makes claims about them.
 
@@ -262,8 +296,150 @@ def draft_variant(*, warm: bool = False, noticed: bool = False, jd_chars: int = 
     return "+".join(bits)
 
 
+#: The pitch shape (SPACE-4). A SEPARATE system prompt, not the job-seeker one with caveats
+#: appended: `_SYSTEM` opens "You write short, casual networking messages for a job seeker
+#: reaching out to someone at a company they just applied to", and no amount of appended text
+#: makes that describe a business proposal. §Lessons 40 — two instructions in one prompt
+#: disagreeing is a code bug, and the heading wins every time.
+#:
+#: What makes this harder than the job version, and the reason it is written this defensively:
+#: a job application is INVITED. The company posted the role. A pitch is not invited, arrives
+#: from a stranger, and the recipient owes nothing. Every shortcut that reads as merely eager in
+#: a job email reads as a sales sequence here, and there is no second impression.
+_PITCH_SYSTEM = """You write short, direct first-contact emails from one working professional to
+another, proposing a piece of work. Not a job application. Not a sales sequence. Not a pitch
+deck in prose.
+
+The person receiving this did not ask to hear from you. That is the whole difficulty, and
+pretending otherwise is what makes outreach read as spam.
+
+Hard rules:
+- SHORT. Under 120 words. A long first email from a stranger does not get read, it gets
+  archived, and length reads as need.
+- Lead with THEM, not with you. The first sentence must be about their company, their work or
+  their situation. An email that opens with who you are is a resume nobody requested.
+- Say the concrete thing you would do. Not a capability list, not adjectives. One specific
+  piece of work.
+- Exactly ONE question, and it must be answerable in a sentence. "Are you the right person for
+  this?" is a good question. "Would you be open to exploring a partnership?" is not, because
+  it asks them to do the thinking.
+- Give an explicit out. One clause saying it is fine to ignore this or to say no. This is what
+  separates direct from pushy, and it costs nothing.
+- Never claim a relationship, a referral or a shared connection that was not given to you.
+  Never say you have been following their work unless you were told something specific.
+- Never imply you applied to anything. There is no job here.
+- No urgency, no scarcity, no "quick question" as a subject line to get an open, no flattery
+  that could be pasted into any other email.
+- NEVER use an em dash (—), en dash (–), or any long dash. Not one, anywhere. It is the
+  clearest signal that text was pasted out of a chatbot, and a reader who spots one re-reads
+  the whole message as machine-written. Use a comma, a full stop, or rewrite the sentence. A
+  plain hyphen in a compound word ("large-scale") is fine.
+- SEVERAL PEOPLE AT THE SAME COMPANY GET THESE, and they sit near each other. Anything
+  recognisably similar across two of them proves a machine wrote both. Reach for a different
+  sentence shape, not a synonym swap.
+
+Return ONLY JSON: {"subject": "...", "body": "...", "linkedin_note": "..."}
+- `subject`: lowercase-ish, specific, no "quick question", no company name alone.
+- `body`: plain text, real line breaks, signed off with the sender's first name.
+- `linkedin_note`: under 300 characters, a connection request note. NO LINKS, LinkedIn
+  penalises them in invite notes."""
+
+
+def _pitch_user_prompt(sender_bits, contact, company, about_them, offer, noticed,
+                       sched_block, deck_block, style_block, tone_block, previous):
+    """The targets-shaped prompt (`spaces-prd.md` §7.1).
+
+    The inversion is the whole point: in a job search the DESCRIPTION varies per row and the
+    pitch is constant (your resume). Here the pitch is constant and their situation varies. So
+    the offer arrives from the Space and what-they-do arrives from the row, which is the exact
+    opposite of where those two things live in `_job_user_prompt`.
+
+    `about_them` is whatever the operator pasted into the Job tab. It is often empty, and the
+    prompt SAYS SO rather than leaving a blank heading: a model handed "WHAT THEY DO:" followed
+    by nothing will invent something, and an invented fact about the recipient's own company is
+    the one error that cannot be recovered from.
+    """
+    from applypilot.domain.burned import burned_block
+    them = (about_them or "").strip()
+    return (
+        "SENDER:\n" + "\n".join(sender_bits) + "\n\n"
+        "TARGET CONTACT:\n"
+        f"Name: {contact.get('full_name', '')}\n"
+        f"Title: {contact.get('title', '')}\n"
+        f"Company: {company}\n\n"
+        "WHAT YOU ARE PROPOSING (constant across everyone in this campaign, do NOT restate it "
+        "verbatim, put it in your own words and aim it at THIS company):\n"
+        f"{offer}\n\n"
+        + (f"WHAT THIS COMPANY DOES (what the sender knows, react to THIS):\n{them}\n\n"
+           if them else
+           "WHAT THIS COMPANY DOES: not recorded. You know the company name and this person's "
+           "title and NOTHING ELSE about them. Do not invent a product, a market, a funding "
+           "round, a recent announcement or a problem they have. Write the opening from their "
+           "TITLE and the offer instead, and keep it shorter because you have less to say.\n\n")
+        + (f"WHAT THE SENDER NOTICED ABOUT THIS PERSON (verbatim, from looking at their "
+           f"profile):\n{noticed}\n"
+           "ENGAGE WITH THE SUBSTANCE, NEVER ANNOUNCE THE NOTICING. Any sentence whose job is "
+           "to report that you looked is the most recognisable automated-outreach shape there "
+           "is. If the sentence could be deleted and the observation still stand, delete it.\n\n"
+           if noticed else "")
+        + sched_block + deck_block + style_block + tone_block
+        + burned_block(previous)
+        + "Write the email. Return the JSON."
+    )
+
+
+def _job_user_prompt(sender_bits, contact, relationship, role, company, jd, noticed,
+                    sched_block, deck_block, warm_block, style_block, tone_block,
+                    previous):
+    """The jobs-shaped prompt, unchanged.
+
+    Extracted from `draft_email` so it can be diffed: `test_a_default_space_changes_the_prompt_by_nothing`
+    asserts that a Space with no overrides produces the byte-identical string this
+    produced before Spaces existed. Every manifest field is additive, and the only way to
+    know that is to compare the artifact rather than to reason about it (§Lessons 46).
+    """
+    from applypilot.domain.burned import burned_block
+    return (
+        "SENDER:\n" + "\n".join(sender_bits) + "\n\n"
+        "TARGET CONTACT:\n"
+        f"Name: {contact.get('full_name', '')}\n"
+        f"Title: {contact.get('title', '')}\n"
+        f"Relationship: {relationship}\n\n"
+        f"JOB APPLIED TO:\nRole: {role}\nCompany: {company}\n"
+        f"WHAT THE ROLE ACTUALLY INVOLVES (from the posting, the specific thing to react to):\n"
+        f"{jd}\n\n"
+        # The operator saw something on their profile and wrote it down. This is the ONE piece
+        # of genuinely person-specific input available, so it takes precedence over the posting
+        #, but it must be used as a human would use it, not announced.
+        + (f"WHAT THE SENDER NOTICED ABOUT THIS PERSON (verbatim, from looking at their "
+           f"profile):\n{noticed}\n"
+           "How to use it:\n"
+           "- ENGAGE WITH THE SUBSTANCE. NEVER ANNOUNCE THE NOTICING. Any sentence whose job is "
+           "to report that you looked, \"I noticed your…\", \"I saw your…\", \"I came across "
+           "your…\", \"your recent post about…\", is the single most recognisable "
+           "automated-outreach shape there is, and a recruiter reads several a week. It is the "
+           "SHAPE that is banned, not a list of verbs: if the sentence could be deleted and the "
+           "observation still stand on its own, delete it.\n"
+           "  Wrong shape: \"I noticed your post about the ferry timetable problem.\"\n"
+           "  Right shape: \"Nine different ferry timetables and no single source of truth is "
+           "the kind of thing that never makes it into a job description.\"\n"
+           "- It is an ADDITION, not a replacement. The email must still say what the role "
+           "involves and what the sender has actually done. An email that is only the "
+           "observation is a compliment, not an application.\n"
+           "- If it does not fit this email naturally, leave it out entirely. A forced "
+           "reference is worse than none.\n\n" if noticed else "")
+        + sched_block + deck_block + warm_block + style_block
+        # LAST, immediately before the instruction to write. A constraint placed above the
+        # scheduling and deck blocks competes with them and loses — §Lessons 40: two
+        # instructions in one prompt disagreeing is a code bug, not a wording problem.
+        + tone_block
+        + burned_block(previous)
+        + "Write the outreach email. Return the JSON."
+    )
+
+
 def draft_email(profile: dict, job: dict, contact: dict, style: str = "", warm: bool = False,
-                previous: list[dict] | None = None) -> dict:
+                previous: list[dict] | None = None, space=None) -> dict:
     """Return {"subject": str, "body": str} for one contact. Raises on LLM/parse failure.
 
     `style` is an optional free-text directive (e.g. "keep it super casual", "mention I'm a
@@ -280,7 +456,16 @@ def draft_email(profile: dict, job: dict, contact: dict, style: str = "", warm: 
     is where that lives; the prompt block is built in `domain/burned.py`, which explains why
     deleting the worked examples was necessary and not sufficient.
     """
-    from applypilot.domain.burned import burned_block
+    # SPACE-4. `space` is the Space's manifest; None means the behaviour that existed before
+    # Spaces did, which is what every caller that has not been taught about them means.
+    shape = getattr(space, "shape", "pipeline/jobs")
+    tone = (getattr(space, "tone", "") or "").strip()
+    wants_deck = getattr(space, "offer_deck", True)
+    # A voice directive from the Space, distinct from `style`: `style` is a one-off the operator
+    # types for a single run, this is the campaign's standing voice. Both are honoured, and the
+    # Space's goes LAST so a per-run instruction cannot be silently overridden by a stored one.
+    tone_block = f"VOICE FOR THIS CAMPAIGN (applies to every message in it):\n{tone}\n\n" if tone else ""
+
     role = job.get("title") or "the role"
     company = contact.get("company") or job.get("company") or job.get("site") or "your company"
     sender_bits = sender_background(profile)
@@ -327,7 +512,10 @@ def draft_email(profile: dict, job: dict, contact: dict, style: str = "", warm: 
         if link else
         "SCHEDULING LINK: none provided, invite a quick call/chat without a link.\n\n"
     )
-    deck = _intro_deck_url(profile, contact)
+    # `offer_deck=False` turns the deck off for a whole Space. Resolved here rather than in
+    # `_intro_deck_url` so the OTHER guarantee still holds: `ensure_intro_deck` appends the link
+    # when the model drops it, and it must not append a link the Space said not to send.
+    deck = _intro_deck_url(profile, contact) if wants_deck else ""
     deck_block = (
         f"INTRO DECK LINK (include in the EMAIL, not the LinkedIn note): {deck}\n"
         "Offer it in a sentence of YOUR OWN. The full URL must appear verbatim; the wording "
@@ -337,46 +525,24 @@ def draft_email(profile: dict, job: dict, contact: dict, style: str = "", warm: 
         if deck else ""
     )
 
-    user = (
-        "SENDER:\n" + "\n".join(sender_bits) + "\n\n"
-        "TARGET CONTACT:\n"
-        f"Name: {contact.get('full_name', '')}\n"
-        f"Title: {contact.get('title', '')}\n"
-        f"Relationship: {relationship}\n\n"
-        f"JOB APPLIED TO:\nRole: {role}\nCompany: {company}\n"
-        f"WHAT THE ROLE ACTUALLY INVOLVES (from the posting, the specific thing to react to):\n"
-        f"{jd}\n\n"
-        # The operator saw something on their profile and wrote it down. This is the ONE piece
-        # of genuinely person-specific input available, so it takes precedence over the posting
-        #, but it must be used as a human would use it, not announced.
-        + (f"WHAT THE SENDER NOTICED ABOUT THIS PERSON (verbatim, from looking at their "
-           f"profile):\n{noticed}\n"
-           "How to use it:\n"
-           "- ENGAGE WITH THE SUBSTANCE. NEVER ANNOUNCE THE NOTICING. Any sentence whose job is "
-           "to report that you looked, \"I noticed your…\", \"I saw your…\", \"I came across "
-           "your…\", \"your recent post about…\", is the single most recognisable "
-           "automated-outreach shape there is, and a recruiter reads several a week. It is the "
-           "SHAPE that is banned, not a list of verbs: if the sentence could be deleted and the "
-           "observation still stand on its own, delete it.\n"
-           "  Wrong shape: \"I noticed your post about the ferry timetable problem.\"\n"
-           "  Right shape: \"Nine different ferry timetables and no single source of truth is "
-           "the kind of thing that never makes it into a job description.\"\n"
-           "- It is an ADDITION, not a replacement. The email must still say what the role "
-           "involves and what the sender has actually done. An email that is only the "
-           "observation is a compliment, not an application.\n"
-           "- If it does not fit this email naturally, leave it out entirely. A forced "
-           "reference is worse than none.\n\n" if noticed else "")
-        + sched_block + deck_block + warm_block + style_block
-        # LAST, immediately before the instruction to write. A constraint placed above the
-        # scheduling and deck blocks competes with them and loses — §Lessons 40: two
-        # instructions in one prompt disagreeing is a code bug, not a wording problem.
-        + burned_block(previous)
-        + "Write the outreach email. Return the JSON."
-    )
+    if shape == "pipeline/targets":
+        # `full_description` is what the operator pasted about the company, and the offer comes
+        # from the Space. In the jobs prompt those two slots are filled the other way round.
+        user = _pitch_user_prompt(sender_bits, contact, company,
+                                  job.get("full_description"),
+                                  (getattr(space, "offer", "") or "").strip(),
+                                  noticed, sched_block, deck_block, style_block,
+                                  tone_block, previous)
+        system = _PITCH_SYSTEM
+    else:
+        user = _job_user_prompt(sender_bits, contact, relationship, role, company, jd,
+                                noticed, sched_block, deck_block, warm_block,
+                                style_block, tone_block, previous)
+        system = _SYSTEM
 
     client = get_client("light")
     raw = client.chat(
-        [{"role": "system", "content": _SYSTEM}, {"role": "user", "content": user}],
+        [{"role": "system", "content": system}, {"role": "user", "content": user}],
         max_tokens=400, temperature=0.8,  # a bit higher for warmth/variety
     )
     variant = draft_variant(warm=warm, noticed=bool(noticed), jd_chars=len(jd),
@@ -386,11 +552,21 @@ def draft_email(profile: dict, job: dict, contact: dict, style: str = "", warm: 
     body = sanitize_text(str(data.get("body", ""))).strip()
     note = sanitize_text(str(data.get("linkedin_note", ""))).strip()
     if not subject:
-        subject = f"Question about the {role} role"
+        subject = (f"{company}" if shape == "pipeline/targets"
+                   else f"Question about the {role} role")
     if not body:
         raise ValueError("empty outreach body")
     # Not left to the prompt: the deck goes in EVERY outreach email.
     body = ensure_intro_deck(body, deck)
+    # Nor is the sender's own name. See ensure_sender_signoff — a live draft came back signed
+    # "Alexander" with "Sender first name: Alejandro" two lines into the prompt.
+    # `_sender_name` — the SAME function the prompt used two hundred lines up. The first version
+    # of this line re-derived the name from `full_name`, which is "Jorge Alejandro Diez", so the
+    # guard against a wrong sign-off would have rewritten every correct "Alejandro" to "Jorge".
+    # A rare hallucination turned into a systematic error, by a fix. §Lessons 49: one rule, one
+    # implementation — and it was caught by regenerating against the live model, not by the unit
+    # test, which hardcoded the name it expected.
+    body = ensure_sender_signoff(body, _sender_name(profile))
     if warm:
         # A DM to an existing connection: no connect-note cap, and links are fine in a chat
         # thread. Cap FIRST so the URL can never be the thing that gets truncated.

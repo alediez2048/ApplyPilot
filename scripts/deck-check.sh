@@ -46,32 +46,51 @@ def get(url):
     with urllib.request.urlopen(url, timeout=30) as r:
         return r.read().decode("utf-8", "replace")
 
-print("beacon in the shipped JavaScript:")
 try:
     html = get(f"{deck}/zzcheck-not-a-person")
 except Exception as e:
     print(f"  could not load the page: {e}"); sys.exit(0)
 
-# The page chunk is loaded by the webpack runtime, not named in the HTML, so walk the runtime's
-# hash table and try each chunk. Grepping the HTML alone finds nothing even when it is there.
-srcs = re.findall(r'<script[^>]+src="([^"]+)"', html)
-runtime = next((s for s in srcs if "webpack-runtime" in s), None)
+# ── link 5: can the beacon still SEE the name when it runs? ──────────────────
+# The parse-time capture lands in the HTML itself (unlike the beacon, which compiles into a
+# chunk), so this one IS greppable. Checked FIRST because it is the link that broke.
+print("name captured before the router rewrites it:")
+if "__deckSlug" in html:
+    print("  YES — captured at parse time, the router cannot get there first")
+else:
+    print("  NO — nothing captures the name before hydration.")
+    print("  If the beacon below reads location.pathname in a useEffect, it will see '/intro/'")
+    print("  and send nothing. That is README step 3, and it is what produced 98 sent emails")
+    print("  and zero recorded opens.")
+
+print()
+print("beacon in the shipped JavaScript:")
+
+# Resolve the intro page's chunk the way Gatsby itself does, not by guessing:
+#   page-data.json -> componentChunkName -> the runtime's id for that name -> its hash.
+# A brute-force walk over the runtime's hash table LOOKS equivalent and is not: it depends on
+# a URL shape that changes between builds, and it reported NOT FOUND against a live beacon
+# once already. Anything that answers "is the tracking deployed" has to be right both ways.
 found = None
-if runtime:
-    rt = get(base + runtime)
-    for cid, h in re.findall(r'(\d+):"([a-f0-9]{8,})"', rt):
-        for name in (f"{cid}-{h}.js", f"component---src-pages-intro-js-{h}.js"):
-            try:
-                js = get(f"{base}/{name}")
-            except Exception:
-                continue
-            if "deck-hit" in js or "sendBeacon" in js:
-                found = name
-            break
-        if found:
-            break
-print(f"  FOUND in {found}" if found
-      else "  NOT FOUND in any chunk — the beacon is not deployed (README step 3)")
+try:
+    import json
+    pd = json.loads(get(f"{base}/page-data/intro/page-data.json"))
+    chunk_name = pd.get("componentChunkName", "")
+    srcs = re.findall(r'<script[^>]+src="([^"]+)"', html)
+    runtime = next((x for x in srcs if "webpack-runtime" in x), None)
+    rt = get(base + runtime) if runtime else ""
+    cid = re.search(r'(\d+):"' + re.escape(chunk_name) + r'"', rt)
+    h = re.search(cid.group(1) + r':"([a-f0-9]{8,})"', rt) if cid else None
+    if h:
+        js = get(f"{base}/{chunk_name}-{h.group(1)}.js")
+        if "deck-hit" in js or "sendBeacon" in js:
+            found = f"{chunk_name}-{h.group(1)}.js"
+        else:
+            print(f"  NOT FOUND — {chunk_name}-{h.group(1)}.js has no beacon in it")
+except Exception as e:
+    print(f"  could not resolve the page chunk: {e}")
+if found:
+    print(f"  FOUND in {found}")
 PY
 
 # ── links 1-3: what the collector has ───────────────────────────────────────

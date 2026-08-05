@@ -48,6 +48,57 @@ function renderSpaceNav(spaces, current, note) {
   }).join('');
 }
 
+//: The shape of the Space on screen. Rows carry it too (`j.shape`), because a renderer that
+//: reads a global would render correctly and then be impossible to test one row at a time.
+let SPACE_SHAPE = 'pipeline/jobs';
+
+// Swap the console for the Space's shape. Wholesale, not by disabling buttons: "Prepare
+// Materials" and "Fill application" are not unavailable in a targets Space, they are
+// meaningless there, and a disabled control asserts an action exists (§Lessons 43).
+function renderSpaceShape(shape, offer) {
+  SPACE_SHAPE = shape || 'pipeline/jobs';
+  const targets = SPACE_SHAPE === 'pipeline/targets';
+  const jobs = document.getElementById('jobControls');
+  const tgt = document.getElementById('targetControls');
+  if (jobs) jobs.hidden = targets;
+  if (tgt) tgt.hidden = !targets;
+  const box = document.getElementById('offerInput');
+  // Never while it has focus. `refresh()` runs every 2.5s and this is a textarea the operator
+  // types a paragraph into — the same reason the whole jobs table skips its rewrite mid-edit.
+  if (box && document.activeElement !== box && box.value !== (offer || '')) {
+    box.value = offer || '';
+  }
+}
+
+async function addTargets(btn) {
+  const box = document.getElementById('targetInput');
+  const out = document.getElementById('targetStatus');
+  const text = (box.value || '').trim();
+  if (!text) { out.textContent = 'Type a company name first.'; return; }
+  btn.disabled = true;
+  const label = btn.textContent;
+  btn.textContent = 'Adding…';
+  const r = await post('/api/target/add', {space: SPACE_ID, text});
+  btn.disabled = false;
+  btn.textContent = label;
+  out.textContent = r.message || '';
+  // Only clear what was accepted. Clearing the whole box on a partial import throws away the
+  // lines that failed along with the ones that worked, and the operator cannot retype what
+  // they can no longer see.
+  if (r.ok && !(r.rejected || []).length) box.value = '';
+  else if (r.ok) box.value = (r.rejected || []).join('\n');
+  refresh();
+}
+
+async function saveOffer(btn) {
+  const box = document.getElementById('offerInput');
+  const out = document.getElementById('offerStatus');
+  btn.disabled = true;
+  const r = await post('/api/space/offer', {space: SPACE_ID, offer: box.value || ''});
+  btn.disabled = false;
+  out.textContent = r.message || '';
+}
+
 async function post(path, payload) {
   const res = await fetch(path, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload || {})});
   const data = await res.json();
@@ -1930,7 +1981,7 @@ function renderJobsTable(allJobs, editing) {
   document.getElementById('jobs').innerHTML = shown.map(j => {
     return `
     <tr class="${j.interview_at ? 'row-won' : ''}">
-      <td class="status-cell"><div class="status-head">${badge(j.status)}${j.interview_at ? ` <span class="won-chip" title="Interview scheduled ${esc(fmtDate(j.interview_at))}">🎯 interview</span>` : ''}</div>${j.status === 'rejected' && j.rejected_at ? `<div class="rejected-on">Rejected ${fmtDate(j.rejected_at)}</div>` : (j.applied_at ? `<div class="applied-on">Applied ${fmtDate(j.applied_at)}</div>` : '')}</td>
+      <td class="status-cell"><div class="status-head">${badge(j.status)}${j.interview_at ? ` <span class="won-chip" title="Scheduled ${esc(fmtDate(j.interview_at))}">${wonLabel(j).icon} ${esc(wonLabel(j).label.toLowerCase())}</span>` : ''}</div>${j.status === 'rejected' && j.rejected_at ? `<div class="rejected-on">Rejected ${fmtDate(j.rejected_at)}</div>` : (j.applied_at ? `<div class="applied-on">Applied ${fmtDate(j.applied_at)}</div>` : '')}</td>
       <td class="job-cell"><div class="job-title">${esc(j.title)}</div><div class="job-co">${esc(j.company)}</div>${matchedVia(j)}</td>
       <td class="desc"><div class="desc-text">${esc(j.description)}</div></td>
       <td class="tags-cell">${jobTags(j).map(t =>
@@ -1981,9 +2032,23 @@ async function refresh() {
   // tab from disagreeing on the next tick.
   if (data.space) SPACE_ID = data.space;
   renderSpaceNav(data.spaces, data.space, data.space_note);
+  renderSpaceShape(data.space_shape, data.space_offer);
   document.getElementById('appDir').textContent = data.app_dir;
   const s = data.stats || {};
-  const stats = [['URL Jobs',s.total],['URL Applied',s.applied],['Lifetime Applied',s.lifetime_applied],['Enriched',s.enriched],['User-approved',s.scored],['Tailored',s.tailored],['Covers',s.covers],['Ready',s.ready],['Errors',s.errors]];
+  // Counters that mean something for the shape on screen. In a targets Space "Tailored",
+  // "Covers" and "Ready" are structurally always 0 — there is nothing to tailor — and seven
+  // permanently-zero boxes are the same furniture as a one-tab nav, teaching you to stop
+  // reading the row. The target counts are derived from `data.jobs`, which is already loaded:
+  // no query, so the budget does not move.
+  const stats = SPACE_SHAPE === 'pipeline/targets'
+    ? [['Targets', s.total],
+       ['Contacted', (data.jobs || []).filter(j => (j.contacts || []).some(c => c.emailed)).length],
+       ['Replied', (data.jobs || []).filter(j => (j.contacts || []).some(c => c.replied_at)).length],
+       ['Booked', (data.jobs || []).filter(j => j.interview_at).length]]
+    : [['URL Jobs',s.total],['URL Applied',s.applied],['Lifetime Applied',s.lifetime_applied],['Enriched',s.enriched],['User-approved',s.scored],['Tailored',s.tailored],['Covers',s.covers],['Ready',s.ready],['Errors',s.errors]];
+  // The list is not "Applications" when its rows are companies you are pitching.
+  const heading = document.getElementById('rowsHeading');
+  if (heading) heading.textContent = SPACE_SHAPE === 'pipeline/targets' ? 'Targets' : 'Applications';
   document.getElementById('stats').innerHTML = stats.map(([k,v]) => `<div class="stat"><strong>${v||0}</strong><span>${k}</span></div>`).join('');
   renderProgress(data.progress, s);
   const c = data.command || {};
@@ -2007,7 +2072,11 @@ async function refresh() {
   document.querySelectorAll('details.rowmenu[open]').forEach(positionRowMenu);
 }
 async function markInterview(url, btn) {
-  if (!confirm('Mark an interview as scheduled?\n\nThe row greys out and every follow-up '
+  // The confirm names the thing the operator is about to assert. "Mark an interview" on a
+  // company you are pitching describes something that did not happen.
+  const j = (LAST_JOBS || []).find(x => x.url === url) || {};
+  const what = wonLabel(j).label.toLowerCase();
+  if (!confirm(`Mark ${what} as scheduled?\n\nThe row greys out and every follow-up `
              + 'sequence for this job stops. Chasing someone after they agreed to meet is the '
              + 'one follow-up guaranteed to cost you something.')) return;
   btn.disabled = true;
@@ -2195,7 +2264,8 @@ function nextAction(j) {
   const cs = j.contacts || [];
   if (j.status === 'rejected') return '';
   if (j.interview_at)
-    return `<span class="won-next" title="Scheduled ${esc(fmtDate(j.interview_at))}">🎯 Interview scheduled</span>`;
+    return `<span class="won-next" title="Scheduled ${esc(fmtDate(j.interview_at))}">${
+      wonLabel(j).icon} ${esc(wonLabel(j).done)}</span>`;
   if (j.status === 'ready')
     return `<button class="primary" onclick="fillOne(${u}, this)">▶ Fill application</button>`;
   if (j.status === 'ready_to_submit')
@@ -2553,7 +2623,21 @@ function nextHint(j) {
 // Only offered before an application has gone through: once it is applied or waiting for
 // review, signing in is not the thing to do next. It is deliberately NOT shown as the primary
 // action — most jobs never need it, and it should not compete with "Fill application".
+//: Whether apply-shaped controls mean anything for this row. Read off the ROW, not the global
+//: SPACE_SHAPE, so a renderer can be driven one row at a time — and so a payload that ever
+//: mixes shapes cannot be rendered wrong by a stale global.
+function isTargetRow(j) { return (j && j.shape) === 'pipeline/targets'; }
+
+//: What success is CALLED here. Read off the row's `terminal`, not inferred from its shape:
+//: shape says what a row IS and terminal says what winning means, and a jobs-shaped Space that
+//: sets terminal='booked' deliberately would be mislabelled by the proxy.
+const WON_LABEL = { interview: {icon:'🎯', label:'Interview', done:'Interview scheduled'},
+                    booked:    {icon:'📞', label:'Call booked', done:'Call booked'} };
+function wonLabel(j) { return WON_LABEL[(j && j.terminal) || 'interview'] || WON_LABEL.interview; }
+
 function signinButton(j) {
+  // Nothing to sign in TO. A target is a company, not an application form behind an ATS wall.
+  if (isTargetRow(j)) return '';
   if (j.signin_open) return '';
   if (['applied', 'ready_to_submit', 'rejected', 'in_progress'].includes(j.status)) return '';
   const u = `decodeURIComponent('${encodeURIComponent(j.url)}')`;
@@ -2601,16 +2685,24 @@ function interviewButton(j) {
   // The undo lives HERE, not only in the ⋯ menu. Marking an interview is the one action that
   // halts every sequence on a job, so misclicking it is expensive — and the revert was buried
   // in the same overflow menu the 🎯 button itself had to be dragged out of (§Lessons 43).
+  // Same column, same write, same halting of every sequence — only the word changes, because
+  // what success MEANS is the Space's `terminal` (spaces-prd §7). Booking detection already
+  // runs automatically (cal.com mails the host), so this shape's success metric was
+  // instrumented before the shape existed.
+  const won = wonLabel(j);
   if (j.interview_at)
     return `<button class="won-btn undo" onclick="unmarkInterview(${u}, this)"
       title="Scheduled ${esc(fmtDate(j.interview_at))} — undo. Sequences this stopped stay stopped; reopen any you want back.">↩ Not scheduled</button>`;
   return `<button class="won-btn" onclick="markInterview(${u}, this)"
-    title="Greys this row and stops every follow-up sequence for this job">🎯 Interview</button>`;
+    title="Greys this row and stops every follow-up sequence for it">${won.icon} ${esc(won.label)}</button>`;
 }
 
 // Re-apply stays visible on the row rather than living only in the ⋯ menu: on an applied
 // job it is the main thing you might still want, and burying it made it unfindable.
 function restartButton(j) {
+  // There is no application to re-apply to. Omitted rather than disabled: a disabled button
+  // asserts the action exists and is unavailable, and here it does not exist (§Lessons 43).
+  if (isTargetRow(j)) return '';
   if (j.status === 'in_progress' || j.status === 'rejected' || j.status === 'failed') return '';
   const u = `decodeURIComponent('${encodeURIComponent(j.url)}')`;
   const applied = j.status === 'applied';

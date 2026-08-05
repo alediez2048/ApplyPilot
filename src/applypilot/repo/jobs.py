@@ -231,6 +231,41 @@ def dashboard_rows(limit: int = 500, conn: sqlite3.Connection | None = None,
     """, (*args, limit)).fetchall()
 
 
+def add_target(space_id: str, name: str, domain: str = "",
+               conn: sqlite3.Connection | None = None) -> dict:
+    """Add one company to a `pipeline/targets` Space. Idempotent on the anchor.
+
+    Returns `{"url", "name", "added"}` — `added` False means the row was already there, which
+    is a normal outcome of pasting a list twice and must not read as a failure.
+
+    `strategy` is `dashboard_upload` because the operator did paste it in (SPACE-1a D2). The
+    row is kept off the six-stage pipeline by its Space's SHAPE, not by hiding it behind a
+    private strategy value — that would also hide it from `delete_job`, which is
+    `DELETE ... AND {QUEUE_SQL}`, leaving a target you could create and never remove.
+
+    `detail_scraped_at` is stamped at creation. There is no page to fetch — the operator stated
+    the company — and leaving it NULL would mark the row as owing a scrape forever, which is
+    how a target ends up looking like a job that failed to enrich.
+    """
+    from applypilot.domain import target as _target
+
+    url = _target.anchor(space_id, name)
+    if not url:
+        raise ValueError(f"{name!r} does not yield a usable slug")
+    c = _c(conn)
+    existing = c.execute("SELECT url FROM jobs WHERE url = ?", (url,)).fetchone()
+    if existing:
+        return {"url": url, "name": name, "added": False}
+    now = _now()
+    c.execute(
+        "INSERT INTO jobs (url, title, company, site, strategy, space_id, discovered_at, "
+        "detail_scraped_at, application_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (url, name, name, domain or "", "dashboard_upload", space_id, now, now,
+         f"https://{domain}" if domain else ""))
+    c.commit()
+    return {"url": url, "name": name, "added": True}
+
+
 def in_progress(conn: sqlite3.Connection | None = None) -> list[dict]:
     """Jobs an apply agent is working on RIGHT NOW.
 

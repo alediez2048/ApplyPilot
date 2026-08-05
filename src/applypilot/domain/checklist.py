@@ -36,12 +36,20 @@ def _step(key: str, label: str, done_n: int, total_n: int, hint: str = "") -> di
 
 
 def job_checklist(job_status: str, applied_at: str, contacts: list[dict],
-                  now: datetime | None = None) -> dict:
-    """Completion state for one job.
+                  now: datetime | None = None, shape: str = "pipeline/jobs") -> dict:
+    """Completion state for one row.
 
     Steps with a zero denominator come back as 'na' and are EXCLUDED from the percentage.
     A job with no emailable contacts must still be able to reach 100%, or the widget reads
     as permanently broken rather than as a goal.
+
+    `shape` decides whether "Applied to the job" is one of the steps at all (SPACE-3). It is
+    OMITTED for a targets row rather than marked `na`, and the distinction is the point: `na`
+    means "this step has no work in it" — no emailable contacts, no LinkedIn profiles — and the
+    strip still draws it, greyed, as a thing that could have happened. There is no application
+    to submit to a company you are pitching, so drawing the step at all would describe work that
+    does not exist. Compare §Lessons 35: a widget that answers its own question is worth
+    nothing, and a permanently-grey step is that with extra pixels.
 
     Side effect: stamps `followup_due` on each contact, so the per-contact button and this
     widget agree on who is owed one — one cutoff, computed once.
@@ -67,11 +75,15 @@ def job_checklist(job_status: str, applied_at: str, contacts: list[dict],
             c["followup_due"] = True
 
     applied = bool((applied_at or "").strip()) or job_status == "applied"
+    targets = shape == "pipeline/targets"
     steps = [
         _step("contacts", "Found people", 1 if contacts else 0, 1,
-              "Run “Find contacts” to pull recruiters and peers."),
-        _step("applied", "Applied to the job", 1 if applied else 0, 1,
-              "The application itself hasn’t been submitted yet."),
+              "Find the decision-maker and whoever owns the work."
+              if targets else "Run “Find contacts” to pull recruiters and peers."),
+        *([] if targets else [
+            _step("applied", "Applied to the job", 1 if applied else 0, 1,
+                  "The application itself hasn’t been submitted yet."),
+        ]),
         _step("emailed", "Emailed everyone", len(emailed), len(emailable),
               "Some reachable contacts haven’t been emailed."),
         _step("linkedin", "LinkedIn invites sent", len(connected), len(linkedinable),

@@ -1382,10 +1382,11 @@ def _apollo_profile_url(apollo_id: str | None) -> str:
     return f"https://app.apollo.io/#/people/{aid}" if aid else ""
 
 
-def _job_checklist(job_status: str, applied_at: str, contacts: list[dict]) -> dict:
+def _job_checklist(job_status: str, applied_at: str, contacts: list[dict],
+                   shape: str = "pipeline/jobs") -> dict:
     """Thin delegate — the rule lives in applypilot.domain.checklist."""
     from applypilot.domain import job_checklist
-    return job_checklist(job_status, applied_at, contacts)
+    return job_checklist(job_status, applied_at, contacts, shape=shape)
 
 
 def _followup_panel(contacts: list[dict], ladders: dict | None = None) -> dict:
@@ -1572,6 +1573,24 @@ def _resolve_space(requested: str, conn) -> tuple[str, list[dict], str]:
     return fallback, nav, ""
 
 
+def _space_manifest(space_id: str, nav: list[dict]):
+    """The manifest for `space_id`, from rows already in hand. None when there is no registry.
+
+    A malformed `config` blob yields the defaults rather than an exception (`Space.from_row`),
+    but a row whose COLUMNS are unusable — an unknown shape written by hand — raises there. That
+    must not take the whole dashboard down, so it is caught: the panel falls back to job-shaped,
+    which is what every Space was before this feature existed.
+    """
+    from applypilot.domain.space import Space
+    row = next((s for s in nav if s["id"] == space_id), None)
+    if not row:
+        return None
+    try:
+        return Space.from_row(row)
+    except ValueError:
+        return None
+
+
 def _status_payload(space: str = "") -> dict:
     init_db()
     conn = get_connection()
@@ -1581,6 +1600,12 @@ def _status_payload(space: str = "") -> dict:
     _net_tasks = _network.statuses()
 
     space_id, space_nav, space_note = _resolve_space(space, conn)
+    # The manifest for the Space on screen, built from the row `_resolve_space` ALREADY read.
+    # `_spaces.load()` would be the obvious call and would cost a statement per render for data
+    # sitting in a local variable — §Lessons 11's shape, and this path re-runs every 2.5s.
+    manifest = _space_manifest(space_id, space_nav)
+    shape = manifest.shape if manifest else _spaces.JOBS_SHAPE
+    terminal = manifest.terminal if manifest else "interview"
 
     stats = _jobs.queue_stats(conn, space_id=space_id)
     lifetime = _jobs.lifetime_stats(conn)
@@ -1650,7 +1675,7 @@ def _status_payload(space: str = "") -> dict:
         # the plan is left is what separates a job worked this morning from one whose every
         # email and follow-up was spent a fortnight ago. Both were computed here already —
         # this is a reordering, not a new query.
-        job_checklist = _job_checklist(status, row["applied_at"] or "", contacts)
+        job_checklist = _job_checklist(status, row["applied_at"] or "", contacts, shape)
         job_followups = _followup_panel(contacts, job_ladders)
         net_task = _net_tasks.get(row["url"], {})
         jobs.append({
@@ -1681,6 +1706,16 @@ def _status_payload(space: str = "") -> dict:
             # KeyError into a plausible value and cost two rounds of fixing the wrong layer.
             # A column the payload needs belongs in the SELECT; if it is absent, crash.
             "detail_error": row["detail_error"] or "",
+            # The Space's SHAPE, on every row. The JS branches on it to decide whether an
+            # apply-shaped control means anything here — a "🔄 Re-apply" button on a company
+            # you are pitching is an action that does not exist, which is the same failure as
+            # offering a sent email as an editable form (§Lessons 31).
+            "shape": shape,
+            # What success MEANS for this row (`spaces-prd.md` §7). On the ROW rather than only
+            # on the payload because the button that writes it is per-row, and because
+            # inferring the word from the shape is a proxy that breaks the moment a
+            # jobs-shaped Space sets `terminal` deliberately.
+            "terminal": terminal,
             # The success metric. A job with this set needs no more attention.
             "interview_at": row["interview_at"] or "",
             "last_attempted_at": row["last_attempted_at"] or "",
@@ -1735,12 +1770,23 @@ def _status_payload(space: str = "") -> dict:
         "ext_token": _ext_token(),
         # Employers whose sign-in wall is unpaid. ONE query — the realm list is refreshed and
         # the browser is scanned by the background poller, never here.
-        "accounts": _accounts_payload(conn),
+        #
+        # Job-shaped Spaces only. An ATS sign-in wall is a fact about submitting an APPLICATION;
+        # in a targets Space "4 employers need an account before their jobs can run" is a banner
+        # about jobs that are not on screen and cannot be reached from it. Found by looking at
+        # the panel, not by a test — the payload was correct and belonged to another room.
+        "accounts": _accounts_payload(conn) if shape == _spaces.JOBS_SHAPE else {},
         # SPACE-2. The nav list is ONE query however many Spaces there are, and the filter
         # itself is a WHERE clause costing none — so the budget does not move (§Lessons 26 is
         # about what gets ADDED to this path, and this adds one statement, not one per job).
         "space": space_id,
         "spaces": [{"id": s["id"], "name": s["name"], "shape": s["shape"]} for s in space_nav],
+        # SPACE-3. The manifest fields the panel itself renders. `offer` is the one field with
+        # no analogue in the jobs pipeline: there the DESCRIPTION varies per row and the pitch
+        # is constant (your résumé); here it inverts.
+        "space_shape": shape,
+        "space_offer": (manifest.offer if manifest else ""),
+        "space_terminal": terminal,
         # Says WHY the panel is not the one that was asked for. An unhonoured `?space=` that
         # silently rendered the default would be a Space that quietly does not exist.
         "space_note": space_note,
@@ -2078,6 +2124,72 @@ def _log_interaction(data: dict) -> dict:
         _t.set_sequence_status(cid, "linkedin", "replied",
                                note="they messaged on LinkedIn", conn=conn)
     return {"ok": True, "message": f"Noted for {who}." if is_new else "Already recorded."}
+
+
+def _add_targets(data: dict) -> dict:
+    """Import companies into a `pipeline/targets` Space (SPACE-3).
+
+    Refuses in a jobs-shaped Space rather than writing a row the panel cannot show. And it
+    reports what it REJECTED: a paste of twelve lines that quietly imports nine gives the
+    operator no way to see which three are missing, which is §Lessons 15 — a zero (or a
+    partial) has to be as loud as an error.
+    """
+    init_db()
+    conn = get_connection()
+    space_id, _, _ = _resolve_space((data or {}).get("space", ""), conn)
+    manifest = _spaces.load(space_id, conn) if space_id else None
+    if manifest is None or manifest.shape != _spaces.TARGETS_SHAPE:
+        return {"ok": False,
+                "message": "Targets belong to an outreach Space. This one holds job postings."}
+
+    from applypilot.database import log_event
+    from applypilot.domain import target as _target
+    parsed, rejected = _target.parse_input((data or {}).get("text", ""))
+    if not parsed and not rejected:
+        return {"ok": False, "message": "Nothing to add — type a company name."}
+
+    added, already = [], []
+    for item in parsed:
+        try:
+            out = _jobs.add_target(space_id, item["name"], item.get("domain", ""), conn)
+        except ValueError:
+            rejected.append(item["name"])
+            continue
+        (added if out["added"] else already).append(out["name"])
+        if out["added"]:
+            log_event(out["url"], "system", "ok",
+                      f"Target added to {manifest.name}: {out['name']}"
+                      + (f" ({item['domain']})" if item.get("domain") else "."), conn)
+
+    bits = []
+    if added:
+        bits.append(f"Added {len(added)}")
+    if already:
+        bits.append(f"{len(already)} already here")
+    if rejected:
+        bits.append(f"{len(rejected)} not understood: " + ", ".join(rejected[:3]))
+    return {"ok": bool(added or already), "added": len(added), "skipped": len(already),
+            "rejected": rejected,
+            "message": " · ".join(bits) or "Nothing recognisable in that."}
+
+
+def _save_offer(data: dict) -> dict:
+    """The Space's constant pitch (`spaces-prd.md` §7.1).
+
+    One paragraph, written once, for every draft in the Space. It occupies the slot
+    `full_description` fills in the jobs pipeline — which is why it belongs to the SPACE and not
+    to a row: there the description varies per row and the pitch is constant, and here that
+    inverts.
+    """
+    init_db()
+    conn = get_connection()
+    space_id, _, _ = _resolve_space((data or {}).get("space", ""), conn)
+    manifest = _spaces.load(space_id, conn) if space_id else None
+    if manifest is None:
+        return {"ok": False, "message": "No such Space."}
+    offer = (data.get("offer") or "").strip()[:2000]
+    _spaces.save(manifest.with_(offer=offer), conn)
+    return {"ok": True, "message": "Offer saved." if offer else "Offer cleared."}
 
 
 def _all_job_descriptions(data: dict | None = None) -> dict:
@@ -3078,6 +3190,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/job-descriptions":
                 _json_response(self, _all_job_descriptions(data))
+                return
+            if path == "/api/target/add":
+                _json_response(self, _add_targets(data))
+                return
+            if path == "/api/space/offer":
+                _json_response(self, _save_offer(data))
                 return
             if path == "/api/job-description":
                 _json_response(self, _job_description(data))

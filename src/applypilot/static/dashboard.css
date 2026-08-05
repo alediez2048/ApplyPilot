@@ -901,6 +901,14 @@
     border:1px solid #b6e0c8; font-size:12px; color:#04603a; }
   .intro-bar button { font-size:12px; padding:4px 12px; }
 
+/* `hidden` means hidden, whatever else matches.
+   The browser's own [hidden]{display:none} is a USER-AGENT rule, so ANY author rule that sets
+   `display` beats it — `.controls{display:grid}` did, and the jobs console stayed on screen in
+   a targets Space with `hidden` correctly set on it. The Node test passed: it asserted the
+   PROPERTY was set, which was true and had no effect. That is §Lessons 43's family again — the
+   code was right and the control was still there. One rule kills the whole class of it. */
+[hidden] { display: none !important; }
+
 /* ---- Spaces (SPACE-2) ------------------------------------------------------
    A tab strip above the stats, hidden while there is only one Space. It sits at
    the very top of <main> because it scopes EVERYTHING below it — a Space filter

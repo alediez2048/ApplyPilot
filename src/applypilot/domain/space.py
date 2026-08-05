@@ -47,7 +47,12 @@ TERMINALS = ("interview", "booked")
 #:
 #: `test_unapplied_fields_are_really_unapplied` holds the line: reading one of these anywhere is
 #: what removes it from this tuple. The list can only shrink.
-UNAPPLIED = ("tone", "offer", "channels", "schedules", "offer_deck", "can_autosend", "terminal")
+#:
+#: `offer` left it in SPACE-3, which is the mechanism working: the panel now renders an editor
+#: for it and the payload carries it. It is still not fed to any PROMPT — that is SPACE-4, and
+#: the distinction is worth keeping straight, because "the operator can write it" and "it
+#: changes what gets sent" are different claims and only the first is true today.
+UNAPPLIED = ("tone", "channels", "schedules", "offer_deck", "can_autosend")
 
 
 @dataclass(frozen=True)

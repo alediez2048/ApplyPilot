@@ -71,7 +71,37 @@
 
   <hr class="section-sep">
 
-  <div class="controls">
+  <!-- SPACE-3. A targets Space pitches companies; there is no posting to import, nothing to
+       tailor and nothing to submit, so the whole jobs console is replaced rather than having
+       its buttons greyed out. A disabled control tells you an action exists and is unavailable
+       (§Lessons 43) — here it does not exist at all, and saying otherwise is worse than silence.
+       Static markup, toggled by renderSpaceShape(). -->
+  <div class="controls" id="targetControls" hidden>
+    <section>
+      <h2>Targets</h2>
+      <textarea id="targetInput" placeholder="One company per line. “Ridgeline Logistics”, or “Ridgeline Logistics, ridgeline.com”."></textarea>
+      <div class="row" style="margin-top:10px; align-items:center">
+        <button class="primary" style="font-size:15px; padding:10px 20px" onclick="addTargets(this)">＋ Add targets</button>
+      </div>
+      <p id="targetStatus" class="hint" style="margin-top:10px; font-weight:600"></p>
+      <div class="hint">Type the company. Unlike a job URL there is nothing to reverse-engineer
+        — the employer is stated rather than recovered from an ATS hostname, which is where
+        “Ouryahoo”, “Edu” and “Ats” came from.</div>
+    </section>
+    <section>
+      <h2>Your offer</h2>
+      <textarea id="offerInput" placeholder="One paragraph: what you are proposing. Written once, used in every draft in this Space."></textarea>
+      <div class="row" style="margin-top:10px; align-items:center">
+        <button class="primary" onclick="saveOffer(this)">Save offer</button>
+        <span id="offerStatus" class="hint" style="font-weight:600"></span>
+      </div>
+      <div class="hint">In a job search the posting varies per row and your pitch is constant.
+        Here it inverts: <strong>your pitch is constant and their situation varies</strong>, so
+        this belongs to the Space rather than to any one row.</div>
+    </section>
+  </div>
+
+  <div class="controls" id="jobControls">
     <section>
       <h2>Apply to Jobs</h2>
       <textarea id="urls" placeholder="Paste one or more job URLs here, then click Run. Direct ATS/career URLs work best."></textarea>
@@ -106,7 +136,7 @@
   <section id="accountsBar" class="accounts-bar" hidden></section>
 
   <section>
-    <h2>Applications</h2>
+    <h2 id="rowsHeading">Applications</h2>
     <!-- The search box is STATIC markup, deliberately. `refresh()` replaces #jobs wholesale
          every 2.5s and renderJobFilters() replaces #jobFilters — anything rendered into either
          would be destroyed mid-keystroke. JS only ever reads .value here. -->

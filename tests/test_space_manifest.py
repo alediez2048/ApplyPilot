@@ -263,18 +263,39 @@ def test_unapplied_fields_are_really_unapplied():
     `conversation_transcript` took a `thread` it barely used and the resulting draft could
     restate but never continue. Wiring one of these is what removes it from `UNAPPLIED`.
     """
+    import ast
+    import dataclasses
     import pathlib
 
     import applypilot
     root = pathlib.Path(applypilot.__file__).parent
     owners = {"domain/space.py", "repo/spaces.py"}
+    fields = {f.name for f in dataclasses.fields(sp.Space)}
+
+    # Attribute access parsed, not grepped, and matched on the variables a Space is actually
+    # held in. The first version of this test looked for the literal string `space.<field>` and
+    # SURVIVED a mutation that read `manifest.tone` — the real holder in `_status_payload` is
+    # called `manifest`, so the guard against declaring a field and quietly using it was itself
+    # a declaration that quietly did nothing. §Lessons 48: grep proves where a string is, not
+    # what the code does. `channels` is why this cannot just look for `.channels` anywhere —
+    # `domain/followup` has its own, and an unqualified match would flag it forever.
+    HOLDERS = {"space", "manifest", "spc", "sp_space", "the_space"}
+    offenders: dict[str, list[str]] = {}
+    for path in root.rglob("*.py"):
+        rel = str(path.relative_to(root))
+        if rel in owners:
+            continue
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except SyntaxError:                       # not ours to police
+            continue
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Attribute) and node.attr in sp.UNAPPLIED
+                    and isinstance(node.value, ast.Name) and node.value.id in HOLDERS):
+                offenders.setdefault(node.attr, []).append(f"{rel}:{node.lineno}")
+
     for name in sp.UNAPPLIED:
-        assert name in {f.name for f in __import__("dataclasses").fields(sp.Space)}, \
-            f"{name} is listed as unapplied but is not a field"
-        readers = sorted(
-            str(p.relative_to(root)) for p in root.rglob("*.py")
-            if str(p.relative_to(root)) not in owners
-            and f"space.{name}" in p.read_text(encoding="utf-8"))
-        assert not readers, (
-            f"`{name}` is read by {readers} but is still listed in UNAPPLIED — "
-            f"remove it from that tuple")
+        assert name in fields, f"{name} is listed as unapplied but is not a field"
+    assert not offenders, (
+        "these fields are read but still listed in UNAPPLIED — remove them from that tuple: "
+        + "; ".join(f"{k} at {', '.join(v)}" for k, v in sorted(offenders.items())))

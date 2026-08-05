@@ -42,17 +42,20 @@ Netlify Blobs needs no setup; it is available to functions on all plans.
 `200` is a REWRITE, not a redirect: the browser keeps `/intro/gina` in the address bar, which is
 what lets the page read the name. A 301 would strip it before the page ever loaded.
 
-**3. Add the beacon to the deck page**, before `</body>` (or as a `useEffect` in the component).
+**3. Add the beacon — at PARSE TIME, not in a `useEffect`.**
 
-> **This is the step that gets skipped, and skipping it is invisible.** On this install steps 1,
-> 2, 4 and 5 were done and step 3 was not, for five days and ~70 named links. Everything a
-> reasonable check would look at passed: the functions returned 204/401/405 correctly, the
-> authenticated read round-tripped a probe, and `/intro/<name>` served 200. None of that touches
-> whether the PAGE calls the endpoint. Verify with §Verify below, which loads the real page.
+> **The `useEffect` version cannot work on a rewritten path, and this cost 98 emails.**
+> The rewrite in step 2 is what puts the name in the browser's URL. A client-side router then
+> hydrates, does not recognise `/intro/gina` as one of its routes, and **replaces the URL with
+> the canonical `/intro/`**. Measured on the live site: the tab title still reads
+> `/intro/zzprobe-live-check-b2` while `location.pathname` is already `/intro/`. By the time a
+> `useEffect` runs, the name is gone and the `seg === "intro"` guard returns.
 >
-> **React/Gatsby: use `deploy/site/useDeckBeacon.js`, not the snippet below.** The rewrite serves
-> the same document for every name, so Gatsby's router believes the path is always `/intro/` —
-> a `useEffect` reading `pageContext` or `useLocation()` sends the wrong slug and looks correct.
+> Everything else looks perfect while this is broken: the link is right, the page serves 200,
+> the function returns 204, the collector reads back. Two real browser loads of named URLs
+> produced zero hits while direct POSTs to the same endpoint landed fine.
+
+Put it in the document, so it runs before any framework touches the URL:
 
 ```html
 <script>
@@ -70,6 +73,23 @@ what lets the page read the name. A 301 would strip it before the page ever load
 
 `sendBeacon` is used first because it survives the user navigating away immediately — which is
 exactly what someone skimming a deck does.
+
+**Gatsby:** put that script in `gatsby-ssr.js` via `onRenderBody({ setPreBodyComponents })`, so
+it lands in the HTML ahead of hydration. If you would rather keep the logic in the component,
+capture the name at parse time and read the captured value:
+
+```js
+// gatsby-ssr.js — runs before React, while the URL still has the name
+setPreBodyComponents([
+  <script key="deck-slug" dangerouslySetInnerHTML={{ __html:
+    'window.__deckSlug=location.pathname.replace(/\\/+$/,"").split("/").pop()||"";' }} />,
+])
+```
+
+```js
+// intro.js — one line changes
+const seg = window.__deckSlug || ""       // NOT location.pathname, which the router has rewritten
+```
 
 **4. Set the shared secret** in Netlify → Site configuration → Environment variables:
 
@@ -113,20 +133,15 @@ GA export, a pasted list. The links already carry their tokens either way.
 
 ## Verify
 
-The check that would have caught the missing beacon. It loads the page a recipient loads,
-rather than calling the API directly.
-
 ```bash
-# 1. Open a MADE-UP name in a real browser. It matches no contact, so nothing is misattributed.
-open "https://www.jorgealejandrodiez.com/intro/zzprobe-$(date +%s)"
-
-# 2. Ask the collector whether the PAGE reported it.
-curl -s -H "Authorization: Bearer $DECK_HITS_TOKEN" \
-     https://www.jorgealejandrodiez.com/api/deck-hits
+sh scripts/deck-check.sh --probe     # in the ApplyPilot repo
 ```
 
-The slug you opened must appear. If it does not, the beacon is not on the page — which is a
-different failure from the collector being broken, and the two look identical from the API side.
+It checks the two things that fail silently: whether the beacon is in the shipped JavaScript
+(the page CHUNK, not the HTML — grepping the HTML reports missing against a working beacon), and
+whether a real browser load actually reaches the collector.
 
-**Never open a real contact's `/intro/<name>`.** It records that person opening the deck. Append
-`?notrack=1` once per browser to opt that device out for good.
+Open the probe URL it prints **in a real browser**, wait ~15 seconds, re-run. Your slug must
+appear. curl will not do: the beacon is JavaScript and curl runs none of it.
+
+**Never open a real contact's `/intro/<name>`.** It records that person opening the deck.

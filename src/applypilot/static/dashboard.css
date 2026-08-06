@@ -11,6 +11,9 @@
     --muted:rgba(0,0,0,.6);
     --faint:rgba(0,0,0,.45);
     --soft:rgba(0,0,0,.75);
+    /* Tooltips invert against every surface in this palette — a light tip on a white card
+       needs a border to exist at all, and then reads as a panel rather than a hint. */
+    --tip-bg:#1f2937;
     --accent:#0a66c2;
     --accent2:#0a66c2;
     --accent-hover:#004182;
@@ -674,30 +677,43 @@
      Two classes each side, so it wins on specificity as well as order. */
   .filter-pill.temp-pill.active { background:var(--accent); border-color:var(--accent); color:#fff; }
 
-  /* The legend, as a native <details>. Closed by default, so the summary has to carry the
-     whole discoverability burden — it is phrased as the reader's own question rather than
-     "Legend", because a collapsed explanation nobody opens is §Lessons 43 with the label on
-     the outside. Styled as an obvious control for the same reason: a bare summary reads as
-     text, and text does not look clickable. */
-  .temp-legend { margin:2px 0 12px; }
-  .lg-summary { display:inline-flex; align-items:center; gap:6px; cursor:pointer; width:fit-content;
-      font-size:12px; font-weight:600; color:var(--soft); background:var(--surface);
-      border:1px solid var(--line2); border-radius:999px; padding:5px 13px; list-style:none;
-      transition:background .15s ease, border-color .15s ease; }
-  .lg-summary:hover { background:rgba(0,0,0,.04); border-color:var(--muted); }
-  .lg-summary:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
-  /* Safari still paints the disclosure triangle via this pseudo-element even with
-     list-style:none, so it needs killing explicitly or the pill renders with a stray marker. */
-  .lg-summary::-webkit-details-marker { display:none; }
-  .lg-summary::after { content:'▾'; font-size:10px; color:var(--faint); transition:transform .15s ease; }
-  .temp-legend[open] .lg-summary::after { transform:rotate(180deg); }
-  .lg-body { display:flex; flex-direction:column; gap:6px; padding:10px 2px 2px; }
-  .lg-row { display:flex; align-items:center; gap:10px; flex-wrap:wrap; font-size:12px; }
-  .lg-title { color:var(--soft); font-weight:600; min-width:190px; display:flex; flex-direction:column; }
-  .lg-hint { color:var(--faint); font-weight:400; font-size:11px; }
-  .lg-item { display:inline-flex; align-items:center; gap:6px; }
-  .lg-what { color:var(--muted); }
-  @media (max-width:720px) { .lg-title { min-width:0; } }
+  /* Every filter pill explains itself on hover. This replaced a standing legend: an
+     explanation attached to the control it describes is read at the moment it is needed,
+     which a block of text above the table is not.
+
+     CSS-only, because the pills are re-rendered every 2.5s by `refresh()` — a JS tooltip
+     would have to survive its own trigger being replaced mid-hover. `data-tip` rather than
+     `title`: the native one waits about a second, cannot be styled, and would stack a SECOND
+     box under this one. The accessible name carries the same words (see `aria-label` in
+     renderJobFilters) because a ::after is invisible to a screen reader. */
+  .job-filters .filter-pill { position:relative; }
+  .filter-pill[data-tip]::after {
+      content:attr(data-tip); position:absolute; bottom:calc(100% + 8px); left:50%;
+      transform:translateX(-50%) translateY(3px); width:max-content; max-width:250px;
+      white-space:normal; text-align:left; line-height:1.4;
+      background:var(--tip-bg); color:#fff; font-size:11.5px; font-weight:500;
+      padding:7px 10px; border-radius:7px; box-shadow:0 4px 14px rgba(0,0,0,.22);
+      opacity:0; visibility:hidden; pointer-events:none; z-index:40;
+      transition:opacity .12s ease, transform .12s ease, visibility .12s; }
+  .filter-pill[data-tip]::before {
+      content:''; position:absolute; bottom:calc(100% + 3px); left:50%;
+      transform:translateX(-50%) translateY(3px);
+      border:5px solid transparent; border-top-color:var(--tip-bg);
+      opacity:0; visibility:hidden; pointer-events:none; z-index:40;
+      transition:opacity .12s ease, transform .12s ease, visibility .12s; }
+  .filter-pill[data-tip]:hover::after, .filter-pill[data-tip]:focus-visible::after,
+  .filter-pill[data-tip]:hover::before, .filter-pill[data-tip]:focus-visible::before {
+      opacity:1; visibility:visible; transform:translateX(-50%) translateY(0); }
+  /* The first and last pills sit at the edges of a full-width row, so a centred tip would run
+     off screen. Anchor those to their own edge instead. */
+  .job-filters .filter-pill:first-child[data-tip]::after { left:0; transform:translateX(0) translateY(3px); }
+  .job-filters .filter-pill:first-child[data-tip]:hover::after,
+  .job-filters .filter-pill:first-child[data-tip]:focus-visible::after { transform:translateX(0) translateY(0); }
+  .job-filters .filter-pill:last-child[data-tip]::after { left:auto; right:0; transform:translateX(0) translateY(3px); }
+  .job-filters .filter-pill:last-child[data-tip]:hover::after,
+  .job-filters .filter-pill:last-child[data-tip]:focus-visible::after { transform:translateX(0) translateY(0); }
+  @media (prefers-reduced-motion:reduce) {
+    .filter-pill[data-tip]::after, .filter-pill[data-tip]::before { transition:none; } }
   .jobs-empty { padding:24px; text-align:center; color:var(--muted); font-size:13px; }
   .st-pulse .st-icon { animation:stpulse 1.2s ease-in-out infinite; }
   @keyframes stpulse { 0%,100% { opacity:1; } 50% { opacity:.35; } }

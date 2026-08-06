@@ -413,11 +413,16 @@ const STATUS_META = {
 
 // ── Job filter buckets: map the 12 granular statuses → a few meaningful stages you filter by. ──
 const JOB_BUCKETS = {
-  all:       { label: 'All',         icon: '',    statuses: null },  // null = everything
-  needs_you: { label: 'Needs you',   icon: '👉',  statuses: ['ready','ready_to_submit','needs_human','failed'] },
-  progress:  { label: 'In progress', icon: '🚀',  statuses: ['imported','enriched','scored','detail_failed','in_progress','dryrun'] },
-  applied:   { label: 'Applied',     icon: '✅',  statuses: ['applied'] },
-  rejected:  { label: 'Rejected',    icon: '✕',   statuses: ['rejected'] },
+  all:       { label: 'All',         icon: '',    statuses: null,   // null = everything
+               tip: 'Every application in this Space' },
+  needs_you: { label: 'Needs you',   icon: '👉',  statuses: ['ready','ready_to_submit','needs_human','failed'],
+               tip: 'Stopped and waiting on a human — a form to review, a sign-in wall, a failure' },
+  progress:  { label: 'In progress', icon: '🚀',  statuses: ['imported','enriched','scored','detail_failed','in_progress','dryrun'],
+               tip: 'Still being prepared — imported, scored, or filling right now' },
+  applied:   { label: 'Applied',     icon: '✅',  statuses: ['applied'],
+               tip: 'Submitted. Where the outreach and follow-up work happens' },
+  rejected:  { label: 'Rejected',    icon: '✕',   statuses: ['rejected'],
+               tip: 'Out of the pipeline. No follow-ups, and no temperature reading' },
 };
 const JOB_FILTER_ORDER = ['all','needs_you','progress','applied','rejected'];
 let JOB_FILTER = 'all';  // client-side view state; persists across the 2.5s auto-refresh
@@ -437,16 +442,16 @@ function jobInBucket(j, bucketKey) {
 // simply more than active. It is not: a cooling job can get a reply tomorrow, and an active one
 // can stay silent forever.
 //
-// So the legend groups them by which question they answer, and the filter is its own axis that
-// ANDs with the status bucket — "applied AND warm" is a real thing to ask for, and folding the
-// bands into JOB_BUCKETS would have made choosing one silently clear the other.
+// The filter is its own axis that ANDs with the status bucket — "applied AND warm" is a real
+// thing to ask for, and folding the bands into JOB_BUCKETS would have made choosing one
+// silently clear the other.
 const TEMP_BANDS = {
   won:           { icon: '🏆', label: 'won',    axis: 'them',
-                   meaning: 'interview booked' },
+                   meaning: 'an interview is booked' },
   warm:          { icon: '●',  label: 'warm',   axis: 'them',
                    meaning: 'a person replied or opened your deck' },
   active:        { icon: '●',  label: 'active', axis: 'us',
-                   meaning: 'outreach still scheduled, nobody has answered' },
+                   meaning: 'still scheduled, nobody has answered yet' },
   cooling:       { icon: '◐',  label: 'cooling', axis: 'us',
                    meaning: 'nearly every email sent, still no answer' },
   cold:          { icon: '○',  label: 'cold',   axis: 'us',
@@ -457,14 +462,29 @@ const TEMP_BANDS = {
                    meaning: 'mail is bouncing — fix the address, do not chase' },
 };
 const TEMP_ORDER = ['won','warm','active','cooling','cold','new','undeliverable'];
-//: The legend's own grouping. `them` first because it is the only axis that means you are
-//: closer to an interview; `us` is effort, which §Lessons 35 says must never read as progress.
-const TEMP_AXES = [
-  { key: 'them', title: 'Did they respond?', hint: 'the only thing that means you are closer' },
-  { key: 'us',   title: 'How far through your outreach', hint: 'your effort, not their interest' },
-  { key: 'fix',  title: 'Needs fixing', hint: '' },
-];
+//: The axis a band belongs to, as a PREFIX on its tooltip.
+//:
+//: The legend this replaced grouped the bands under these headings, and the grouping was doing
+//: real work: four of the seven count OUR OWN sending and two are about what THEY did, which is
+//: the distinction that made one chip unreadable as a single scale. Per-pill tooltips have no
+//: grouping to carry that, so each tip states its axis outright — otherwise removing the legend
+//: throws away the explanation and keeps only the vocabulary.
+//:
+//: `them` matters most: §Lessons 35 — effort must never read as progress, and this is the only
+//: axis that means you are closer to an interview.
+const TEMP_AXIS_TIP = {
+  them: 'They responded',
+  us:   'Your outreach',
+  fix:  'Needs fixing',
+};
 let TEMP_FILTER = 'all';
+
+//: What a band pill says on hover. Composed from axis + meaning rather than written out per
+//: band, so a band cannot end up on one axis in the data and another in its own description.
+function tempTip(key) {
+  const b = TEMP_BANDS[key];
+  return b ? `${TEMP_AXIS_TIP[b.axis]} — ${b.meaning}` : '';
+}
 
 function jobInTemp(j, key) {
   if (!key || key === 'all') return true;
@@ -676,7 +696,9 @@ function renderJobFilters(jobs) {
     const b = JOB_BUCKETS[key];
     const n = jobs.filter(j => jobInBucket(j, key) && jobInTemp(j, TEMP_FILTER)).length;
     const on = key === JOB_FILTER ? ' active' : '';
-    return `<button class="filter-pill${on}" onclick="setJobFilter('${key}')">${b.icon ? b.icon + ' ' : ''}${b.label} <span class="fp-n">${n}</span></button>`;
+    return `<button class="filter-pill${on}" data-tip="${esc(b.tip)}" `
+         + `aria-label="${esc(`${b.label} — ${b.tip}`)}" onclick="setJobFilter('${key}')">`
+         + `${b.icon ? b.icon + ' ' : ''}${b.label} <span class="fp-n">${n}</span></button>`;
   }).join('');
 
   const bands = TEMP_ORDER.map(key => {
@@ -686,39 +708,24 @@ function renderJobFilters(jobs) {
     // Empty bands are noise — but never drop the one that is SELECTED, or the active filter
     // vanishes the moment its last job changes band and the table looks broken with no way back.
     if (!n && !on) return '';
-    const title = on ? `Showing ${b.label} only — click to clear` : `${b.label} — ${b.meaning}`;
+    // The tip is what the legend used to be, per pill: axis + meaning, plus the way out when
+    // this one is the selected filter. `data-tip` and not `title` — a native tooltip waits
+    // about a second, cannot be styled, and would stack a SECOND box under the CSS one. The
+    // accessible name carries the same words, because a ::after is invisible to a screen reader.
+    const tip = on ? `${tempTip(key)}. Click to clear this filter.` : tempTip(key);
     // `tb-` prefix, not the bare band name: one of the bands IS called "active", which is also
     // the selected-state class every filter pill uses. Unprefixed, the active-band pill carries
     // `active` at all times and renders as permanently selected — a filter that looks applied
     // when it is not, which is worse than one that looks unapplied when it is.
     return `<button class="filter-pill temp-pill tb-${esc(key)}${on ? ' active' : ''}" `
-         + `title="${esc(title)}" onclick="setTempFilter('${key}')">`
+         + `data-tip="${esc(tip)}" aria-label="${esc(`${b.label} — ${tip}`)}" `
+         + `onclick="setTempFilter('${key}')">`
          + `${b.icon} ${b.label} <span class="fp-n">${n}</span></button>`;
   }).join('');
 
   el.innerHTML = status + (bands ? `<span class="filter-sep" aria-hidden="true"></span>${bands}` : '');
 }
 
-//: The legend. Static content, rendered once into the <details> BODY — it explains the
-//: vocabulary rather than reporting data, so it never needs the payload.
-//:
-//: Writing to the body and never to the <details> itself is what keeps the panel open across
-//: the 2.5s refresh: the element holding the `open` attribute is one nothing rewrites. Render
-//: into the wrapper instead and every tick would slam it shut mid-read.
-function renderTempLegend() {
-  const el = document.getElementById('tempLegendBody');
-  if (!el || el.dataset.done === '1') return;   // never changes; skip the 2.5s rewrite
-  el.innerHTML = TEMP_AXES.map(axis => {
-    const items = TEMP_ORDER.filter(k => TEMP_BANDS[k].axis === axis.key).map(k => {
-      const b = TEMP_BANDS[k];
-      return `<span class="lg-item"><span class="temp ${esc(k)}">${b.icon} ${b.label}</span>`
-           + `<span class="lg-what">${esc(b.meaning)}</span></span>`;
-    }).join('');
-    return `<div class="lg-row"><span class="lg-title">${esc(axis.title)}`
-         + `${axis.hint ? `<span class="lg-hint">${esc(axis.hint)}</span>` : ''}</span>${items}</div>`;
-  }).join('');
-  el.dataset.done = '1';
-}
 // Every one of these ends the same way — you act in the open tab, then Continue, which
 // reconnects a FRESH agent to that same browser and carries on from the current page. The
 // wording differs because "the agent is stuck" and "you chose to take over" call for different
@@ -2116,7 +2123,6 @@ function renderMetrics(mx) {
 // SQL statements, and putting it behind a keystroke is §Lessons 11 and 26 with a new trigger.
 function renderJobsTable(allJobs, editing) {
   renderJobFilters(allJobs);
-  renderTempLegend();
   renderActiveTags();
   // Bucket → band → tags → search, narrowing at each step. The bucket counts above deliberately
   // keep counting the WHOLE set: a filter pill that renumbers itself as you type cannot tell you

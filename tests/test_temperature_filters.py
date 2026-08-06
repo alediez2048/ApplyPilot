@@ -1,4 +1,4 @@
-"""The band legend, and filtering the table by band.
+"""What each filter pill means, and filtering the table by band.
 
 Reported as "not sure this is the best way to know what's up with an application" — and the
 confusion was the finding rather than a misreading. Four of the seven bands (new → active →
@@ -6,8 +6,10 @@ cooling → cold) are a countdown of OUR OWN sending; `warm` and `won` are about
 One chip presenting both as a single scale reads as if warm were simply more than active, which
 it is not: a cooling job can get a reply tomorrow and an active one can stay silent forever.
 
-So the legend groups the bands by which QUESTION each answers, and the filter is a second axis
-that ANDs with the status bucket rather than replacing it.
+There was a standing legend for a day; it is gone. Each pill explains itself on hover instead,
+so the explanation sits on the control it describes and is read at the moment it is needed. The
+axis a band belongs to therefore has to be stated in its own tooltip — a per-pill tip has no
+grouping to carry it, and dropping it would keep the vocabulary and throw away the point.
 
 These run the real functions under node. The failure mode that matters is a handler that throws
 at runtime, which blanks the whole jobs table exactly as silently as a syntax error (§Lessons 7).
@@ -27,9 +29,8 @@ from browser_stubs import BROWSER_GLOBALS
 
 pytestmark = pytest.mark.skipif(not shutil.which("node"), reason="node not available")
 
-# `getElementById` has to hand back a DISTINCT node per id and remember what was written to it:
-# the legend and the filter bar are rendered by different functions into different nodes, and a
-# shared stub would let a test pass while both wrote to the same place.
+# `getElementById` has to hand back a DISTINCT node per id and remember what was written to it,
+# so a test cannot pass because two renderers wrote to the same shared stub.
 _STUBS = """
 const NODES = {};
 const el = (id) => (NODES[id] = NODES[id] || { id, innerHTML:'', textContent:'', hidden:false,
@@ -42,8 +43,8 @@ globalThis.document = { getElementById: el, querySelectorAll: ()=>[], querySelec
 globalThis.__nodes = NODES;
 """ + BROWSER_GLOBALS
 
-_EXPORTS = """; return { TEMP_BANDS, TEMP_ORDER, TEMP_AXES, jobInTemp, jobInBucket,
-  setTempFilter, setJobFilter, renderJobFilters, renderTempLegend,
+_EXPORTS = """; return { TEMP_BANDS, TEMP_ORDER, TEMP_AXIS_TIP, tempTip, JOB_BUCKETS,
+  jobInTemp, jobInBucket, setTempFilter, setJobFilter, renderJobFilters,
   get TEMP_FILTER(){ return TEMP_FILTER; }, get JOB_FILTER(){ return JOB_FILTER; } };"""
 
 
@@ -76,6 +77,8 @@ def _job(url, status="applied", band="active"):
             "temperature": {"band": band, "label": band, "icon": "●", "reason": "why."}}
 
 
+TEMP_ALL = ['won','warm','active','cooling','cold','new','undeliverable']
+
 BOARD = [
     _job("j/1", "applied", "warm"),
     _job("j/2", "applied", "active"),
@@ -84,50 +87,6 @@ BOARD = [
     _job("j/5", "applied", "cooling"),
     _job("j/6", "rejected", "cold"),
 ]
-
-
-# ── the legend ──────────────────────────────────────────────────────────────
-
-def test_the_legend_explains_every_band_it_can_show(tmp_path):
-    """A band that appears on a row and not in the legend is the vocabulary problem this was
-    built to fix, one entry short."""
-    out = _run("console.log(JSON.stringify((F.renderTempLegend(), "
-               "{html: __nodes.tempLegendBody.innerHTML, order: F.TEMP_ORDER})));", tmp_path)
-    html = out["html"]
-    assert html.strip(), "the legend rendered nothing"
-    for band in out["order"]:
-        assert f">{band}<" in html or f" {band}<" in html, f"{band} is missing from the legend"
-
-
-def test_the_legend_says_what_each_band_MEANS(tmp_path):
-    """Listing the words without their meanings reproduces the original complaint in a new
-    place: the reader still cannot tell active from warm.
-
-    The emptiness check is not padding — it is the whole test. The first version asserted only
-    `meaning in html`, and `"" in html` is True for every string, so blanking a band's
-    explanation passed cleanly. §Lessons 13: a mutation that empties the thing under test must
-    fail, or the assertion is measuring nothing.
-    """
-    out = _run("console.log(JSON.stringify((F.renderTempLegend(), "
-               "{html: __nodes.tempLegendBody.innerHTML, bands: F.TEMP_BANDS})));", tmp_path)
-    for band, meta in out["bands"].items():
-        # Two, not three: "interview booked" is a complete explanation and the shortest honest
-        # one on the list. The bar only has to be high enough to kill "" and a bare "yes".
-        words = (meta["meaning"] or "").split()
-        assert len(words) >= 2, f"{band} has no usable explanation: {meta['meaning']!r}"
-        assert meta["meaning"] in out["html"], f"{band} has no explanation in the legend"
-
-
-def test_the_legend_separates_what_THEY_did_from_what_WE_did(tmp_path):
-    """The whole point. `warm`/`won` answer "did they respond"; new/active/cooling/cold count
-    our own sending. Presented as one scale they read as a single ladder, which is what made
-    the chip unreadable — so the grouping is the explanation, not decoration."""
-    out = _run("console.log(JSON.stringify(F.TEMP_BANDS));", tmp_path)
-    them = {k for k, v in out.items() if v["axis"] == "them"}
-    us = {k for k, v in out.items() if v["axis"] == "us"}
-    assert them == {"warm", "won"}, them
-    assert us == {"new", "active", "cooling", "cold"}, us
-    assert not (them & us), "a band cannot be on both axes"
 
 
 # ── filtering ───────────────────────────────────────────────────────────────
@@ -212,34 +171,67 @@ def test_band_counts_respect_the_bucket_you_are_in(tmp_path):
         f"active counts the whole board while the bucket is needs_you: {seg[:160]!r}")
 
 
-def test_the_open_legend_survives_the_refresh(tmp_path):
-    """The legend is a <details>, and `refresh()` replaces #jobs every 2.5s. The `open`
-    attribute therefore has to live on a node nothing rewrites — so renderTempLegend writes to
-    the BODY, never to the wrapper. Render into the wrapper and the panel slams shut mid-read
-    on every tick, which is the class of bug PANEL_OPEN / TAB_OPEN exist to work around.
+# ── the tooltips (what the legend used to be) ───────────────────────────────
 
-    Asserted by re-rendering and checking the wrapper was never written to: reading `open`
-    would prove nothing, because the stub has no real <details> behaviour.
-    """
-    out = _run("F.renderTempLegend(); F.renderTempLegend(); F.renderTempLegend();"
-               "console.log(JSON.stringify({"
-               " wrapper: __nodes.tempLegend ? __nodes.tempLegend.innerHTML : null,"
-               " body: __nodes.tempLegendBody.innerHTML.length}));", tmp_path)
-    assert out["body"] > 0, "the legend body is empty"
-    assert not out["wrapper"], (
-        "renderTempLegend wrote to the <details> wrapper, which discards the open state "
-        f"every 2.5s: {out['wrapper']!r}")
+def test_every_band_pill_carries_its_own_explanation(tmp_path):
+    """The legend is gone, so the pill is the only place the meaning survives. A band that
+    renders with no tip is the original complaint — a word with nothing behind it."""
+    board = [_job(f"j/{i}", "applied", b) for i, b in enumerate(TEMP_ALL)]
+    html = _pills(tmp_path, board)
+    for band in TEMP_ALL:
+        seg = html.split(f"tb-{band}", 1)
+        assert len(seg) == 2, f"{band} has no pill"
+        tip = seg[1].split('data-tip="', 1)[1].split('"', 1)[0]
+        assert len(tip.split()) >= 4, f"{band} has no usable tooltip: {tip!r}"
 
 
-def test_the_summary_asks_the_question_instead_of_saying_legend(tmp_path):
-    """A collapsed explanation is one nobody opens (§Lessons 43), and closing it was the whole
-    request — so the summary text is the only discoverability left. "Legend" is a filing label;
-    the reader's actual question is what gets it clicked."""
+def test_a_band_tip_states_WHOSE_action_it_describes(tmp_path):
+    """The legend grouped the bands under "Did they respond?" and "How far through your
+    outreach", and that grouping was the explanation — four bands count our own sending, two
+    are about what they did. A per-pill tooltip has no grouping to carry it, so each tip has to
+    say its axis outright. Without this, removing the legend keeps the vocabulary and throws
+    away the point of it."""
+    out = _run("console.log(JSON.stringify({"
+               " tips: Object.fromEntries(F.TEMP_ORDER.map(k => [k, F.tempTip(k)])),"
+               " axes: F.TEMP_AXIS_TIP, bands: F.TEMP_BANDS}));", tmp_path)
+    for band, tip in out["tips"].items():
+        axis = out["bands"][band]["axis"]
+        assert tip.startswith(out["axes"][axis]), f"{band} does not say whose action it is: {tip!r}"
+    # ...and the two axes must not describe themselves the same way, or stating it is a no-op.
+    assert out["axes"]["them"] != out["axes"]["us"], out["axes"]
+
+
+def test_the_selected_band_tip_says_how_to_clear_it(tmp_path):
+    """There is no "All" pill in this group, so clicking the selected band is the only way out
+    — and an affordance you have to guess is one nobody finds (§Lessons 43)."""
+    html = _pills(tmp_path, BOARD, bucket="all", band="cooling")
+    tip = html.split("tb-cooling active", 1)[1].split('data-tip="', 1)[1].split('"', 1)[0]
+    assert "clear" in tip.lower(), f"the selected pill does not say how to clear it: {tip!r}"
+
+
+def test_every_status_bucket_pill_explains_itself_too(tmp_path):
+    """"Needs you" and "In progress" each stand for a specific set of statuses that the label
+    does not name."""
+    html = _pills(tmp_path, BOARD)
+    out = _run("console.log(JSON.stringify(F.JOB_BUCKETS));", tmp_path)
+    for key, meta in out.items():
+        assert len(str(meta.get("tip") or "").split()) >= 4, f"{key} has no tooltip: {meta}"
+        assert meta["tip"] in html, f"{key}'s tooltip never reaches the markup"
+
+
+def test_the_tooltip_is_not_a_native_title(tmp_path):
+    """`title` waits about a second, cannot be styled, and would stack a SECOND box under the
+    CSS one. The accessible name carries the same words instead, because a ::after is invisible
+    to a screen reader — so dropping aria-label makes these pills unreadable to one."""
+    html = _pills(tmp_path, BOARD)
+    assert "title=" not in html, f"a native title tooltip is back and will double up: {html[:200]!r}"
+    assert html.count("aria-label=") >= 5, "the tips are invisible to a screen reader"
+
+
+def test_the_legend_is_really_gone(tmp_path):
+    """Deleting the renderer while leaving the markup gives an empty panel that opens onto
+    nothing; deleting the markup while leaving the call gives a dead function on the 2.5s path."""
     html = (web_dashboard._STATIC_DIR / "index.html").read_text(encoding="utf-8")
-    seg = html.split('class="lg-summary"', 1)[1].split("</summary>", 1)[0]
-    assert "mean" in seg.lower(), f"the summary does not ask what anything means: {seg!r}"
-    # Matched on the legend's OWN tag, not `"<details" in html`: the metrics panel is also a
-    # <details>, so the loose version passed happily against a legend rewritten as a plain
-    # <div> — §Lessons 1, a substring found somewhere in the file standing in for the element
-    # actually under test.
-    assert '<details id="tempLegend"' in html, "the legend element itself is not a <details>"
+    js = (web_dashboard._STATIC_DIR / "dashboard.js").read_text(encoding="utf-8")
+    assert "tempLegend" not in html, "the legend markup is still there"
+    assert "renderTempLegend" not in js, "the legend renderer is still called"

@@ -1245,3 +1245,69 @@ def test_a_followup_step_that_never_started_is_not_overdue(tmp_path):
     html = _strip(tmp_path, _ux1_job(checklist=_steps(emailed=(0, 5), followup=(0, 0))))
     cls = _step_class(html, "Follow up")
     assert "na" in cls and "due" not in cls, f"an unstarted ladder reads as overdue: {cls!r}"
+
+
+# ── adding a contact by hand ────────────────────────────────────────────────
+
+def _people(tmp_path, job, driver):
+    script = tmp_path / "addc.mjs"
+    script.write_text(_STUBS + f"const SRC = {json.dumps(_page_js())};\n"
+                      + "globalThis.refresh = () => {};\n"
+                      + "const F = (new Function(SRC + `; return { peopleList, addContactForm, "
+                      + "toggleAddContact, onAddField, addState };`))();\n"
+                      + f"const J = {json.dumps(job)};\n" + driver)
+    proc = subprocess.run(["node", str(script)], capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr[:1500]
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node not available")
+def test_adding_by_hand_is_offered_even_with_no_contacts(tmp_path):
+    """The empty People tab is exactly where a referral arrives — somebody named a person for a
+    job Apollo found nobody at. Offering it only once contacts exist would hide it in the one
+    state that needs it most (§Lessons 43)."""
+    empty = _people(tmp_path, _ux1_job(contacts=[]),
+                    "console.log(JSON.stringify(F.peopleList(J)));")
+    assert "toggleAddContact" in empty, "no way to add someone by hand on an empty People tab"
+
+    full = _people(tmp_path, _ux1_job(contacts=[_ux1_contact()]),
+                   "console.log(JSON.stringify(F.peopleList(J)));")
+    assert "toggleAddContact" in full, "the control disappears once Apollo found people"
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node not available")
+def test_what_you_typed_survives_a_refresh(tmp_path):
+    """`refresh()` replaces #jobs wholesale every 2.5s and only holds off while a field HAS
+    focus, so moving between fields opens a window where the tick lands between blur and focus.
+    Keeping the values in JS and re-rendering them from there is what closes it — a form that
+    silently empties halfway through is worse than no form."""
+    out = _people(tmp_path, _ux1_job(), """
+      F.toggleAddContact(J.url);
+      F.onAddField(J.url, 'name', 'Priya Raman');
+      F.onAddField(J.url, 'linkedin', 'https://linkedin.com/in/priya');
+      const first = F.addContactForm(J);
+      const afterRerender = F.addContactForm(J);   // what the 2.5s tick would draw
+      console.log(JSON.stringify({first, afterRerender}));""")
+    assert "Priya Raman" in out["afterRerender"], "the form emptied itself on re-render"
+    assert "linkedin.com/in/priya" in out["afterRerender"], "the LinkedIn field was discarded"
+    assert out["first"] == out["afterRerender"], "the form is not stable across renders"
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node not available")
+def test_the_form_is_closed_until_asked_for(tmp_path):
+    """Most jobs never need it, and four always-open text fields under every People tab is a
+    permanent invitation to fill something in."""
+    out = _people(tmp_path, _ux1_job(),
+                  "console.log(JSON.stringify(F.addContactForm(J)));")
+    assert "addc-grid" not in out, "the form is open before anyone asked for it"
+    assert "toggleAddContact" in out, "and there is no way to open it"
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node not available")
+def test_both_reachability_fields_are_offered(tmp_path):
+    """An introduction hands you an address or a profile, rarely both, and never predictably."""
+    out = _people(tmp_path, _ux1_job(), """
+      F.toggleAddContact(J.url);
+      console.log(JSON.stringify(F.addContactForm(J)));""")
+    for field in ("name", "email", "linkedin", "by"):
+        assert f"'{field}'" in out, f"the {field} field is missing from the form"

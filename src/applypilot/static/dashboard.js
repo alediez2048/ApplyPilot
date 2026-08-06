@@ -1087,7 +1087,10 @@ function introBanner(j) {
 }
 async function addIntroduced(url, email, name, by, btn) {
   btn.disabled = true; btn.textContent = 'Adding…';
-  const r = await post('/api/contact/add-introduced', {job_url: url, email, name, introduced_by: by});
+  // `on_thread` is what earns this address `email_status: 'verified'`. It came off a Cc on a
+  // live thread, so it is real by construction — which a hand-typed one is not.
+  const r = await post('/api/contact/add-introduced',
+                       {job_url: url, email, name, introduced_by: by, on_thread: 1});
   const cmdEl = document.getElementById('command');
   if (cmdEl) cmdEl.textContent = r.message || '';
   // #command sits above the whole jobs table, often screens away from the banner that was
@@ -1099,11 +1102,72 @@ async function addIntroduced(url, email, name, by, btn) {
   }
   refresh();
 }
+// Somebody hands you a name. `introBanner` above only fires on a Cc DETECTED in a live Gmail
+// thread, so "you should talk to Priya, here's her LinkedIn" — said on a call, in a LinkedIn
+// DM, or in a reply that names her without copying her — had nowhere to go at all. That is the
+// warmest lead this system can produce and the only way to record it was to go and look the
+// person up in Apollo. §Lessons 37: the tool has to be reachable from the state it repairs.
+//
+// The typed values live HERE and not in the DOM. `refresh()` replaces #jobs wholesale every
+// 2.5s and only holds off while a field HAS focus (`isEditingJobs`), so moving between fields
+// opens a window where the tick lands between blur and focus and takes the half-filled form
+// with it. Same reason PANEL_OPEN exists, one layer down.
+const ADD_FORM = new Map();
+function addState(url) {
+  if (!ADD_FORM.has(url)) {
+    ADD_FORM.set(url, {open: false, name: '', email: '', linkedin: '', by: '', err: ''});
+  }
+  return ADD_FORM.get(url);
+}
+function toggleAddContact(url) { const s = addState(url); s.open = !s.open; s.err = ''; refresh(); }
+function onAddField(url, field, value) { addState(url)[field] = value; }
+async function submitAddContact(url, btn) {
+  const s = addState(url);
+  btn.disabled = true; btn.textContent = 'Adding…';
+  const r = await post('/api/contact/add-introduced', {job_url: url, name: s.name,
+    email: s.email, linkedin_url: s.linkedin, introduced_by: s.by});
+  const cmdEl = document.getElementById('command');
+  if (cmdEl) cmdEl.textContent = r.message || '';
+  // The failure has to land IN the form. #command sits above the whole table, often screens
+  // away from the button that was clicked, and a rejection that only shows up there reads as a
+  // button that did nothing — which is exactly what addIntroduced learned the hard way.
+  if (r.ok) ADD_FORM.delete(url);
+  else { s.err = r.message || 'Could not add them.'; btn.disabled = false; btn.textContent = 'Add contact'; }
+  refresh();
+}
+function addContactForm(j) {
+  const s = addState(j.url);
+  const u = `decodeURIComponent('${encodeURIComponent(j.url)}')`;
+  if (!s.open) {
+    return `<div class="addc-row"><button class="ghost addc-open" onclick="toggleAddContact(${u})"
+        title="Someone referred you to a person Apollo never found — a name from a reply, a call or a DM">＋ Add someone by hand</button></div>`;
+  }
+  const f = (k, ph) => `<input class="addc-f" type="text" placeholder="${esc(ph)}" `
+      + `value="${esc(s[k])}" oninput="onAddField(${u}, '${k}', this.value)">`;
+  return `<div class="addc">
+      <div class="addc-head">Someone gave you a name</div>
+      <div class="addc-grid">
+        ${f('name', 'Name')}
+        ${f('email', 'Email')}
+        ${f('linkedin', 'LinkedIn profile URL')}
+        ${f('by', 'Who referred them?')}
+      </div>
+      <div class="addc-actions">
+        <button class="primary" onclick="submitAddContact(${u}, this)">Add contact</button>
+        <button class="ghost" onclick="toggleAddContact(${u})">Cancel</button>
+        <span class="addc-hint">${s.err ? `<span class="addc-err">${esc(s.err)}</span>`
+          : 'An email or a LinkedIn URL — either one is enough. Naming who referred them makes the draft warmer.'}</span>
+      </div>
+    </div>`;
+}
 function peopleList(j) {
   const cs = j.contacts || [];
   let intro = introBanner(j);
-  if (!cs.length) return intro + `<div class="pane-empty">No contacts yet. ${findContactsPrompt(j)}</div>`;
-  intro += anotherRoundPrompt(j, cs);
+  if (!cs.length) {
+    return intro + `<div class="pane-empty">No contacts yet. ${findContactsPrompt(j)}</div>`
+         + addContactForm(j);
+  }
+  intro += anotherRoundPrompt(j, cs) + addContactForm(j);
   const hot = cs.filter(c => c.hot), cold = cs.filter(c => !c.hot);
   let out = intro + bulkBar(j);
   if (hot.length)  out += `<div class="ppl-group hot">🔥 People you know here <span class="ppl-g-n">${hot.length}</span></div>` + hot.map(c => contactRow(c)).join('');

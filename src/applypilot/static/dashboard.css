@@ -250,6 +250,23 @@
   .round2-txt b { color:var(--soft); font-weight:600; }
   .round2 .netnote { flex-basis:100%; }
 
+  /* Add a contact by hand — a referral Apollo never found. Quiet when closed: it sits under a
+     list of people who ARE there, and the common case is not needing it. */
+  .addc-row { margin:2px 0 12px; }
+  .addc-open { font-size:12.5px; }
+  .addc { background:var(--surface2); border:1px solid var(--line);
+      border-left:3px solid var(--accent); border-radius:8px; padding:12px 14px; margin:2px 0 12px; }
+  .addc-head { font-size:12.5px; font-weight:700; color:var(--soft); margin-bottom:9px; }
+  /* auto-fit rather than a fixed column count: this panel renders inside an expanded row that
+     is already indented, and four fixed columns overflow it on a laptop. */
+  .addc-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(190px, 1fr)); gap:8px; }
+  .addc-f { width:100%; font-size:12.5px; padding:7px 10px; border:1px solid var(--line2);
+      border-radius:6px; background:var(--surface); color:var(--text); }
+  .addc-f:focus { outline:none; border-color:var(--accent); }
+  .addc-actions { display:flex; align-items:center; gap:9px; flex-wrap:wrap; margin-top:10px; }
+  .addc-hint { font-size:11.5px; color:var(--faint); flex:1 1 220px; }
+  .addc-err { color:var(--red); font-weight:600; }
+
   .noticed { margin-top:10px; padding-top:10px; border-top:1px dashed var(--line2); }
   .noticed textarea { width:100%; font-size:12px; padding:5px 6px; border:1px solid #d7e2ec;
     border-radius:5px; font-family:inherit; resize:vertical; }

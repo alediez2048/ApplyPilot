@@ -1895,23 +1895,43 @@ def _pending_introductions(job_threads: dict, raw_contacts: list) -> list[dict]:
 
 
 def _add_introduced_contact(data: dict) -> dict:
-    """Add someone who was introduced on a thread, as a real contact.
+    """Add a contact by hand: someone introduced on a thread, or someone you were simply told
+    to talk to.
 
     Kept behind an explicit click rather than created automatically: threads collect
     schedulers, assistants and ATS robots, and a contact created here is one an automated
     follow-up ladder would then EMAIL.
 
-    `source='introduction'` is deliberately distinct from apollo/connection — this is the
-    warmest lead the system can produce (a human at the company handed you to them), and
-    CRM-2's by_layer() should eventually be able to prove that.
+    Two ways in, one write path. `on_thread` marks the original: a Cc detected on a live
+    Gmail thread, where the address is real by construction. Everything else is typed by the
+    operator, and the difference is worth keeping because `email_status='verified'` is a claim
+    about the ADDRESS, not about how much we trust the person.
+
+    The manual door exists because the automatic one only opens on a state that already
+    contains the answer. `introductions` is built from Cc detection, so it never fires for
+    "you should talk to Priya, here's her LinkedIn" — said on a call, in a DM, or in a reply
+    that names somebody without copying them. That is the warmest lead this system can produce
+    and there was no way to record it. §Lessons 37: the tool has to be reachable from the
+    state it repairs.
+
+    A LinkedIn URL alone is enough. Half of what an introduction hands you is a profile, and
+    refusing it would send the operator to Apollo to look up somebody they were just given.
     """
     from applypilot.database import log_event
     from applypilot.networking.store import init_contacts, upsert_contact
 
     job_url = (data.get("job_url") or "").strip()
     email = (data.get("email") or "").strip().lower()
-    if not job_url or not email:
-        return {"ok": False, "message": "job_url and email required"}
+    linkedin = (data.get("linkedin_url") or "").strip()
+    if not job_url:
+        return {"ok": False, "message": "job_url required"}
+    if not email and not linkedin:
+        return {"ok": False, "message": "Add an email or a LinkedIn profile — without one of "
+                                        "them there is no way to reach them."}
+    if email and ("@" not in email or "." not in email.split("@")[-1]):
+        return {"ok": False, "message": f"{email!r} does not look like an email address."}
+    if linkedin and "linkedin.com/" not in linkedin.lower():
+        return {"ok": False, "message": "That does not look like a LinkedIn profile URL."}
 
     init_db()
     conn = get_connection()
@@ -1921,23 +1941,43 @@ def _add_introduced_contact(data: dict) -> dict:
         return {"ok": False, "message": "job not found"}
     job = dict(row)
 
-    name = (data.get("name") or "").strip() or email.split("@")[0].replace(".", " ").title()
+    name = ((data.get("name") or "").strip()
+            or (email.split("@")[0].replace(".", " ").title() if email else "")
+            or linkedin.rstrip("/").rsplit("/", 1)[-1].replace("-", " ").title())
     by = (data.get("introduced_by") or "").strip()
+    on_thread = bool(data.get("on_thread"))
+    if by:
+        why = f"introduced by {by}"
+        note = f"{by} added them to a live thread" if on_thread else f"{by} introduced them"
+    else:
+        why = "introduced on the thread" if on_thread else "added by hand"
+        note = "added to a live thread" if on_thread else "added by hand — you named them"
     cid = upsert_contact({
         "job_url": job["url"],
         "full_name": name,
         "email": email,
-        "email_status": "verified",   # it came off a real thread they were Cc'd on
+        # 'verified' is a claim about the ADDRESS. It holds for a Cc off a real thread and not
+        # for one typed from memory, so a hand-added contact is 'unverified' — reachable, but
+        # not proven, which is exactly what a bounce would later tell us.
+        "email_status": ("verified" if on_thread else "unverified") if email else "none",
+        "linkedin_url": linkedin,
         "company": job.get("company"),
-        "source": "introduction",
-        "match_reason": f"introduced by {by}" if by else "introduced on the thread",
+        # `source='introduction'` is deliberately distinct from apollo/connection — a human at
+        # the company handing you to somebody is the warmest lead the system can produce, and
+        # CRM-2's by_layer() should eventually be able to prove that. A hand-added contact with
+        # no introducer is 'manual' and must not be pooled with it, or the comparison is lost.
+        "source": "introduction" if (by or on_thread) else "manual",
+        "match_reason": why,
+        # The operator is the authority on who they were told to talk to (§Lessons 19), and
+        # verification exists to catch people who work somewhere else — which cannot happen to
+        # a name you chose yourself. The note says how it got here, so the claim is checkable.
         "confidence": "high",
-        "verify_note": f"{by} added them to a live thread" if by else "added to a live thread",
+        "verify_note": note,
         "outreach_status": "none",
     }, conn)
 
-    log_event(job["url"], "outreach", "ok",
-              f"Added {name} ({email}) as a contact — introduced by {by or 'the thread'}.", conn)
+    reach = email or linkedin
+    log_event(job["url"], "outreach", "ok", f"Added {name} ({reach}) as a contact — {why}.", conn)
 
     drafted = False
     try:

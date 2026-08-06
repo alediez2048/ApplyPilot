@@ -2177,21 +2177,21 @@ async function unmarkRejected(url, btn) {
   if (r.ok) refresh(); else { btn.disabled = false; alert(r.message || 'Failed'); }
 }
 // The People toggle in the footer: the expandable contacts panel when contacts exist, or a
-// Round two. Offered ONLY when the first round is genuinely spent: everybody found has been
-// written to, every ladder on every channel has run out, and nobody answered. Showing it any
-// earlier competes with the follow-ups that have not been sent yet — and the cheapest next
-// move is always finishing the sequence you already started, not buying more contacts.
+// Round two. ALWAYS available once contacts exist; the panel recommends, it does not gate.
+// It reads the state of the first round — who replied, whose ladder is still running, who has
+// never been written to — and says which of those is the cheaper next move, because buying
+// strangers costs Apollo credits and finishing a started sequence does not.
 //
 // It spends Apollo credits, so the label says what it will do rather than being a bare verb.
 function anotherRoundPrompt(j, cs) {
   if (!NET_AVAIL || !cs.length) return '';
 
-  // ALWAYS rendered once contacts exist, and disabled with the reason when it is not the right
-  // move. The first version returned '' unless every ladder was spent, which is correct
-  // behaviour and unusable feedback — reported as "I'm not seeing the button" while looking at
-  // a job whose sequences were simply still running. §Lessons 41, written two commits before
-  // this one and then repeated: a control that is conditionally ABSENT reads as a control that
-  // is missing, and the operator cannot tell "not yet" from "broken".
+  // Two earlier versions of this control were both unusable, in opposite directions. The first
+  // returned '' unless every ladder was spent — correct behaviour, no feedback, reported as
+  // "I'm not seeing the button" on a job whose sequences were simply still running (§Lessons
+  // 41). The second rendered it disabled with the reason, which answers "why" but still refuses
+  // a judgement call the operator is better placed to make than the row is. The reason survives;
+  // the refusal does not.
   const answered = cs.filter(c => c.replied_at || (c.conversation || {}).state === 'awaiting_us');
   const spent = cs.filter(c => c.exhausted);
   const untouched = cs.filter(c => !c.exhausted && !c.emailed
@@ -2200,27 +2200,34 @@ function anotherRoundPrompt(j, cs) {
 
   let why = '', head = '';
   if (answered.length) {
-    // Somebody is talking to you. Buying more strangers is never the next move (§Lessons 27).
-    why = `${answered.map(c => esc(firstName(c.full_name))).join(', ')} ${answered.length > 1 ? 'are' : 'is'} waiting on you — answer first.`;
+    // Somebody is talking to you. Buying more strangers is rarely the next move (§Lessons 27).
+    why = `${answered.map(c => esc(firstName(c.full_name))).join(', ')} ${answered.length > 1 ? 'are' : 'is'} waiting on you — worth answering before you buy more.`;
     head = `<b>Someone replied.</b>`;
   } else if (running > 0) {
     why = `${running} sequence${running > 1 ? 's are' : ' is'} still running. Finishing what you started is free; this is not.`;
-    head = `<b>Not yet.</b>`;
+    head = `<b>Sequences still running.</b>`;
   } else if (untouched.length) {
-    why = `${untouched.length} contact${untouched.length > 1 ? 's have' : ' has'} never been written to. Send those before buying more.`;
-    head = `<b>Not yet.</b>`;
+    why = `${untouched.length} contact${untouched.length > 1 ? 's have' : ' has'} never been written to. Cheaper to send those first.`;
+    head = `<b>Some contacts are untouched.</b>`;
   } else {
     head = `<b>No response from any of the ${cs.length}.</b>`;
     why = 'Every follow-up has been sent and nobody replied.';
   }
   const ready = !why || (!answered.length && running === 0 && !untouched.length);
   const busy = j.network_running;
-  const dis = (busy || !ready) ? 'disabled' : '';
+  // Only a search already in flight disables this. The three reasons above are ADVICE about
+  // what is cheapest to do next, and advice does not belong on a disabled attribute — the
+  // operator knows things the row does not (a hiring manager named in the posting, a team that
+  // just reorganised, a first round that resolved to the wrong company entirely). Spending
+  // Apollo credits is their call to make, so the panel says what it thinks and gets out of the
+  // way. `ready` still drives the accent styling, so "now is the moment" stays visible.
+  const dis = busy ? 'disabled' : '';
   const label = busy ? '⏳ looking for new people…' : '🔄 Find a new round of contacts';
+  const what = 'Searches this company again, skipping everyone above, and drafts fresh outreach. Spends Apollo credits.';
   return `<div class="round2${ready ? ' ready' : ''}">
       <div class="round2-txt">${head} ${esc(why)}</div>
       <button class="secondary" ${dis}
-        title="${ready ? 'Searches this company again, skipping everyone above, and drafts fresh outreach. Spends Apollo credits.' : esc(why)}"
+        title="${ready ? what : esc(why) + ' — ' + what}"
         onclick="findContacts(decodeURIComponent('${encodeURIComponent(j.url)}'), true)">${label}</button>
       ${j.network_note && !busy ? `<div class="netnote">${esc(j.network_note)}</div>` : ''}
     </div>`;

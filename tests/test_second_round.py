@@ -245,22 +245,41 @@ def test_the_panel_explains_why_instead_of_disappearing(tmp_path):
     """§Lessons 41, repeated two commits after it was written down. Returning '' when the round
     is not spent is correct behaviour and unusable feedback: reported as "I'm not seeing the
     button" on a job whose sequences were simply still running. The operator cannot tell
-    "not yet" from "broken" if there is nothing on screen."""
+    "not yet" from "broken" if there is nothing on screen.
+
+    The panel ADVISES and never blocks: each state below has to name its reason while leaving
+    the button clickable. Asserting the reason alone would pass against a panel that renders
+    the words and a dead control, so every case checks both halves."""
     running = _panel([_c(), _c(id="y", exhausted=True)], tmp_path)
-    assert running, "the panel vanished instead of saying why it is not available"
-    assert "disabled" in running and "still running" in running
+    assert running, "the panel vanished instead of saying why it is not the cheapest move"
+    assert "still running" in running
+    assert "disabled" not in running, "a running sequence is advice, not a lock"
 
     replied = _panel([_c(replied_at="2026-08-01T00:00:00+00:00")], tmp_path)
-    assert "disabled" in replied and "waiting on you" in replied, \
-        "a live reply must be named as the reason, not silently disable the button"
+    assert "waiting on you" in replied, "a live reply must be named as the reason"
     assert "Ada" in replied, "it does not say WHO is waiting"
+    assert "disabled" not in replied, "a reply is advice, not a lock"
 
     untouched = _panel([_c(emailed=False)], tmp_path)
-    assert "disabled" in untouched and "never been written to" in untouched
+    assert "never been written to" in untouched
+    assert "disabled" not in untouched, "an untouched contact is advice, not a lock"
 
     ready = _panel([_c(exhausted=True), _c(id="y", exhausted=True)], tmp_path)
     assert "disabled" not in ready, "every ladder is spent and the button is still disabled"
     assert "No response from any of the 2" in ready and "round2 ready" in ready
+
+
+@pytest.mark.skipif(not _shutil.which("node"), reason="node not available")
+def test_only_a_search_in_flight_disables_the_button(tmp_path):
+    """The one real constraint left. A second search while the first is still running would
+    double-spend Apollo credits and race the write, so `network_running` is a genuine "cannot"
+    rather than a "should not" — and it is the ONLY thing allowed to disable this control.
+
+    Without this the previous test is one-sided: it proves the button is never locked, and
+    would pass just as happily against a version that dropped the attribute entirely."""
+    busy = _panel([_c(exhausted=True)], tmp_path, network_running=True)
+    assert "disabled" in busy, "a search already in flight must not be startable twice"
+    assert "looking for new people" in busy
 
 
 @pytest.mark.skipif(not _shutil.which("node"), reason="node not available")

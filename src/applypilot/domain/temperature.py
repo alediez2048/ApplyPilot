@@ -65,15 +65,24 @@ _COLD_DAYS = 14
 #: same lie in the other direction.
 _STALE_DAYS = 10
 
-#: The steps whose remaining work counts as runway toward a REPLY.
+#: How much of the email plan must be spent before "still running" stops being the honest
+#: reading. Below this a job has real road left; above it, the plan is nearly over and nobody
+#: has answered, which is what `cooling` is for.
 #:
-#: LinkedIn invites are deliberately absent, and this is the §Lessons 35 line drawn once more.
-#: `dm_status` is 'sent' | 'manual', both meaning WE sent one; no `accepted` state exists
-#: anywhere in the schema, so an uninvited contact is not a pending conversation. Counting them
-#: also makes the band useless in practice — measured live, LinkedIn steps sit at 3/16, 5/10,
-#: 3/6, so every job on the board would have had runway forever and nothing could ever read as
-#: spent.
-_RUNWAY_STEPS = ("emailed", "followup")
+#: Two thirds rather than "is anything left at all", because *anything left* puts a job emailed
+#: this morning and one with a single trailing touch after a fortnight of silence in the same
+#: band — which is the §Lessons 54 failure (Visa and Webai printing the same word) rebuilt from
+#: the other side. Checked against the whole board before it was chosen; see the commit.
+_MOSTLY_SPENT = 2 / 3
+
+#: LinkedIn is deliberately outside the runway maths, and this is the §Lessons 35 line drawn
+#: once more. `dm_status` is 'sent' | 'manual', both meaning WE sent one; no `accepted` state
+#: exists anywhere in the schema, so an uninvited contact is not a pending conversation.
+#: Counting them also makes the band useless in practice — measured live, LinkedIn steps sit at
+#: 3/16, 5/10, 3/6, so every job on the board would have runway forever and nothing could read
+#: as spent. What it may NOT do is license the sentence "everything planned here is spent" on a
+#: row whose own Next button says an invite is outstanding, so the copy says EMAILS throughout.
+_EMAIL = "email"
 
 LABEL = {WON: "won", UNDELIVERABLE: "undeliverable", WARM: "warm", ACTIVE: "active",
          COOLING: "cooling", COLD: "cold", NEW: "new"}
@@ -141,31 +150,47 @@ def _last_effort(contacts: list[dict], ladders: dict | None) -> str:
     return best
 
 
-def _runway(plan: dict | None) -> tuple[int, str]:
-    """Outreach still scheduled on this job, and how it reads.
+def _plan_progress(contacts: list[dict], ladders: dict | None,
+                   plan: dict | None) -> tuple[int, int]:
+    """(sent, planned) email messages across this job — the cold email plus its whole ladder.
 
-    This is the difference the band was blind to. Every job with a message sent and no reply
-    fell into one bucket called `cooling`, so a job applied to THIS MORNING with six of eight
-    emails out read the same as one whose every email and every follow-up had been spent
-    thirteen days earlier. Measured on the live board it was catching 10 of 22 jobs — a band
-    covering half the table and meaning "decaying" is worse than no band at all.
+    **Runway is what is SCHEDULED, not what is owed right now**, and reading the wrong one of
+    those is what put a job applied to seven minutes earlier in the `cooling` band.
+
+    The previous version asked the checklist. But the checklist's follow-up step is built as
+    `done / (done + due)` and its own comment says so — "reads 100% until a follow-up actually
+    comes due" — which is right for a checklist, because you have not failed to do something
+    that is not owed yet. Read as RUNWAY it inverts: a ladder scheduled for 48h from now
+    reports zero work remaining, indistinguishable from a ladder that has finished. So five
+    emails sent this morning, with fifteen follow-ups queued behind them, read as a spent plan.
+    §Lessons 21 — a value one layer computes with a meaning the other layer cannot see.
+
+    Measured on the live board when this was written: of the ten jobs reading `cooling`, six
+    were 38% through their plan or less, and Expedia at 25% was reading "spent" while Saronic
+    at 32% — further along — read "active". The bands were inverted against the very thing they
+    claimed to measure.
+
+    Counting rules, each of which was a wrong answer first:
+      * only contacts with an ADDRESS are in the email plan; the rest are not runway.
+      * a TERMINAL sequence (they replied, or it was stopped) has no remaining touches, so that
+        contact's plan is whatever actually happened — otherwise stopping a ladder would make
+        a job look like it had further to go.
+      * LinkedIn is excluded, see `_EMAIL` above.
     """
-    plan = plan or {}
-    due = int(plan.get("due") or 0)
-    left, bits = due, []
-    if due:
-        bits.append(f"{due} follow-up{'s' if due != 1 else ''} due")
-    for step in plan.get("steps") or []:
-        if step.get("key") not in _RUNWAY_STEPS or step.get("state") not in ("todo", "partial"):
+    per = int((plan or {}).get("total_touches") or 0)
+    ladders = ladders or {}
+    sent = planned = 0
+    for contact in contacts or []:
+        if not (contact.get("email") or "").strip():
             continue
-        gap = int(step.get("total") or 0) - int(step.get("done") or 0)
-        if gap <= 0:
-            continue
-        left += gap
-        bits.append(f"{gap} {'more to email' if step['key'] == 'emailed' else 'follow-up to send'}"
-                    if gap == 1 else
-                    f"{gap} {'more to email' if step['key'] == 'emailed' else 'follow-ups to send'}")
-    return left, ", ".join(bits)
+        ladder = ladders.get((contact.get("id"), _EMAIL)) or {}
+        count = int(ladder.get("count") or 0)
+        started = bool((contact.get("submitted_at") or "").strip())
+        done_here = (1 if started else 0) + count
+        sent += done_here
+        # A terminal ladder is finished by definition, whatever the schedule still lists.
+        planned += done_here if (ladder.get("sequence_status") or "").strip() else 1 + per
+    return sent, planned
 
 
 def _spent(plan: dict | None) -> str:
@@ -242,29 +267,42 @@ def temperature(job: dict, contacts: list[dict] | None = None, ladders: dict | N
         return _band(NEW, "Nothing sent yet." if not contacts else
                      "Contacts found, nothing sent yet.")
 
-    # Nobody has engaged. What separates these jobs is whether the plan has anywhere left to
-    # go, and whether anyone is still working it.
-    left, what_is_left = _runway(plan)
+    # Nobody has engaged. What separates these jobs is how much of the plan could still produce
+    # a reply, and whether anyone is still working it.
+    sent, planned = _plan_progress(contacts, ladders, plan)
+    left = max(0, planned - sent)
     quiet = _days_since(_last_effort(contacts, ladders), now)
     idle = int(quiet) if quiet is not None else 0
 
-    if left and idle < _STALE_DAYS:
-        moved = "sent today" if idle < 1 else f"last sent {_when(idle)}"
-        return _band(ACTIVE, f"Outreach still running — {what_is_left}, {moved}.")
-    if left:
+    if left and idle >= _STALE_DAYS:
         # Runway with nobody using it. Calling this active would be the same lie as calling a
         # fresh job cooling, pointing the other way.
-        return _band(COOLING, f"{what_is_left}, but nothing has been sent in {_ago(idle)}.")
+        return _band(COOLING, f"{left} message{'s' if left != 1 else ''} still scheduled, but "
+                              f"nothing has been sent in {_ago(idle)}.")
+    if left and sent < planned * _MOSTLY_SPENT:
+        moved = "sent today" if idle < 1 else f"last sent {_when(idle)}"
+        return _band(ACTIVE, f"{sent} of {planned} planned emails sent, {left} still to go — "
+                             f"{moved}.")
+    if left:
+        # Nearly through the plan with nothing back. There is road left, but not much, and
+        # saying "still running" here is how Webai and a job applied to this morning ended up
+        # printing the same word. Naming the remainder keeps it actionable rather than final.
+        return _band(COOLING, f"{sent} of {planned} planned emails sent and nobody has "
+                              f"answered. Only {left} left.")
 
     # Both of these say what was spent AND when the last message went, because those are two
     # different facts and only naming one misleads. A job applied to a fortnight ago whose last
     # follow-up went yesterday is not "no answer in 15 days" — it is a sequence that has just
     # finished, and the difference is whether there is anything left to wait for.
-    spent = _spent(plan) or f"{effort} message{'s' if effort != 1 else ''}"
+    #
+    # "Every email" and not "everything": the LinkedIn ladder is outside this maths by design,
+    # and the old wording contradicted the same row's own Next button reading "1 LinkedIn
+    # invite left" — one row, two facts, §Lessons 56.
+    spent_desc = _spent(plan) or f"{effort} message{'s' if effort != 1 else ''}"
     if idle >= _COLD_DAYS:
-        return _band(COLD, f"Everything planned here is spent ({spent}) and nothing has been "
-                           f"sent or answered in {_ago(idle)}.")
-    return _band(COOLING, f"Everything planned here is spent ({spent}). Last message "
+        return _band(COLD, f"Every email planned here is spent ({spent_desc}) and nothing has "
+                           f"been sent or answered in {_ago(idle)}.")
+    return _band(COOLING, f"Every email planned here is spent ({spent_desc}). Last message "
                           f"{_when(idle)}, no answer.")
 
 

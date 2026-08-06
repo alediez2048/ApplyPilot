@@ -312,9 +312,15 @@ payload already loads — no new query, budget unmoved:
   which are not temperatures. **A dot AND a word**, never colour alone, and every band carries
   the sentence that produced it. `undeliverable` and `new` were not in the ticket and both came
   from running it: a bounce is not cold (opposite fixes), and a job imported this morning is not
-  failing. **Rebuilt around RUNWAY on 2026-08-04 — see §Lessons 54.** First live reading was
-  cooling 10 · new 6 · warm 4 · won 1 · cold 1; it is now active 7 · new 6 · warm 4 · cooling 4
-  · won 1.
+  failing. **Rebuilt around RUNWAY on 2026-08-04 (§Lessons 54), and runway was rebuilt again on
+  2026-08-06 (§Lessons 67)** — it was reading the checklist, whose follow-up step counts work
+  OWED rather than work SCHEDULED, so a ladder that had not started was indistinguishable from
+  one that had finished. Runway is now `_plan_progress()`: the cold email plus its whole ladder
+  (`followups.total_touches`), per contact with an address, minus what has actually gone. The
+  band reads the PROPORTION left (`_MOSTLY_SPENT`, two thirds) rather than whether any is left,
+  because "anything remaining" puts a job emailed this morning and one trailing touch after a
+  fortnight of silence back in the same band. Readings: cooling 10 · warm 4 · won 1 · cold 1 →
+  active 7 · cooling 4 → **won 1 · warm 7 · active 13 · cooling 3 · new 4**.
 - **Last interaction, with its DIRECTION** — `← Sarah replied · 2d ago` accented,
   `→ You emailed Sarah` faint. Same age, opposite situations.
 - **Search reaches people and whole postings.** It covered nine fields and never looked at
@@ -1186,6 +1192,30 @@ company `"Jobs"` — the same substring bug class, inside the function written t
     → `componentChunkName` → runtime id → hash — and checks the parse-time capture separately,
     because "no beacon" and "beacon that cannot see the name" have different fixes and look
     identical from the API side.
+
+67. **"Owed right now" and "left in the plan" are opposite, and one number was serving both.**
+    §Lessons 54 rebuilt the temperature band around RUNWAY and then asked the CHECKLIST for it.
+    The checklist's follow-up step is `done / (done + due)` and its own comment says "reads 100%
+    until a follow-up actually comes due" — correct for a checklist, because you have not failed
+    to do something that is not owed yet. Read as runway it inverts: the email ladder is
+    48/96/168h, so nothing is due on the day you send, and a ladder that had **not started**
+    reported the same zero as one that had **finished**. Expedia, applied 12:57, screenshotted at
+    13:04: `cooling`, tooltip "Everything planned here is spent (5 emails)", with fifteen
+    follow-ups queued. §Lessons 21's shape — a value one layer computes with a meaning the other
+    cannot see.
+    **What made it undeniable was measuring the claim rather than the band.** Counting planned
+    vs sent messages per job: of the ten reading `cooling`, six were ≤38% through their plan, and
+    Expedia at 25% read "spent" while Saronic at 32% — further along — read "active". The bands
+    were inverted against the very thing they claimed to measure. Two more things fell out of
+    that table: the jobs reading `active` were only doing so because their EMAILED step was still
+    partial, so finishing the emailing flipped a job to cooling with the whole ladder ahead; and
+    the fix's own trap is that counting scheduled touches makes "anything left" true nearly
+    everywhere, which would put Webai back beside a job emailed this morning — §Lessons 54
+    rebuilt from the other side. Hence a PROPORTION, not a boolean.
+    Also fixed here: a terminal ladder is finished whatever the schedule lists (Devrev was
+    promising a follow-up on a `replied` sequence that could never send), and the spent sentence
+    says "every EMAIL" — the old wording contradicted the same row's Next button reading
+    "1 LinkedIn invite left" (§Lessons 56).
 
 Shipped in one session, in this order: **CRM-3a → CRM-1 → CRM-2 → CRM-3b → CRM-4a.**
 Tickets in `docs/tickets/CRM-*.md`; two of them had instructions that were factually wrong

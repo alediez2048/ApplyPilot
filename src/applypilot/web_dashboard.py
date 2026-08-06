@@ -2100,8 +2100,13 @@ def _temperature(row, contacts: list, ladders: dict | None,
     try:
         if (row["rejected_at"] or ""):
             return None            # left the pipeline; a reading would be permanently lit
+        # `total_touches` is the EMAIL ladder's length, and it is what makes runway mean
+        # "scheduled" rather than "owed right now". Without it `_plan_progress` sees a
+        # zero-length ladder and every job whose emails are out reads as a spent plan — which
+        # is the bug this replaced, reproduced by omission.
         plan = {"steps": (checklist or {}).get("steps") or [],
-                "due": (followups or {}).get("due_count") or 0}
+                "due": (followups or {}).get("due_count") or 0,
+                "total_touches": (followups or {}).get("total_touches") or 0}
         return temperature({"interview_at": row["interview_at"] or "",
                             "applied_at": row["applied_at"] or ""}, contacts, ladders, plan)
     except Exception:  # noqa: BLE001

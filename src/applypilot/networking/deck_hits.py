@@ -26,6 +26,44 @@ log = logging.getLogger(__name__)
 TIMEOUT_SECONDS = 20
 
 
+#: Hits the operator has judged not to be real opens, keyed `slug|at`.
+#:
+#: Needed because the collector is a ROLLING WINDOW the poller re-reads in full every five
+#: minutes. Clearing `deck_viewed_at` in the database does not stick: the same hit is still in
+#: the window and `mark_deck_viewed` re-stamps it on the next poll, so a correction silently
+#: undoes itself within minutes. There is no delete on the collector — it accepts a POST and
+#: serves a GET, nothing else — so the suppression has to live here.
+#:
+#: Keyed on the hit (slug AND timestamp), never on the slug alone. "Ignore katherine-j" would
+#: suppress her REAL open forever, which is a worse failure than the false one it fixes: a
+#: missing signal nobody knows to look for beats a wrong signal you can at least see.
+DISMISSED_PATH = "deck_hits_dismissed.json"
+
+
+def _dismissed_file():
+    from applypilot import config
+    return config.APP_DIR / DISMISSED_PATH
+
+
+def dismissed() -> set[str]:
+    """`{"slug|at"}` the operator has rejected. Empty on any read failure — refusing to poll
+    because a side file is unreadable would trade a small problem for a total one."""
+    try:
+        return set(json.loads(_dismissed_file().read_text(encoding="utf-8")))
+    except Exception:  # noqa: BLE001
+        return set()
+
+
+def dismiss(slug: str, at: str) -> int:
+    """Mark one hit as not-a-real-open. Returns the new total. Idempotent."""
+    keep = dismissed()
+    keep.add(f"{(slug or '').lower()}|{at or ''}")
+    path = _dismissed_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(sorted(keep), indent=1), encoding="utf-8")
+    return len(keep)
+
+
 def configured() -> tuple[bool, str]:
     """Is the pull set up? Returns (ready, why-not)."""
     if not (os.environ.get("DECK_HITS_URL") or "").strip():
@@ -95,16 +133,37 @@ def poll(conn=None) -> dict:
     contacts = [c for c in contacts if c]
 
     by_slug = {(c.get("deck_slug") or "").lower(): c for c in contacts if c.get("deck_slug")}
-    new_names, recorded = [], 0
+    skip = dismissed()
+
+    # Grouped by slug BEFORE anything is written, so each contact is touched once per poll with
+    # the count the window actually holds. Writing per hit is what made `deck_views` count polls
+    # instead of opens — the window is re-read whole every five minutes, so every hit in it was
+    # replayed as if it were new.
+    groups: dict[str, list[dict]] = {}
+    ignored = 0
     for hit in hits:
-        contact = by_slug.get((hit.get("slug") or "").lower())
+        slug = (hit.get("slug") or "").lower()
+        # Checked BEFORE the contact lookup: a dismissed hit is not "a hit we could not
+        # attribute", it is one the operator has ruled out, and conflating the two would make
+        # the count meaningless.
+        if f"{slug}|{hit.get('at') or ''}" in skip:
+            ignored += 1
+            continue
+        groups.setdefault(slug, []).append(hit)
+
+    new_names, recorded = [], 0
+    for slug, group in groups.items():
+        contact = by_slug.get(slug)
         if not contact:
             continue                     # deleted contact, or a link from another install
-        recorded += 1
-        if store.mark_deck_viewed(contact["id"], at=hit.get("at") or "", conn=conn):
+        recorded += len(group)
+        stamps = sorted(h.get("at") or "" for h in group)
+        if store.mark_deck_viewed(contact["id"], at=stamps[0], last=stamps[-1],
+                                  views=len(group), conn=conn):
             new_names.append(contact.get("full_name") or contact.get("email") or contact["id"])
             log_event(contact.get("job_url", ""), "outreach", "ok",
                       f"{contact.get('full_name') or 'They'} opened the intro deck.", conn)
     return {"ok": True, "recorded": recorded, "new": len(new_names), "names": new_names,
+            "ignored": ignored,
             "note": (f"{len(new_names)} new: {', '.join(new_names)}" if new_names
                      else f"{recorded} click(s), none new")}

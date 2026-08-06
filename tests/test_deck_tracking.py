@@ -303,10 +303,14 @@ def test_polling_records_a_click_and_says_who(db, monkeypatch):
 
     first = deck_hits.poll(db)
     assert first["new"] == 1 and first["names"] == ["Josh Guild"]
-    # Idempotent: the collector keeps a rolling window that we re-read every hour.
+    # Idempotent: the collector keeps a rolling window that we re-read every five minutes.
     again = deck_hits.poll(db)
     assert again["new"] == 0 and again["recorded"] == 1
-    assert store.get_contact(cid, db)["deck_views"] == 2
+    # ONE hit in the window means ONE open, however many times we re-read it. This line used to
+    # assert 2 — the test encoded the bug, with "Idempotent" written directly above it. On live
+    # data the column reached **99** for a slug the collector held exactly once, which is 8.2
+    # hours of five-minute polling.
+    assert store.get_contact(cid, db)["deck_views"] == 1, "re-reading the window counted again"
 
 
 def test_an_unknown_token_is_never_attributed_to_the_wrong_person(db, monkeypatch):
@@ -477,3 +481,97 @@ def test_named_links_are_OFF_until_the_site_can_serve_them(db, monkeypatch):
     monkeypatch.setenv("INTRO_DECK_PATHS", "1")
     on = outreach._intro_deck_url({}, {"id": cid, "full_name": "Gina Johnson"})
     assert on == f"{BASE}gina"
+
+
+def test_the_view_count_is_opens_not_polls(db, monkeypatch):
+    """The regression the 99 came from, driven the way it actually happened.
+
+    The poller re-reads the ENTIRE rolling window every five minutes, so every hit in it is
+    replayed on every poll. A counter that increments per call therefore measures how long the
+    dashboard has been open, not how interested anyone is — and it looks like engagement.
+    """
+    from applypilot.networking import deck_hits
+
+    cid = store.upsert_contact({"job_url": "http://j/1", "full_name": "Yuki N",
+                                "email": "y@co.com"}, db)
+    slug = store.ensure_deck_slug(cid, "Yuki N", db)
+    monkeypatch.setattr(deck_hits, "fetch",
+                        lambda: ([{"slug": slug, "at": "2026-08-06T00:28:03Z"}], ""))
+    for _ in range(20):
+        deck_hits.poll(db)
+    assert store.get_contact(cid, db)["deck_views"] == 1, "twenty polls became twenty opens"
+
+
+def test_two_real_opens_count_as_two(db, monkeypatch):
+    """The negative control. A fix that makes the counter always report 1 is not a fix."""
+    from applypilot.networking import deck_hits
+
+    cid = store.upsert_contact({"job_url": "http://j/1", "full_name": "Yuki N",
+                                "email": "y@co.com"}, db)
+    slug = store.ensure_deck_slug(cid, "Yuki N", db)
+    monkeypatch.setattr(deck_hits, "fetch", lambda: ([
+        {"slug": slug, "at": "2026-08-06T00:28:03Z"},
+        {"slug": slug, "at": "2026-08-06T09:14:00Z"},
+    ], ""))
+    deck_hits.poll(db)
+    deck_hits.poll(db)
+    got = store.get_contact(cid, db)
+    assert got["deck_views"] == 2
+    # First and last are DIFFERENT facts, and grouping the poll's hits per contact is what
+    # destroyed the ordering the old per-hit loop relied on to keep them apart.
+    assert got["deck_viewed_at"].startswith("2026-08-06T00:28")
+    assert got["deck_last_at"].startswith("2026-08-06T09:14")
+
+
+def test_a_dismissed_hit_stays_dismissed_across_polls(db, monkeypatch, tmp_path):
+    """Clearing the database alone does not stick.
+
+    The hit is still in the rolling window, so the next poll re-stamps it — a correction that
+    silently undoes itself within five minutes. The collector has no delete (POST a hit, GET the
+    list, nothing else), so the suppression has to live on this side.
+    """
+    from applypilot import config
+    from applypilot.networking import deck_hits
+
+    monkeypatch.setattr(config, "APP_DIR", tmp_path)
+    cid = store.upsert_contact({"job_url": "http://j/1", "full_name": "Kath J",
+                                "email": "k@co.com"}, db)
+    slug = store.ensure_deck_slug(cid, "Kath J", db)
+    at = "2026-08-05T23:34:33.755Z"
+    monkeypatch.setattr(deck_hits, "fetch", lambda: ([{"slug": slug, "at": at}], ""))
+
+    deck_hits.poll(db)
+    assert store.get_contact(cid, db)["deck_viewed_at"], "fixture never recorded a view"
+
+    deck_hits.dismiss(slug, at)
+    db.execute("UPDATE contacts SET deck_viewed_at=NULL, deck_last_at=NULL, deck_views=NULL "
+               "WHERE id=?", (cid,))
+    db.commit()
+
+    out = deck_hits.poll(db)
+    assert out["ignored"] == 1
+    assert not store.get_contact(cid, db)["deck_viewed_at"], "the poller restored a cleared view"
+
+
+def test_dismissing_one_hit_does_not_blind_the_person_forever(db, monkeypatch, tmp_path):
+    """Keyed on the HIT, never the slug.
+
+    "Ignore katherine-j" would suppress her real open forever — a missing signal nobody knows
+    to look for, which is worse than the wrong signal it was meant to remove.
+    """
+    from applypilot import config
+    from applypilot.networking import deck_hits
+
+    monkeypatch.setattr(config, "APP_DIR", tmp_path)
+    cid = store.upsert_contact({"job_url": "http://j/1", "full_name": "Kath J",
+                                "email": "k@co.com"}, db)
+    slug = store.ensure_deck_slug(cid, "Kath J", db)
+    deck_hits.dismiss(slug, "2026-08-05T23:34:33.755Z")
+
+    monkeypatch.setattr(deck_hits, "fetch", lambda: ([
+        {"slug": slug, "at": "2026-08-05T23:34:33.755Z"},   # dismissed
+        {"slug": slug, "at": "2026-08-09T11:00:00.000Z"},   # a genuine one, later
+    ], ""))
+    out = deck_hits.poll(db)
+    assert out["ignored"] == 1 and out["new"] == 1
+    assert store.get_contact(cid, db)["deck_viewed_at"].startswith("2026-08-09")

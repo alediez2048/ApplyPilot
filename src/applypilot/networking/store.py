@@ -396,14 +396,39 @@ def ensure_deck_slug(contact_id: str, full_name: str = "",
     return slug
 
 
-def mark_deck_viewed(contact_id: str, at: str = "",
+def mark_deck_viewed(contact_id: str, at: str = "", views: int = 0, last: str = "",
                      conn: sqlite3.Connection | None = None) -> bool:
-    """Record an intro-deck click. Returns True if this is the FIRST one for this contact.
+    """Record intro-deck clicks. Returns True if this is the FIRST one for this contact.
 
     `deck_viewed_at` keeps the first click (COALESCE), `deck_last_at` moves. The distinction
     earns its keep: the first click is the event worth acting on, and re-importing the same
     analytics export must not keep re-announcing it — the same idempotence lesson as the eleven
     duplicate BOUNCED log lines (§Lessons 22).
+
+    `at` is the FIRST click and `last` the most recent; `last` defaults to `at` for the
+    single-hit case. They are separate parameters because grouping a poll's hits per contact
+    (which is what stopped the counter counting polls) also destroyed the ordering the old
+    per-hit loop relied on to get these right — passing one timestamp for both would stamp a
+    brand-new contact's "first opened" with their LATEST click.
+
+    **`views` has two modes, because there are two callers and they know different things.**
+
+    `views > 0` — "the source holds exactly N clicks for this person", which is what the poller
+    can say: it re-reads the whole rolling window every five minutes and can simply count. The
+    column is SET to `MAX(existing, N)`, so replaying the same window is a no-op.
+
+    `views == 0` — "here is one more click, I do not know the total", which is what the manual
+    `applypilot deck-hits` import says. That path increments.
+
+    Collapsing the two is what produced the bug this fixes: the old version incremented on
+    every call, and the poller called it once per hit per poll — so the column counted POLLS.
+    Measured on live data: one contact read **99** from a slug appearing in the collector
+    exactly ONCE, which is 8.2 hours of five-minute polling. §Lessons 22 got `deck_viewed_at`
+    idempotent and missed the counter sitting beside it.
+
+    MAX rather than a bare assignment: the collector keeps a rolling 500, so an old hit
+    eventually ages out of the window, and a count that walks backwards is worse than one that
+    stops rising.
     """
     if conn is None:
         conn = get_connection()
@@ -413,10 +438,14 @@ def mark_deck_viewed(contact_id: str, at: str = "",
     if row is None:
         return False
     first = not (row[0] or "").strip()
+    counter = ("MAX(COALESCE(deck_views, 0), ?)" if views > 0
+               else "COALESCE(deck_views, 0) + 1")
     conn.execute(
-        "UPDATE contacts SET deck_viewed_at = COALESCE(NULLIF(deck_viewed_at,''), ?), "
-        "deck_last_at = ?, deck_views = COALESCE(deck_views, 0) + 1, updated_at = ? WHERE id = ?",
-        (when, when, datetime.now(timezone.utc).isoformat(), contact_id),
+        f"UPDATE contacts SET deck_viewed_at = COALESCE(NULLIF(deck_viewed_at,''), ?), "
+        f"deck_last_at = ?, deck_views = {counter}, updated_at = ? WHERE id = ?",
+        ((when, last or when, views, datetime.now(timezone.utc).isoformat(), contact_id)
+         if views > 0 else
+         (when, last or when, datetime.now(timezone.utc).isoformat(), contact_id)),
     )
     conn.commit()
     return first

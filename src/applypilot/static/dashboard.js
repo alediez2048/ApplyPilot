@@ -428,6 +428,49 @@ function jobInBucket(j, bucketKey) {
   return b.statuses.includes(j.status);
 }
 
+// ── Temperature: a SECOND axis, deliberately not folded into JOB_BUCKETS ─────
+//
+// Reported as "not sure this is the best way to know what's up with an application" — and the
+// confusion is the finding, not a misreading. Four of the seven bands (new → active → cooling →
+// cold) are a countdown of OUR OWN sending; `warm` and `won` are about what THEY did. Those are
+// different questions, and one chip presenting them as a single scale reads as if warm were
+// simply more than active. It is not: a cooling job can get a reply tomorrow, and an active one
+// can stay silent forever.
+//
+// So the legend groups them by which question they answer, and the filter is its own axis that
+// ANDs with the status bucket — "applied AND warm" is a real thing to ask for, and folding the
+// bands into JOB_BUCKETS would have made choosing one silently clear the other.
+const TEMP_BANDS = {
+  won:           { icon: '🏆', label: 'won',    axis: 'them',
+                   meaning: 'interview booked' },
+  warm:          { icon: '●',  label: 'warm',   axis: 'them',
+                   meaning: 'a person replied or opened your deck' },
+  active:        { icon: '●',  label: 'active', axis: 'us',
+                   meaning: 'outreach still scheduled, nobody has answered' },
+  cooling:       { icon: '◐',  label: 'cooling', axis: 'us',
+                   meaning: 'nearly every email sent, still no answer' },
+  cold:          { icon: '○',  label: 'cold',   axis: 'us',
+                   meaning: 'all sent, silent long enough to be over' },
+  new:           { icon: '·',  label: 'new',    axis: 'us',
+                   meaning: 'nothing sent yet' },
+  undeliverable: { icon: '⚠',  label: 'undeliverable', axis: 'fix',
+                   meaning: 'mail is bouncing — fix the address, do not chase' },
+};
+const TEMP_ORDER = ['won','warm','active','cooling','cold','new','undeliverable'];
+//: The legend's own grouping. `them` first because it is the only axis that means you are
+//: closer to an interview; `us` is effort, which §Lessons 35 says must never read as progress.
+const TEMP_AXES = [
+  { key: 'them', title: 'Did they respond?', hint: 'the only thing that means you are closer' },
+  { key: 'us',   title: 'How far through your outreach', hint: 'your effort, not their interest' },
+  { key: 'fix',  title: 'Needs fixing', hint: '' },
+];
+let TEMP_FILTER = 'all';
+
+function jobInTemp(j, key) {
+  if (!key || key === 'all') return true;
+  return ((j.temperature || {}).band || '') === key;
+}
+
 // ── Tags: the last column, and the facets you filter by ─────────────────────
 //
 // Replaces the old Links column. Those links were already redundant — the `job` one was
@@ -619,15 +662,58 @@ function renderActiveTags() {
   }).join('') + `<button class="tag-clear" onclick="clearTags()">clear</button>`;
 }
 function setJobFilter(key) { JOB_FILTER = key; refresh(); }
+//: Clicking the band you are already on clears it. There is no "All" pill in this group —
+//: seven bands plus an eighth is a wall of chips — so the selected pill has to be its own way
+//: out, or the only escape from a one-row view is reloading the page.
+function setTempFilter(key) { TEMP_FILTER = (TEMP_FILTER === key) ? 'all' : key; refresh(); }
+
 function renderJobFilters(jobs) {
   const el = document.getElementById('jobFilters');
   if (!el) return;
-  el.innerHTML = JOB_FILTER_ORDER.map(key => {
+  // Each group counts with the OTHER group's filter applied, so a pill's number is what you
+  // will actually get by clicking it rather than a board-wide total that lies under a filter.
+  const status = JOB_FILTER_ORDER.map(key => {
     const b = JOB_BUCKETS[key];
-    const n = key === 'all' ? jobs.length : jobs.filter(j => jobInBucket(j, key)).length;
-    const active = key === JOB_FILTER ? ' active' : '';
-    return `<button class="filter-pill${active}" onclick="setJobFilter('${key}')">${b.icon ? b.icon + ' ' : ''}${b.label} <span class="fp-n">${n}</span></button>`;
+    const n = jobs.filter(j => jobInBucket(j, key) && jobInTemp(j, TEMP_FILTER)).length;
+    const on = key === JOB_FILTER ? ' active' : '';
+    return `<button class="filter-pill${on}" onclick="setJobFilter('${key}')">${b.icon ? b.icon + ' ' : ''}${b.label} <span class="fp-n">${n}</span></button>`;
   }).join('');
+
+  const bands = TEMP_ORDER.map(key => {
+    const b = TEMP_BANDS[key];
+    const n = jobs.filter(j => jobInBucket(j, JOB_FILTER) && jobInTemp(j, key)).length;
+    const on = key === TEMP_FILTER;
+    // Empty bands are noise — but never drop the one that is SELECTED, or the active filter
+    // vanishes the moment its last job changes band and the table looks broken with no way back.
+    if (!n && !on) return '';
+    const title = on ? `Showing ${b.label} only — click to clear` : `${b.label} — ${b.meaning}`;
+    // `tb-` prefix, not the bare band name: one of the bands IS called "active", which is also
+    // the selected-state class every filter pill uses. Unprefixed, the active-band pill carries
+    // `active` at all times and renders as permanently selected — a filter that looks applied
+    // when it is not, which is worse than one that looks unapplied when it is.
+    return `<button class="filter-pill temp-pill tb-${esc(key)}${on ? ' active' : ''}" `
+         + `title="${esc(title)}" onclick="setTempFilter('${key}')">`
+         + `${b.icon} ${b.label} <span class="fp-n">${n}</span></button>`;
+  }).join('');
+
+  el.innerHTML = status + (bands ? `<span class="filter-sep" aria-hidden="true"></span>${bands}` : '');
+}
+
+//: The legend. Static content, rendered once per refresh into its own node — it explains the
+//: vocabulary rather than reporting data, so it never needs the payload.
+function renderTempLegend() {
+  const el = document.getElementById('tempLegend');
+  if (!el || el.dataset.done === '1') return;   // never changes; skip the 2.5s rewrite
+  el.innerHTML = TEMP_AXES.map(axis => {
+    const items = TEMP_ORDER.filter(k => TEMP_BANDS[k].axis === axis.key).map(k => {
+      const b = TEMP_BANDS[k];
+      return `<span class="lg-item"><span class="temp ${esc(k)}">${b.icon} ${b.label}</span>`
+           + `<span class="lg-what">${esc(b.meaning)}</span></span>`;
+    }).join('');
+    return `<div class="lg-row"><span class="lg-title">${esc(axis.title)}`
+         + `${axis.hint ? `<span class="lg-hint">${esc(axis.hint)}</span>` : ''}</span>${items}</div>`;
+  }).join('');
+  el.dataset.done = '1';
 }
 // Every one of these ends the same way — you act in the open tab, then Continue, which
 // reconnects a FRESH agent to that same browser and carries on from the current page. The
@@ -2026,12 +2112,14 @@ function renderMetrics(mx) {
 // SQL statements, and putting it behind a keystroke is §Lessons 11 and 26 with a new trigger.
 function renderJobsTable(allJobs, editing) {
   renderJobFilters(allJobs);
+  renderTempLegend();
   renderActiveTags();
-  // Bucket → tags → search, narrowing at each step. The bucket counts above deliberately keep
-  // counting the WHOLE set: a filter pill that renumbers itself as you type cannot tell you
+  // Bucket → band → tags → search, narrowing at each step. The bucket counts above deliberately
+  // keep counting the WHOLE set: a filter pill that renumbers itself as you type cannot tell you
   // where the thing you are searching for lives.
   const shown = allJobs
     .filter(j => jobInBucket(j, JOB_FILTER))
+    .filter(j => jobInTemp(j, TEMP_FILTER))
     .filter(jobMatchesTags)
     .filter(jobMatchesQuery);
   const emptyEl = document.getElementById('jobsEmpty');
@@ -2039,8 +2127,11 @@ function renderJobsTable(allJobs, editing) {
     emptyEl.hidden = shown.length > 0;
     // Say which filter emptied the table, and offer the way out. "No applications in All" is
     // the message a naive version prints while a search term is quietly hiding everything.
+    // The band belongs in this list for the same reason: it ANDs with the bucket, so it can
+    // empty the table on its own and leave the bucket pill looking like the culprit.
     const bits = [];
     if (JOB_QUERY.trim()) bits.push(`matching “${JOB_QUERY.trim()}”`);
+    if (TEMP_FILTER !== 'all') bits.push(`marked ${TEMP_BANDS[TEMP_FILTER].label}`);
     if (TAG_FILTER.size) bits.push(`with ${TAG_FILTER.size} tag filter${TAG_FILTER.size > 1 ? 's' : ''}`);
     emptyEl.textContent = allJobs.length === 0 ? ''
       : bits.length ? `No applications ${bits.join(' ')}.`

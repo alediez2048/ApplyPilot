@@ -653,6 +653,36 @@
   .filter-pill.active { background:var(--accent); border-color:var(--accent); color:#fff; }
   .filter-pill .fp-n { background:rgba(0,0,0,.08); border-radius:999px; padding:0 7px; font-size:11px; font-weight:600; }
   .filter-pill.active .fp-n { background:rgba(255,255,255,.25); }
+  /* The two filter groups are different QUESTIONS (where is this in my pipeline / how is it
+     doing), and they AND together. Without a visible break they read as one radio group where
+     picking a band would clear the bucket. */
+  .filter-sep { width:1px; align-self:stretch; margin:2px 4px; background:var(--line2); }
+  /* A band pill wears its own band colour so the pill and the chip on the row are recognisably
+     the same thing. `warm` and `active` share the ● glyph — the word and the colour are what
+     separate them, which is why the label is never dropped for space. */
+  /* Band tints are `tb-` prefixed because one band is called "active" and `active` is already
+     the selected-state class on every filter pill. Unprefixed they collide and that pill reads
+     as permanently selected. */
+  .temp-pill { font-weight:600; }
+  .temp-pill.tb-won { border-color:var(--green); color:var(--green); }
+  .temp-pill.tb-warm { border-color:#bfe3cd; color:var(--green); }
+  .temp-pill.tb-active { border-color:#c3ddf1; color:#1d5b8f; }
+  .temp-pill.tb-cooling { border-color:#f0c890; color:var(--yellow); }
+  .temp-pill.tb-cold, .temp-pill.tb-new { border-color:var(--line2); color:var(--muted); }
+  .temp-pill.tb-undeliverable { border-color:#d99; color:var(--red); }
+  /* Selection must beat the band tint, or the pill you chose looks like the six you did not.
+     Two classes each side, so it wins on specificity as well as order. */
+  .filter-pill.temp-pill.active { background:var(--accent); border-color:var(--accent); color:#fff; }
+
+  /* The legend. Small, always visible, never a toggle — a collapsed explanation is one nobody
+     opens, and the whole point is that the words were not self-explanatory (§Lessons 43). */
+  .temp-legend { display:flex; flex-direction:column; gap:6px; margin:2px 0 12px; }
+  .lg-row { display:flex; align-items:center; gap:10px; flex-wrap:wrap; font-size:12px; }
+  .lg-title { color:var(--soft); font-weight:600; min-width:190px; display:flex; flex-direction:column; }
+  .lg-hint { color:var(--faint); font-weight:400; font-size:11px; }
+  .lg-item { display:inline-flex; align-items:center; gap:6px; }
+  .lg-what { color:var(--muted); }
+  @media (max-width:720px) { .lg-title { min-width:0; } }
   .jobs-empty { padding:24px; text-align:center; color:var(--muted); font-size:13px; }
   .st-pulse .st-icon { animation:stpulse 1.2s ease-in-out infinite; }
   @keyframes stpulse { 0%,100% { opacity:1; } 50% { opacity:.35; } }

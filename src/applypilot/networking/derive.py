@@ -21,7 +21,23 @@ _BOARD_HOSTS = {
     "lever", "ashbyhq", "workday", "myworkdayjobs",
     "smartrecruiters", "bamboohr", "icims", "taleo", "workable", "breezy", "rippling",
     "ycombinator", "workatastartup",
+    # Oracle Recruiting Cloud. `eohh.fa.us2.oraclecloud.com` is Texas Children's Hospital,
+    # and the employer appears NOWHERE in that host: Oracle pods are opaque codes, unlike a
+    # Workday tenant (`salesforce.wd12`) that at least wraps the real name. Without this the
+    # last non-TLD label wins and the employer becomes "Oraclecloud" — the "Ats"/"Hr"/"Edu"
+    # shape a fourth time, and the one that did the most damage, because it also became the
+    # DOMAIN. Apollo has oraclecloud.com filed under the City of Atlanta (whose own careers
+    # portal is Oracle-hosted), so asking "who works at this domain" returned five Atlanta
+    # city employees and four of them were emailed. Better to resolve to nothing and say so.
+    "oraclecloud",
 }
+
+# ATS hosts where NO label is the employer — the tenant is an internal code, not a name.
+# Every other vendor here carries the tenant somewhere recoverable: Workday in the first
+# label, Greenhouse and Lever in the path. Oracle Fusion carries it nowhere
+# (`eohh.fa.us2.oraclecloud.com`), so the only honest answer from the URL alone is "no idea",
+# and `_host_label` must not reach for the nearest label-shaped thing instead.
+_OPAQUE_TENANT_HOSTS = {"oraclecloud"}
 
 # Labels that are never the employer's name but don't make the host a job board either
 # (jobs.stripe.com is Stripe's own careers portal, not a board).
@@ -337,6 +353,13 @@ def _host_label(url: str | None, job: dict | None = None) -> str | None:
     # A label is unusable as a company name if it's a board identity OR a generic
     # careers-portal word ("job-boards.greenhouse.io" must not yield "Job Boards").
     unusable = _BOARD_HOSTS | _GENERIC_HOST_LABELS
+    # Falling back to the FIRST label assumes the vendor puts the tenant there, which is true
+    # of `salesforce.wd12.myworkdayjobs.com` and `acme.breezy.hr` and false of the opaque-pod
+    # vendors below. Adding `oraclecloud` to _BOARD_HOSTS without this reproduced the original
+    # bug one label to the left: `eohh.fa.us2.oraclecloud.com` stopped resolving to
+    # "Oraclecloud" and started resolving to "Eohh", which is the pod, not the hospital.
+    if any(p in _OPAQUE_TENANT_HOSTS for p in parts):
+        return None
     label = labels[-1] if labels[-1] not in unusable else (labels[0] if labels else None)
     if not label:
         return None
@@ -394,9 +417,14 @@ def derive_company(job: dict) -> str | None:
     if host_label:
         return host_label.capitalize()
 
-    # 5. fall back to site only if it's not a generic board
+    # 5. fall back to site only if it's not a board or ATS name.
+    #    _BOARD_NAMES, not _BOARD_SITES: step 1 rejects a board name arriving in `company` and
+    #    this one used the narrower set, so the same name was refused in one field and accepted
+    #    in the other. The live Texas Children's row carries site='Oraclecloud' — every rule
+    #    above correctly declined to name an employer, and this line handed back the ATS vendor
+    #    anyway. §Lessons 49: a rule implemented at one of its call sites is not implemented.
     site = _clean_company(job.get("site"))
-    if site and site.lower() not in _BOARD_SITES:
+    if site and site.lower() not in _BOARD_NAMES:
         return site
 
     # `stored` is only reachable here when it IS a board name — return None instead so the

@@ -1115,7 +1115,9 @@ company `"Jobs"` — the same substring bug class, inside the function written t
     `sha256(contact|kind|at)` so two of three vanish with a success response. One structural
     probe, no message text read, settled both.
 
-58. **The deck beacon existed, was deployed, and could not see the name.** "Nobody has opened
+58. **The deck beacon existed, was deployed, and could not see the name.** *(Closed 2026-08-06:
+    the fix is a parse-time capture in `gatsby-ssr.js` → `window.__deckSlug`, and a real browser
+    load is now recorded end to end.)* "Nobody has opened
     the deck" after ~98 emails was not false, it was UNKNOWABLE. Netlify rewrites `/intro/*` to
     `/intro/index.html` with a 200, so the browser keeps the name — then Gatsby hydrates, does
     not recognise `/intro/gina` as a route, and **replaces the URL with `/intro/`**. Measured:
@@ -1156,6 +1158,34 @@ company `"Jobs"` — the same substring bug class, inside the function written t
     `in_progress: 1`, because the check was chained into the same command as the restart instead
     of gating it. The documented failure, walked into with the warning on screen. `pgrep -fl
     "applypilot apply"` before ANY restart, as a separate step whose output you actually read.
+
+64. **A correction that the system silently undoes is not a correction.** Three contacts were
+    marked as having opened the deck and none had — the hits were direct POSTs from testing,
+    made while no working beacon existed. Clearing `deck_viewed_at` did not stick: the collector
+    is a ROLLING WINDOW of 500 that the poller re-reads IN FULL every five minutes, and it has
+    no delete (POST a hit, GET the list, nothing else). Both contacts were back before the next
+    command finished. `deck_hits.dismiss(slug, at)` is the suppression, keyed on the HIT and
+    never the slug — "ignore katherine-j" would suppress her real open forever, and a missing
+    signal nobody knows to look for is worse than a wrong one you can see.
+
+65. **`deck_views` counted POLLS, not opens, and read 99 from one click.** Same root cause: the
+    poller replays the whole window every five minutes, and `mark_deck_viewed` incremented on
+    every call. 99 × 5 minutes = 8.2 hours, which matched that hit's age exactly. The column
+    measured how long the dashboard had been open and looked like engagement. It has two modes
+    now, because two callers know different things: the poller can COUNT the window, the manual
+    import can only say "one more". **The test asserted the bug** —
+    `assert deck_views == 2` after polling twice with ONE hit, with the word "Idempotent"
+    written in a comment directly above it.
+
+66. **Verifying a browser feature needs a browser, and the artifact is not the HTML.** Three
+    wrong calls in one day on the same feature: I said the beacon was missing (it was in a
+    lazily-loaded chunk the HTML names only by hash), then said two opens were real (no beacon
+    existed at the time), then said a probe had failed after waiting 12 seconds (the collector
+    lags up to a minute). Every one came from checking something adjacent to the thing that
+    matters. `scripts/deck-check.sh` now resolves the chunk the way Gatsby does — `page-data.json`
+    → `componentChunkName` → runtime id → hash — and checks the parse-time capture separately,
+    because "no beacon" and "beacon that cannot see the name" have different fixes and look
+    identical from the API side.
 
 Shipped in one session, in this order: **CRM-3a → CRM-1 → CRM-2 → CRM-3b → CRM-4a.**
 Tickets in `docs/tickets/CRM-*.md`; two of them had instructions that were factually wrong
@@ -1268,7 +1298,7 @@ Established by LOOKING at the real mailbox, not by guessing:
 |---|---|---|
 | Replied | `messages` | automatic |
 | **Booked a call** | cal.com emails the host — verified (`hello@cal.com`, "30 Min Meeting between …") | automatic |
-| **Opened the intro deck** | first-party beacon on the sender's OWN site → Netlify Blobs → polled every 5 min | **genuinely live 2026-08-05.** It was believed live from 2026-08-01 and recorded nothing for five days and ~98 emails — §Lessons 58. Verify with `sh scripts/deck-check.sh --probe`, which loads the real page in a real browser; every API-level check passed the whole time it was broken |
+| **Opened the intro deck** | first-party beacon on the sender's OWN site → Netlify Blobs → polled every 5 min | **PROVEN live 2026-08-06 17:07** — a real browser load of a named link recorded end to end, the first ever. Believed live from 2026-08-01 and recorded nothing for six weeks and ~113 emails (§Lessons 58). Verify with `sh scripts/deck-check.sh`; BOTH lines must be affirmative, and the collector lags a real click by up to a minute |
 | **Viewed your LinkedIn profile** | **not detectable** — absent from the LinkedIn data export AND no notification email exists. Only LinkedIn's UI has it, and automating that was abandoned twice (§Lessons 3) | operator-logged, tagged `noted` |
 
 **Email OPEN tracking was rejected outright.** A pixel fires when Gmail proxies and caches the
@@ -1301,7 +1331,16 @@ was a `deck-hit.mjs` validating `body.v` against an 8-hex regex while the live b
 nothing. `git checkout <old-commit> -- netlify/functions/` is the obvious move and the wrong one.
 
 **Never open your own `/intro/<name>` link** — it records that person opening the deck. Any
-made-up name returns 200 and matches nobody.
+made-up name returns 200 and matches nobody, which is what `deck-check.sh --probe` generates.
+Append **`?notrack=1`** once per browser to opt that device out permanently; without it,
+previewing what you sent somebody records them as having read it, which is exactly how three
+false "opens" ended up in the database on 2026-08-05/06 (§Lessons 64).
+
+**The beacon must run at PARSE TIME, not in a `useEffect`.** The Netlify rewrite keeps the name
+in the URL; Gatsby then hydrates, does not recognise `/intro/gina` as a route, and replaces the
+URL with `/intro/` before any effect runs. `gatsby-ssr.js` captures it into `window.__deckSlug`
+first. `deploy/netlify/README.md` step 3 has the exact snippet and says why the other option
+cannot work.
 
 ## Sign-in walls are a per-EMPLOYER cost (2026-08-03)
 
@@ -1386,8 +1425,12 @@ way to ask whether the personalised ones did better — so every improvement to 
 unfalsifiable. `draft_variant` (2026-08-03) starts fixing it, but nothing is readable until
 enough tagged sends accumulate; `MIN_MEANINGFUL_N` is 10.
 
-~~**Half-finished:** intro-deck click collection.~~ **DONE 2026-08-01 — the whole chain is
-live**, and the cause of the two "build failures" was finally seen: **`AWS_LAMBDA_JS_RUNTIME =
+~~**Half-finished:** intro-deck click collection.~~ **Genuinely done 2026-08-06** — a real
+browser load of `/intro/<name>` recorded end to end for the first time. It was believed done on
+2026-08-01 and recorded nothing for six weeks; see §Lessons 58/59/64. The 2026-08-01 note below
+is kept because its own diagnosis was right and its conclusion was wrong:
+
+~~**DONE 2026-08-01 — the whole chain is live**, and the cause of the two "build failures" was finally seen: **`AWS_LAMBDA_JS_RUNTIME =
 nodejs12.x`**, a variable set on the Netlify site years ago and forgotten. Deleting it was the
 entire fix; the function code shipped unchanged (§Lessons 38). `INTRO_DECK_PATHS=1`, 12 drafts
 relinked, 26 already-sent ones correctly untouched.
@@ -1618,8 +1661,10 @@ change still needs the `pip install` above — but that copy gives the file a ne
 - **On branch `spaces`, 12 commits ahead of `main`, unmerged and unpushed** (2026-08-05).
   `main` last pushed at **`e1f0be6`**. Tags: `stable-arch2/3/5/6` · `stable-e2e-20260730` ·
   `stable-crm-20260731`.
-- **Deck tracking has its own check**: `sh scripts/deck-check.sh --probe`. It tests the page,
-  not the API — every API-level check passed for the five days it was broken.
+- **Deck tracking has its own check**: `sh scripts/deck-check.sh --probe`. It tests the PAGE,
+  not the API — every API-level check passed for the six weeks it was broken. Both lines must
+  read affirmatively; open the probe URL in a real browser (curl runs no JavaScript) and allow
+  up to a minute before calling it a failure.
 - **`applypilot ats`** is the fastest way to check a résumé is readable and see keyword gaps.
 - **All 28 existing résumé PDFs carry an em dash** from the old renderer and need a re-render;
   nothing rewrites a PDF in place.

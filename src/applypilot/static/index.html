@@ -169,8 +169,20 @@
          is the best way to know what's up with an application": four of the seven are a
          countdown of your own sending and two are about what they did, and one chip presenting
          both as a single scale reads as if warm were simply more than active. Filled once by
-         renderTempLegend() — it explains vocabulary, not data, so it never needs the payload. -->
-    <div id="tempLegend" class="temp-legend"></div>
+         renderTempLegend() — it explains vocabulary, not data, so it never needs the payload.
+
+         A native <details>, not a JS toggle, for one specific reason: open/closed then lives
+         in the DOM on a node `refresh()` never replaces, so it survives the 2.5s tick with no
+         global to keep in sync — the bug that PANEL_OPEN / TAB_OPEN exist to work around.
+         Keyboard and screen-reader behaviour come free with it.
+
+         The summary is phrased as the QUESTION rather than "Legend" because a collapsed
+         explanation is one nobody opens (§Lessons 43). Labelling it with the thing the reader
+         is actually wondering is the only mitigation a closed panel gets. -->
+    <details id="tempLegend" class="temp-legend">
+      <summary class="lg-summary">What do the status labels mean?</summary>
+      <div id="tempLegendBody" class="lg-body"></div>
+    </details>
     <div id="jobFilters" class="job-filters"></div>
     <div class="table-wrap">
       <table>

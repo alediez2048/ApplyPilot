@@ -699,10 +699,14 @@ function renderJobFilters(jobs) {
   el.innerHTML = status + (bands ? `<span class="filter-sep" aria-hidden="true"></span>${bands}` : '');
 }
 
-//: The legend. Static content, rendered once per refresh into its own node — it explains the
+//: The legend. Static content, rendered once into the <details> BODY — it explains the
 //: vocabulary rather than reporting data, so it never needs the payload.
+//:
+//: Writing to the body and never to the <details> itself is what keeps the panel open across
+//: the 2.5s refresh: the element holding the `open` attribute is one nothing rewrites. Render
+//: into the wrapper instead and every tick would slam it shut mid-read.
 function renderTempLegend() {
-  const el = document.getElementById('tempLegend');
+  const el = document.getElementById('tempLegendBody');
   if (!el || el.dataset.done === '1') return;   // never changes; skip the 2.5s rewrite
   el.innerHTML = TEMP_AXES.map(axis => {
     const items = TEMP_ORDER.filter(k => TEMP_BANDS[k].axis === axis.key).map(k => {

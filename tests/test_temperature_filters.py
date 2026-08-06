@@ -92,7 +92,7 @@ def test_the_legend_explains_every_band_it_can_show(tmp_path):
     """A band that appears on a row and not in the legend is the vocabulary problem this was
     built to fix, one entry short."""
     out = _run("console.log(JSON.stringify((F.renderTempLegend(), "
-               "{html: __nodes.tempLegend.innerHTML, order: F.TEMP_ORDER})));", tmp_path)
+               "{html: __nodes.tempLegendBody.innerHTML, order: F.TEMP_ORDER})));", tmp_path)
     html = out["html"]
     assert html.strip(), "the legend rendered nothing"
     for band in out["order"]:
@@ -109,7 +109,7 @@ def test_the_legend_says_what_each_band_MEANS(tmp_path):
     fail, or the assertion is measuring nothing.
     """
     out = _run("console.log(JSON.stringify((F.renderTempLegend(), "
-               "{html: __nodes.tempLegend.innerHTML, bands: F.TEMP_BANDS})));", tmp_path)
+               "{html: __nodes.tempLegendBody.innerHTML, bands: F.TEMP_BANDS})));", tmp_path)
     for band, meta in out["bands"].items():
         # Two, not three: "interview booked" is a complete explanation and the shortest honest
         # one on the list. The bar only has to be high enough to kill "" and a bare "yes".
@@ -210,3 +210,36 @@ def test_band_counts_respect_the_bucket_you_are_in(tmp_path):
     seg = html.split("tb-active", 1)[1]
     assert ">1<" in seg.split("</button>", 1)[0], (
         f"active counts the whole board while the bucket is needs_you: {seg[:160]!r}")
+
+
+def test_the_open_legend_survives_the_refresh(tmp_path):
+    """The legend is a <details>, and `refresh()` replaces #jobs every 2.5s. The `open`
+    attribute therefore has to live on a node nothing rewrites — so renderTempLegend writes to
+    the BODY, never to the wrapper. Render into the wrapper and the panel slams shut mid-read
+    on every tick, which is the class of bug PANEL_OPEN / TAB_OPEN exist to work around.
+
+    Asserted by re-rendering and checking the wrapper was never written to: reading `open`
+    would prove nothing, because the stub has no real <details> behaviour.
+    """
+    out = _run("F.renderTempLegend(); F.renderTempLegend(); F.renderTempLegend();"
+               "console.log(JSON.stringify({"
+               " wrapper: __nodes.tempLegend ? __nodes.tempLegend.innerHTML : null,"
+               " body: __nodes.tempLegendBody.innerHTML.length}));", tmp_path)
+    assert out["body"] > 0, "the legend body is empty"
+    assert not out["wrapper"], (
+        "renderTempLegend wrote to the <details> wrapper, which discards the open state "
+        f"every 2.5s: {out['wrapper']!r}")
+
+
+def test_the_summary_asks_the_question_instead_of_saying_legend(tmp_path):
+    """A collapsed explanation is one nobody opens (§Lessons 43), and closing it was the whole
+    request — so the summary text is the only discoverability left. "Legend" is a filing label;
+    the reader's actual question is what gets it clicked."""
+    html = (web_dashboard._STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    seg = html.split('class="lg-summary"', 1)[1].split("</summary>", 1)[0]
+    assert "mean" in seg.lower(), f"the summary does not ask what anything means: {seg!r}"
+    # Matched on the legend's OWN tag, not `"<details" in html`: the metrics panel is also a
+    # <details>, so the loose version passed happily against a legend rewritten as a plain
+    # <div> — §Lessons 1, a substring found somewhere in the file standing in for the element
+    # actually under test.
+    assert '<details id="tempLegend"' in html, "the legend element itself is not a <details>"

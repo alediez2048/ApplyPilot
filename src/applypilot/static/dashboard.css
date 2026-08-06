@@ -674,9 +674,24 @@
      Two classes each side, so it wins on specificity as well as order. */
   .filter-pill.temp-pill.active { background:var(--accent); border-color:var(--accent); color:#fff; }
 
-  /* The legend. Small, always visible, never a toggle — a collapsed explanation is one nobody
-     opens, and the whole point is that the words were not self-explanatory (§Lessons 43). */
-  .temp-legend { display:flex; flex-direction:column; gap:6px; margin:2px 0 12px; }
+  /* The legend, as a native <details>. Closed by default, so the summary has to carry the
+     whole discoverability burden — it is phrased as the reader's own question rather than
+     "Legend", because a collapsed explanation nobody opens is §Lessons 43 with the label on
+     the outside. Styled as an obvious control for the same reason: a bare summary reads as
+     text, and text does not look clickable. */
+  .temp-legend { margin:2px 0 12px; }
+  .lg-summary { display:inline-flex; align-items:center; gap:6px; cursor:pointer; width:fit-content;
+      font-size:12px; font-weight:600; color:var(--soft); background:var(--surface);
+      border:1px solid var(--line2); border-radius:999px; padding:5px 13px; list-style:none;
+      transition:background .15s ease, border-color .15s ease; }
+  .lg-summary:hover { background:rgba(0,0,0,.04); border-color:var(--muted); }
+  .lg-summary:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  /* Safari still paints the disclosure triangle via this pseudo-element even with
+     list-style:none, so it needs killing explicitly or the pill renders with a stray marker. */
+  .lg-summary::-webkit-details-marker { display:none; }
+  .lg-summary::after { content:'▾'; font-size:10px; color:var(--faint); transition:transform .15s ease; }
+  .temp-legend[open] .lg-summary::after { transform:rotate(180deg); }
+  .lg-body { display:flex; flex-direction:column; gap:6px; padding:10px 2px 2px; }
   .lg-row { display:flex; align-items:center; gap:10px; flex-wrap:wrap; font-size:12px; }
   .lg-title { color:var(--soft); font-weight:600; min-width:190px; display:flex; flex-direction:column; }
   .lg-hint { color:var(--faint); font-weight:400; font-size:11px; }

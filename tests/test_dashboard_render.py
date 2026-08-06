@@ -1178,3 +1178,70 @@ def test_the_temperature_chip_renders_with_its_reason(tmp_path):
     assert 'class="temp warm"' in strip, "the temperature is not on the row"
     assert "warm" in strip and "●" in strip, "colour is the only channel"
     assert "Sarah replied 2d ago." in strip, "the band does not carry its reason"
+
+
+def _strip(tmp_path, job):
+    script = tmp_path / "duestrip.mjs"
+    script.write_text(_STUBS + f"const SRC = {json.dumps(_page_js())};\n"
+                      + "const F = (new Function(SRC + `; return { stepStrip };`))();\n"
+                      + f"const J = {json.dumps(job)};\n"
+                      + "console.log(JSON.stringify(F.stepStrip(J)));")
+    proc = subprocess.run(["node", str(script)], capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr[:1500]
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+def _step_class(html, label):
+    """The OUTER step span's class. Splitting on the label and taking the last `<span class="`
+    finds the inner `.mk` marker instead, which is how the first version of these tests read
+    'mk' and asserted against it."""
+    before = html.split(label, 1)[0]
+    return "sstep" + before.rsplit('class="sstep', 1)[1].split('"', 1)[0]
+
+
+def _steps(emailed, followup, linkedin=(0, 0)):
+    def st(key, pair):
+        done, total = pair
+        state = "na" if not total else ("done" if done >= total else ("partial" if done else "todo"))
+        return {"key": key, "done": done, "total": total, "state": state, "hint": f"{key} hint"}
+    return {"steps": [st("contacts", (1, 1)), st("applied", (1, 1)), st("emailed", emailed),
+                      st("linkedin", linkedin), st("followup", followup)]}
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node not available")
+def test_overdue_followups_highlight_even_behind_an_unfinished_step(tmp_path):
+    """Reported on a row reading `! Emailed 9/10 — · LinkedIn 11/12 — · Follow up 4/9` with ten
+    follow-ups due. The strip highlights the FIRST unfinished step, `Emailed` claimed it, and
+    the one thing actually overdue rendered grey — while the Next button and the tab badge both
+    said 10 an inch away (§Lessons 56: one row, two facts).
+
+    Follow-up is the one step whose total is `done + currently due`, so a gap there is late
+    work rather than later work, and it has to highlight wherever it sits in the path.
+    """
+    html = _strip(tmp_path, _ux1_job(checklist=_steps(emailed=(9, 10), followup=(4, 9),
+                                                      linkedin=(11, 12))))
+    cls = _step_class(html, "Follow up")
+    assert "due" in cls, f"the follow-up step is not highlighted while 5 are overdue: {cls!r}"
+    assert "↻" in html, "the overdue step does not carry the follow-up mark"
+    # ...and the step that IS first-unfinished keeps its own highlight; this adds one, it does
+    # not move the existing one somewhere else.
+    assert "sstep now" in html, "Emailed lost its highlight"
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node not available")
+def test_a_followup_step_with_nothing_due_is_not_highlighted(tmp_path):
+    """The half that makes the test above mean something. `total` is `done + due`, so 4/4 is
+    "nothing owed right now" — the state most of every ladder's life is spent in. Highlighting
+    that would light every applied row permanently and be ignored within a week."""
+    html = _strip(tmp_path, _ux1_job(checklist=_steps(emailed=(9, 10), followup=(4, 4))))
+    cls = _step_class(html, "Follow up")
+    assert "due" not in cls, f"a settled follow-up step is highlighted as overdue: {cls!r}"
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node not available")
+def test_a_followup_step_that_never_started_is_not_overdue(tmp_path):
+    """0/0 is `na` — nobody has been emailed, so no follow-up can be late. Treating an `na`
+    step as overdue would mark every freshly imported job as behind."""
+    html = _strip(tmp_path, _ux1_job(checklist=_steps(emailed=(0, 5), followup=(0, 0))))
+    cls = _step_class(html, "Follow up")
+    assert "na" in cls and "due" not in cls, f"an unstarted ladder reads as overdue: {cls!r}"

@@ -409,6 +409,14 @@
   .sstep.done { color:var(--text); }  .sstep.done .mk { background:var(--green); }
   .sstep.now  { color:var(--yellow); font-weight:700; }  .sstep.now .mk { background:var(--yellow); }
   .sstep.na   { color:#b8c0c8; }      .sstep.na .mk { background:#eceff2; }
+  /* Overdue follow-ups, wherever they sit in the path. Declared after .na so it wins on order
+     at equal specificity — a step that is both `now` and `due` should still read as amber.
+     The SAME amber as `.now` on purpose. A second, louder colour was tried and is wrong here:
+     nearly every applied job has follow-ups due, so an alarm state would be permanently lit
+     and trained away within a week — the failure the 🔔 counter was designed around. One
+     colour means "outstanding"; the ↻ and ! marks are what separate "late" from "in flight". */
+  .sstep.due  { color:var(--yellow); font-weight:700; }
+  .sstep.due .mk { background:var(--yellow); }
   .sarrow { width:14px; height:1px; background:#dfe3e7; margin:0 7px; flex-shrink:0; }
   .next { margin-left:auto; display:flex; align-items:center; gap:7px; }
   .next-label { font-size:10px; color:var(--faint); text-transform:uppercase; letter-spacing:.07em;

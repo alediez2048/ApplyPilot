@@ -2379,9 +2379,25 @@ function stepStrip(j) {
     let currentFound = false;
     steps = cl.steps.map((s, i) => {
       let cls = 'sstep', mark = '·';
+      // Follow-up is the one step whose TOTAL is "done + currently due" — see the checklist,
+      // where it is built as `len(done), len(done) + len(due)` precisely so it reads 100% until
+      // something actually comes due. So a gap HERE means work is overdue right now, not work
+      // that arrives later, and it has to highlight wherever it sits in the path rather than
+      // queue behind an earlier unfinished step.
+      //
+      // Reported on a job reading `! Emailed 9/10 — · LinkedIn 11/12 — · Follow up 4/9` with
+      // ten follow-ups due: `Emailed` took the highlight for being first, so the only overdue
+      // thing on the row was the one rendered grey. The Next button and the tab badge both said
+      // 10 an inch away, which is §Lessons 56 — one row, two facts.
+      //
+      // `due` carries the same amber as `now` rather than a louder colour, because nearly every
+      // applied job has follow-ups outstanding and an alarm state that is always on gets
+      // ignored. The ↻ mark is what distinguishes late from in-flight.
+      const overdue = s.key === 'followup' && s.state !== 'na' && s.total > s.done;
       if (s.state === 'done') { cls += ' done'; mark = '✓'; }
       else if (s.state === 'na') { cls += ' na'; mark = '–'; }
       else if (!currentFound) { cls += ' now'; mark = s.key === 'followup' ? '↻' : '!'; currentFound = true; }
+      if (overdue) { cls += ' due'; mark = '↻'; }
       const count = s.total > 1 ? ` ${s.done}/${s.total}` : '';
       const arrow = i < cl.steps.length - 1 ? '<span class="sarrow"></span>' : '';
       return `<span class="${cls}" title="${esc(s.hint || s.label)}"><span class="mk">${mark}</span> ${esc(STEP_LABEL[s.key] || s.label)}${count}</span>${arrow}`;

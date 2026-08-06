@@ -1434,10 +1434,11 @@ def _apollo_profile_url(apollo_id: str | None) -> str:
 
 
 def _job_checklist(job_status: str, applied_at: str, contacts: list[dict],
-                   shape: str = "pipeline/jobs") -> dict:
+                   shape: str = "pipeline/jobs", interview_at: str = "") -> dict:
     """Thin delegate — the rule lives in applypilot.domain.checklist."""
     from applypilot.domain import job_checklist
-    return job_checklist(job_status, applied_at, contacts, shape=shape)
+    return job_checklist(job_status, applied_at, contacts, shape=shape,
+                         interview_at=interview_at)
 
 
 def _space_of_contact(contact_id: str, conn=None):
@@ -1743,7 +1744,8 @@ def _status_payload(space: str = "") -> dict:
         # the plan is left is what separates a job worked this morning from one whose every
         # email and follow-up was spent a fortnight ago. Both were computed here already —
         # this is a reordering, not a new query.
-        job_checklist = _job_checklist(status, row["applied_at"] or "", contacts, shape)
+        job_checklist = _job_checklist(status, row["applied_at"] or "", contacts, shape,
+                                       interview_at=row["interview_at"] or "")
         job_followups = _followup_panel(contacts, job_ladders, manifest)
         net_task = _net_tasks.get(row["url"], {})
         jobs.append({

@@ -437,3 +437,77 @@ def test_marking_it_twice_is_refused(tmp_path, monkeypatch):
     conn.commit()
     assert wd._mark_applied_manually("http://j/hand")["ok"] is True
     assert wd._mark_applied_manually("http://j/hand")["ok"] is False
+
+
+# ── the checklist ───────────────────────────────────────────────────────────
+
+def _emailed_long_ago():
+    return [{"email": "a@x.com", "emailed": True, "linkedin_url": "",
+             "submitted_at": "2026-07-01T10:00:00+00:00", "followed_up_at": ""}]
+
+
+def test_an_interview_owes_no_follow_ups():
+    """Marking an interview HALTS every ladder, but the checklist measures from `submitted_at`
+    and knew nothing about it — so a won job kept counting follow-ups as owed.
+
+    Live on WRITER: temperature `won`, Next slot empty, excluded from the 🔔 counter, and the
+    status strip still reading `↻ Follow up 1/2`. Three surfaces agreeing and one contradicting
+    them is §Lessons 21 — a fact one layer has that the other cannot see.
+    """
+    from applypilot.domain import checklist as cl
+    chasing = cl.job_checklist("applied", "2026-07-01T10:00:00+00:00", _emailed_long_ago())
+    assert chasing["followups_due"] == 1, "the fixture does not produce an owed follow-up"
+
+    won = cl.job_checklist("applied", "2026-07-01T10:00:00+00:00", _emailed_long_ago(),
+                           interview_at="2026-08-03T21:39:37+00:00")
+    assert won["followups_due"] == 0, "an interview is booked and the row still wants a nudge"
+    step = next(s for s in won["steps"] if s["key"] == "followup")
+    assert step["state"] != "partial", f"the strip still shows an outstanding follow-up: {step}"
+    assert step["total"] == step["done"], step
+
+
+def test_an_interview_silences_the_per_contact_button_too():
+    """`followup_due` is stamped on the contact and read by the per-contact button. Clearing
+    only the job-level count would leave the row quiet and the person inside it still asking to
+    be chased — the two have to go silent together."""
+    from applypilot.domain import checklist as cl
+    contacts = _emailed_long_ago()
+    cl.job_checklist("applied", "2026-07-01T10:00:00+00:00", contacts,
+                     interview_at="2026-08-03T21:39:37+00:00")
+    assert contacts[0]["followup_due"] is False, "the contact still reads as owed a follow-up"
+
+
+def test_follow_ups_already_sent_still_count_as_done():
+    """The step goes quiet, not blank. Work that actually happened stays on the record — a won
+    job reading `Follow up 0/0` would erase two real sends."""
+    from applypilot.domain import checklist as cl
+    contacts = [{"email": "a@x.com", "emailed": True, "linkedin_url": "",
+                 "submitted_at": "2026-07-01T10:00:00+00:00",
+                 "followed_up_at": "2026-07-05T10:00:00+00:00"}]
+    won = cl.job_checklist("applied", "2026-07-01T10:00:00+00:00", contacts,
+                           interview_at="2026-08-03T21:39:37+00:00")
+    step = next(s for s in won["steps"] if s["key"] == "followup")
+    assert step["done"] == 1 and step["state"] == "done", step
+
+
+def test_the_dashboard_passes_the_interview_through(db):
+    """§Lessons 47's shape, pre-empted: the rule is in `domain/` and useless if the payload
+    never hands it the timestamp. Asserted end to end on a real row rather than on the helper,
+    because the helper's default is exactly the value that hides the bug."""
+    # `strategy` and `tailored_resume_path` are what /api/status filters on. Without them the
+    # payload comes back EMPTY and every assertion below measures nothing — the same way the
+    # first version of the query-budget fixture passed while proving nothing (§Lessons 13).
+    db.execute("UPDATE jobs SET strategy='dashboard_upload', tailored_resume_path='/tmp/r.pdf' "
+               "WHERE url='http://j/1'")
+    cid = store.upsert_contact({"job_url": "http://j/1", "full_name": "Ada", "email": "a@x.com",
+                                "submitted_at": "2026-07-01T10:00:00+00:00",
+                                "sent_message_id": "g1"}, db)
+    db.commit()
+    assert cid
+    before = next(j for j in wd._status_payload()["jobs"] if j["url"] == "http://j/1")
+    assert before["checklist"]["followups_due"] >= 1, "the fixture owes no follow-up to silence"
+
+    assert wd._mark_interview("http://j/1")["ok"]
+    after = next(j for j in wd._status_payload()["jobs"] if j["url"] == "http://j/1")
+    assert after["checklist"]["followups_due"] == 0, (
+        "the interview never reached the checklist — the strip will keep asking")

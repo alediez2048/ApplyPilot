@@ -36,7 +36,8 @@ def _step(key: str, label: str, done_n: int, total_n: int, hint: str = "") -> di
 
 
 def job_checklist(job_status: str, applied_at: str, contacts: list[dict],
-                  now: datetime | None = None, shape: str = "pipeline/jobs") -> dict:
+                  now: datetime | None = None, shape: str = "pipeline/jobs",
+                  interview_at: str = "") -> dict:
     """Completion state for one row.
 
     Steps with a zero denominator come back as 'na' and are EXCLUDED from the percentage.
@@ -51,6 +52,17 @@ def job_checklist(job_status: str, applied_at: str, contacts: list[dict],
     does not exist. Compare §Lessons 35: a widget that answers its own question is worth
     nothing, and a permanently-grey step is that with extra pixels.
 
+    `interview_at` ends the follow-up step. Marking an interview already HALTS every ladder —
+    chasing somebody after they agreed to meet is the one follow-up guaranteed to cost
+    something — but the checklist measures from `submitted_at` and knew nothing about it, so a
+    won job kept counting follow-ups as owed. Live on WRITER: temperature `won`, Next slot
+    empty, excluded from the 🔔 counter, and the strip still reading `↻ Follow up 1/2`. Three
+    surfaces agreeing and one contradicting them is §Lessons 21 — a fact one layer has that
+    the other cannot see.
+
+    Nothing needs special-casing downstream: with no follow-up owed the step is either `done`
+    (some were sent, none outstanding) or `na` (none were ever owed), and both are true.
+
     Side effect: stamps `followup_due` on each contact, so the per-contact button and this
     widget agree on who is owed one — one cutoff, computed once.
     """
@@ -61,6 +73,11 @@ def job_checklist(job_status: str, applied_at: str, contacts: list[dict],
     linkedinable = [c for c in contacts if c.get("linkedin_url")]
     connected = [c for c in linkedinable if c.get("dm_status") in ("sent", "manual")]
 
+    # An interview stops every sequence, so nothing here is owed any more. Computed as a flag
+    # rather than by clearing `due` afterwards, because the loop below also stamps
+    # `followup_due` on each contact — and that is what the per-contact button reads, so the
+    # two have to go quiet together or the row and the person disagree.
+    won = bool((interview_at or "").strip())
     cutoff = now - timedelta(days=followup_after_days())
     due, done = [], []
     for c in contacts:
@@ -68,6 +85,8 @@ def job_checklist(job_status: str, applied_at: str, contacts: list[dict],
     for c in emailed:
         if (c.get("followed_up_at") or "").strip():
             done.append(c)
+            continue
+        if won:
             continue
         sent_dt = parse_ts(c.get("submitted_at"))
         if sent_dt is not None and sent_dt <= cutoff:

@@ -2698,9 +2698,93 @@ function jobDetail(j) {
       ${row('Attempts', j.apply_attempts ? String(j.apply_attempts) : '')}
       ${urls}
     </div>
+    ${contextBox(j)}
     <div class="jd-label">Description</div>
     ${desc}
   </div>`;
+}
+
+// CTX-2. What the operator knows and the scraper cannot. Everything else this tab shows about
+// a job was read off the posting; these two boxes are the only place their own knowledge goes.
+//
+// A <details>, so it survives the 2.5s refresh through the same native mechanism the metrics
+// panel uses — and OPEN by default when there is nothing in it yet, because a collapsed empty
+// box is indistinguishable from no feature (§Lessons 43, six occurrences, every one reported
+// as "it does nothing").
+function contextBox(j) {
+  // Typed-but-unsaved values live HERE, not in the DOM — the same reason `ADD_FORM` exists.
+  // `isEditingJobs()` only holds the refresh off while a field HAS focus, so clicking from the
+  // textarea to anything that is not an input hands the next 2.5s tick a paragraph to destroy.
+  // A lost name is annoying; a lost paragraph is the feature failing at the moment it is used.
+  const pending = CTX_FORM.get(j.url);
+  const ctx = pending ? pending.context : (j.job_context || '');
+  const ask = pending ? pending.ask : (j.job_ask || '');
+  const u = j.context_use || {};
+  const url = `decodeURIComponent('${encodeURIComponent(j.url)}')`;
+  const saved = !!((j.job_context || '').trim() || (j.job_ask || '').trim());
+  const has = saved;
+  const dirty = !!pending && (ctx !== (j.job_context || '') || ask !== (j.job_ask || ''));
+
+  // Only ever reports UNSENT drafts as regenerable. A sent one is the record of what went out.
+  let note = '';
+  if (has && u.stale) {
+    note = `<span class="ctx-stale">↻ ${u.stale} draft${u.stale === 1 ? '' : 's'} here ${
+      u.stale === 1 ? 'was' : 'were'} written before this — regenerate ${
+      u.stale === 1 ? 'it' : 'them'} from the People tab</span>`;
+  } else if (has && u.used) {
+    note = `<span class="ctx-on">✓ used in ${u.used} draft${u.used === 1 ? '' : 's'}</span>`;
+  }
+  if (dirty) note = '<span class="ctx-stale">● unsaved</span>';
+  const sentNote = has && u.sent
+    ? `<div class="hint">${u.sent} already sent — those are left exactly as they went out.</div>` : '';
+
+  return `<details class="ctx" ${has && !dirty ? '' : 'open'}>
+    <summary><span class="jd-label">Context for this application</span> ${note}</summary>
+    <div class="ctx-body">
+      <div class="d-label">What you know about this company and role</div>
+      <textarea class="ctx-what" rows="3" oninput="onCtxField(${url}, this)"
+        placeholder="Met their Head of Eng at a meetup; they're rebuilding intake on agents. Whatever you would mention if you already knew them.">${esc(ctx)}</textarea>
+      <div class="d-label">What you want from this person</div>
+      <textarea class="ctx-ask" rows="2" oninput="onCtxField(${url}, this)"
+        placeholder="An intro to whoever owns the intake rebuild. Leave empty to ask for a call as usual.">${esc(ask)}</textarea>
+      <div class="dbtns">
+        <button class="primary" onclick="saveJobContext(${url}, this)">Save context</button>
+        <span class="ctx-status hint"></span>
+      </div>
+      <div class="hint">Facts, not phrasing — this is rewritten for each person, never pasted.
+        Saving does not redraft: existing drafts stay until you regenerate them.</div>
+      ${sentNote}
+    </div>
+  </details>`;
+}
+
+// Unsaved context per job url, surviving the 2.5s rewrite of #jobs.
+const CTX_FORM = new Map();
+
+function onCtxField(url, el) {
+  const wrap = el.closest('.ctx-body');
+  CTX_FORM.set(url, {
+    context: wrap.querySelector('.ctx-what').value || '',
+    ask: wrap.querySelector('.ctx-ask').value || '',
+  });
+}
+
+async function saveJobContext(url, btn) {
+  const wrap = btn.closest('.ctx-body');
+  const out = wrap.querySelector('.ctx-status');
+  btn.disabled = true;
+  const r = await post('/api/job/context', {
+    job_url: url,
+    context: wrap.querySelector('.ctx-what').value || '',
+    ask: wrap.querySelector('.ctx-ask').value || '',
+  });
+  btn.disabled = false;
+  out.textContent = r.message || '';
+  // Only on success. Dropping the buffer after a failed save discards the paragraph AND leaves
+  // the box rendering the stale server copy, so the operator loses work and cannot see that
+  // they did.
+  if (r.ok) CTX_FORM.delete(url);
+  refresh();
 }
 async function toggleJobDesc(url, btn) {
   if (JOB_DESC_OPEN.has(url)) { JOB_DESC_OPEN.delete(url); refresh(); return; }

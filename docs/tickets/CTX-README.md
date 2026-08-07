@@ -9,8 +9,8 @@ produce the same email — because the only Space-level lever that reaches a job
 
 | # | Ticket | Size | Kind | Status |
 |---|---|---|---|---|
-| 1 | `CTX-1` the campaign premise reaches a jobs draft | S/M | **bug** | TODO |
-| 2 | `CTX-2` context and ask on the row | M | feature | TODO |
+| 1 | `CTX-1` the campaign premise reaches a jobs draft | S/M | **bug** | **DONE** 2026-08-07 |
+| 2 | `CTX-2` context and ask on the row | M | feature | **DONE** 2026-08-07 |
 | 3 | `CTX-3` every channel sees the Space | S/M | gap | TODO |
 | 4 | `CTX-4` the identity owns the unchanging things | — | **deferred** → ID-1 | NOT NOW |
 
@@ -57,3 +57,19 @@ asks *"is this field read anywhere?"* and the answer is yes: on one of two shape
 
 §Lessons 49 in a new place. A rule implemented at one of its two call sites is not implemented;
 a field wired into one of two shapes is not wired.
+
+## What shipped, and the one thing that is still unproven
+
+CTX-1 and CTX-2 both landed 2026-08-07. The cascade is live end to end: a Space premise, a
+per-row context and ask, and `noticed` per person, each in its own block, with the more specific
+layer reading closest to the instruction to write.
+
+**The parroting risk is guarded but not measured.** Both tickets assert that the block *tells*
+the model to treat operator text as facts rather than phrasing, which is not the same as the
+model obeying it. §Lessons 42 was invisible to inspection — a quoted phrasing appeared in 5 of 5
+drafts and only generation against real data showed it. The Peak6 row is exactly the right
+shape to settle it: 8 contacts at one company, all unsent. Until those 8 are generated with
+context and counted for shared sentences, this feature is unproven in the only way that matters.
+
+The two `SURVIVED` mutations in CTX-2 are the reminder for why that matters: both were places
+the tests looked complete and had never exercised the branch at all.

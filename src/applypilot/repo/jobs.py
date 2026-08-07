@@ -214,7 +214,8 @@ def dashboard_rows(limit: int = 500, conn: sqlite3.Connection | None = None,
         SELECT url, title, site, salary, location, full_description, application_url, detail_error,
                fit_score, score_reasoning, tailored_resume_path, cover_letter_path,
                apply_status, apply_error, apply_attempts, applied_at,
-               last_attempted_at, apply_duration_ms, rejected_at, interview_at
+               last_attempted_at, apply_duration_ms, rejected_at, interview_at,
+               job_context, job_ask
         FROM jobs
         WHERE {QUEUE_SQL}{scope}
         ORDER BY
@@ -448,6 +449,40 @@ def set_description(url: str, text: str, conn: sqlite3.Connection | None = None)
         "detail_scraped_at = COALESCE(detail_scraped_at, ?) WHERE url = ?",
         (text, _now(), url))
     conn.commit()
+
+
+#: What the operator may type per row, and how much of it reaches a prompt (CTX-2). Capped at
+#: the WRITE, like every other free-text field in this schema. An ask that runs long is a second
+#: ask, and a second ask in one email gets neither answered.
+CONTEXT_MAX = 1200
+ASK_MAX = 200
+
+
+def set_context(url: str, context: str | None = None, ask: str | None = None,
+                conn: sqlite3.Connection | None = None) -> dict:
+    """Store what the operator knows about this job. Returns what was actually written.
+
+    `None` means "this caller did not show that field", which is not the same as the operator
+    clearing it — the panel renders both boxes today, but a future caller showing one would
+    otherwise silently blank the other. That is the bug `_save_draft` already carries a comment
+    about: the channel tabs each render half a form, and defaulting a missing key to "" had the
+    LinkedIn tab blanking the outreach email.
+    """
+    conn = _c(conn)
+    sets, args = [], []
+    if context is not None:
+        sets.append("job_context = ?")
+        args.append(context.strip()[:CONTEXT_MAX])
+    if ask is not None:
+        sets.append("job_ask = ?")
+        args.append(ask.strip()[:ASK_MAX])
+    if not sets:
+        return {}
+    args.append(url)
+    conn.execute(f"UPDATE jobs SET {', '.join(sets)} WHERE url = ?", args)
+    conn.commit()
+    row = conn.execute("SELECT job_context, job_ask FROM jobs WHERE url = ?", (url,)).fetchone()
+    return {"context": (row["job_context"] or ""), "ask": (row["job_ask"] or "")} if row else {}
 
 
 def mark_interview(url: str, conn: sqlite3.Connection | None = None) -> str:

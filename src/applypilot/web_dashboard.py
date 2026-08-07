@@ -1789,6 +1789,24 @@ def _status_payload(space: str = "") -> dict:
             "terminal": terminal,
             # The success metric. A job with this set needs no more attention.
             "interview_at": row["interview_at"] or "",
+            # CTX-2. What the operator knows about this employer, and what they want from the
+            # people at it. Read straight off the SELECT — no `if "col" in row.keys()` guard,
+            # which is what hid `interview_at` from the browser for two rounds while the write
+            # worked perfectly (§Lessons 47). A column the payload needs belongs in the SELECT;
+            # if it is absent this must crash.
+            "job_context": row["job_context"] or "",
+            "job_ask": row["job_ask"] or "",
+            # How many existing drafts were actually WRITTEN with that context — read off
+            # `draft_variant`, which records the INPUTS to each draft, so this needs no new
+            # column and no timestamp to compare against. It also cannot lie the way a
+            # timestamp could: it says what went into the draft, not what existed when it was
+            # made.
+            #
+            # Known limit, worth stating rather than discovering: editing the context after a
+            # draft was written leaves that draft tagged `ctx`, so this counts "used SOME
+            # context", not "used THIS context". It catches the case that matters — context
+            # typed onto a job that already has drafts, which is every job in the table today.
+            "context_use": _context_use(raw_contacts),
             "last_attempted_at": row["last_attempted_at"] or "",
             "materials": materials,
             "contacts": contacts,
@@ -1893,6 +1911,22 @@ def _accounts_payload(conn, rows=None) -> dict:
         return acct.panel(conn, jobs=[dict(r) for r in rows] if rows is not None else None)
     except Exception:  # noqa: BLE001
         return {"blocking": [], "ready": [], "open_count": 0}
+
+
+def _context_use(raw_contacts: list) -> dict:
+    """How many of this job's drafts were written with the operator's context, and how many of
+    those are now unchangeable because they have been sent.
+
+    `stale` is what the panel acts on: unsent drafts that predate the context and could be
+    regenerated for free. Sent ones are counted separately and never offered — a sent draft is
+    the only record of what actually went out, which is the same rule `deck-relink` follows.
+    """
+    drafted = [c for c in raw_contacts if (c.get("outreach_message") or "").strip()]
+    used = [c for c in drafted if "ctx" in (c.get("draft_variant") or "").split("+")]
+    unsent_without = [c for c in drafted
+                      if c not in used and not (c.get("sent_message_id") or "").strip()]
+    return {"drafts": len(drafted), "used": len(used), "stale": len(unsent_without),
+            "sent": len([c for c in drafted if (c.get("sent_message_id") or "").strip()])}
 
 
 def _pending_introductions(job_threads: dict, raw_contacts: list) -> list[dict]:
@@ -2360,6 +2394,35 @@ def _space_templates() -> dict:
     return {"ok": True, "templates": [
         {"id": t, "name": sp.TEMPLATE_BLURB[t][0], "blurb": sp.TEMPLATE_BLURB[t][1]}
         for t in sp.OFFERED_TEMPLATES]}
+
+
+def _save_job_context(data: dict) -> dict:
+    """CTX-2. What the operator knows about ONE job, and what they want from its people.
+
+    Writes only the fields the client actually SENT. A missing key means "this caller did not
+    show that box", not "the operator cleared it" — the same distinction `_save_draft` carries a
+    comment about, where defaulting an absent field to "" had the LinkedIn tab silently blanking
+    the outreach email.
+
+    Deliberately does NOT redraft. Regenerating eight drafts the moment somebody stops typing
+    spends real credits on a paragraph they may still be editing; the panel reports which drafts
+    are now older than the context instead, and the operator decides.
+    """
+    init_db()
+    conn = get_connection()
+    url = (data.get("job_url") or "").strip()
+    if not url or not _jobs.find_by_any_url(url, conn):
+        return {"ok": False, "message": "No such job."}
+    if "context" not in data and "ask" not in data:
+        return {"ok": False, "message": "Nothing to save."}
+    saved = _jobs.set_context(
+        url,
+        context=str(data["context"]) if "context" in data else None,
+        ask=str(data["ask"]) if "ask" in data else None,
+        conn=conn)
+    what = [n for n, v in (("Context", saved.get("context")), ("Ask", saved.get("ask"))) if v]
+    return {"ok": True, "message": (" and ".join(what) + " saved.") if what else "Cleared.",
+            **saved}
 
 
 def _save_offer(data: dict) -> dict:
@@ -3432,6 +3495,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/space/offer":
                 _json_response(self, _save_offer(data))
+                return
+            if path == "/api/job/context":
+                _json_response(self, _save_job_context(data))
                 return
             if path == "/api/space/create":
                 _json_response(self, _create_space(data))

@@ -891,6 +891,27 @@
     letter-spacing:.04em; margin-bottom:5px; }
   .jd-desc { font-size:12.5px; white-space:pre-wrap; max-height:420px; overflow-y:auto;
     padding:9px 11px; border:1px solid var(--line); border-radius:8px; background:var(--surface2); }
+  /* CTX-2. The operator's own knowledge, above the scraped description on the same tab — the
+     ordering is the argument: what you know outranks what the posting says. A <details> so the
+     open/closed state survives the 2.5s rewrite of #jobs without any JS holding it. */
+  .ctx { margin-bottom:14px; border:1px solid var(--line); border-radius:8px;
+    background:var(--surface2); }
+  .ctx > summary { list-style:none; cursor:pointer; padding:9px 11px; display:flex;
+    align-items:baseline; gap:8px; flex-wrap:wrap; }
+  .ctx > summary::-webkit-details-marker { display:none; }
+  .ctx > summary::before { content:'▸'; color:var(--faint); font-size:10px; }
+  .ctx[open] > summary::before { content:'▾'; }
+  .ctx > summary .jd-label { margin-bottom:0; }
+  .ctx-body { padding:0 11px 11px; }
+  .ctx-body textarea { width:100%; font:inherit; font-size:12.5px; padding:7px 9px;
+    border:1px solid var(--line); border-radius:6px; background:var(--surface); resize:vertical; }
+  .ctx-body .dbtns { display:flex; gap:8px; align-items:center; margin:8px 0 6px; }
+  .ctx-body .d-label { font-size:11px; font-weight:600; color:#55707f; margin:8px 0 3px;
+    text-transform:uppercase; letter-spacing:.4px; }
+  .ctx-on { color:var(--green); font-weight:600; font-size:11px; }
+  /* Same amber as every other "this is late, not broken" state. Nine of twenty-eight rows carry
+     something outstanding; an alarm colour that is always on is trained away within a week. */
+  .ctx-stale { color:#9a6b00; font-weight:600; font-size:11px; }
   /* Deck click — a distinct colour from "sent" and "replied": it is a third, weaker-than-reply
      but real signal, and collapsing it into either would lose that. */
   .pill.deck { background:#f3ecfd; color:#5b21b6; border-color:#d9c8f5; }

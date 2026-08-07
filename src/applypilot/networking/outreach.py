@@ -268,7 +268,7 @@ def sender_background(profile: dict) -> list[str]:
 
 def draft_variant(*, warm: bool = False, noticed: bool = False, jd_chars: int = 0,
                   deck: bool = False, scheduling: bool = False, style: bool = False,
-                  premise: bool = False) -> str:
+                  premise: bool = False, ctx: bool = False, ask: bool = False) -> str:
     """A compact signature of WHAT WENT INTO a draft, e.g. "cold+jd2k+deck+cal".
 
     Reply rate without this is a single number that can only go up or down for reasons nobody
@@ -295,6 +295,14 @@ def draft_variant(*, warm: bool = False, noticed: bool = False, jd_chars: int = 
     # was unfalsifiable before `draft_variant`.
     if premise:
         bits.append("premise")
+    # CTX-2. Unlike `premise`, these VARY across the rows of one Space, so they are the first
+    # inputs in this signature that can actually be compared within a campaign — some jobs get
+    # context and some do not, and the reply rates are then two populations rather than a
+    # before/after split.
+    if ctx:
+        bits.append("ctx")
+    if ask:
+        bits.append("ask")
     if deck:
         bits.append("deck")
     if scheduling:
@@ -396,8 +404,8 @@ def _pitch_user_prompt(sender_bits, contact, company, about_them, offer, noticed
     )
 
 
-def _job_user_prompt(sender_bits, contact, relationship, role, company, jd, noticed, premise,
-                    sched_block, deck_block, warm_block, style_block, tone_block,
+def _job_user_prompt(sender_bits, contact, relationship, role, company, jd, noticed, context,
+                    premise, sched_block, deck_block, warm_block, style_block, tone_block,
                     previous):
     """The jobs-shaped prompt.
 
@@ -426,6 +434,26 @@ def _job_user_prompt(sender_bits, contact, relationship, role, company, jd, noti
         f"JOB APPLIED TO:\nRole: {role}\nCompany: {company}\n"
         f"WHAT THE ROLE ACTUALLY INVOLVES (from the posting, the specific thing to react to):\n"
         f"{jd}\n\n"
+        # CTX-2. What the operator KNOWS, against the scrape directly above it, which is
+        # everything else this prompt has ever had about a job. Placed above `noticed` because
+        # it is the more general of the two operator inputs — person-specific reads closest to
+        # the instruction to write — and above the CTA blocks because it is a fact to draw on
+        # rather than a thing to ask for.
+        + (f"WHAT THE SENDER KNOWS ABOUT THIS COMPANY AND ROLE (verbatim, from the sender — "
+           f"true, and not in the posting):\n{context}\n"
+           "How to use it:\n"
+           "- FACTS, never phrasing. Several people at this company are being written to from "
+           "this same paragraph, so reusing its wording sends them the identical sentence. Put "
+           "it in your own words, differently each time.\n"
+           "- It outranks the posting where they disagree. The operator has spoken to these "
+           "people; the posting was written by whoever owned the requisition.\n"
+           "- Use the part that is relevant to THIS person and drop the rest. A recruiter and "
+           "an engineer do not need the same half of it.\n"
+           "- Never present it as research. Naming how you came to know something, \"I saw "
+           "that…\", \"I read that…\", \"I understand you…\", is the shape that reads as "
+           "automated. Say the thing itself.\n"
+           "- If none of it fits naturally, leave it out. A forced detail is worse than "
+           "none.\n\n" if context else "")
         # The operator saw something on their profile and wrote it down. This is the ONE piece
         # of genuinely person-specific input available, so it takes precedence over the posting
         #, but it must be used as a human would use it, not announced.
@@ -517,6 +545,10 @@ def draft_email(profile: dict, job: dict, contact: dict, style: str = "", warm: 
     from applypilot.domain.jobdesc import role_essentials
     jd = role_essentials(job.get("full_description"))
     noticed = (contact.get("noticed") or "").strip()[:400]
+    # CTX-2. Per ROW, against `noticed`'s per PERSON. Capped here as well as at the write,
+    # because a job dict can reach this function from a caller that never went through
+    # `repo.set_context` — a CLI path, a test, a future importer.
+    context = (job.get("job_context") or "").strip()[:1200]
 
     directive = _resolve_style(profile, style)
     style_block = f"STYLE DIRECTION (follow closely):\n{directive}\n\n" if directive else ""
@@ -549,11 +581,27 @@ def draft_email(profile: dict, job: dict, contact: dict, style: str = "", warm: 
         warm_block = ""
 
     link = _scheduling_link(profile)
-    sched_block = (
-        f"SCHEDULING LINK (include in the EMAIL CTA so they can book a call directly): {link}\n\n"
-        if link else
-        "SCHEDULING LINK: none provided, invite a quick call/chat without a link.\n\n"
-    )
+    # CTX-2. The operator's own ask for this row REPLACES the default CTA framing; it is not
+    # appended to it. A prompt that says "invite them to book a call" AND "ask who owns the
+    # intake rebuild" produces an email that does both, badly — §Lessons 40, where the SMS
+    # touch ladder beat the standing block every time because appending never resolves a
+    # contradiction. The LINK survives either way: what the operator overrides is what to ask
+    # for, not whether a calendar exists.
+    ask = (job.get("job_ask") or "").strip()[:200]
+    if ask:
+        sched_block = (
+            f"WHAT THE SENDER WANTS FROM THIS PERSON (verbatim, from the sender):\n{ask}\n"
+            "This REPLACES the usual call-booking ask. Do not also invite them to book a call, "
+            "and do not ask for two things — one email, one request.\n"
+            + (f"If a call is the natural way to give it, this link books one directly: {link}\n\n"
+               if link else "\n")
+        )
+    else:
+        sched_block = (
+            f"SCHEDULING LINK (include in the EMAIL CTA so they can book a call directly): {link}\n\n"
+            if link else
+            "SCHEDULING LINK: none provided, invite a quick call/chat without a link.\n\n"
+        )
     # `offer_deck=False` turns the deck off for a whole Space. Resolved here rather than in
     # `_intro_deck_url` so the OTHER guarantee still holds: `ensure_intro_deck` appends the link
     # when the model drops it, and it must not append a link the Space said not to send.
@@ -581,7 +629,7 @@ def draft_email(profile: dict, job: dict, contact: dict, style: str = "", warm: 
         system = _PITCH_SYSTEM
     else:
         user = _job_user_prompt(sender_bits, contact, relationship, role, company, jd,
-                                noticed, offer, sched_block, deck_block, warm_block,
+                                noticed, context, offer, sched_block, deck_block, warm_block,
                                 style_block, tone_block, previous)
         system = _SYSTEM
 
@@ -592,7 +640,7 @@ def draft_email(profile: dict, job: dict, contact: dict, style: str = "", warm: 
     )
     variant = draft_variant(warm=warm, noticed=bool(noticed), jd_chars=len(jd),
                             deck=bool(deck), scheduling=bool(link), style=bool(directive),
-                            premise=bool(offer))
+                            premise=bool(offer), ctx=bool(context), ask=bool(ask))
     data = extract_json(raw)
     subject = sanitize_text(str(data.get("subject", ""))).strip()
     body = sanitize_text(str(data.get("body", ""))).strip()

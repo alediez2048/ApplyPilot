@@ -316,6 +316,24 @@ _ALL_COLUMNS: dict[str, str] = {
     # a valid row. A migration that backfills with an UPDATE misses whatever is inserted while
     # it runs; a column default cannot.
     "space_id": "TEXT NOT NULL DEFAULT 'job-search'",
+    # CTX-2. What the OPERATOR knows about this employer and role, which the scraper cannot:
+    # that they met the Head of Engineering at a meetup, that the team is rebuilding the thing
+    # this candidate already built once. Everything else the drafting prompt knows about a job
+    # arrives from `role_essentials(full_description)` — a scrape.
+    #
+    # The targets shape has had this tier since SPACE-3: `_pitch_user_prompt` reads
+    # `full_description` as "what the operator pasted about the company". On the jobs shape that
+    # same column holds the posting, so there was nowhere to put it. This is the missing half.
+    #
+    # In the additive dict and NOT a migration, like `space_id` above and for the same reason:
+    # `get_connection()` does not call `init_db`, so the two RACE. Nullable TEXT — nothing to
+    # backfill, so the column default has no work to do here either.
+    "job_context": "TEXT",
+    # What the operator wants FROM this person. Separate from the above because it lands
+    # somewhere else entirely: the ask is currently decided by the scheduling and deck blocks,
+    # so this REPLACES their CTA framing rather than being appended to it (§Lessons 40 — two
+    # instructions disagreeing in one prompt is a code bug, not a wording problem).
+    "job_ask": "TEXT",
 }
 
 

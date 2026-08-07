@@ -2665,10 +2665,27 @@ def _progress_payload(stats: dict, jobs: list[dict], command_status: dict) -> di
     }
 
 
-def _import_urls(text: str) -> dict:
+def _import_urls(text: str, space: str = "") -> dict:
+    """Import pasted job URLs INTO THE SPACE ON SCREEN.
+
+    `space` was missing entirely and the column default put every paste in `job-search`, so a
+    posting added while standing in Gauntlet appeared under a different tab — separation of
+    outreach is the whole reason the tabs exist. `_add_targets` had carried its Space since
+    SPACE-3; this path is its twin and never got it.
+
+    A targets Space is refused rather than silently redirected. Its jobs console is hidden
+    (SPACE-3), so this is only reachable by a stale tab or a hand-made request — and quietly
+    filing the row somewhere else is exactly the bug being fixed, one level up.
+    """
     init_db()
     config.ensure_dirs()
     conn = get_connection()
+    space_id, _, _ = _resolve_space(space, conn)
+    if space_id:
+        manifest = _spaces.load(space_id, conn)
+        if manifest is not None and manifest.shape != _spaces.JOBS_SHAPE:
+            return {"ok": False, "found": 0, "inserted": 0, "duplicates": 0,
+                    "message": "Job postings belong to a jobs Space. This one holds targets."}
     urls = []
     for match in _URL_RE.findall(text):
         url = match.rstrip(").,;]")
@@ -2700,7 +2717,7 @@ def _import_urls(text: str) -> dict:
         company = _infer_company(url)
         title = f"{company} uploaded job"
         try:
-            _jobs.insert_imported(url, title, company, company, url, conn)
+            _jobs.insert_imported(url, title, company, company, url, conn, space_id=space_id)
             inserted += 1
         except Exception:
             duplicates += 1
@@ -3441,7 +3458,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 _json_response(self, {"ok": ok, "message": msg}, 200 if ok else 409)
                 return
             if path == "/api/import":
-                _json_response(self, _import_urls(data.get("urls", "")))
+                _json_response(self, _import_urls(data.get("urls", ""), data.get("space", "")))
                 return
             if path == "/api/prepare":
                 min_score = int(data.get("min_score") or 1)

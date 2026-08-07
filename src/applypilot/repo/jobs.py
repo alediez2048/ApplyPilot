@@ -497,12 +497,25 @@ def touch_import(url: str, application_url: str, conn: sqlite3.Connection | None
 
 
 def insert_imported(url: str, title: str, company: str, site: str, application_url: str,
-                    conn: sqlite3.Connection | None = None) -> None:
+                    conn: sqlite3.Connection | None = None, space_id: str = "") -> None:
+    """Store a pasted job URL, in the Space the operator was looking at.
+
+    `space_id` is NAMED here rather than left to the column DEFAULT. The default is
+    'job-search', which is right for a fresh install and wrong for every paste made while
+    standing in another Space — the row lands correctly in the table and then appears under a
+    different tab, which is the one outcome tabs exist to prevent. Reported on a Peak6 posting
+    pasted into Gauntlet; the whole point of a Space is that its outreach stays its own.
+
+    Empty means "do not name it", so an install with no registry keeps the column default and
+    every caller predating Spaces behaves exactly as before.
+    """
     conn = _c(conn)
-    conn.execute(
-        "INSERT INTO jobs (url, title, company, site, strategy, discovered_at, application_url) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (url, title, company, site, "dashboard_upload", _now(), application_url))
+    cols = "url, title, company, site, strategy, discovered_at, application_url"
+    vals = [url, title, company, site, "dashboard_upload", _now(), application_url]
+    if space_id:
+        cols += ", space_id"
+        vals.append(space_id)
+    conn.execute(f"INSERT INTO jobs ({cols}) VALUES ({','.join('?' * len(vals))})", vals)
     conn.commit()
 
 

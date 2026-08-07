@@ -402,3 +402,66 @@ def test_the_picker_is_described_by_the_module_that_builds_the_templates(db):
     assert "business" not in [t["id"] for t in offered]
     for t in offered:
         assert t["blurb"] and t["name"]
+
+
+# ── pasting a job URL lands it in the Space you are standing in ─────────────
+
+def _urls_in(space_id, conn):
+    return [r["url"] for r in conn.execute(
+        "SELECT url FROM jobs WHERE space_id = ? ORDER BY url", (space_id,))]
+
+
+def test_a_pasted_url_lands_in_the_space_on_screen(db):
+    """Reported on a Peak6 posting pasted while standing in Gauntlet: it appeared under
+    job-search with everything else. `insert_imported` never named `space_id`, so the column
+    DEFAULT decided — and the default is 'job-search'. Separation of outreach is the entire
+    reason the tabs exist, and a row that quietly files itself elsewhere destroys it.
+
+    `_add_targets` has carried its Space since SPACE-3. This path is its twin and never got it.
+    """
+    spaces.create_space("gauntlet", "Gauntlet", "jobs", conn=db)
+    out = wd._import_urls("https://boards.greenhouse.io/peak6/jobs/123", space="gauntlet")
+    assert out["inserted"] == 1, out
+    assert any("peak6" in u for u in _urls_in("gauntlet", db)), _urls_in("gauntlet", db)
+    assert not any("peak6" in u for u in _urls_in("job-search", db)), (
+        "the posting leaked into job-search — the bug this fixes")
+
+
+def test_no_space_named_still_works(db):
+    """Every caller predating Spaces passes nothing, and an install with no registry must keep
+    behaving exactly as it did."""
+    out = wd._import_urls("https://boards.greenhouse.io/acme/jobs/9")
+    assert out["inserted"] == 1, out
+    assert any("acme/jobs/9" in u for u in _urls_in("job-search", db))
+
+
+def test_a_targets_space_refuses_a_job_posting(db):
+    """Its jobs console is hidden (SPACE-3), so this is only reachable from a stale tab or a
+    hand-made request. Filing the row somewhere else instead would be the reported bug again,
+    one level up — so it is refused, out loud."""
+    out = wd._import_urls("https://boards.greenhouse.io/peak6/jobs/123", space="partnerships")
+    assert out["ok"] is False and out["inserted"] == 0, out
+    assert "targets" in out["message"].lower(), out["message"]
+    assert not any("peak6" in u for u in _urls_in("partnerships", db))
+    assert not any("peak6" in u for u in _urls_in("job-search", db)), "refused and stored anyway"
+
+
+def test_an_unknown_space_does_not_scatter_the_row(db):
+    """`_resolve_space` falls back to the first Space and says so. The row has to follow that
+    same answer — filing it under the id that does not exist would put it in a Space with no
+    tab, which is the one place nothing can ever reach it again."""
+    out = wd._import_urls("https://boards.greenhouse.io/acme/jobs/77", space="nope")
+    assert out["inserted"] == 1, out
+    assert not _urls_in("nope", db), "the row went to a Space that does not exist"
+    assert any("acme/jobs/77" in u for u in _urls_in("job-search", db))
+
+
+def test_the_new_row_shows_under_its_own_tab_and_not_the_other(db):
+    """The write being right is half of it — the symptom was what the operator SAW. Asserted
+    through /api/status, which is the surface that was wrong."""
+    spaces.create_space("gauntlet", "Gauntlet", "jobs", conn=db)
+    wd._import_urls("https://boards.greenhouse.io/peak6/jobs/123", space="gauntlet")
+    mine = [j["url"] for j in wd._status_payload(space="gauntlet")["jobs"]]
+    theirs = [j["url"] for j in wd._status_payload(space="job-search")["jobs"]]
+    assert any("peak6" in u for u in mine), mine
+    assert not any("peak6" in u for u in theirs), "it is still showing on the job-search tab"

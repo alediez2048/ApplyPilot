@@ -310,7 +310,16 @@ async function runEverything() {
     if (urls) {
       pipeSet('import', 'active');
       cmdEl.textContent = 'Importing URLs…';
-      const imp = await post('/api/import', {urls});
+      // SPACE_ID, or the row lands in whatever the column default is — 'job-search' — and a
+      // posting pasted while standing in Gauntlet turns up under a different tab. Separation is
+      // the whole reason the tabs exist. `addTargets` has passed its Space since SPACE-3.
+      const imp = await post('/api/import', {urls, space: SPACE_ID});
+      if (imp.ok === false) {
+        document.getElementById('importStatus').textContent = imp.message || 'Import refused.';
+        pipeSet('import', 'failed');
+        cmdEl.textContent = imp.message || 'Import refused.';
+        return;
+      }
       document.getElementById('importStatus').textContent =
         `Imported ${imp.inserted || 0} new URL(s); ${imp.duplicates || 0} already known.`;
       pipeSet('import', 'done');

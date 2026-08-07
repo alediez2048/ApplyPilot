@@ -465,3 +465,32 @@ def test_the_new_row_shows_under_its_own_tab_and_not_the_other(db):
     theirs = [j["url"] for j in wd._status_payload(space="job-search")["jobs"]]
     assert any("peak6" in u for u in mine), mine
     assert not any("peak6" in u for u in theirs), "it is still showing on the job-search tab"
+
+
+def test_the_accounts_banner_counts_only_this_spaces_employers(db):
+    """Reported from the Gauntlet tab: "🔐 8 employers need an account before their jobs can
+    run", with all eight belonging to job-search postings.
+
+    `ats_accounts` has no `space_id` and must not grow one — an account covers an ATS TENANT,
+    so one Workday login is the same fact on every tab. The banner's SENTENCE is the part that
+    is about jobs, and it was counting rows from another Space.
+    """
+    from applypilot.apply import accounts as acct
+    spaces.create_space("gauntlet", "Gauntlet", "jobs", conn=db)
+    db.execute("INSERT INTO jobs (url, title, site, strategy, space_id, full_description, "
+               "tailored_resume_path, discovered_at) VALUES (?,?,?,?,?,?,?,?)",
+               ("https://peak6.wd5.myworkdayjobs.com/x/1", "Solutions Engineer", "Greenhouse",
+                "dashboard_upload", "gauntlet", "words", "/tmp/r.pdf",
+                "2026-08-06T10:00:00+00:00"))
+    db.execute("UPDATE jobs SET url = ? WHERE url = 'http://j/1'",
+               ("https://acme.wd5.myworkdayjobs.com/x/1",))
+    db.commit()
+    for url in ("https://peak6.wd5.myworkdayjobs.com/x/1",
+                "https://acme.wd5.myworkdayjobs.com/x/1"):
+        acct.note_wall({"url": url}, "login", db)
+
+    mine = wd._status_payload(space="gauntlet")["accounts"]["blocking"]
+    assert [e["realm"] for e in mine] == ["peak6.wd5.myworkdayjobs.com"], mine
+
+    theirs = wd._status_payload(space="job-search")["accounts"]["blocking"]
+    assert [e["realm"] for e in theirs] == ["acme.wd5.myworkdayjobs.com"], theirs

@@ -262,3 +262,71 @@ def test_a_session_hint_is_never_an_answer(db):
     assert p["blocking"][0]["session_seen"] is True
     assert p["blocking"][0]["have"] is False
     assert not acct.preflight({"url": "https://a.wd5.myworkdayjobs.com/x/1"}, db)[0]
+
+
+# ── the panel is scoped to the Space on screen ──────────────────────────────
+#
+# `ats_accounts` has no `space_id` and must not grow one: an account covers an ATS TENANT, so
+# one Salesforce Workday login is the same fact on every tab. What is not shared is the
+# SENTENCE — "8 employers need an account before their jobs can run" is a claim about jobs, and
+# on a Space holding one job it named eight belonging to another.
+
+def _wall(url, db):
+    acct.note_wall({"url": url}, "login", db)
+    return {"url": url, "application_url": "", "applied_at": "", "rejected_at": ""}
+
+
+def test_the_panel_names_only_realms_this_space_would_hit(db):
+    mine = _wall("https://acme.wd5.myworkdayjobs.com/x/1", db)
+    _wall("https://other.wd5.myworkdayjobs.com/x/1", db)     # a job on a different tab
+    p = acct.panel(db, jobs=[mine])
+    assert [e["realm"] for e in p["blocking"]] == ["acme.wd5.myworkdayjobs.com"], p["blocking"]
+
+
+def test_no_jobs_named_still_returns_everything(db):
+    """The CLI's accounts view, and every caller predating Spaces, has no Space in hand. `None`
+    has to keep meaning "all of them" — distinct from an EMPTY list, which means a Space whose
+    jobs hit no wall at all."""
+    _wall("https://acme.wd5.myworkdayjobs.com/x/1", db)
+    _wall("https://other.wd5.myworkdayjobs.com/x/1", db)
+    assert len(acct.panel(db)["blocking"]) == 2
+    assert acct.panel(db, jobs=[])["blocking"] == [], "an empty Space still shows other tabs"
+
+
+def test_a_finished_job_stops_blocking(db):
+    """Applied and rejected rows cannot run, so a wall they once hit is not standing between
+    the operator and anything. Without this the banner keeps naming an employer forever after
+    its only job is done."""
+    done = _wall("https://acme.wd5.myworkdayjobs.com/x/1", db)
+    done["applied_at"] = "2026-08-01T10:00:00+00:00"
+    assert acct.panel(db, jobs=[done])["blocking"] == []
+
+    rejected = _wall("https://beta.wd5.myworkdayjobs.com/x/1", db)
+    rejected["rejected_at"] = "2026-08-01T10:00:00+00:00"
+    assert acct.panel(db, jobs=[rejected])["blocking"] == []
+
+
+def test_an_account_stays_shared_across_spaces(db):
+    """The half that keeps the registry honest. Filtering the PANEL must not turn into
+    partitioning the TABLE — signing in once has to cover the same employer on every tab, which
+    is the entire reason a realm is per tenant rather than per job."""
+    job = _wall("https://acme.wd5.myworkdayjobs.com/x/1", db)
+    repo.set_have_account("acme.wd5.myworkdayjobs.com", True, "operator", db)
+    row = repo.get("acme.wd5.myworkdayjobs.com", db)
+    assert row["have_account"], "the account was not recorded"
+    assert acct.panel(db, jobs=[job])["blocking"] == [], "a paid wall still reads as blocking"
+    # A job at the same employer in ANOTHER Space inherits it — same realm, same row.
+    twin = {"url": "https://acme.wd5.myworkdayjobs.com/x/999", "application_url": "",
+            "applied_at": "", "rejected_at": ""}
+    assert acct.panel(db, jobs=[twin])["blocking"] == []
+
+
+def test_the_application_url_decides_the_realm(db):
+    """A careers page fronting a different vendor's tenant. Scoping must use the same rule the
+    apply itself does, or the panel filters on a realm no apply would ever reach."""
+    acct.note_wall({"url": "https://careers.acme.com/x",
+                    "application_url": "https://acme.wd5.myworkdayjobs.com/x/1"}, "login", db)
+    job = {"url": "https://careers.acme.com/x", "applied_at": "", "rejected_at": "",
+           "application_url": "https://acme.wd5.myworkdayjobs.com/x/1"}
+    assert [e["realm"] for e in acct.panel(db, jobs=[job])["blocking"]] == \
+        ["acme.wd5.myworkdayjobs.com"]

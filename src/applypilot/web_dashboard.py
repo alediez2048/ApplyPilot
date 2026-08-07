@@ -1845,7 +1845,11 @@ def _status_payload(space: str = "") -> dict:
         # in a targets Space "4 employers need an account before their jobs can run" is a banner
         # about jobs that are not on screen and cannot be reached from it. Found by looking at
         # the panel, not by a test — the payload was correct and belonged to another room.
-        "accounts": _accounts_payload(conn) if shape == _spaces.JOBS_SHAPE else {},
+        # ...and scoped to THIS Space's jobs. The registry is shared on purpose — an account
+        # covers an ATS tenant, not a tab — but "8 employers need an account before their jobs
+        # can run" is a claim about jobs, and on a Space holding one it named eight belonging
+        # to another. `rows` is already loaded; the filter is two URL reads per row, no query.
+        "accounts": _accounts_payload(conn, rows) if shape == _spaces.JOBS_SHAPE else {},
         # SPACE-2. The nav list is ONE query however many Spaces there are, and the filter
         # itself is a WHERE clause costing none — so the budget does not move (§Lessons 26 is
         # about what gets ADDED to this path, and this adds one statement, not one per job).
@@ -1866,15 +1870,21 @@ def _status_payload(space: str = "") -> dict:
     }
 
 
-def _accounts_payload(conn) -> dict:
+def _accounts_payload(conn, rows=None) -> dict:
     """The Accounts panel's data. Kept to a single statement on purpose.
 
     A wall is per EMPLOYER, not per job, so this is a short list however many jobs are queued —
     which is exactly why it can ride on a 2.5-second refresh at all.
+
+    `rows` are the jobs of the Space on screen, already in hand. The realm registry is shared
+    across Spaces by design (an account covers a tenant, not a tab), but the banner's claim is
+    about the jobs in front of you — see `accounts.panel`. Filtering here reads two URL strings
+    per row and adds no query, which is the only reason it can live on this path at all
+    (§Lessons 26).
     """
     try:
         from applypilot.apply import accounts as acct
-        return acct.panel(conn)
+        return acct.panel(conn, jobs=[dict(r) for r in rows] if rows is not None else None)
     except Exception:  # noqa: BLE001
         return {"blocking": [], "ready": [], "open_count": 0}
 

@@ -132,9 +132,38 @@ def note_wall(job: dict, reason: str, conn: sqlite3.Connection | None = None) ->
     return realm.id
 
 
-def panel(conn: sqlite3.Connection | None = None) -> dict:
-    """What the Accounts UI renders: what is blocking, and what is already handled."""
+def panel(conn: sqlite3.Connection | None = None,
+          jobs: list[dict] | None = None) -> dict:
+    """What the Accounts UI renders: what is blocking, and what is already handled.
+
+    `jobs` scopes the panel to the rows ON SCREEN. `ats_accounts` has no `space_id` and must
+    not grow one: an account is per ATS TENANT and covers every job at that employer in every
+    Space, so one Salesforce Workday login is the same fact whichever tab you are standing on.
+    What is NOT global is the sentence the banner makes — "8 employers need an account before
+    THEIR JOBS can run" is a claim about jobs, and on a Space holding one job it named eight
+    employers belonging to another tab.
+
+    So the registry stays shared and the panel is filtered: a realm appears only when a job
+    here would actually go through it. `blocked_count` is left alone — it counts every apply
+    that ever hit the wall, across Spaces, which is what makes it a useful sort key.
+
+    Costs nothing: `realm_for` reads two URL strings, and the caller already holds the rows.
+    Passing `jobs=None` keeps the old behaviour for callers with no Space in hand (the CLI's
+    accounts view, and anything predating Spaces).
+    """
     rows = repo.all_realms(conn)
+    if jobs is not None:
+        here = set()
+        for job in jobs:
+            # Applied and rejected rows cannot "run", so a wall they once hit is not something
+            # standing between the operator and anything. Leaving them in kept a realm on the
+            # banner forever after its only job was finished.
+            if (job.get("applied_at") or "") or (job.get("rejected_at") or ""):
+                continue
+            realm = realm_for(job)
+            if realm is not None:
+                here.add(realm.id)
+        rows = [r for r in rows if r["realm_id"] in here]
     blocking, ready = [], []
     for row in rows:
         entry = {

@@ -1,6 +1,6 @@
 # CTX-1 — The campaign premise never reaches a jobs draft
 
-**Size:** S/M · **Depends on:** nothing · **Status:** TODO
+**Size:** S/M · **Depends on:** nothing · **Status:** DONE 2026-08-07
 **PRD:** `docs/outreach-context-prd.md` §1, §6.2
 **Reported:** 2026-08-07 — *"the same message for job applications won't be the same as gauntlet"*
 
@@ -94,28 +94,54 @@ every one reported as *"it does nothing"*.
 
 ## Scope / tasks
 
-- [ ] Add an `offer` parameter to `_job_user_prompt` and pass it from `outreach.py:538`.
-- [ ] New block, **THE PREMISE OF THIS CAMPAIGN**, positioned per PRD §5 — below `noticed`,
-      above `warm_block`. It is the most general fact in the prompt, so it sits furthest from
-      the write instruction, mirroring why `tone_block` is last.
-- [ ] Frame it as **substance, not voice**, and say so in the block: `tone_block` is already
-      in this prompt and the two must not read as the same instruction (§Lessons 40). The
-      premise says *what is true of every role in this Space*; tone says *how to sound*.
-- [ ] **No worked example in the block.** §Lessons 9, three occurrences — an example in the
-      candidate's own domain comes back verbatim. If an example is unavoidable it is
-      off-domain with `N` placeholders.
-- [ ] Regenerate `tests/golden/jobs_outreach_prompt.txt` **in its own commit**, with the diff
-      read rather than accepted. That file exists to make exactly this change visible.
-- [ ] **Move `#offerInput` out of `#targetControls`** into a shape-neutral section, so it
-      renders on both shapes. No backend change — `_save_offer` already accepts any Space.
-- [ ] Label and hint per shape:
-      `pipeline/jobs` → **"The premise of this campaign"**;
-      `pipeline/targets` → **"What you're offering"** (unchanged).
-      The strings live beside `TEMPLATE_BLURB` in `domain/space.py`, not in the HTML, so the
-      panel cannot describe a field differently from what the manifest does.
-- [ ] Rewrite the hint under the box. The current one explains why the field is a *targets*
-      concern, which is the sentence this ticket disproves.
-- [ ] Write the premise for `gauntlet` and for `job-search`, and read one real draft from each.
+- [x] Added a `premise` parameter to `_job_user_prompt` and passed it from the jobs branch.
+      Named `premise`, not `offer`: in this prompt that is what it IS, and the ticket already
+      records that the field's name is worse than the thing.
+- [x] New block, **THE PREMISE OF THIS CAMPAIGN**, below `noticed` and above the CTA blocks —
+      the more general of the two operator inputs, so person-specific still reads closest to
+      the instruction to write.
+- [x] Framed as substance, not voice, with `test_the_premise_is_not_the_tone` holding the two
+      apart. Rendering one from the other would have passed every other test in the file.
+- [x] **No worked example in the block.** §Lessons 9. The repetition rule is stated as a rule.
+- [x] ~~Regenerate the golden file~~ — **it did not move, and that is the better outcome.**
+      See the correction below.
+- [x] Moved `#offerInput` out of `#targetControls` into `#premiseControls`, which no shape
+      hides. No backend change needed: `_save_offer` never had a shape guard.
+- [x] Heading, placeholder and hint per shape, from `space.OFFER_COPY` / `offer_copy()` in
+      `domain/space.py`, shipped on the payload as `space_offer_copy`. The old hint argued the
+      field was a targets concern; rewritten.
+- [x] `_save_offer`'s confirmation uses the label above the box — "Offer saved." is the wrong
+      word on a jobs Space.
+- [x] `draft_variant` gained a `premise` bit. Not in the original scope; added because the
+      argument for `+ctx` in CTX-2 applies identically, and tagging has to start at the first
+      premise-driven send or the before/after comparison is lost.
+- [ ] **Write the premise for `gauntlet` and `job-search`.** Left to the operator — the whole
+      point of the field is that it says something only they know. The mechanism is verified
+      end to end against the real Peak6 row (below); nothing was written to either Space.
+
+### Correction: the golden file did not need regenerating
+
+The ticket assumed the block always renders and therefore that
+`tests/golden/jobs_outreach_prompt.txt` would move. It does not: the block is conditional on a
+non-empty premise, exactly as `noticed` and `tone_block` are, so a Space without one produces
+the byte-identical prompt it produced before CTX-1.
+
+That is strictly better than a regenerated baseline. `test_the_jobs_prompt_matches_the_fixed_baseline`
+and `test_a_default_space_changes_the_prompt_by_nothing` both still pass **untouched**, which
+proves the change is additive rather than asking a reader to believe it — and 30 live jobs'
+worth of outreach is provably unchanged until somebody types a premise.
+
+### Verified live
+
+Against the real Gauntlet row (`Solutions Engineer @ Peak6`) and its real contact, with the
+prompt captured rather than sent:
+
+```
+premise present  : True
+premise absent   : True          (same job, same contact, no premise)
+delta            : 920 chars
+position         : after WHAT THE SENDER NOTICED, before SCHEDULING LINK
+```
 
 ## Not in scope
 
@@ -126,30 +152,39 @@ every one reported as *"it does nothing"*.
 
 ## Tests
 
-- [ ] `test_two_jobs_spaces_produce_different_prompts` — **the objective, asserted on the
-      artifact.** Same job, same contact, two Spaces with different premises; assert each
-      premise appears in its own prompt and is **absent** from the other's. Comparing the two
-      prompts to each other proves only that they differ (§Lessons 60 — the first version of
-      `test_a_default_space_changes_the_prompt_by_nothing` compared two moving things and
-      survived a mutation that leaked a field into both paths).
-- [ ] **Assert both premises are non-empty first.** `"" in prompt` is True for every string;
-      that exact shape shipped three times in one session last week (§Lessons 71).
-- [ ] `test_a_default_space_changes_the_prompt_by_nothing` — must still pass. A Space with no
-      premise produces the byte-identical string it produced before Spaces existed.
-- [ ] `test_the_premise_is_not_the_tone` — set `tone` and leave `offer` empty; assert the
-      premise block is absent. Then the reverse. A mutation that renders one from the other
-      must fail.
-- [ ] `test_the_golden_file_moved_once` — the regenerated file contains the premise heading
-      when a premise is set and not otherwise.
-- [ ] `test_the_premise_box_renders_on_a_jobs_space` — assert the control **exists**, not that
-      the copy is right. §Lessons 41: a render test that asserts on a sentence passes happily
-      for a panel showing nothing but the right words. And `hidden` is a user-agent rule that
-      any author `display` beats (§Lessons 62), so assert the attribute is absent rather than
-      that a property computes.
-- [ ] Mutation-verified: deleting the `offer` argument at the call site kills
-      `test_two_jobs_spaces_produce_different_prompts`. Clear `__pycache__` before believing a
-      contradictory result (§Lessons 16 — a same-second, same-length edit is invisible to the
-      bytecode cache).
+`tests/test_premise.py`, 22 tests. **All 22 passed on the first run**, which §Lessons 13 says is
+exactly when to distrust them, so all twelve mutations below were run before believing any of it.
+
+- [x] `test_two_jobs_spaces_produce_different_prompts` — the objective, asserted on the artifact.
+      Each premise present in its own prompt and **absent** from the other's; comparing the two
+      prompts to each other proves only that they differ (§Lessons 60).
+- [x] Both premises asserted non-empty first. `"" in prompt` is True for every string, which
+      shipped three separate times in one session (§Lessons 71).
+- [x] `test_an_empty_premise_adds_nothing` / `test_whitespace_is_not_a_premise` — asserted on the
+      HEADING, never on `offer in prompt`.
+- [x] `test_the_premise_is_not_the_tone` — both directions.
+- [x] `test_the_premise_is_told_not_to_be_reused_verbatim` — the §Lessons 42 instruction is
+      present in the block, not merely intended.
+- [x] `test_the_targets_offer_still_works` — the path that already read the field did not move,
+      and the jobs heading does not leak into the pitch prompt.
+- [x] `test_every_shape_has_copy_for_the_box`, `test_an_unknown_shape_falls_back_to_a_label`,
+      `test_offer_copy_hands_back_a_copy` — the label cannot go blank, and a caller cannot
+      mutate the shared dict the payload ships.
+- [x] `test_the_confirmation_uses_the_label_above_the_box`.
+- [x] Browser half under Node with **real nodes**, not `el()` stubs that swallow every write
+      (§Lessons 41): the panel is unhidden on both shapes, labelled from the payload, and the
+      2.5s refresh still does not eat a paragraph mid-sentence.
+- [x] `test_the_markup_no_longer_hides_the_box_behind_the_shape` — reads the shipped HTML and
+      asserts the textarea has LEFT `#targetControls`. `hidden` is a user-agent rule any author
+      `display` beats (§Lessons 62), so the attribute's absence is the assertion.
+- [x] **Mutation-verified, 12 of 12 killed**, `__pycache__` cleared between each (§Lessons 16):
+      dropping `offer` at the call site · rendering the block unconditionally · removing the
+      variant bit · collapsing `offer_copy` to one wording · returning the live dict · restoring
+      "Offer saved." · emptying the payload key · not setting the title · not setting the
+      placeholder · re-hiding the panel on jobs · overwriting a focused textarea · renaming the
+      textarea back out of the panel.
+
+Full suite **1562 passed, 1 skipped**; ruff and eslint clean.
 
 ## Open question carried to CTX-2
 

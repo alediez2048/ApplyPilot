@@ -102,17 +102,6 @@
         — the employer is stated rather than recovered from an ATS hostname, which is where
         “Ouryahoo”, “Edu” and “Ats” came from.</div>
     </section>
-    <section>
-      <h2>Your offer</h2>
-      <textarea id="offerInput" placeholder="One paragraph: what you are proposing. Written once, used in every draft in this Space."></textarea>
-      <div class="row" style="margin-top:10px; align-items:center">
-        <button class="primary" onclick="saveOffer(this)">Save offer</button>
-        <span id="offerStatus" class="hint" style="font-weight:600"></span>
-      </div>
-      <div class="hint">In a job search the posting varies per row and your pitch is constant.
-        Here it inverts: <strong>your pitch is constant and their situation varies</strong>, so
-        this belongs to the Space rather than to any one row.</div>
-    </section>
   </div>
 
   <div class="controls" id="jobControls">
@@ -138,6 +127,24 @@
         <button id="prepareBtn" onclick="prepareJobs()">Prepare only</button>
         <button id="applyBtn" onclick="applyJobs()">Apply only</button>
       </div>
+    </section>
+  </div>
+
+  <!-- CTX-1. The Space's one constant paragraph. It lived inside #targetControls, which is
+       hidden on a jobs Space, so `job-search` and `gauntlet` had nowhere to type one — while
+       the drafting code was equally unable to read one. Shape-neutral now: BOTH shapes have a
+       constant paragraph, they just call it different things. The heading, placeholder and hint
+       come from domain/space.py via the payload, so this panel cannot describe the field
+       differently from what the manifest does. -->
+  <div class="controls" id="premiseControls">
+    <section>
+      <h2 id="premiseTitle">Your offer</h2>
+      <textarea id="offerInput"></textarea>
+      <div class="row" style="margin-top:10px; align-items:center">
+        <button class="primary" onclick="saveOffer(this)">Save</button>
+        <span id="offerStatus" class="hint" style="font-weight:600"></span>
+      </div>
+      <div id="premiseHint" class="hint"></div>
     </section>
   </div>
 

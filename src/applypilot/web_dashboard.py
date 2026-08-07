@@ -1665,6 +1665,7 @@ def _status_payload(space: str = "") -> dict:
     conn = get_connection()
     from applypilot.networking.store import init_contacts, get_contacts_for_job
     from applypilot.networking import derive as _derive
+    from applypilot.domain import space as _sp
     init_contacts(conn)
     _net_tasks = _network.statuses()
 
@@ -1860,6 +1861,11 @@ def _status_payload(space: str = "") -> dict:
         # is constant (your résumé); here it inverts.
         "space_shape": shape,
         "space_offer": (manifest.offer if manifest else ""),
+        # CTX-1. What to CALL that paragraph on this shape. Three short strings, on the payload
+        # for the same reason `space_templates` is — the panel already re-renders every 2.5s and
+        # this adds no statement. Sourced from `domain/space.py` so the label cannot drift from
+        # the field.
+        "space_offer_copy": _sp.offer_copy(shape),
         "space_terminal": terminal,
         # What the + button offers. On the payload rather than a second endpoint: it is three
         # short strings and the panel already re-renders every 2.5s.
@@ -2357,13 +2363,17 @@ def _space_templates() -> dict:
 
 
 def _save_offer(data: dict) -> dict:
-    """The Space's constant pitch (`spaces-prd.md` §7.1).
+    """The Space's constant paragraph (`spaces-prd.md` §7.1, CTX-1).
 
-    One paragraph, written once, for every draft in the Space. It occupies the slot
-    `full_description` fills in the jobs pipeline — which is why it belongs to the SPACE and not
-    to a row: there the description varies per row and the pitch is constant, and here that
-    inverts.
+    One paragraph, written once, for every draft in the Space — on BOTH shapes. On targets it is
+    the offer and occupies the slot `full_description` fills for a job. On jobs it is the
+    PREMISE: what is true of every role in the campaign, which is why `job-search` and
+    `gauntlet` no longer have to send the same email as each other.
+
+    This endpoint never had a shape guard, so the backend has always accepted a premise for a
+    jobs Space; the box to type one into was inside `#targetControls` and hidden there.
     """
+    from applypilot.domain import space as sp
     init_db()
     conn = get_connection()
     space_id, _, _ = _resolve_space((data or {}).get("space", ""), conn)
@@ -2372,7 +2382,11 @@ def _save_offer(data: dict) -> dict:
         return {"ok": False, "message": "No such Space."}
     offer = (data.get("offer") or "").strip()[:2000]
     _spaces.save(manifest.with_(offer=offer), conn)
-    return {"ok": True, "message": "Offer saved." if offer else "Offer cleared."}
+    # CTX-1. "Offer saved." is the wrong word on a jobs Space, where the same paragraph is the
+    # premise. One field, two names, and the confirmation has to use the one on the label above
+    # the box the operator just typed into.
+    what = sp.offer_copy(manifest.shape)["title"]
+    return {"ok": True, "message": f"{what} saved." if offer else f"{what} cleared."}
 
 
 def _all_job_descriptions(data: dict | None = None) -> dict:

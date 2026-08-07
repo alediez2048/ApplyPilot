@@ -59,6 +59,45 @@ TEMPLATE_BLURB = {
                  "Needs a separate mailbox (ID-1), so it is not offered yet."),
 }
 
+#: What the Space's one constant paragraph is CALLED, per shape (CTX-1). Beside `TEMPLATE_BLURB`
+#: and for the same reason: the panel cannot describe the field differently from what the
+#: manifest does.
+#:
+#: One field, two meanings. `offer` is the targets name — there it is what you are SELLING. On
+#: the jobs shape the same paragraph is the PREMISE: what is true of every role in the campaign,
+#: which is the thing a résumé cannot say and a posting does not know. The name is worse than
+#: the thing, and renaming it costs a manifest field plus a config-blob path, so the field keeps
+#: its name and the operator is shown the right one.
+OFFER_COPY = {
+    JOBS_SHAPE: {
+        "title": "The premise of this campaign",
+        "placeholder": ("One paragraph: what you are looking for and why. The part that is true "
+                        "of every role in this Space, whatever the posting says."),
+        "hint": ("Used in every draft here, so <strong>Gauntlet does not have to sound like a "
+                 "general job search</strong>. Facts, not phrasing — it is rewritten for each "
+                 "person, never pasted."),
+    },
+    TARGETS_SHAPE: {
+        "title": "Your offer",
+        "placeholder": ("One paragraph: what you are proposing. Written once, used in every "
+                        "draft in this Space."),
+        "hint": ("In a job search the posting varies per row and your pitch is constant. Here "
+                 "it inverts: <strong>your pitch is constant and their situation varies</strong>, "
+                 "so this belongs to the Space rather than to any one row."),
+    },
+}
+
+
+def offer_copy(shape: str) -> dict:
+    """The heading, placeholder and hint for this shape's constant paragraph.
+
+    Falls back to the jobs wording rather than to empty strings: a shape this does not know is
+    still a Space with an `offer`, and rendering an unlabelled textarea is the §Lessons 41
+    failure — a control the operator cannot name is one they do not use.
+    """
+    return dict(OFFER_COPY.get(shape) or OFFER_COPY[JOBS_SHAPE])
+
+
 #: What success MEANS. The only two outcomes in this system that mean stop — everything else
 #: counts effort. `interview` for a job search, `booked` for a pitch.
 TERMINALS = ("interview", "booked")

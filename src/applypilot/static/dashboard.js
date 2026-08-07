@@ -126,14 +126,23 @@ let SPACE_SHAPE = 'pipeline/jobs';
 // Swap the console for the Space's shape. Wholesale, not by disabling buttons: "Prepare
 // Materials" and "Fill application" are not unavailable in a targets Space, they are
 // meaningless there, and a disabled control asserts an action exists (§Lessons 43).
-function renderSpaceShape(shape, offer) {
+function renderSpaceShape(shape, offer, copy) {
   SPACE_SHAPE = shape || 'pipeline/jobs';
   const targets = SPACE_SHAPE === 'pipeline/targets';
   const jobs = document.getElementById('jobControls');
   const tgt = document.getElementById('targetControls');
   if (jobs) jobs.hidden = targets;
   if (tgt) tgt.hidden = !targets;
+  // CTX-1. #premiseControls is deliberately NOT toggled — both shapes have a constant
+  // paragraph. It used to live inside #targetControls, so on a jobs Space there was nowhere to
+  // type one, which is why `gauntlet` and `job-search` sent the same email as each other.
+  const c = copy || {};
+  const title = document.getElementById('premiseTitle');
+  const hint = document.getElementById('premiseHint');
   const box = document.getElementById('offerInput');
+  if (title && c.title && title.textContent !== c.title) title.textContent = c.title;
+  if (hint && c.hint && hint.innerHTML !== c.hint) hint.innerHTML = c.hint;
+  if (box && c.placeholder && box.placeholder !== c.placeholder) box.placeholder = c.placeholder;
   // Never while it has focus. `refresh()` runs every 2.5s and this is a textarea the operator
   // types a paragraph into — the same reason the whole jobs table skips its rewrite mid-edit.
   if (box && document.activeElement !== box && box.value !== (offer || '')) {
@@ -2278,7 +2287,7 @@ async function refresh() {
   if (data.space) SPACE_ID = data.space;
   renderSpaceNav(data.spaces, data.space, data.space_note);
   SPACE_TEMPLATES = data.space_templates || SPACE_TEMPLATES;
-  renderSpaceShape(data.space_shape, data.space_offer);
+  renderSpaceShape(data.space_shape, data.space_offer, data.space_offer_copy);
   document.getElementById('appDir').textContent = data.app_dir;
   const s = data.stats || {};
   // Counters that mean something for the shape on screen. In a targets Space "Tailored",

@@ -267,7 +267,8 @@ def sender_background(profile: dict) -> list[str]:
 
 
 def draft_variant(*, warm: bool = False, noticed: bool = False, jd_chars: int = 0,
-                  deck: bool = False, scheduling: bool = False, style: bool = False) -> str:
+                  deck: bool = False, scheduling: bool = False, style: bool = False,
+                  premise: bool = False) -> str:
     """A compact signature of WHAT WENT INTO a draft, e.g. "cold+jd2k+deck+cal".
 
     Reply rate without this is a single number that can only go up or down for reasons nobody
@@ -287,6 +288,13 @@ def draft_variant(*, warm: bool = False, noticed: bool = False, jd_chars: int = 
         bits.append(f"jd{min(9, max(1, round(jd_chars / 1000)))}k")
     if noticed:
         bits.append("noticed")
+    # CTX-1. Constant within a Space once set, so it carries little information ACROSS a
+    # campaign — but it is the only way to separate what was drafted before the premise existed
+    # from what came after, which is the one comparison that says whether writing it was worth
+    # anything. Untagged, that question is unanswerable for the same reason every copy change
+    # was unfalsifiable before `draft_variant`.
+    if premise:
+        bits.append("premise")
     if deck:
         bits.append("deck")
     if scheduling:
@@ -388,15 +396,25 @@ def _pitch_user_prompt(sender_bits, contact, company, about_them, offer, noticed
     )
 
 
-def _job_user_prompt(sender_bits, contact, relationship, role, company, jd, noticed,
+def _job_user_prompt(sender_bits, contact, relationship, role, company, jd, noticed, premise,
                     sched_block, deck_block, warm_block, style_block, tone_block,
                     previous):
-    """The jobs-shaped prompt, unchanged.
+    """The jobs-shaped prompt.
 
     Extracted from `draft_email` so it can be diffed: `test_a_default_space_changes_the_prompt_by_nothing`
     asserts that a Space with no overrides produces the byte-identical string this
     produced before Spaces existed. Every manifest field is additive, and the only way to
     know that is to compare the artifact rather than to reason about it (§Lessons 46).
+
+    `premise` is `Space.offer` (CTX-1). The field is called `offer` because the targets shape
+    named it — there it means "what I am selling" — and it is the PREMISE here: what is true of
+    every role in this campaign. The name is worse than the thing; renaming it costs a manifest
+    field and a config-blob path, so the better name is used locally and the mismatch is written
+    down rather than carried silently.
+
+    It was declared, documented for exactly this case, and read by nothing on this path for
+    three days. `UNAPPLIED` was empty the whole time and its guard was honest — it asks "is this
+    field read anywhere?", and the answer was yes, on one of two shapes (§Lessons 49).
     """
     from applypilot.domain.burned import burned_block
     return (
@@ -428,6 +446,30 @@ def _job_user_prompt(sender_bits, contact, relationship, role, company, jd, noti
            "observation is a compliment, not an application.\n"
            "- If it does not fit this email naturally, leave it out entirely. A forced "
            "reference is worse than none.\n\n" if noticed else "")
+        # CTX-1. Why this role, which is the one thing a résumé cannot say and the posting does
+        # not know. Placed below `noticed` because it is the more GENERAL of the two operator
+        # inputs — person-specific reads closest to the instruction to write — and above the
+        # CTA blocks because it is a fact to draw on, not a thing to ask for.
+        #
+        # The repetition warning is not boilerplate. `noticed` is per PERSON, so its worst case
+        # is one repeated sentence to one reader. This is per SPACE: `job-search` holds 30 jobs
+        # and 131 emailed contacts, so a premise that comes back verbatim is one paragraph
+        # arriving in ~200 inboxes. §Lessons 42 fired on a single quoted phrasing appearing in
+        # 5 of 5 drafts; the exposure here is two orders of magnitude larger.
+        + (f"THE PREMISE OF THIS CAMPAIGN (verbatim, from the sender — what is true of every "
+           f"role they are pursuing here):\n{premise}\n"
+           "How to use it:\n"
+           "- These are FACTS, never sentences to reuse. Every email in this campaign is "
+           "written from this same paragraph, so reusing its wording means every recipient "
+           "receives the identical claim. Say it in your own words each time, or leave it out.\n"
+           "- It answers WHY THIS ROLE, which the résumé cannot and the posting does not know. "
+           "Use it where the email would otherwise say nothing more than that the sender "
+           "applied.\n"
+           "- It is background, not the subject. What the role actually involves, above, is "
+           "still the thing the email reacts to. An email that is only the premise is about "
+           "the sender.\n"
+           "- If this particular role does not fit it, leave it out. A stretched connection "
+           "reads worse than no connection.\n\n" if premise else "")
         + sched_block + deck_block + warm_block + style_block
         # LAST, immediately before the instruction to write. A constraint placed above the
         # scheduling and deck blocks competes with them and loses — §Lessons 40: two
@@ -525,18 +567,21 @@ def draft_email(profile: dict, job: dict, contact: dict, style: str = "", warm: 
         if deck else ""
     )
 
+    # The Space's constant paragraph. BOTH shapes read it — the targets prompt as the offer,
+    # the jobs prompt as the premise. It reached only the first for three days (CTX-1).
+    offer = (getattr(space, "offer", "") or "").strip()
+
     if shape == "pipeline/targets":
         # `full_description` is what the operator pasted about the company, and the offer comes
         # from the Space. In the jobs prompt those two slots are filled the other way round.
         user = _pitch_user_prompt(sender_bits, contact, company,
-                                  job.get("full_description"),
-                                  (getattr(space, "offer", "") or "").strip(),
+                                  job.get("full_description"), offer,
                                   noticed, sched_block, deck_block, style_block,
                                   tone_block, previous)
         system = _PITCH_SYSTEM
     else:
         user = _job_user_prompt(sender_bits, contact, relationship, role, company, jd,
-                                noticed, sched_block, deck_block, warm_block,
+                                noticed, offer, sched_block, deck_block, warm_block,
                                 style_block, tone_block, previous)
         system = _SYSTEM
 
@@ -546,7 +591,8 @@ def draft_email(profile: dict, job: dict, contact: dict, style: str = "", warm: 
         max_tokens=400, temperature=0.8,  # a bit higher for warmth/variety
     )
     variant = draft_variant(warm=warm, noticed=bool(noticed), jd_chars=len(jd),
-                            deck=bool(deck), scheduling=bool(link), style=bool(directive))
+                            deck=bool(deck), scheduling=bool(link), style=bool(directive),
+                            premise=bool(offer))
     data = extract_json(raw)
     subject = sanitize_text(str(data.get("subject", ""))).strip()
     body = sanitize_text(str(data.get("body", ""))).strip()

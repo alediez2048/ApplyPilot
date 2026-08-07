@@ -12,9 +12,10 @@ campaign happens to be a job search** — see `docs/crm-prd.md` for where that g
 - **Packaging:** Hatchling, `src/` layout, single package `applypilot`
 - **Entry point:** `applypilot = "applypilot.cli:app"` (Typer CLI)
 - **License:** AGPL-3.0-only · **Version:** 0.4.0 (`pyproject.toml`)
-- **Tests:** 1481 passing (`tests/`, 82 files) · ruff clean (line-length 120, py311) · ESLint clean
+- **Tests:** 1540 passing (`tests/`, 84 files) · ruff clean (line-length 120, py311) · ESLint clean
 - **Schema version:** 3 (`applypilot migrate --status`) · **Settings:** 47 declared in `settings.py`
-- **Branch:** the Spaces work lives on `spaces`, **12 commits ahead of `main` and unmerged**.
+- **Branch:** the Spaces work lives on `spaces`, **26 commits ahead of `main`, PUSHED to
+  `origin/spaces` (2026-08-07) and still unmerged**. `main` is at `e1f0be6` and has none of it.
   Check `git log --oneline -1` before believing anything here (§Dev workflow).
 
 ## Quick orientation
@@ -230,12 +231,13 @@ re-reading a thread you have already logged is a no-op rather than a duplicate.
 | `identities` | `repo/spaces.py` | One row per SENDER (mailbox, from-name, deck, limits). Created by 003, **read by nothing yet** — ID-1. |
 | `schema_migrations` | `migrations/` | Version, status, `claimed_at` lease. See §Lessons on the 300s lease. |
 
-Live counts (2026-08-05, a snapshot — these move within minutes of real use, so treat them as
-orders of magnitude and re-measure before reasoning from one): jobs **27** (27 applied,
-**1 interview scheduled**), contacts **206**
-(113 emailed, **5 replied**), touches 69, messages 182, interactions 10, connections 899,
-**2 recorded deck opens** (the first ever — see §Engagement signals). Three Spaces: `job-search`,
-`partnerships`, `gauntlet`. **Schema version 3**.
+Live counts (2026-08-07, a snapshot — these move within minutes of real use, so treat them as
+orders of magnitude and re-measure before reasoning from one): jobs **31** (28 applied,
+**1 interview scheduled**), contacts **227**
+(131 emailed, **7 replied**), touches 94, messages 231, connections 899,
+**2 recorded deck opens** (the first ever — see §Engagement signals). Three Spaces: `job-search`
+(30 jobs), `partnerships` (targets), `gauntlet` (1 job — and it held **zero** until the import
+path started carrying the Space, §Lessons 70). **Schema version 3**.
 
 Contacts nearly tripled on 2026-08-04 — 66 → 185 — because employer resolution was broken in
 three separate ways and every one of them returned zero people rather than an error. See
@@ -287,6 +289,28 @@ rather than OR, because with OR a second click returns MORE rows and reads as br
 box is STATIC markup — `refresh()` replaces `#jobs` wholesale every 2.5s, so anything rendered
 into it is destroyed mid-keystroke. Typing re-filters from `LAST_JOBS` and never refetches
 `/api/status` (§Lessons 11, 26 — 74 SQL statements behind a keystroke).
+
+**Two filter axes, ANDed** (2026-08-06). Status buckets (`All · Needs you · In progress ·
+Applied · Rejected`) answer *where is this in my pipeline*; band pills (`won · warm · active ·
+cooling · cold · new · undeliverable`) answer *how is it doing*. Folding the bands into
+`JOB_BUCKETS` would have made picking one silently clear the other, and "applied AND warm" is
+the actual question — so they are separate groups with a visible divider. Each group's counts
+are computed with the OTHER group's filter applied, so a pill's number is what clicking it
+yields. An empty band gets no pill **except the selected one**, or the active filter vanishes
+when its last job changes band and the table looks broken with no way back. There is no "All"
+pill in the band group (seven plus an eighth is a wall of chips), so clicking the selected band
+clears it. Band tints are `tb-` prefixed because **one band is called `active`, which is also
+the selected-state class** — unprefixed, that pill renders as permanently applied.
+
+**Every filter pill explains itself on hover** — `data-tip`, not `title` (the native one waits a
+second, cannot be styled, and would stack a second box under the CSS one), with `aria-label`
+carrying the same words because a `::after` is invisible to a screen reader. A standing legend
+was built first and removed the same day: an explanation attached to the control it describes is
+read at the moment it is needed. **Each tip states its axis** ("They responded — …" against
+"Your outreach — …"), composed from `axis + meaning` rather than written per band. The legend's
+GROUPING was the actual explanation — four bands count our own sending, two are about what they
+did — and a per-pill tip has nowhere to put it, so dropping the prefix would keep the vocabulary
+and throw away the point.
 
 **🎯 Interview scheduled is the success metric** (2026-08-03), on the row next to Re-apply. Every
 other number counts EFFORT; this is the only outcome, and the funnel now ends at it. It is also
@@ -347,6 +371,19 @@ corrupt reply detection. `dm_status` only ever recorded what WE sent. So both di
 - **Status strip** (always visible, never a toggle) — a left-to-right path
   `✓ Found → ✓ Applied → ✓ Emailed 4/4 → ↻ Follow up 0/4 → · Reply`, first unfinished step
   amber, plus **one** `Next` action (`nextAction()`) and a visible `🔄 Re-apply`.
+  **Overdue follow-ups highlight out of turn** (2026-08-06). The strip greys everything after
+  the first unfinished step, so `! Emailed 9/10` claimed the amber and `· Follow up 4/9` — the
+  only overdue thing on the row — rendered faint while the Next button said "10 follow-ups due"
+  an inch away (§Lessons 56). Follow-up is the one step whose `total` is `done + currently due`,
+  so a gap there is LATE work, not later work. Same amber as `now`, not a louder colour: nine of
+  twenty-eight rows have follow-ups outstanding, and an alarm that is always on is trained away
+  within a week. The ↻ mark separates late from in-flight.
+  **An interview owes no follow-ups** (2026-08-06). Marking one already halts every ladder, but
+  the checklist measures from `submitted_at` and knew nothing about `interview_at` — so WRITER
+  read `won`, had an empty Next slot, was excluded from the 🔔 counter, and the strip still said
+  `↻ Follow up 1/2`. The flag is computed BEFORE the loop that stamps `followup_due` on each
+  contact, or the row goes quiet while the person inside it still asks to be chased. It reads
+  `Follow up 1/1` now — quiet, not blank, so the send that really happened survives.
 - **One tabbed panel**: People · Follow-ups · Materials · Activity. `PANEL_OPEN` / `TAB_OPEN`
   survive the 2.5s refresh.
 - **Contacts collapse to one line** with channel pills (`✉ sent · 🔗 connected · ↻ due`).
@@ -423,10 +460,29 @@ ID-1 has not shipped, so a business Space made today would send from the persona
 forever. The refusal says so. The nav shows from ONE Space up, because the `＋` lives in it and
 hiding the strip below two hid the only way to make a second.
 
+**A Space is only as separate as its WRITE PATHS**, and two of them were not (2026-08-06/07).
+Both shipped with SPACE-1..4 and both went unnoticed for days, because a Space that is filtered
+correctly on READ looks completely finished:
+
+- **`/api/import` carried no Space at all** — not from the browser, not through the handler, not
+  into `insert_imported`. The column DEFAULT (`job-search`) decided, so a Peak6 posting pasted
+  while standing in Gauntlet appeared under another tab and **Gauntlet held zero jobs since the
+  day it was created**. `_add_targets` had carried its Space since SPACE-3; this is its twin.
+  Resolved through `_resolve_space`, not the posted id — filing a row under an id that does not
+  exist puts it in a Space with no tab, the one place nothing can reach it again.
+- **The accounts banner counted every Space's employers.** See §Sign-in walls: the fix is to
+  scope the PANEL, never the registry.
+
+The lesson generalises past these two: **anything that WRITES a `jobs` or `contacts` row from
+the dashboard needs the Space threaded to it**, and the read-side filter will hide the mistake.
+`insert_imported` and `add_target` are the two that exist; a third would need the same.
+
 **Not built:** ID-1/ID-2 (per-identity mailbox, deck, limits — `identities` exists and is read
 by nothing), SPACE-0 (archive terminal rows), SPACE-6 (the business Space as a falsifier).
 Copy debt: the bucket filters still say "In progress / Applied / Rejected" and the search
-placeholder names salary, both wrong words in a targets Space.
+placeholder names salary, both wrong words in a targets Space. The four discovery scrapers also
+leave `space_id` to the default — defensible, they run from a CLI with no Space on screen, and
+discovery has produced zero rows to date.
 
 ---
 
@@ -536,6 +592,15 @@ them, because a second name/email match would be a competing answer to "is this 
 person". Without the exclusion the button is an expensive no-op: `select()` is deterministic and
 returns the same top five. A contact is `exhausted` when every channel USED has run out with no
 reply; a phone number or an unwritten address is NOT unresponsive, it is untouched.
+**The panel ADVISES, it no longer refuses** (2026-08-06). The button was disabled whenever a
+reply was waiting, a sequence was running, or a contact was untouched — all true statements
+about what is CHEAPEST next, none of them a reason the operator cannot spend their own credits.
+The row does not know what they know: a hiring manager named in the posting, a team that just
+reorganised, or a first round that resolved to the wrong company entirely and whose "still
+running" sequences are aimed at strangers (which is exactly what Texas Children's was). The
+reason survives, the refusal does not; `ready` still drives the accent styling. The one real
+constraint kept is `network_running` — a second search would double-spend credits and race the
+write.
 
 **Not built:** no scheduler (nothing fires while the dashboard is closed — `applypilot
 schedule --install` exists and has never been run), **no per-company cap** — 5 contacts × 3
@@ -613,6 +678,51 @@ confirmed, never for an unanchored keyword search.
 
 **Every exit logs.** A search that found nobody used to log nothing, making a completed run
 byte-identical to a dead button (§Lessons 15).
+
+### The fourth way, and the one that did not return zero (2026-08-06)
+
+`eohh.fa.us2.oraclecloud.com` is **Texas Children's Hospital**. Oracle Recruiting Cloud pods
+carry the employer NOWHERE — unlike a Workday tenant (`salesforce.wd12`) that at least wraps the
+real name, an Oracle pod is an opaque code. `_host_label` took the last non-TLD label and
+produced the employer **"Oraclecloud"**: the "Ats"/"Hr"/"Edu" shape a fourth time, and by far
+the most expensive, because the same string also became the DOMAIN. Apollo has `oraclecloud.com`
+filed under the **City of Atlanta** (whose own careers portal is Oracle-hosted), so asking "who
+works at this domain" returned five Atlanta city employees. Four were emailed, one with the
+subject line *"Exploring the IS Technology Business Partner role at Oraclecloud"*.
+
+**Verification caught it twice and excused it twice.** The email contradiction (`@atlantaga.gov`)
+was waived because the domain was only guessed; the org-name contradiction (`"City of Atlanta"`)
+was waived because they came from a domain search — *the same guessed domain*. Each guard
+excused itself using the other's weakness, and the system wrote the whole truth into a
+`verify_note` nobody reads. **Not fixed by tightening either exemption**: that rejects the seven
+real Avathon colleagues at `@sparkcognition.com` §Lessons 34 exists to protect. The discriminator
+is that this "employer domain" is a five-label ATS host no human has an address at.
+
+Three fixes, because each exposed the next: `oraclecloud` joins `_BOARD_HOSTS`;
+`_OPAQUE_TENANT_HOSTS` stops `_host_label` falling back to `labels[0]` and returning **"Eohh"**
+(the pod); and the `site` fallback checked `_BOARD_SITES` while step 1 checks `_BOARD_NAMES`, so
+the live row's `site='Oraclecloud'` would have resolved through it regardless of the first two
+(§Lessons 49, found only because the new eval case failed). Three eval cases, one per fix,
+including the fix's own failure mode. Stanford, on the same Oracle product at its own domain,
+still resolves.
+
+### Adding a contact by hand (2026-08-06)
+
+`/api/contact/add-introduced` now takes a LinkedIn URL, an email, or both. It was CRM-4a's
+thread-handoff path and only reachable from `introBanner`, which fires on a **Cc detected in a
+live Gmail thread** — so "you should talk to Priya, here's her LinkedIn", said on a call or in a
+reply that names her without copying her, had nowhere to go. §Lessons 37 again: the tool has to
+be reachable from the state it repairs. **＋ Add someone by hand** sits in the People tab,
+including when it is empty, which is exactly when a referral for a job Apollo found nobody at
+arrives.
+
+One write path, two doors, and what they do NOT share:
+`email_status='verified'` is a claim about the ADDRESS — true of a Cc off a real thread
+(`on_thread`), false of one typed from memory, which is `unverified`. And `source='introduction'`
+stays for a real handoff while a plain manual add is `'manual'`, or CRM-2's `by_layer()` can
+never prove a warm handoff beats a cold list. `confidence: high` with no unconfirmed chip:
+verification exists to catch people who work somewhere ELSE, which cannot happen to a name the
+operator chose (§Lessons 19).
 
 ### Three ways the employer was wrong, all returning zero instead of an error (2026-08-04)
 
@@ -1217,6 +1327,56 @@ company `"Jobs"` — the same substring bug class, inside the function written t
     says "every EMAIL" — the old wording contradicted the same row's Next button reading
     "1 LinkedIn invite left" (§Lessons 56).
 
+68. **Two guards, each excused by the other's weakness, and neither can be tightened alone.**
+    `eohh.fa.us2.oraclecloud.com` resolved to the employer "Oraclecloud", which then became the
+    DOMAIN, and Apollo has `oraclecloud.com` filed under the City of Atlanta. Five Atlanta city
+    employees were found for a Texas Children's Hospital job and four were emailed. Verification
+    fired **both** signals — the address contradicted the domain, and Apollo's org name
+    contradicted the employer — and waived both: the first because the domain was only guessed,
+    the second because they came from a domain search, *which was that same guessed domain*.
+    Each exemption was written for a real earlier bug and both are still right in isolation;
+    tightening either one rejects the seven genuine Avathon colleagues §Lessons 34 protects. The
+    discriminator was neither guard's business: a five-label ATS host is not an employer domain
+    at all, so the fix belongs in `_BOARD_HOSTS`, one layer up from where the symptom appeared.
+    **The system wrote the whole answer down** — *"Apollo lists them at 'City of Atlanta'"* — in
+    a `verify_note` that renders nowhere anyone looks.
+    Then the fix reproduced the bug twice more before landing: `_host_label` fell back to
+    `labels[0]` and returned **"Eohh"** (the pod code — §Lessons 1's shape, one label to the
+    left), and the `site` fallback checked `_BOARD_SITES` while step 1 checks `_BOARD_NAMES`, so
+    the live row's `site='Oraclecloud'` would have resolved through it regardless (§Lessons 49).
+    Only the eval case caught the third.
+
+69. **An advisory disguised as a lock.** "Find a new round of contacts" was DISABLED whenever a
+    reply was waiting, a sequence was running, or a contact was untouched. All three are true
+    statements about what is cheapest to do next; none is a reason the operator cannot spend
+    their own credits. The row does not know what they know — and the case that proved it was
+    live on the board: Texas Children's had five "still running" sequences aimed at City of
+    Atlanta employees (§Lessons 68), so the wrong first round was itself what blocked searching
+    again. Reserve `disabled` for what is genuinely impossible (`network_running` would
+    double-spend and race the write); everything else is a sentence, not a lock.
+
+70. **A Space is only as separate as its WRITE paths, and the read filter hides the gap.**
+    `/api/import` carried no Space — not from the browser, not through the handler, not into
+    `insert_imported` — so the column DEFAULT filed every paste under `job-search` and
+    **Gauntlet held zero jobs from the day it was created**. `_add_targets` had carried its
+    Space since SPACE-3; nobody checked its twin. The accounts banner had the same shape one
+    surface over, counting eight employers on a tab holding one job.
+    The reason both survived four Space tickets: **a Space that filters correctly on READ looks
+    finished.** Every panel was scoped, every query took `space_id`, and the rows were still
+    landing in the wrong place. Ask what WRITES, not what reads.
+    Its fix has a second half worth keeping separately: scope the PANEL, never the registry.
+    `ats_accounts` is per ATS TENANT on purpose — partitioning it by Space would make you pay
+    the same sign-in wall once per tab.
+
+71. **Three tests in one session asserted something true for the wrong reason.**
+    `meaning in html` passed against a blanked meaning, because `"" in html` is True for every
+    string. `"<details" in html` passed against a legend rewritten as a `<div>`, because the
+    metrics panel is also a `<details>` — §Lessons 1's shape in a file rather than a name. And a
+    strip-class helper split on the label and took the last `<span class="`, which finds the
+    inner `.mk` marker, so it asserted against `'mk'` and passed. All three were found by
+    mutation and none by reading. **The common tell is an assertion that cannot fail when the
+    thing under test is emptied** — check that first, before checking whether it is correct.
+
 Shipped in one session, in this order: **CRM-3a → CRM-1 → CRM-2 → CRM-3b → CRM-4a.**
 Tickets in `docs/tickets/CRM-*.md`; two of them had instructions that were factually wrong
 before being revised (they told you to write `followup_status`, removed by ARCH-3).
@@ -1393,7 +1553,21 @@ job view, so a cookie is a hint to ask the operator about, never an answer (§Le
 
 **`preflight` skips the launch entirely** when a realm needs an account we do not have. Before
 it, that discovery cost a Chrome launch, a Claude run and 59 seconds — repeated for every job at
-the same employer, because the finding was recorded on the JOB.
+the same employer, because the finding was recorded on the JOB. That skip takes under a second
+and writes only to the Activity tab, which is why "Restart end-to-end does nothing" is what it
+looks like from the row — the fastest of the three refusals that all render as silence
+(§Lessons 43, and still open as a UI gap).
+
+**The banner is scoped to the Space; the REGISTRY is not** (2026-08-07). `ats_accounts` has no
+`space_id` and must not grow one: an account covers an ATS TENANT, so one Salesforce Workday
+login is the same fact on every tab, and partitioning the table would make you pay the same wall
+once per Space. What is not shared is the banner's SENTENCE — *"8 employers need an account
+before their jobs can run"* is a claim about jobs, and on Gauntlet (holding one) it named eight
+belonging to job-search. `panel(jobs=…)` filters to realms a row on screen would actually hit;
+`jobs=None` keeps the old behaviour for the CLI and is distinct from an empty list. Costs no
+query — `realm_for` reads two URL strings and the caller already holds the rows.
+**Applied and rejected rows drop out**, which was the larger effect: of the eight realms named,
+five were walls on applications already submitted. Both tabs now read 1, and both are true.
 
 **The apply profile no longer carries credentials.** `chrome.py:setup_worker_profile` copies the
 operator's real Chrome profile, which is how sessions persist — and was also copying **682 saved
@@ -1450,10 +1624,18 @@ is 2,137 lines of keyword SEARCH across boards. Those are not two implementation
 idea; for RELEVANCE the recommender wins, and running ours would buy throughput at worse
 precision that the operator would then have to filter back down. Do not "fix" this by default.
 
-**Open, and the real ceiling:** nothing could tell you what works. 77 emails, 2 replies, and no
+**Open, and the real ceiling:** nothing could tell you what works. 131 emails, 7 replies, and no
 way to ask whether the personalised ones did better — so every improvement to the copy was
 unfalsifiable. `draft_variant` (2026-08-03) starts fixing it, but nothing is readable until
 enough tagged sends accumulate; `MIN_MEANINGFUL_N` is 10.
+
+**Open, and reported twice:** the status BAND is still four words describing your own effort
+(`new → active → cooling → cold`) plus two describing theirs (`warm`, `won`), presented as one
+scale. The tooltips make the vocabulary learnable; they do not fix the conflation. The proposal
+on the table is a **plan progress bar** (`5 of 20 sent` — self-explanatory, no glossary) plus a
+separate **response marker**, which is what the four effort words were always approximating.
+Not built, and it must never become a single bar to an interview: that is §Lessons 35 with a
+percentage on it, and it would look most encouraging exactly when a job is most dead.
 
 ~~**Half-finished:** intro-deck click collection.~~ **Genuinely done 2026-08-06** — a real
 browser load of `/intro/<name>` recorded end to end for the first time. It was believed done on
@@ -1555,8 +1737,10 @@ What is actually open now, ordered by leverage:
    them. Until then every Space sends from the one personal mailbox, and `identity_id` freezes
    on first send — so **do not create a business Space yet**.
 
-10. **The `spaces` branch is 12 commits ahead of `main` and unmerged.** Everything above is on
-    it. `main` has none of it.
+10. **The `spaces` branch is 26 commits ahead of `main` and unmerged.** Everything above is on
+    it; `main` has none of it. **Pushed to `origin/spaces` on 2026-08-07**, so it is no longer
+    only on this laptop — but merging is still deliberately deferred, and checking out `main`
+    gets you a build without Spaces, the deck fix, the Oracle fix or any of the UX work.
 
 6. ~~**No per-company outreach cap.**~~ **CLOSED 2026-08-03** (`OUTREACH_COMPANY_CAP`, default
    8). Kept for the number: six companies were already OVER the cap the moment it shipped, three
@@ -1688,9 +1872,13 @@ change still needs the `pip install` above — but that copy gives the file a ne
   and the restart ran anyway, because both were in one chained command (§Lessons 63). Use
   `pgrep -fl "applypilot apply"`; recover an orphaned lock with
   `release_stale_locks(max_age_minutes=0)` and ONLY after pgrep comes back empty.
-- **On branch `spaces`, 12 commits ahead of `main`, unmerged and unpushed** (2026-08-05).
-  `main` last pushed at **`e1f0be6`**. Tags: `stable-arch2/3/5/6` · `stable-e2e-20260730` ·
-  `stable-crm-20260731`.
+- **On branch `spaces`, 26 commits ahead of `main`, PUSHED and still unmerged** (2026-08-07).
+  `origin/spaces` tracks it; `main` last pushed at **`e1f0be6`**. Tags: `stable-arch2/3/5/6` ·
+  `stable-e2e-20260730` · `stable-crm-20260731`.
+- **A frontend-only edit needs the `pip install` but NOT a dashboard restart** — the copy gives
+  the file a new mtime, `?v=` changes with it, and a normal reload fetches it. A **Python** edit
+  needs the restart, because the running server has those modules imported already. Getting this
+  backwards wastes a restart, or worse, tests a change that is not loaded.
 - **Deck tracking has its own check**: `sh scripts/deck-check.sh --probe`. It tests the PAGE,
   not the API — every API-level check passed for the six weeks it was broken. Both lines must
   read affirmatively; open the probe URL in a real browser (curl runs no JavaScript) and allow

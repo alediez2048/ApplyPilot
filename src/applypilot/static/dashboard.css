@@ -406,7 +406,18 @@
   .tag-clear:hover { background:none; box-shadow:none; text-decoration:underline; }
   /* Description: normal table cell; clamp the INNER div (clamping the td breaks cell sizing). */
   td.desc { color:var(--muted); font-size:12.5px; }
-  td.desc .desc-text { display:-webkit-box; -webkit-line-clamp:6; -webkit-box-orient:vertical; overflow:hidden; line-height:1.45; }
+  /* SPACE-0. TWO lines, not six. Measured on the live board before changing it: the page was
+     8,939px — ten screens — and the table was 73% of it, at 130px per data row. Every one of
+     those 30 rows carried a description excerpt sitting exactly on its 900-char cap, and the
+     `desc` cell WAS the row height: every other cell on the row holds 25 to 33 characters.
+     Six lines to two takes a data row from 130px to about 56.
+     Nothing is lost that the row was really carrying. The first 900 characters of a posting are
+     the mission statement and the org chart — `domain/jobdesc.role_essentials` exists because
+     the role itself starts around character 520 — so this column was six lines of "About Acme,
+     Acme is on a mission to". Recognising a row is done by title, company and tags; READING the
+     posting is what the Job tab is for. Search is unaffected: it matches `j.description` in JS
+     and this is presentation only. */
+  td.desc .desc-text { display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; line-height:1.45; }
   td.people button { white-space:nowrap; }
   td.people .neterr { color:var(--red); font-size:11px; margin-top:3px; max-width:150px; }
   /* Per-job footer: Activity + People toggles (left, stacked), low-key delete (top-right). */
@@ -909,6 +920,15 @@
   .ctx-body .d-label { font-size:11px; font-weight:600; color:#55707f; margin:8px 0 3px;
     text-transform:uppercase; letter-spacing:.4px; }
   .ctx-on { color:var(--green); font-weight:600; font-size:11px; }
+  /* SPACE-0. The premise box, collapsed. Its <summary> holds an <h2>, which is block-level and
+     would drop below the marker on its own line. */
+  #premiseBox > summary { list-style:none; cursor:pointer; display:flex; align-items:baseline;
+    gap:10px; flex-wrap:wrap; }
+  #premiseBox > summary::-webkit-details-marker { display:none; }
+  #premiseBox > summary h2 { margin:0; border:0; padding:0; }
+  #premiseBox > summary::before { content:'▸'; color:var(--faint); font-size:11px; }
+  #premiseBox[open] > summary::before { content:'▾'; }
+  #premiseBox > summary + * { margin-top:14px; }
   /* Same amber as every other "this is late, not broken" state. Nine of twenty-eight rows carry
      something outstanding; an alarm colour that is always on is trained away within a week. */
   .ctx-stale { color:#9a6b00; font-weight:600; font-size:11px; }

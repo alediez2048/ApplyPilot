@@ -1473,6 +1473,24 @@ company `"Jobs"` — the same substring bug class, inside the function written t
     `saveJobContext` reads the DOM and never populates the buffer, so the first version asserted
     against something nothing had filled (§Lessons 13, again).
 
+76. **The ticket named a cause, the browser named a different one, and the gap was 30x.**
+    SPACE-0 was written as "archive terminal rows" — applied, rejected and interviewing rows
+    "render forever". Measured before building: terminal rows were **1 of 31**, so the
+    prescribed fix removed 2.5% of the page; and the applied pile is not stale either (median
+    5 days, none past 21), so archiving it would have hidden 28 jobs with live follow-up
+    ladders running. §Lessons 28, third occurrence — a ticket is a hypothesis.
+    What the page actually was, measured in a real browser rather than reasoned about:
+    **8,939px, of which the table was 73%**, at 130px per row — and the `desc` cell WAS the row
+    height, every other cell on the row holding 25 to 33 characters. All 30 excerpts sat exactly
+    on their 900-char cap. The lever was `-webkit-line-clamp:6`, already there, already a knob.
+    Six to two, plus collapsing the premise box CTX-1 had added above the table the same day:
+    **8,939 → 7,423px**, rows 130 → 89, premise box 290 → 65.
+    Two things worth keeping separately. The measurement had to be RENDERED — no amount of
+    reading the payload says which cell owns the row height. And the fix I had shipped hours
+    earlier was itself the second-largest block on the page; a feature's cost is not visible
+    from inside the feature.
+
+
 Shipped in one session, in this order: **CRM-3a → CRM-1 → CRM-2 → CRM-3b → CRM-4a.**
 Tickets in `docs/tickets/CRM-*.md`; two of them had instructions that were factually wrong
 before being revised (they told you to write `followup_status`, removed by ARCH-3).
@@ -1777,8 +1795,9 @@ survive contact with the code.
 
 Still open, in the order they matter: **ID-1/ID-2** (per-identity mailbox, deck and limits — the
 `identities` table exists and is read by nothing, and until it is wired a business Space cannot
-exist), **SPACE-0** (archive terminal rows, independent, half a day, and it is the
-endless-scroll complaint that started all of this), **SPACE-6** (the business Space as a
+exist), ~~**SPACE-0**~~ **DONE 2026-08-08, and its diagnosis was wrong** — terminal rows
+were 1 of 31, so archiving would have hidden 2.5% of the page. The scroll was a six-line
+description clamp plus the premise box; 8,939px → 7,423px (§Lessons 76), **SPACE-6** (the business Space as a
 falsifier — if it costs code, the PRD's central claim was wrong and should say so).
 
 `docs/crm-prd.md` is the larger person-as-root version of the same idea. Not superseded — it is

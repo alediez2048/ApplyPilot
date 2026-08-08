@@ -126,6 +126,10 @@ let SPACE_SHAPE = 'pipeline/jobs';
 // Swap the console for the Space's shape. Wholesale, not by disabling buttons: "Prepare
 // Materials" and "Fill application" are not unavailable in a targets Space, they are
 // meaningless there, and a disabled control asserts an action exists (§Lessons 43).
+// Whether the premise box has already been auto-collapsed this session. Without it every
+// 2.5s tick would slam it shut again while the operator is editing.
+let PREMISE_SETTLED = false;
+
 function renderSpaceShape(shape, offer, copy) {
   SPACE_SHAPE = shape || 'pipeline/jobs';
   const targets = SPACE_SHAPE === 'pipeline/targets';
@@ -143,6 +147,16 @@ function renderSpaceShape(shape, offer, copy) {
   if (title && c.title && title.textContent !== c.title) title.textContent = c.title;
   if (hint && c.hint && hint.innerHTML !== c.hint) hint.innerHTML = c.hint;
   if (box && c.placeholder && box.placeholder !== c.placeholder) box.placeholder = c.placeholder;
+  // SPACE-0. Collapse once there IS a premise: written once per campaign, then read almost
+  // never, while costing 290px above the table on every render. Collapsed only on the FIRST
+  // render that finds one — after that the operator's own toggle wins, or opening it to edit
+  // would be undone by the next 2.5s tick.
+  const det = document.getElementById('premiseBox');
+  const mark = document.getElementById('premiseMark');
+  const filled = !!(offer || '').trim();
+  if (det && filled && !PREMISE_SETTLED) { det.open = false; PREMISE_SETTLED = true; }
+  if (det && !filled) PREMISE_SETTLED = false;
+  if (mark) mark.textContent = filled ? '✓ in every draft here' : '';
   // Never while it has focus. `refresh()` runs every 2.5s and this is a textarea the operator
   // types a paragraph into — the same reason the whole jobs table skips its rewrite mid-edit.
   if (box && document.activeElement !== box && box.value !== (offer || '')) {

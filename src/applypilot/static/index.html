@@ -138,13 +138,19 @@
        differently from what the manifest does. -->
   <div class="controls" id="premiseControls">
     <section>
-      <h2 id="premiseTitle">Your offer</h2>
-      <textarea id="offerInput"></textarea>
-      <div class="row" style="margin-top:10px; align-items:center">
-        <button class="primary" onclick="saveOffer(this)">Save</button>
-        <span id="offerStatus" class="hint" style="font-weight:600"></span>
-      </div>
-      <div id="premiseHint" class="hint"></div>
+      <!-- SPACE-0. A <details> because this is written ONCE per campaign and then read almost
+           never, while costing 290px above the table on every render — measured, and it was
+           the second largest block on a page that ran to ten screens. Open while empty, so it
+           cannot become the invisible control CTX-1 shipped to fix. -->
+      <details id="premiseBox" open>
+        <summary><h2 id="premiseTitle">Your offer</h2><span id="premiseMark" class="ctx-on"></span></summary>
+        <textarea id="offerInput"></textarea>
+        <div class="row" style="margin-top:10px; align-items:center">
+          <button class="primary" onclick="saveOffer(this)">Save</button>
+          <span id="offerStatus" class="hint" style="font-weight:600"></span>
+        </div>
+        <div id="premiseHint" class="hint"></div>
+      </details>
     </section>
   </div>
 

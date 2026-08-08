@@ -280,7 +280,7 @@ personal identity that is already connected.
 
 | Ticket | What | Notes |
 |---|---|---|
-| **SPACE-0** | Archive terminal rows | Independent, ships first. §8.1 |
+| **SPACE-0** ✅ | The endless scroll | **Shipped 2026-08-08 — and §8.1's diagnosis was WRONG.** Terminal rows were 1 of 31, so a `Done` bucket would have hidden 2.5% of the page. The scroll was a six-line description clamp (73% of the page was the table, and the `desc` cell WAS the row height) plus the premise box CTX-1 had just added. `docs/tickets/SPACE-0-the-endless-scroll.md` is the authority |
 | **SPACE-1a** ✅ | Where a target row lives; `space_id` vs `strategy`; migration 003 | **Shipped 2026-08-04.** Zero code changes downstream of it — it exists so the tickets below can be estimated at all |
 | **SPACE-1** ✅ | Manifests, and the stage queues gated on shape | **Shipped 2026-08-05.** Invisible on screen. `domain/space.py` is pure; `UNAPPLIED` names the seven fields nothing reads yet, and a test holds that list honest |
 | **SPACE-1b** | `job_url` → `anchor`, converge-not-rename | Optional. Hygiene, and the only step that can lose data — decide on its own merits |
@@ -291,7 +291,14 @@ personal identity that is already connected.
 | **ID-2** | Per-identity reply polling + a second deck collector | §8.2 |
 | **SPACE-6** | The business Space — **a config row** | The falsifier |
 
-### 8.1 SPACE-0 — archive (ships first, independent)
+### 8.1 SPACE-0 — the endless scroll (ships first, independent)
+
+> **Superseded 2026-08-08 by `docs/tickets/SPACE-0-the-endless-scroll.md`.** The paragraph
+> below is kept because its *conclusion* was wrong and its instinct was right, which is worth
+> being able to see. Measured before building: terminal rows were **1 of 31**, so the
+> prescribed fix would have removed 2.5% of the page, and the applied pile is not stale either
+> (median 5 days, none past 21) — archiving it hides work with live follow-up ladders. The
+> scroll was the description column at six lines and the premise box rendered open. §Lessons 28.
 
 The complaint that started this was "endless infinite scroll". The cause is that **nothing
 ever leaves**: applied, rejected, interviewing and expired rows render forever. A `Done`

@@ -12,11 +12,12 @@ campaign happens to be a job search** — see `docs/crm-prd.md` for where that g
 - **Packaging:** Hatchling, `src/` layout, single package `applypilot`
 - **Entry point:** `applypilot = "applypilot.cli:app"` (Typer CLI)
 - **License:** AGPL-3.0-only · **Version:** 0.4.0 (`pyproject.toml`)
-- **Tests:** 1540 passing (`tests/`, 84 files) · ruff clean (line-length 120, py311) · ESLint clean
+- **Tests:** 1639 passing (`tests/`, 87 files) · ruff clean (line-length 120, py311) · ESLint clean
 - **Schema version:** 3 (`applypilot migrate --status`) · **Settings:** 47 declared in `settings.py`
-- **Branch:** the Spaces work lives on `spaces`, **26 commits ahead of `main`, PUSHED to
-  `origin/spaces` (2026-08-07) and still unmerged**. `main` is at `e1f0be6` and has none of it.
-  Check `git log --oneline -1` before believing anything here (§Dev workflow).
+- **Branch:** the outreach-context work lives on `context`, **4 commits ahead of `spaces`**,
+  which is itself **27 ahead of `main`** — so `context` is **31 ahead of `main`** and is where
+  everything current lives. `origin/spaces` is pushed; **`context` is LOCAL ONLY**. `main` has
+  none of it. Check `git log --oneline -1` before believing anything here (§Dev workflow).
 
 ## Quick orientation
 
@@ -217,7 +218,7 @@ re-reading a thread you have already logged is a no-op rather than a duplicate.
 
 | Table | Owner | Purpose |
 |-------|-------|---------|
-| `jobs` (35 cols) | `database.py` | The 6-stage state machine. `_ALL_COLUMNS` is its source of truth. Holds **targets too** — a targets row is a `jobs` row keyed `target:<space>:<slug>` (SPACE-1a D1). |
+| `jobs` (37 cols) | `database.py` | The 6-stage state machine. `_ALL_COLUMNS` is its source of truth. Holds **targets too** — a targets row is a `jobs` row keyed `target:<space>:<slug>` (SPACE-1a D1). |
 | `contacts` (41 cols) | `networking/store.py` | People per job + outreach + verification. |
 | `touches` | `networking/touches.py` | One follow-up touch per row, ANY channel. `seq` is per (contact, channel). |
 | `sequences` | `networking/touches.py` | Terminal state per (contact, channel): `stopped` / `replied`. |
@@ -257,7 +258,7 @@ before CRM-1 the only recorded reply in the database had been typed in by hand.
 **`jobs` columns by stage:** discover(`title,salary,description,location,site,strategy`) →
 enrich(`full_description,application_url,detail_error`) → score(`fit_score,score_reasoning`) →
 tailor(`tailored_resume_path`) → cover(`cover_letter_path`) → apply(`applied_at,apply_status,
-apply_error,agent_id,verification_confidence`), plus `rejected_at`.
+apply_error,agent_id,verification_confidence`), plus `rejected_at`, and the two operator-typed ones (`job_context`, `job_ask` — CTX-2, §Outreach context).
 
 **`contacts` groups:** identity · outreach(`outreach_subject/message/status,sent_message_id`) ·
 threading(`thread_id,rfc_message_id`) · LinkedIn invite(`dm_status,dm_sent_at`) ·
@@ -485,6 +486,52 @@ leave `space_id` to the default — defensible, they run from a CLI with no Spac
 discovery has produced zero rows to date.
 
 ---
+
+## Outreach context — four tiers, one cascade (CTX-1…3, 2026-08-07/08)
+
+`docs/outreach-context-prd.md`, tickets `docs/tickets/CTX-*.md`. **Not a new architecture — the
+missing tier in one that already worked.** Context cascades from the sender to the person, and
+the more specific layer always wins.
+
+| Tier | Answers | Changes | Lives in |
+|---|---|---|---|
+| **Identity** | who is sending | ~never | `identities` — deck, mailbox, limits. **Read by nothing** (ID-1) |
+| **Space** | what is this campaign about | per campaign | `tone` (voice) + `offer` (substance) |
+| **Job** | what do I know about THIS company | per row | `job_context` + `job_ask` |
+| **Contact** | what do I know about THIS person | per person | `contacts.noticed` |
+
+**Three builders, not five inline constructions** — `_voice_block`, `_premise_block`,
+`_known_block` in `outreach.py`. The voice goes LAST on every path, immediately before the
+instruction to write; facts go early. `brief=True` for the short channels (text, LinkedIn,
+reply) shortens the GUIDANCE and **never drops a field**.
+
+**`job_ask` REPLACES the CTA, it does not join it.** `sched_block` already sets one, and a
+prompt carrying both writes an email that does both, badly (§Lessons 40). The scheduling link
+survives — what the operator overrides is what to ask for, not whether a calendar exists. An
+empty ask behaves exactly as before CTX-2. **`job_ask` is email-only**: the follow-up ladder
+sets a per-touch intent and overriding that is a second contradiction, deliberately deferred.
+
+**The repetition exposure is the whole risk, and it grows with the tier.** `noticed` is per
+PERSON, so a parroted sentence reaches one reader. `job_context` is per ROW — one paragraph,
+every contact at that company. `offer` is per SPACE — `job-search` holds 30 jobs and 131
+emailed contacts, so a premise quoted verbatim is one paragraph landing in ~200 inboxes. Every
+block says facts-never-phrasing, and `burned_block` sees what the company was already sent.
+**Still unproven against a live model** — §Lessons 42 was invisible to inspection.
+
+**Staleness is derived from `draft_variant`, not stored.** A draft tagged `ctx` was written with
+context; one without predates it. No third column and no timestamp to drift. Known limit, stated
+rather than discovered: editing context afterwards leaves the old tag, so it counts "used SOME
+context", not "used THIS context". Sent drafts are counted separately and **never** offered for
+regeneration — a sent draft is the only record of what went out.
+
+`draft_variant` now carries `premise`, `ctx` and `ask`. `premise` is constant within a Space so
+it only separates before/after; `ctx` and `ask` VARY across rows, which makes them the first
+inputs comparable INSIDE one campaign.
+
+**The premise box is shape-neutral** (`#premiseControls`). It lived inside `#targetControls`,
+hidden on a jobs Space, so the field could be read by nothing AND typed by no one. Labels come
+from `space.OFFER_COPY` via the payload so the panel cannot describe the field differently from
+the manifest.
 
 ## Follow-up sequences
 
@@ -1377,6 +1424,55 @@ company `"Jobs"` — the same substring bug class, inside the function written t
     mutation and none by reading. **The common tell is an assertion that cannot fail when the
     thing under test is emptied** — check that first, before checking whether it is correct.
 
+72. **A field wired into one of TWO SHAPES is not wired, and the guard that should have caught
+    it asked the wrong question.** `Space.offer` was declared, documented for exactly the jobs
+    case — *"in a job search the DESCRIPTION varies per row and the pitch is constant"* — and
+    handed only to `_pitch_user_prompt`. The jobs branch never received it, so `job-search` and
+    `gauntlet` wrote the same email as each other for days. `UNAPPLIED` was empty the whole
+    time and `test_unapplied_fields_are_really_unapplied` was honest: it asks *"is this field
+    read ANYWHERE?"* and the answer was yes, on one of two shapes. §Lessons 49 with a shape
+    instead of a call site.
+    The second half made the first worthless: `#offerInput` lived inside `#targetControls`,
+    which is `hidden` on a jobs Space, **so the field could be read by nothing AND typed by no
+    one** — and the hint beneath it argued the field was a targets concern. Wiring the prompt
+    without moving the box ships a field nobody can fill (§Lessons 43, sixth occurrence).
+
+73. **A signature audit proves ACCEPTANCE, not use — and I wrote one and briefly believed it.**
+    CTX-3 opened by measuring which draft functions take `space`: four of six did, two did not.
+    That table was true and the conclusion drawn from it was wrong. Of the four that accepted a
+    manifest, **three never read `tone`** — `draft_followup` and `draft_linkedin_followup` take
+    `space` and use it for `shape` alone. The campaign's standing voice reached **one of six**
+    entry points, not four.
+    §Lessons 39 already ends with the exact sentence — *"A parameter being accepted is not
+    evidence it is used"* — and the guard written in this very ticket,
+    `test_every_draft_entry_point_accepts_a_space`, is itself only an acceptance check. It is
+    worth keeping (a new entry point fails it by default) but it is the parametrised
+    behaviour tests that prove reading. **Cheap check, weak claim; do not let the cheap one
+    stand in for the strong one.**
+    It survived four Space tickets because it is invisible from the output: a text with no
+    campaign voice is a *perfectly good text*. Nothing errors and nothing renders wrong.
+
+74. **Refactor onto the frozen artifact FIRST, then extend.** CTX-3 needed the same three
+    context blocks in five prompts. Building them as shared functions and rewriting
+    `draft_email` to use them *before* touching anything else meant
+    `tests/golden/jobs_outreach_prompt.txt` had to stay byte-identical — which it did, so the
+    extraction was **proven** correct rather than believed, and every later change was built on
+    a verified base. Doing it the other way round (add to four prompts, extract later) gives
+    the golden file nothing to say, because by then the baseline has moved for a real reason
+    and any drift hides inside it. A frozen artifact is only leverage if you spend it before
+    you change behaviour.
+
+75. **A two-directional guard tested in one direction.** `repo.set_context(url, context=None,
+    ask=None)` must leave an unshown field alone — a missing key means "this caller did not
+    render that box", never "the operator cleared it". The test exercised the ASK side only, so
+    a mutation making the CONTEXT branch fire on `None` **survived**. Its twin in the same batch:
+    the failed-save path in the browser was never exercised at all, so dropping the operator's
+    typed paragraph on a failed save — losing the work AND re-rendering the stale server copy,
+    which looks like it saved — went unnoticed. Both tests read as complete and neither had ever
+    entered the branch. And writing the second one caught a bug in the test itself:
+    `saveJobContext` reads the DOM and never populates the buffer, so the first version asserted
+    against something nothing had filled (§Lessons 13, again).
+
 Shipped in one session, in this order: **CRM-3a → CRM-1 → CRM-2 → CRM-3b → CRM-4a.**
 Tickets in `docs/tickets/CRM-*.md`; two of them had instructions that were factually wrong
 before being revised (they told you to write `followup_status`, removed by ARCH-3).
@@ -1629,6 +1725,13 @@ way to ask whether the personalised ones did better — so every improvement to 
 unfalsifiable. `draft_variant` (2026-08-03) starts fixing it, but nothing is readable until
 enough tagged sends accumulate; `MIN_MEANINGFUL_N` is 10.
 
+**Open, and the one thing CTX-1..3 did NOT prove:** every test asserts the prompt *tells* the
+model to treat operator text as facts rather than phrasing. That is not the same as it obeying.
+§Lessons 42 was invisible to inspection — a quoted phrasing appeared in 5 of 5 drafts and only
+generation against real data showed it. **The Peak6 row is the shape that settles it**: 8
+contacts at one company, nothing sent, `job_context` still empty. Generate all 8 with context
+and count shared sentences before this runs on a 30-job Space.
+
 **Open, and reported twice:** the status BAND is still four words describing your own effort
 (`new → active → cooling → cold`) plus two describing theirs (`warm`, `won`), presented as one
 scale. The tooltips make the vocabulary learnable; they do not fix the conflation. The proposal
@@ -1737,10 +1840,12 @@ What is actually open now, ordered by leverage:
    them. Until then every Space sends from the one personal mailbox, and `identity_id` freezes
    on first send — so **do not create a business Space yet**.
 
-10. **The `spaces` branch is 26 commits ahead of `main` and unmerged.** Everything above is on
-    it; `main` has none of it. **Pushed to `origin/spaces` on 2026-08-07**, so it is no longer
-    only on this laptop — but merging is still deliberately deferred, and checking out `main`
-    gets you a build without Spaces, the deck fix, the Oracle fix or any of the UX work.
+10. **`context` is 31 commits ahead of `main`, and 4 of them exist nowhere but this laptop.**
+    `spaces` is pushed; `context` is not. Merging is still deliberately deferred, and checking
+    out `main` gets you a build without Spaces, the deck fix, the Oracle fix, any of the UX work
+    or any outreach context. **The `~/.applypilot/` database is not in git either** — latest
+    backup `applypilot-20260807-pre-ctx2.db`, taken with the sqlite backup API because the WAL
+    routinely holds more than the main file (4.1 MB against 1.8 MB when it was taken).
 
 6. ~~**No per-company outreach cap.**~~ **CLOSED 2026-08-03** (`OUTREACH_COMPANY_CAP`, default
    8). Kept for the number: six companies were already OVER the cap the moment it shipped, three
@@ -1872,9 +1977,10 @@ change still needs the `pip install` above — but that copy gives the file a ne
   and the restart ran anyway, because both were in one chained command (§Lessons 63). Use
   `pgrep -fl "applypilot apply"`; recover an orphaned lock with
   `release_stale_locks(max_age_minutes=0)` and ONLY after pgrep comes back empty.
-- **On branch `spaces`, 26 commits ahead of `main`, PUSHED and still unmerged** (2026-08-07).
-  `origin/spaces` tracks it; `main` last pushed at **`e1f0be6`**. Tags: `stable-arch2/3/5/6` ·
-  `stable-e2e-20260730` · `stable-crm-20260731`.
+- **On branch `context`** (2026-08-08), 4 commits ahead of `spaces`, which is 27 ahead of
+  `main` — **31 ahead of `main` in total, and `context` is LOCAL ONLY.** `origin/spaces` is
+  pushed; nothing of CTX-1..3 is off this laptop. `main` last pushed at **`e1f0be6`**. Tags:
+  `stable-arch2/3/5/6` · `stable-e2e-20260730` · `stable-crm-20260731`.
 - **A frontend-only edit needs the `pip install` but NOT a dashboard restart** — the copy gives
   the file a new mtime, `?v=` changes with it, and a normal reload fetches it. A **Python** edit
   needs the restart, because the running server has those modules imported already. Getting this

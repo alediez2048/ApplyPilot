@@ -404,9 +404,84 @@ def _pitch_user_prompt(sender_bits, contact, company, about_them, offer, noticed
     )
 
 
-def _job_user_prompt(sender_bits, contact, relationship, role, company, jd, noticed, context,
-                    premise, sched_block, deck_block, warm_block, style_block, tone_block,
-                    previous):
+#: CTX-3. Everything the OPERATOR supplied — the campaign's voice, its premise, and what they
+#: know about this one row — built in ONE place for every channel.
+#:
+#: Built as functions rather than inlined per prompt because the alternative is the failure this
+#: codebase keeps paying for: `space.tone` reached `draft_email` and NOTHING else, so the
+#: campaign voice applied to a cold email and stopped at the follow-up, the text and the reply.
+#: Two of the six entry points could not even accept a manifest. Five separate constructions
+#: would drift the same way (§Lessons 49 — a rule implemented at one of its call sites is not
+#: implemented), and `followup.Channel` already showed what turning this into data buys.
+#:
+#: `brief` is for the short channels. It shortens the GUIDANCE and never drops a field: a
+#: channel that silently loses a layer is the bug this exists to close, and a text has a
+#: character limit that enforces brevity anyway.
+
+
+def _voice_block(space) -> str:
+    """The campaign's standing voice. Goes LAST in every prompt, immediately before the
+    instruction to write — a constraint placed above the scheduling and deck blocks competes
+    with them and loses (§Lessons 40)."""
+    tone = (getattr(space, "tone", "") or "").strip()
+    return f"VOICE FOR THIS CAMPAIGN (applies to every message in it):\n{tone}\n\n" if tone else ""
+
+
+def _premise_block(space, brief: bool = False) -> str:
+    """What is true of every row in this Space. The most GENERAL fact available, so it reads
+    furthest from the instruction to write."""
+    premise = (getattr(space, "offer", "") or "").strip()
+    if not premise:
+        return ""
+    if brief:
+        return (f"THE PREMISE OF THIS CAMPAIGN (from the sender):\n{premise}\n"
+                "Facts only, never this wording, and at most a clause of it — there is no room "
+                "for more here.\n\n")
+    return (f"THE PREMISE OF THIS CAMPAIGN (verbatim, from the sender — what is true of every "
+            f"role they are pursuing here):\n{premise}\n"
+            "How to use it:\n"
+            "- These are FACTS, never sentences to reuse. Every message in this campaign is "
+            "written from this same paragraph, so reusing its wording means every recipient "
+            "receives the identical claim. Say it in your own words each time, or leave it "
+            "out.\n"
+            "- It answers WHY THIS ROLE, which the résumé cannot and the posting does not "
+            "know.\n"
+            "- It is background, not the subject. A message that is only the premise is about "
+            "the sender.\n"
+            "- If this particular role does not fit it, leave it out. A stretched connection "
+            "reads worse than no connection.\n\n")
+
+
+def _known_block(job: dict, brief: bool = False) -> str:
+    """What the operator knows about THIS employer and role, against the scrape."""
+    known = (job.get("job_context") or "").strip()[:1200]
+    if not known:
+        return ""
+    if brief:
+        return (f"WHAT THE SENDER KNOWS ABOUT THIS COMPANY AND ROLE (from the sender, true and "
+                f"not in the posting):\n{known}\n"
+                "Facts only, never this wording. Take the one part that fits this person and "
+                "drop the rest.\n\n")
+    return (f"WHAT THE SENDER KNOWS ABOUT THIS COMPANY AND ROLE (verbatim, from the sender — "
+            f"true, and not in the posting):\n{known}\n"
+            "How to use it:\n"
+            "- FACTS, never phrasing. Several people at this company are being written to from "
+            "this same paragraph, so reusing its wording sends them the identical sentence. Put "
+            "it in your own words, differently each time.\n"
+            "- It outranks the posting where they disagree. The operator has spoken to these "
+            "people; the posting was written by whoever owned the requisition.\n"
+            "- Use the part that is relevant to THIS person and drop the rest. A recruiter and "
+            "an engineer do not need the same half of it.\n"
+            "- Never present it as research. Naming how you came to know something, \"I saw "
+            "that…\", \"I read that…\", \"I understand you…\", is the shape that reads as "
+            "automated. Say the thing itself.\n"
+            "- If none of it fits naturally, leave it out. A forced detail is worse than "
+            "none.\n\n")
+
+
+def _job_user_prompt(sender_bits, contact, relationship, role, company, jd, noticed,
+                    context_block, premise_block, sched_block, deck_block, warm_block,
+                    style_block, tone_block, previous):
     """The jobs-shaped prompt.
 
     Extracted from `draft_email` so it can be diffed: `test_a_default_space_changes_the_prompt_by_nothing`
@@ -439,21 +514,7 @@ def _job_user_prompt(sender_bits, contact, relationship, role, company, jd, noti
         # it is the more general of the two operator inputs — person-specific reads closest to
         # the instruction to write — and above the CTA blocks because it is a fact to draw on
         # rather than a thing to ask for.
-        + (f"WHAT THE SENDER KNOWS ABOUT THIS COMPANY AND ROLE (verbatim, from the sender — "
-           f"true, and not in the posting):\n{context}\n"
-           "How to use it:\n"
-           "- FACTS, never phrasing. Several people at this company are being written to from "
-           "this same paragraph, so reusing its wording sends them the identical sentence. Put "
-           "it in your own words, differently each time.\n"
-           "- It outranks the posting where they disagree. The operator has spoken to these "
-           "people; the posting was written by whoever owned the requisition.\n"
-           "- Use the part that is relevant to THIS person and drop the rest. A recruiter and "
-           "an engineer do not need the same half of it.\n"
-           "- Never present it as research. Naming how you came to know something, \"I saw "
-           "that…\", \"I read that…\", \"I understand you…\", is the shape that reads as "
-           "automated. Say the thing itself.\n"
-           "- If none of it fits naturally, leave it out. A forced detail is worse than "
-           "none.\n\n" if context else "")
+        + context_block
         # The operator saw something on their profile and wrote it down. This is the ONE piece
         # of genuinely person-specific input available, so it takes precedence over the posting
         #, but it must be used as a human would use it, not announced.
@@ -484,20 +545,7 @@ def _job_user_prompt(sender_bits, contact, relationship, role, company, jd, noti
         # and 131 emailed contacts, so a premise that comes back verbatim is one paragraph
         # arriving in ~200 inboxes. §Lessons 42 fired on a single quoted phrasing appearing in
         # 5 of 5 drafts; the exposure here is two orders of magnitude larger.
-        + (f"THE PREMISE OF THIS CAMPAIGN (verbatim, from the sender — what is true of every "
-           f"role they are pursuing here):\n{premise}\n"
-           "How to use it:\n"
-           "- These are FACTS, never sentences to reuse. Every email in this campaign is "
-           "written from this same paragraph, so reusing its wording means every recipient "
-           "receives the identical claim. Say it in your own words each time, or leave it out.\n"
-           "- It answers WHY THIS ROLE, which the résumé cannot and the posting does not know. "
-           "Use it where the email would otherwise say nothing more than that the sender "
-           "applied.\n"
-           "- It is background, not the subject. What the role actually involves, above, is "
-           "still the thing the email reacts to. An email that is only the premise is about "
-           "the sender.\n"
-           "- If this particular role does not fit it, leave it out. A stretched connection "
-           "reads worse than no connection.\n\n" if premise else "")
+        + premise_block
         + sched_block + deck_block + warm_block + style_block
         # LAST, immediately before the instruction to write. A constraint placed above the
         # scheduling and deck blocks competes with them and loses — §Lessons 40: two
@@ -529,12 +577,12 @@ def draft_email(profile: dict, job: dict, contact: dict, style: str = "", warm: 
     # SPACE-4. `space` is the Space's manifest; None means the behaviour that existed before
     # Spaces did, which is what every caller that has not been taught about them means.
     shape = getattr(space, "shape", "pipeline/jobs")
-    tone = (getattr(space, "tone", "") or "").strip()
     wants_deck = getattr(space, "offer_deck", True)
     # A voice directive from the Space, distinct from `style`: `style` is a one-off the operator
     # types for a single run, this is the campaign's standing voice. Both are honoured, and the
     # Space's goes LAST so a per-run instruction cannot be silently overridden by a stored one.
-    tone_block = f"VOICE FOR THIS CAMPAIGN (applies to every message in it):\n{tone}\n\n" if tone else ""
+    # Shared with every other channel since CTX-3 — it used to be built here and nowhere else.
+    tone_block = _voice_block(space)
 
     role = job.get("title") or "the role"
     company = contact.get("company") or job.get("company") or job.get("site") or "your company"
@@ -629,7 +677,8 @@ def draft_email(profile: dict, job: dict, contact: dict, style: str = "", warm: 
         system = _PITCH_SYSTEM
     else:
         user = _job_user_prompt(sender_bits, contact, relationship, role, company, jd,
-                                noticed, context, offer, sched_block, deck_block, warm_block,
+                                noticed, _known_block(job), _premise_block(space),
+                                sched_block, deck_block, warm_block,
                                 style_block, tone_block, previous)
         system = _SYSTEM
 
@@ -816,7 +865,9 @@ def draft_followup(profile: dict, job: dict, contact: dict, touch: int = 1,
                  "This is the concrete thing this follow-up offers, so lead with it rather "
                  "than tacking it on.\n\n"
                  if deck else ""))
+        + _premise_block(space) + _known_block(job)
         + (f"STYLE DIRECTION (follow closely):\n{directive}\n\n" if directive else "")
+        + _voice_block(space)
         + "Write the follow-up. Return the JSON."
     )
 
@@ -894,7 +945,8 @@ def draft_for_channel(channel: str, profile: dict, job: dict, contact: dict,
         # is a product decision, not a wording one, and the outreach template should probably
         # drop the channel rather than have this file invent copy for it. Flagged, not guessed.
         return {"subject": "", "body": draft_sms(
-            profile, job, contact, touch=touch, style=style, thread=thread)["message"]}
+            profile, job, contact, touch=touch, style=style, thread=thread,
+            space=space)["message"]}
     return draft_followup(profile, job, contact, touch=touch, style=style, touches=touches,
                           space=space)
 
@@ -1000,7 +1052,7 @@ def _last_inbound(thread: list | None) -> dict:
 
 def draft_reply(profile: dict, job: dict, contact: dict, thread: list | None = None,
                 subject: str = "", style: str = "", their_reply: str = "",
-                touches: list | None = None) -> dict:
+                touches: list | None = None, space=None) -> dict:
     """Draft an answer to a live conversation, from the WHOLE sequence.
 
     `their_reply` is what the other person actually said. Two ways it gets here and the
@@ -1051,8 +1103,10 @@ def draft_reply(profile: dict, job: dict, contact: dict, thread: list | None = N
         + f"\nTHE CONVERSATION SO FAR, in order:\n{transcript}\n\n"
         + "Everything above marked YOU is already in their inbox. Do not repeat any of it.\n\n"
         + (f"SCHEDULING LINK (use it only if they want to talk): {link}\n\n" if link else "")
+        + _premise_block(space, brief=True) + _known_block(job, brief=True)
         + (f"STYLE DIRECTION (follow closely, it overrides the default voice):\n{directive}\n\n"
            if directive else "")
+        + _voice_block(space)
         + "Write the reply. Answer what they said. Return the JSON."
     )
 
@@ -1122,7 +1176,9 @@ def draft_linkedin_followup(profile: dict, job: dict, contact: dict, touch: int 
            "This is a DM to an existing connection, so a link is fine here, LinkedIn only "
            "penalises them in connection-request notes. Offer it in your own words; the full "
            "URL must appear verbatim.\n\n" if deck else "")
+        + _premise_block(space, brief=True) + _known_block(job, brief=True)
         + (f"STYLE DIRECTION (follow closely):\n{directive}\n\n" if directive else "")
+        + _voice_block(space)
         + "Write the LinkedIn follow-up. Return the JSON."
     )
 
@@ -1285,7 +1341,7 @@ def _sms_permission(contact: dict) -> str:
 
 
 def draft_sms(profile: dict, job: dict, contact: dict, touch: int = 0,
-              style: str = "", thread: list | None = None) -> dict:
+              style: str = "", thread: list | None = None, space=None) -> dict:
     """Draft a text message. `touch` 0 is the first one; 1+ are follow-ups.
 
     Returns {"message": str}. NEVER sends, the operator copies this, opens Messages and
@@ -1356,7 +1412,9 @@ def draft_sms(profile: dict, job: dict, contact: dict, touch: int = 0,
            "(availability to talk, or asking where the process stands).\n"
            if replied and not said else "")
         + f"\nTHIS MESSAGE: {intent}\n\n"
+        + _premise_block(space, brief=True) + _known_block(job, brief=True)
         + (f"STYLE DIRECTION (follow closely):\n{directive}\n\n" if directive else "")
+        + _voice_block(space)
         + f"Write the text message. Under {_SMS_LIMIT} characters. Return the JSON."
     )
 

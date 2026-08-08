@@ -11,7 +11,7 @@ produce the same email — because the only Space-level lever that reaches a job
 |---|---|---|---|---|
 | 1 | `CTX-1` the campaign premise reaches a jobs draft | S/M | **bug** | **DONE** 2026-08-07 |
 | 2 | `CTX-2` context and ask on the row | M | feature | **DONE** 2026-08-07 |
-| 3 | `CTX-3` every channel sees the Space | S/M | gap | TODO |
+| 3 | `CTX-3` every channel sees the Space | S/M | gap | **DONE** 2026-08-08 |
 | 4 | `CTX-4` the identity owns the unchanging things | — | **deferred** → ID-1 | NOT NOW |
 
 ## Order, and the one real constraint

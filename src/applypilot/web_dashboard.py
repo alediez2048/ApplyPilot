@@ -2576,9 +2576,13 @@ def _draft_reply(data: dict) -> dict:
             # link, both optional. Refusing to answer a live human because a config file is
             # missing is the wrong trade.
             profile = {}
+        # CTX-3. A reply is the one message where the campaign's voice matters most and was
+        # reaching it least: `draft_reply` could not accept a manifest at all.
+        from applypilot.networking.service import space_for
         d = outreach.draft_reply(profile, job, contact, thread=thread,
                                  style=(data.get("style") or ""), their_reply=said,
-                                 touches=_touches.sent_touches(cid, "email", conn))
+                                 touches=_touches.sent_touches(cid, "email", conn),
+                                 space=space_for(job, conn))
     except Exception as e:  # noqa: BLE001
         log.debug("Reply draft failed", exc_info=True)
         return {"ok": False, "message": f"Draft failed: {e}"}

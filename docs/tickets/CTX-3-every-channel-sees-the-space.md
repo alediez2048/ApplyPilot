@@ -1,6 +1,6 @@
 # CTX-3 — Two of the six draft entry points cannot see a Space
 
-**Size:** S/M · **Depends on:** nothing (independent of CTX-1/2) · **Status:** TODO
+**Size:** S/M · **Depends on:** nothing (independent of CTX-1/2) · **Status:** DONE 2026-08-08
 **PRD:** `docs/outreach-context-prd.md` §4
 **Predates this PRD.** Found while measuring for it, not introduced by it.
 
@@ -27,9 +27,26 @@ def draft_sms(profile: dict, job: dict, contact: dict, touch: int = 0,
 ```
 
 A parameter that does not exist cannot be read, so this is settled without tracing further:
-**`space.tone` has never reached a text message or a reply.** The campaign's standing voice
-applies to email and LinkedIn and silently stops at the two channels where the operator is
-closest to the person.
+**`space.tone` has never reached a text message or a reply.**
+
+### Correction, found while building: it was worse than that
+
+Two of six could not accept a manifest. But of the four that COULD, three never read `tone` —
+`draft_followup` and `draft_linkedin_followup` take `space` and use it for `shape` alone, to
+pick between the pitch and job-seeker system prompts. Measured:
+
+```
+draft_email              tone ✓   premise ✓   context ✓
+draft_followup           tone ✗   premise ✗   context ✗   (takes space, reads only shape)
+draft_for_channel        tone ✗   premise ✗   context ✗
+draft_linkedin_followup  tone ✗   premise ✗   context ✗   (takes space, reads only shape)
+draft_reply              — cannot accept a manifest at all —
+draft_sms                — cannot accept a manifest at all —
+```
+
+**The campaign's voice reached ONE of six entry points**, not four. Accepting a manifest and
+reading it are different things, and the ticket's own table measured the first while claiming
+the second.
 
 `draft_for_channel` (`:784`) does take `space` and dispatches to `draft_sms`, so the value is
 in the caller's hand and is dropped at the call.
@@ -54,18 +71,29 @@ link** — a URL from an unrecognised number is the strongest spam signal there 
 
 ## Scope / tasks
 
-- [ ] Add `space=None` to `draft_reply` and `draft_sms`, matching the four that have it.
-- [ ] Pass it from every call site: `draft_for_channel` (`:784`), `web_dashboard.py:2967`,
-      `tick.py:172`, and the reply path.
-- [ ] `tone_block` in both, in the same position the other four use — last, immediately before
-      the instruction to write (`outreach.py` already carries the comment explaining that a
-      constraint placed above the scheduling and deck blocks competes with them and loses).
-- [ ] **The SMS tone block must not be a stock sentence.** §Lessons 42 fired on this exact
-      prompt: a phrasing quoted as a model came back in 5 of 5 drafts. Tone is a direction to
-      follow, never a sentence to reuse.
-- [ ] `offer_deck` stays unconsulted on the SMS path. Assert it, do not just avoid it.
-- [ ] Carry CTX-1's premise and CTX-2's context through the same threading if those have
-      shipped — but this ticket stands alone and must be mergeable without them.
+- [x] `space=None` on `draft_reply` and `draft_sms`, matching the four that had it.
+- [x] Passed from every call site: `draft_for_channel`, and `web_dashboard._draft_reply` through
+      `service.space_for(job, conn)`.
+- [x] **Three shared builders rather than five inline constructions** — `_voice_block`,
+      `_premise_block`, `_known_block`. Repeating the assembly per channel is precisely how this
+      drifted in the first place (§Lessons 49), and `followup.Channel` already showed what
+      turning per-channel branching into data buys.
+- [x] `draft_email` refactored onto the same builders **first**, with the golden file as the
+      proof: `tests/golden/jobs_outreach_prompt.txt` did not move, so the extraction is
+      byte-identical rather than merely believed to be.
+- [x] `brief=True` for the short channels (text, LinkedIn, reply). It shortens the GUIDANCE and
+      **never drops a field** — a channel silently missing a layer is the bug this closes.
+- [x] The voice goes LAST on every path, immediately before the instruction to write.
+- [x] `offer_deck` still unconsulted on the SMS path, asserted rather than merely avoided.
+- [x] Premise and row context carried through the same threading, so all three layers arrive
+      together instead of one shipping now and two later.
+
+### Deliberately not done
+
+**`job_ask` stays email-only.** The follow-up ladder already sets a per-touch intent (touch 2
+offers a redirect, touch 3 says plainly it is the last), and overriding that from a row-level
+field is a second contradiction of exactly the §Lessons 40 kind — not a threading problem. If it
+is wanted, it is its own ticket with its own decision about which wins.
 
 ## Not in scope
 
@@ -75,17 +103,30 @@ link** — a URL from an unrecognised number is the strongest spam signal there 
 
 ## Tests
 
-- [ ] `test_the_campaign_voice_reaches_every_channel` — parametrised over all six entry points,
-      one Space with a distinctive tone, assert the tone reaches each prompt. **Name a tone
-      string that appears nowhere in the codebase**, for the reason
-      `test_adding_a_channel_needs_no_schema_change` had to stop naming SMS: a fixture that
-      collides with something real starts passing for the wrong reason the moment that thing
-      ships.
-- [ ] `test_a_text_never_consults_the_deck` — with `offer_deck=True` and a deck URL set,
-      assert no URL appears in an SMS prompt or draft. This guards the thing this ticket could
-      break while fixing the thing it is for.
-- [ ] `test_every_draft_entry_point_accepts_a_space` — introspect the signatures. Mechanical,
-      cheap, and it is what would have caught this two weeks ago. A new entry point added
-      later fails it by default, which is the point.
-- [ ] Mutation-verified: dropping `space` at any one call site kills the parametrised test for
-      that channel and no other.
+`tests/test_every_channel_sees_the_space.py`, 45 tests — five properties parametrised across all
+seven entry points (six functions plus `draft_for_channel` routing to both a leaf and itself).
+
+- [x] `test_the_campaign_voice_reaches_every_channel` — **passed for one of seven before this
+      ticket.**
+- [x] `test_the_premise_reaches_every_channel`, `test_the_row_context_reaches_every_channel`.
+- [x] `test_no_space_adds_nothing_anywhere` — additive on every path, not only the one with a
+      golden file.
+- [x] `test_the_voice_is_the_last_thing_before_the_instruction` — asserts nothing the operator
+      supplied comes after it.
+- [x] `test_every_draft_entry_point_accepts_a_space` — introspects the signatures. Mechanical,
+      cheap, and what would have caught this weeks ago; a new entry point fails it by default.
+- [x] `test_the_test_voice_is_genuinely_unknown_to_the_codebase` — scans `src/` for the fixture
+      string. The channel version of this test named SMS and silently broke the day SMS shipped.
+- [x] `test_a_text_never_consults_the_deck` — guards what this ticket could break while fixing
+      what it is for: threading `space` into `draft_sms` hands it `offer_deck`, and a URL from an
+      unrecognised number is the strongest spam signal there is.
+- [x] `test_the_short_channels_get_the_short_guidance` — brief is shorter AND still contains
+      every field.
+- [x] **Mutation-verified, 11 of 11 killed**, `__pycache__` cleared between each: the voice
+      dropped from each of the four prompts individually, the router not passing `space`, either
+      signature losing the parameter, an unconditional voice block, brief falling back to long,
+      and the deck reaching a text.
+
+Suite **1639 passed, 1 skipped**. ruff and eslint clean. Verified live against the real Gauntlet
+premise: it now reaches the cold email, the email follow-up, the LinkedIn follow-up and the text,
+where before it reached the first only.

@@ -486,83 +486,131 @@ def _known_block(job: dict, brief: bool = False) -> str:
             "none.\n\n")
 
 
-def job_link_for(job: dict, shape: str = "pipeline/jobs") -> str:
-    """The posting URL to reference, or "" when there is none to send.
+def posting_ref_for(job: dict, shape: str = "pipeline/jobs") -> dict:
+    """How to NAME this job: {"title": …, "req": …}, either possibly "".
 
-    ONE derivation per draft, and every consumer takes the string from here — the prompt block,
-    the `ensure_job_link` guarantee and the `draft_variant` tag. Deriving it twice is exactly how
-    `ensure_sender_signoff` came within one line of rewriting every correct sign-off, because the
-    guard re-computed a name the prompt had already computed differently (§Lessons 49).
+    Replaced the posting LINK, which was the first version of this and read badly. A Workday URL
+    runs to 141 characters and inline in an opening sentence it turns a personal note into
+    something a bot forwarded. What a human writes is the role's name, plus a requisition number
+    when the reader is the sort who would look one up.
 
-    Jobs shape only. A targets Space pitches a company; there is no posting, and `posting_link`
-    refuses a `target:` anchor anyway (§Lessons 70 — belt and braces on the write paths).
+    ONE derivation per draft, and both consumers read this — the prompt block and nothing else,
+    now that there is no string to force-append. See `domain/jobref.py` for why the TITLE is the
+    hard half: eleven of thirty-three live rows carry one that must never be quoted.
     """
-    if shape == "pipeline/targets":
-        return ""
-    from applypilot.domain.joblink import posting_link
-    return posting_link(job)
+    from applypilot.domain.jobref import posting_reference
+    return posting_reference(job, shape)
 
 
-def _job_link_block(link: str, brief: bool = False) -> str:
-    """The prompt block naming the posting.
+def _wants_requisition(contact: dict | None, ref: dict | None) -> bool:
+    """Whether this recipient should be given the requisition number.
 
-    The gap it closes: an email could say "the role I applied for" and name nothing checkable.
-    That is worst exactly where the scrape failed — five live rows still carry the placeholder
-    title `{company} uploaded job`, and one sent draft reads *"I just applied for the Betterup
-    role"*, which tells a recruiter at a company with forty openings precisely nothing.
+    ONE predicate, read by the prompt block and by the guarantee that enforces it. Two
+    implementations of "is this person a recruiter" would let the prompt ask for a number the
+    guarantee then refuses to insert, or worse the reverse — §Lessons 49, and the reason
+    `rank.is_recruiter` is reused rather than re-written here.
+
+    A requisition is how a recruiter finds the application in their own ATS. To a peer engineer
+    it is a string of noise that reads as machine-generated, which is the exact quality this
+    change exists to remove.
     """
-    if not link:
-        return ""
+    from applypilot.networking.rank import is_recruiter
+    return bool((ref or {}).get("req")) and is_recruiter((contact or {}).get("title"))
+
+
+def _posting_ref_block(ref: dict, contact: dict | None = None, brief: bool = False) -> str:
+    """The prompt block naming the role, and the requisition when it is worth naming.
+
+    The gap it closes: an email could say "the role I applied for" and name nothing. That is
+    worst exactly where the scrape failed, and §Lessons 42 caught the failure mode reaching a
+    live draft as *"the Betterup uploaded job"*.
+
+    **An empty title says so, out loud.** A model handed "ROLE:" followed by nothing invents one,
+    and an invented job title in the first sentence of an application email is unrecoverable. Six
+    live rows have no sayable role, so this is the common case, not the edge.
+
+    **The requisition is offered only to someone who would use it.** A req number is how a
+    recruiter finds the application in their own ATS; to a peer engineer it is a string of noise
+    that reads as machine-generated, which is the exact quality this change exists to fix.
+    `rank.is_recruiter` already decides this elsewhere and is reused rather than re-implemented
+    (§Lessons 49).
+    """
+    title, req = (ref or {}).get("title", ""), (ref or {}).get("req", "")
+    wants_req = _wants_requisition(contact, ref)
+
+    # ONE path for the no-title case. It was written twice — an early return for "nothing at all"
+    # and an else-branch for "no title but a requisition" — and mutation showed the second was
+    # untested, because every fixture that reached it took the first. Two copies of the same
+    # instruction is one of them going stale (§Lessons 49, in a prompt instead of a call site).
     if brief:
-        return f"THE POSTING (the exact role, include the URL verbatim): {link}\n\n"
-    return (
-        f"THE POSTING BEING REFERRED TO (include this URL verbatim in the EMAIL):\n{link}\n"
-        "How to use it:\n"
-        "- It says WHICH role. A large employer has many openings and the reader cannot be "
-        "expected to guess; naming the role in words and linking it costs one clause.\n"
-        "- Put it where the role is first mentioned, not in a footer. A link at the bottom "
-        "under the sign-off reads as a signature block and gets skimmed past.\n"
-        "- Copy the URL EXACTLY. Do not shorten it, wrap it in a word, re-encode it, or append "
-        "anything to it. A link that does not resolve is worse than no link, because the reader "
-        "clicks it.\n"
-        "- One sentence of your own around it. Do not announce that you are including a link.\n\n"
-    )
+        bits = (f"THE ROLE (name it in these words): {title}\n" if title else
+                "THE ROLE: the stored title is unusable. If the posting names the role, use that "
+                "name; otherwise stay general and invent nothing.\n")
+        if wants_req:
+            bits += f"Requisition {req} — include it, this person can look it up.\n"
+        return bits + "\n"
+
+    out = ""
+    if title:
+        out += (f"THE ROLE THIS IS ABOUT:\n{title}\n"
+                "Name it in the first sentence, IN THESE WORDS. A large employer has many "
+                "openings and the reader cannot be expected to guess which one. Do not "
+                "paraphrase it, shorten it to something snappier, or add a level or a team it "
+                "does not say.\n")
+    else:
+        out += ("THE ROLE THIS IS ABOUT: the stored title is unusable — it is a scraper "
+                "placeholder or a careers-page heading rather than a role.\n"
+                "- If the posting text above NAMES the role, use that name. Reading it from the "
+                "description is not inventing it, and it is much better than staying vague.\n"
+                "- If it does not, refer to the role in general terms and NEVER invent a title, "
+                "a level or a team the posting does not state. An invented job title in the "
+                "first sentence of an application email cannot be recovered from.\n")
+    if wants_req:
+        out += (f"REQUISITION: {req}\n"
+                "This person recruits, so the number is genuinely useful to them — it is how "
+                "they find the application. Put it in parentheses after the role name or in a "
+                "short closing line. Never make it the subject of a sentence.\n")
+    elif req:
+        out += ("REQUISITION: one exists, but this person does not recruit. Do NOT mention it. "
+                "A requisition number means nothing to a peer and reads as machine-generated.\n")
+    return out + "\n"
 
 
-def ensure_job_link(body: str, url: str) -> str:
-    """Guarantee the posting URL is in `body`. Same shape and same reason as `ensure_intro_deck`.
+def ensure_requisition(body: str, title: str, req: str) -> str:
+    """Put the requisition in parentheses after the role's first mention, if it is missing.
 
-    A prompt instruction is not a guarantee (§Lessons 9, 12): the model can drop the link,
-    paraphrase it, or split it across a line break, and the result looks like a perfectly good
-    email — which is §Lessons 29's property, the half of a feature that is invisible when wrong.
+    Measured rather than assumed: with the prompt asking for it, four drafts to a recruiter
+    carried the number **twice**. A coin flip is not "include it", and §Lessons 9 and 12 are the
+    standing answer — a prompt instruction is not a guarantee.
 
-    Idempotent, and it leaves a naturally-placed link exactly where the model put it. The
-    appended fallback sits ABOVE the sign-off for the same reason the deck sentence does.
+    What makes this different from the guarantees it is modelled on is that it will NOT append.
+    `ensure_intro_deck` can add a sentence because a deck link is an offer that stands alone; a
+    requisition number is a qualifier on a role, and a line reading "REQ-12289" under the
+    sign-off is precisely the machine-assembled footer this whole change removed. So it inserts
+    at the one place the number belongs and otherwise does nothing:
+
+        "I just applied for the Emerging Technology Architect role at Q2"
+                                                                 ^ here
+
+    No role mention in the body means no insertion. A requisition floating free of the thing it
+    identifies is worse than its absence.
     """
-    if not url:
+    if not req or not title or not (body or "").strip():
         return body
-    if url.rstrip("/") in (body or "").replace("\n", " ").rstrip("/"):
+    if req.lower() in body.lower():
         return body
-    sentence = JOB_LINK_SENTENCE.format(url=url)
-    body = (body or "").rstrip()
-    paras = list(body.split("\n\n"))
-    if len(paras) >= 2 and _looks_like_signoff(paras[-1]):
-        paras.insert(len(paras) - 1, sentence)
-        return "\n\n".join(p.strip("\n") for p in paras)
-    return f"{body}\n\n{sentence}"
-
-
-#: The fallback wording, used ONLY when the model dropped the link entirely. Deliberately flat
-#: and unmemorable: it is a reference, not a pitch, and §Lessons 42 is what happens when a
-#: quotable sentence lives in this file — the SMS prompt's suggested phrasing came back in 5 of
-#: 5 drafts. This one is never shown to the model, so it cannot be parroted; it only ever
-#: appears in the drafts where the model wrote no link at all.
-JOB_LINK_SENTENCE = "The role I'm referring to: {url}"
+    # The title as the MODEL wrote it, which may differ in case. Matching case-insensitively and
+    # splicing by index preserves whatever it actually typed.
+    idx = body.lower().find(title.lower())
+    if idx < 0:
+        return body
+    end = idx + len(title)
+    return f"{body[:end]} ({req}){body[end:]}"
 
 
 def _job_user_prompt(sender_bits, contact, relationship, role, company, jd, noticed,
                     context_block, premise_block, sched_block, deck_block, warm_block,
-                    style_block, tone_block, previous, job_link_block=""):
+                    style_block, tone_block, previous, posting_ref_block=""):
     """The jobs-shaped prompt.
 
     Extracted from `draft_email` so it can be diffed: `test_a_default_space_changes_the_prompt_by_nothing`
@@ -590,10 +638,10 @@ def _job_user_prompt(sender_bits, contact, relationship, role, company, jd, noti
         f"JOB APPLIED TO:\nRole: {role}\nCompany: {company}\n"
         f"WHAT THE ROLE ACTUALLY INVOLVES (from the posting, the specific thing to react to):\n"
         f"{jd}\n\n"
-        # Directly under the role it identifies, not down with the CTA blocks. The link is a
-        # FACT about which job this is, not a thing being asked for, and the blocks below all
+        # Directly under the role it identifies, not down with the CTA blocks. Which job this
+        # is, is a FACT to state rather than a thing to ask for, and the blocks below all
         # compete for the closing paragraph (§Lessons 40).
-        + job_link_block
+        + posting_ref_block
         # CTX-2. What the operator KNOWS, against the scrape directly above it, which is
         # everything else this prompt has ever had about a job. Placed above `noticed` because
         # it is the more general of the two operator inputs — person-specific reads closest to
@@ -752,9 +800,9 @@ def draft_email(profile: dict, job: dict, contact: dict, style: str = "", warm: 
     # the jobs prompt as the premise. It reached only the first for three days (CTX-1).
     offer = (getattr(space, "offer", "") or "").strip()
 
-    # The posting URL, cleaned, derived ONCE — the prompt block, the guarantee and the variant
-    # tag all read this one string.
-    job_link = job_link_for(job, shape)
+    # How to NAME the role, derived ONCE. No URL: a 141-character Workday link inline in an
+    # opening sentence reads as machine-forwarded, which is what this replaced.
+    posting_ref = posting_ref_for(job, shape)
 
     if shape == "pipeline/targets":
         # `full_description` is what the operator pasted about the company, and the offer comes
@@ -769,7 +817,7 @@ def draft_email(profile: dict, job: dict, contact: dict, style: str = "", warm: 
                                 noticed, _known_block(job), _premise_block(space),
                                 sched_block, deck_block, warm_block,
                                 style_block, tone_block, previous,
-                                job_link_block=_job_link_block(job_link))
+                                posting_ref_block=_posting_ref_block(posting_ref, contact))
         system = _SYSTEM
 
     client = get_client("light")
@@ -780,7 +828,7 @@ def draft_email(profile: dict, job: dict, contact: dict, style: str = "", warm: 
     variant = draft_variant(warm=warm, noticed=bool(noticed), jd_chars=len(jd),
                             deck=bool(deck), scheduling=bool(link), style=bool(directive),
                             premise=bool(offer), ctx=bool(context), ask=bool(ask),
-                            joblink=bool(job_link))
+                            joblink=bool(posting_ref.get("title") or posting_ref.get("req")))
     data = extract_json(raw)
     subject = sanitize_text(str(data.get("subject", ""))).strip()
     body = sanitize_text(str(data.get("body", ""))).strip()
@@ -792,10 +840,10 @@ def draft_email(profile: dict, job: dict, contact: dict, style: str = "", warm: 
         raise ValueError("empty outreach body")
     # Not left to the prompt: the deck goes in EVERY outreach email.
     body = ensure_intro_deck(body, deck)
-    # Nor the posting. A message about a job that does not say WHICH job puts the work of
-    # figuring that out on the recipient, and the rows where it matters most are the ones whose
-    # title is still `{company} uploaded job`.
-    body = ensure_job_link(body, job_link)
+    # Nor the requisition, for the recipients it is meant for. The prompt asks and the model
+    # obliged in two of four live drafts, which is a coin flip rather than a rule.
+    if _wants_requisition(contact, posting_ref):
+        body = ensure_requisition(body, posting_ref.get("title", ""), posting_ref.get("req", ""))
     # Nor is the sender's own name. See ensure_sender_signoff — a live draft came back signed
     # "Alexander" with "Sender first name: Alejandro" two lines into the prompt.
     # `_sender_name` — the SAME function the prompt used two hundred lines up. The first version
@@ -967,9 +1015,8 @@ def draft_followup(profile: dict, job: dict, contact: dict, touch: int = 1,
     deck = _intro_deck_url(profile, contact)
 
     sent_on = (contact.get("submitted_at") or "")[:10]
-    # Jobs shape only, and derived once — the block below and the guarantee after the call both
-    # read this string.
-    job_link = job_link_for(job, getattr(space, "shape", "pipeline/jobs"))
+    # Jobs shape only, derived once for the block below.
+    posting_ref = posting_ref_for(job, getattr(space, "shape", "pipeline/jobs"))
 
     # EVERYTHING already said on this thread, not just the first email.
     transcript = conversation_transcript(contact, touches=touches)
@@ -1018,7 +1065,7 @@ def draft_followup(profile: dict, job: dict, contact: dict, touch: int = 1,
         # It also does not carry the deck's cost. Re-pitching an OFFER four times is what read as
         # automated; a reference saying which job this is about is what every human chasing an
         # application writes, and it is one clause.
-        + _job_link_block(job_link, brief=True)
+        + _posting_ref_block(posting_ref, contact, brief=True)
         + _premise_block(space) + _known_block(job)
         + (f"STYLE DIRECTION (follow closely):\n{directive}\n\n" if directive else "")
         + _voice_block(space)
@@ -1047,10 +1094,8 @@ def draft_followup(profile: dict, job: dict, contact: dict, touch: int = 1,
     # had correctly left it out.
     if not deck_sent:
         body = ensure_intro_deck(body, deck)
-    # The posting link IS unconditional here, and the asymmetry with the deck directly above is
-    # the point rather than an oversight: the body ships bare, so every touch has to name the
-    # role on its own. See the block builder in the prompt for the measurement.
-    body = ensure_job_link(body, job_link)
+    if _wants_requisition(contact, posting_ref):
+        body = ensure_requisition(body, posting_ref.get("title", ""), posting_ref.get("req", ""))
     return {"subject": subject, "body": body}
 
 

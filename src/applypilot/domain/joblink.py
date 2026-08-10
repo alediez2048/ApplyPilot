@@ -1,12 +1,21 @@
-"""The link to a job POSTING, fit to send to a human.
+"""Job URLs, normalised — for SEEING THROUGH, not for sending.
 
-A cold email that says "the role I applied for" and names nothing is asking the reader to
-guess. At a company with forty openings that is a real cost, and it is worst exactly where the
-scrape failed: five rows still carry the placeholder title `{company} uploaded job`, and one
-live draft went out reading *"I just applied for the Betterup role"*.
+This began as "put the posting link in every email". That shipped, and the drafts read badly: a
+Workday URL runs to 141 characters and inline in an opening sentence it turns a personal note
+into something a bot forwarded. Naming the role is what a human does, so that is what outreach
+does now — `domain/jobref.py`, and the honest note is that the TITLE turned out to be the hard
+part, not the link.
 
-So the email should carry a reference. What it must NOT carry is the string in the database.
-Measured across the 32 live rows before writing any of this:
+What survives here is the normalisation, and it is load-bearing somewhere else entirely:
+`networking/derive.unwrap_job_urls` uses `clean_link` to see through an ad-network redirect
+before any rule reads a hostname. Without it `jsv3.recruitics.com/redirect?rx_url=…` makes every
+employer rule describe the DISTRIBUTOR — which is how a Meta job resolved to "Recruitics" and
+stored three of that vendor's own recruiters as the contacts.
+
+`posting_link` — which chose between `url` and `application_url` — was deleted with the
+send-a-link feature rather than left as an unused public function. Its finding is worth keeping
+even though its code is not: **`application_url` is the FORM, not the posting, whatever the name
+says.** Measured across the 32 live rows:
 
     Betterup     url  .../544ff316-...?utm_source=linkedin_promoted
                  appl .../544ff316-.../application          <- the FORM, not the posting
@@ -17,13 +26,10 @@ Measured across the 32 live rows before writing any of this:
                       www.metacareers.com%2Fjobs%2F...      <- 434 chars of ad redirect
     Peak6/Expedia appl .../apply?utm_source=linkedin&utm_medium=referral
 
-Two conclusions, both load-bearing:
-
-**`url` is the posting; `application_url` is the FORM.** The name says otherwise, which is why
-this is written down. `application_url` exists so the apply agent knows where to type; it is
-frequently a Workday `/apply` endpoint, an Ashby `/application`, or — for Google — a relative
-path that means nothing outside the page it was scraped from. Emailing somebody who works at
-the company a link to their own application form is the wrong artifact.
+`application_url` exists so the apply agent knows where to type: it is frequently a Workday
+`/apply` endpoint, an Ashby `/application`, or — for Google — a relative path meaningless
+outside the page it was scraped from. Anything that later wants "the posting" should prefer
+`url` and know why.
 
 **Nearly every stored URL is tagged with where WE found it.** `utm_source=linkedin`,
 `gh_src=689c81d53us`, `source=LinkedIn`, `__jvsd=LinkedIn`, `utm_source=syn_li`. Those are
@@ -39,9 +45,8 @@ provably safe (the wrapped URL is literally the destination). Path surgery is ne
 `/application` link ships as-is: it renders the posting above the form, which is imperfect and
 alive, rather than tidy and hypothetical.
 
-Empty string means NO LINK, and every caller must treat it that way. There is no fallback to a
-half-usable URL — a broken reference to the job is worse than no reference, because the reader
-clicks it.
+Empty string means "nothing usable here", and every caller must treat it that way. There is no
+fallback to a half-usable URL.
 """
 
 from __future__ import annotations
@@ -144,20 +149,3 @@ def clean_link(url: str) -> str:
     # linking, and it is another thing that reads as pasted.
     return urlunsplit((parts.scheme, parts.netloc, parts.path,
                        urlencode(kept, doseq=True), ""))
-
-
-def posting_link(job: dict) -> str:
-    """The URL to reference in a message about this job, or "" when there is nothing to send.
-
-    Prefers `url` — see the module docstring; the field named `application_url` is the form.
-    Falls back to it only when `url` yields nothing sendable, because a form link is still a
-    page about the role and a missing link is nothing at all.
-    """
-    job = job or {}
-    anchor = (job.get("url") or "").strip()
-    # A targets row is keyed `target:<space>:<slug>` (SPACE-1a D1). It is a company you pitch,
-    # not a posting, and there is no link — the caller should never have asked, but a Space is
-    # only as separate as its write paths (§Lessons 70) so this refuses rather than trusts.
-    if anchor.startswith("target:"):
-        return ""
-    return clean_link(anchor) or clean_link(job.get("application_url") or "")

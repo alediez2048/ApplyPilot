@@ -12,9 +12,9 @@ campaign happens to be a job search** — see `docs/crm-prd.md` for where that g
 - **Packaging:** Hatchling, `src/` layout, single package `applypilot`
 - **Entry point:** `applypilot = "applypilot.cli:app"` (Typer CLI)
 - **License:** AGPL-3.0-only · **Version:** 0.4.0 (`pyproject.toml`)
-- **Tests:** 1760 passing (`tests/`, 92 files) · ruff clean (line-length 120, py311) · ESLint clean
+- **Tests:** 1778 passing (`tests/`, 93 files) · ruff clean (line-length 120, py311) · ESLint clean
 - **Schema version:** 3 (`applypilot migrate --status`) · **Settings:** 47 declared in `settings.py`
-- **Branch:** everything current lives on `context`, **38 commits ahead of `main`** and **pushed to `origin/context` on 2026-08-10**. `main` has
+- **Branch:** everything current lives on `context`, **39 commits ahead of `main`** and **pushed to `origin/context` on 2026-08-10**. `main` has
   none of it. Check `git log --oneline -1` before believing anything here (§Dev workflow).
 
 ## Quick orientation
@@ -140,7 +140,8 @@ harness no longer has to import a web server to test scheduling.
 | `space.py` | **What a Space IS** — a frozen manifest, shaped after `followup.Channel`. `shape` + `tailor_docs` gate the pipeline queues; `tone`/`offer` reach the prompts; `schedules`/`channels` drive the ladders; `offer_deck` and `can_autosend` gate the deck link and the send path. Everything but the five COLUMNS rides in a `config` JSON blob, so a new field is never a schema change. |
 | `target.py` | A company you STATE, not an employer recovered from a URL. `anchor(space, name)` → `target:<space>:<slug>`, hashed into every contact key. `parse_input()` returns rejects rather than dropping them. |
 | `temperature.py` | How an application is DOING, not how far it has travelled. Bands answer **is anything still in motion**, from an interview backwards. **Only a PERSON can reach `warm`**, and finishing the plan moves a job DOWN. §Lessons 54, 55. |
-| `joblink.py` | The posting link fit to SEND. `url` is the posting, `application_url` is the form (§Lessons 82). Strips attribution params and unwraps ad redirects; **never rewrites paths**. `""` means no link, and every caller must treat it that way. |
+| `joblink.py` | URL normalisation, for SEEING THROUGH rather than sending. `derive.unwrap_job_urls` calls `clean_link` before any employer rule reads a hostname — without it an ad redirect makes every rule describe the distributor (§Lessons 79). Strips attribution params, unwraps redirects, **never rewrites paths**. |
+| `jobref.py` | How to NAME a job in a message: `{title, req}`. The title is the hard half — 11 of 33 live rows carry one that must never be quoted (§Lessons 84). `""` is a real answer and the caller must handle it. |
 
 **Adding a channel is one `Channel` entry plus one prompt** — executed, not claimed:
 `test_adding_a_channel_needs_no_schema_change` defines a channel that exists nowhere in the
@@ -571,11 +572,19 @@ since we last wrote*, so the operator previewing their own link before sending i
 and later touches do not re-ask about the same click. A reply outranks it; an open implies the
 deck was received, so it is never re-pitched. **Email only** — the deck link is only ever emailed.
 
-**Every job-search email carries the posting link** (2026-08-10, `domain/joblink.py`). Cold email
-and every follow-up touch, with an `ensure_job_link` guarantee — a prompt instruction is not a
-guarantee (§Lessons 9, 12). On the ladder it is unconditional where the DECK is once-only, and
-that asymmetry was measured: `send_followup` transmits the body BARE, with no quoted original, so
-a follow-up otherwise names no role at all. Never on SMS (no links, ever) or a LinkedIn note.
+**Every job-search email NAMES the role** (2026-08-10, `domain/jobref.py`). It carried the
+posting URL for about an hour; the drafts read badly and it came straight back out — 141
+characters of Workday link inline in an opening sentence is a machine-assembled tell (§Lessons
+84). The title is the hard half, not the link: **11 of 33 live rows carry one that must never be
+quoted** (`Webai uploaded job`, `LegalZoom Careers`, `Program Manager, Customer &amp; …`), so an
+unusable title resolves to `""` and the prompt is told to read the role out of the POSTING or
+stay general — never to invent one.
+**A requisition number goes only to a recruiter** (8 of 33 rows have one). It is how they find
+the application in their own ATS; to a peer it is noise that reads as machine-generated.
+`_wants_requisition` is the ONE predicate the prompt and the guarantee share, and
+`ensure_requisition` splices it after the role's first mention — never appends, because a bare
+`REQ-12289` under the sign-off is the footer this change removed. Asking alone got it into 2 of
+4 live drafts; with the guarantee, 4 of 4.
 
 **The deck is offered ONCE.** It used to go in every touch, and `ensure_intro_deck()`
 force-appended the link when the model correctly left it out — a guarantee that guaranteed the
@@ -1612,6 +1621,9 @@ company `"Jobs"` — the same substring bug class, inside the function written t
     a guess about a URL space we do not own, and §Lessons 32 is what that costs. Result across
     32 rows: 1,052 characters of tracking removed, 0 rows left unsendable, and a 434-character
     Recruitics ad redirect unwrapped to the metacareers.com posting inside it.
+    **The link itself did not survive contact with the drafts** — see §Lessons 84. The cleaning
+    did, one layer down, because `derive` needs it to see past an ad redirect before any employer
+    rule reads a hostname.
 
 83. **The deck-open follow-up is the one message with something real to be about — and the one
     that can least afford to say so.** Every other touch chases silence; this one answers an
@@ -1626,6 +1638,29 @@ company `"Jobs"` — the same substring bug class, inside the function written t
     argument: of two recorded opens, one is stamped **ninety seconds BEFORE** the email carrying
     the link — the operator previewing their own `/intro/<name>` (§Lessons 64). "Has ever
     opened" writes that person a follow-up about a deck they were never sent.
+84. **Built the wrong half, and the artifact said so within the hour.** "Include the job" was
+    implemented as the posting URL, shipped, and reverted on sight of real drafts: 141 characters
+    of Workday link inline in an opening sentence is a machine-assembled tell, the same family as
+    the em dash. What a human writes is the role's NAME.
+    The reversal is not the lesson. **The lesson is which half was hard, and I had it backwards
+    both times.** Measured on 33 rows: a requisition is recoverable on 8 and appears in the
+    posting text on none, while the TITLE — the part assumed to be free, sitting right there in
+    a column — is unusable on **11**: five scraper placeholders (`Webai uploaded job`), a careers
+    index heading (`LegalZoom Careers`), an undecoded HTML entity (`Customer &amp; Community`),
+    the employer prefixed onto its own role, and a board's sentence *about* a posting (`Google
+    hiring AI Sales Specialist…`). Quoting any of them is worse than naming no role: §Lessons 42
+    already caught "the Betterup uploaded job" reaching a live draft.
+    So `""` is a real answer the caller must handle, and the prompt is told to recover the role
+    from the POSTING TEXT if it can — which the model then did, correctly, on the row whose
+    stored title is `LegalZoom Careers`. **Reading a name from the description is not inventing
+    it**, and the first wording forbade both.
+    Two more things only generation could show. The requisition reached **2 of 4** drafts on a
+    prompt instruction alone, so it needed `ensure_requisition` (§Lessons 9, 12) — which
+    SPLICES after the role's first mention and never appends, because a bare `REQ-12289` under
+    the sign-off is the footer the whole change existed to remove. And `\b` does not match
+    between `_` and `REQ`, so two live Workday rows had no requisition at all until the boundary
+    became a character class.
+
 
 
 Shipped in one session, in this order: **CRM-3a → CRM-1 → CRM-2 → CRM-3b → CRM-4a.**
@@ -2010,7 +2045,7 @@ What is actually open now, ordered by leverage:
    the documented `identity_id` freeze **does not exist** — `domain/space.py:240` freezes
    `("id", "shape")` only, so a Space with 133 sent emails is repointable today with no error.
 
-10. **`context` is 38 commits ahead of `main`, and PUSHED as of 2026-08-10.** Nothing is
+10. **`context` is 39 commits ahead of `main`, and PUSHED as of 2026-08-10.** Nothing is
     laptop-only any more. Merging to `main` is still deliberately deferred, and checking
     out `main` gets you a build without Spaces, the deck fix, the Oracle fix, any of the UX work
     or any outreach context. **The `~/.applypilot/` database is not in git either** — latest
@@ -2147,7 +2182,7 @@ change still needs the `pip install` above — but that copy gives the file a ne
   and the restart ran anyway, because both were in one chained command (§Lessons 63). Use
   `pgrep -fl "applypilot apply"`; recover an orphaned lock with
   `release_stale_locks(max_age_minutes=0)` and ONLY after pgrep comes back empty.
-- **On branch `context`** (2026-08-10), **38 commits ahead of `main`**, pushed to
+- **On branch `context`** (2026-08-10), **39 commits ahead of `main`**, pushed to
   `origin/context`. `main` last pushed at **`e1f0be6`**. Tags:
   `stable-arch2/3/5/6` · `stable-e2e-20260730` · `stable-crm-20260731`.
 - **A frontend-only edit needs the `pip install` but NOT a dashboard restart** — the copy gives

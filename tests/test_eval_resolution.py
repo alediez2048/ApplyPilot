@@ -55,9 +55,24 @@ def test_eval_employer_resolution():
     failures = []
     for r in rows:
         job = {"url": r["url"], "site": r.get("site"), "company": r.get("company"),
-               "application_url": r["url"]}
+               # Defaults to `url`, as most rows do, but a row may state its own. The PEAK6 case
+               # is only expressible with both: the posting is on `careers.peak6.com` while the
+               # Workday tenant behind it is `apexfintechsolutions`, and collapsing the two hides
+               # exactly the slot the employer lives in.
+               "application_url": r.get("application_url") or r["url"],
+               # Carried so the chain below can be the REAL one. Absent on most rows, which is
+               # why adding it changes nothing for them: `refine_company_from_posting` needs the
+               # posting to name a variant as a whole word and returns None otherwise.
+               "full_description": r.get("description")}
+        # `find_contacts_for_job` resolves the employer in TWO steps and this harness only ever
+        # ran the first, so it scored an intermediate value rather than the answer the system
+        # gives. It surfaced on the Recruitics case, where step one yields "Metacareers" and the
+        # live path yields "Meta" — the eval would have failed a correct fix. §Lessons 73's
+        # shape: measuring what a function returns is not measuring what the caller does.
         got_company = derive.derive_company(job)
-        got_domain = derive.derive_domain(job)
+        got_company = derive.refine_company_from_posting(
+            got_company, job["full_description"]) or got_company
+        got_domain = derive.derive_domain(job, got_company)
         if (got_company or None) != (r["expect_company"] or None):
             failures.append(f"{r['id']}: company {got_company!r} != {r['expect_company']!r}"
                             f"  ({r.get('why', '')})")

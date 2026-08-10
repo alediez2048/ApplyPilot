@@ -167,14 +167,12 @@ def find_contacts_for_job(
     """
     job_url = job.get("url")
     role = job.get("title")
+    # `derive_company` now does the whole chain — URL rules, then the tenant-slug repair
+    # (Ouryahoo -> Yahoo), then the wrong-entity challenge (Jobvite -> LegalZoom). It used to do
+    # only the first, with the repair bolted on HERE and nowhere else, so the import path wrote
+    # an uncorrected name into `jobs.company` and every later read trusted it. One function, one
+    # answer, four call sites that can no longer disagree (§Lessons 49).
     company = derive.derive_company(job)
-    # An ATS tenant slug is not the employer's name. `ouryahoo.wd5.myworkdayjobs.com` stored the
-    # company as "Ouryahoo" and Apollo truthfully reported "0 found" — there is no such company.
-    # The posting's own text is the corroboration, so this cannot invent a name that the job
-    # description does not say.
-    refined = derive.refine_company_from_posting(company, job.get("full_description"))
-    if refined:
-        company = refined
     domain = derive.derive_domain(job, company)
     # WHERE the domain came from decides how much it may be trusted later. A domain read off the
     # careers-site host is an inference: avathongov.com hosts Avathon Government's postings, but

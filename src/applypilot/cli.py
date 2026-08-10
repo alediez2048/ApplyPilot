@@ -806,15 +806,79 @@ def dashboard(
     open_dashboard()
 
 
+def _audit_employers(apply_fix: bool = False) -> None:
+    """Every job, its STORED employer name against the one the resolver now derives.
+
+    The diagnosis surface for a bug this codebase has paid for seven times — Ats, Hr, Edu,
+    Ouryahoo, Oraclecloud, Recruitics, Jobvite — where an ATS or ad vendor is stored as the
+    employer and its staff get emailed about somebody else's job. Each was found by noticing one
+    bad draft. This asks the question about every row at once, and costs nothing to run.
+
+    The stored name matters even though `derive_company` corrects on READ: `jobs.company` is what
+    the dashboard displays, what the email text says, and what the per-company send cap counts.
+    """
+    from applypilot.database import get_connection, init_db
+    from applypilot.networking import derive
+
+    init_db()
+    conn = get_connection()
+    rows = conn.execute(
+        # `application_url` is not optional here. Left out of the first version of this query and
+        # the audit silently missed the PEAK6 row, whose employer lives in the Workday tenant
+        # `apexfintechsolutions` and nowhere else — §Lessons 47, inside the tool written to find
+        # §Lessons 47. `site` feeds the resolver's last fallback for the same reason.
+        "SELECT url, application_url, company, site, title, full_description FROM jobs "
+        "WHERE url NOT LIKE 'target:%' ORDER BY company"
+    ).fetchall()
+
+    wrong = []
+    for row in rows:
+        job = dict(zip(row.keys(), row))
+        name, source = derive.resolve_employer(job)
+        stored = (job.get("company") or "").strip()
+        if name and name.lower() != stored.lower():
+            wrong.append((job["url"], stored, name, source))
+
+    if not wrong:
+        console.print(f"[green]All {len(rows)} jobs carry the employer the posting names.[/green]")
+        return
+
+    console.print(f"\n[yellow]{len(wrong)} of {len(rows)} jobs have a stored employer the "
+                  f"posting disagrees with:[/yellow]\n")
+    for _url, stored, name, source in wrong:
+        # `challenged` is the serious one — the stored value is a DIFFERENT company, so contacts
+        # found under it work somewhere else. `refined` is the same company spelled differently.
+        mark = "[red]![/red]" if source == "challenged" else " "
+        console.print(f"  {mark} {stored or '(none)':26} -> {name:28} [dim]({source})[/dim]")
+
+    if not apply_fix:
+        console.print("\n[dim]Re-run with --fix-employers to write these back. Contacts already "
+                      "stored under a wrong name are NOT touched: check them by hand, because "
+                      "they are real people at the wrong company.[/dim]")
+        return
+
+    for url, _stored, name, _source in wrong:
+        conn.execute("UPDATE jobs SET company = ? WHERE url = ?", (name, url))
+    conn.commit()
+    console.print(f"\n[green]Updated {len(wrong)} rows.[/green] Contacts were left alone — "
+                  "re-run Find contacts on any row marked [red]![/red].")
+
+
 @app.command()
 def doctor(
     config: bool = typer.Option(False, "--config", help="Show every setting, its value, and its source."),
+    employers: bool = typer.Option(False, "--employers", help="Audit the stored employer name on every job against what the posting says."),
+    fix_employers: bool = typer.Option(False, "--fix-employers", help="With --employers: write the corrected names back to the jobs table."),
     write_env_example: bool = typer.Option(False, "--write-env-example", help="Regenerate .env.example from the schema."),
 ) -> None:
     """Check your setup and diagnose missing requirements."""
     import pathlib
 
     from applypilot import settings as _settings
+
+    if employers:
+        _audit_employers(apply_fix=fix_employers)
+        return
 
     if write_env_example:
         target = pathlib.Path(".env.example")

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import pytest
 
+from applypilot.networking import derive
 from applypilot.networking.derive import refine_company_from_posting as refine
 
 
@@ -94,17 +95,32 @@ def test_a_slug_that_is_barely_longer_than_its_affix_is_left_alone(slug):
 
 # ── and it reaches the code that queries Apollo ─────────────────────────────
 
-def test_contact_discovery_uses_the_refined_name(monkeypatch):
-    """A refiner nobody calls is the same as no refiner — the mutation that survived when
-    `role_essentials` shipped unwired."""
-    import pathlib
+def test_the_refiner_runs_from_the_one_entry_point():
+    """A refiner nobody calls is the same as no refiner.
 
-    from applypilot.networking import service
-    src = pathlib.Path(service.__file__).read_text(encoding="utf-8")
-    block = src[src.index("company = derive.derive_company(job)"):]
-    block = block[:block.index("domain = derive.derive_domain(")]
-    assert "refine_company_from_posting" in block, (
-        "the refined employer name never reaches the Apollo query")
+    This used to grep `service.py` for the call between two known lines, which is §Lessons 48 —
+    grep proves where a string is, not what the code does — and it also PINNED the bug: it
+    asserted the repair happened at that ONE call site, so it passed happily while the import
+    path, the send cap and the eval harness all called `derive_company` and got an unrepaired
+    name. Asserting the behaviour at the entry point covers every caller instead of blessing one.
+    """
+    job = {"company": "Ouryahoo", "site": "Workday",
+           "url": "https://ouryahoo.wd5.myworkdayjobs.com/en-US/careers/job/AI-Strategist_JR1",
+           "full_description": "Yahoo is a global media and tech company. At Yahoo we build."}
+    assert derive.derive_company(job) == "Yahoo"
+
+
+def test_the_challenger_runs_from_the_one_entry_point():
+    """Its twin, for the correction that catches a wrong ENTITY rather than a wrong spelling.
+
+    Both corrections have to be reachable from `derive_company` alone, because that is the only
+    thing three of the four call sites ever call.
+    """
+    job = {"company": "Jobvite", "site": "Jobvite",
+           "url": "https://jobs.jobvite.com/legalzoom/job/oWLtAfwu",
+           "full_description": ("About LegalZoom. LegalZoom is on a mission to help people "
+                                "navigate the legal system. LegalZoom was founded in 2001.")}
+    assert derive.derive_company(job) == "LegalZoom"
 
 
 # ── and a zero result has to say WHICH zero it is ───────────────────────────

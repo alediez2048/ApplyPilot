@@ -1752,7 +1752,15 @@ def _status_payload(space: str = "") -> dict:
         jobs.append({
             "url": row["url"],
             "title": row["title"] or "Untitled",
-            "company": row["site"] or "",
+            # `company`, NOT `site`. `site` is the DISCOVERY SOURCE — "Jobvite", "Recruitics",
+            # "Greenhouse", "Workday" — and putting it in a column labelled Company meant the
+            # board's name was what the operator read on the row. Seven live rows disagreed, and
+            # the two that matter most read "Jobvite" for a LegalZoom application and
+            # "Recruitics" for a Meta one. `contact_company` beside it has carried the RESOLVED
+            # employer the whole time, which is why connection counts were right while the label
+            # was wrong. Falls back to `site` so a row that has never resolved still says
+            # something rather than going blank.
+            "company": row["company"] or row["site"] or "",
             "contact_company": contact_company,
             "connections_at_company": _conn_counts.get(contact_company, 0),
             "salary": row["salary"] or "",

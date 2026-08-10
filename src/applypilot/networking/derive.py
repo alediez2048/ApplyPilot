@@ -30,6 +30,15 @@ _BOARD_HOSTS = {
     # portal is Oracle-hosted), so asking "who works at this domain" returned five Atlanta
     # city employees and four of them were emailed. Better to resolve to nothing and say so.
     "oraclecloud",
+    # Recruitics is a job-ad DISTRIBUTOR, not an ATS and not an employer. Found by generating a
+    # real draft (§Lessons 42, which is the only thing that ever finds these): the email read
+    # "I just applied for the Marketing Science Consultant position at Recruitics" and carried a
+    # link to **metacareers.com**. The employer is Meta. Fifth in the family after Ats, Hr, Edu,
+    # Ouryahoo and Oraclecloud, and the domain went the same way as the Oracle one —
+    # `derive_domain` returned `jsv3.recruitics.com`, a guessed "employer domain" that Apollo
+    # would resolve to whoever it has filed there (§Lessons 68). Three contacts were stored on
+    # that row; none had been emailed, which is the only reason this was free.
+    "recruitics",
 }
 
 # ATS hosts where NO label is the employer — the tenant is an internal code, not a name.
@@ -37,7 +46,12 @@ _BOARD_HOSTS = {
 # label, Greenhouse and Lever in the path. Oracle Fusion carries it nowhere
 # (`eohh.fa.us2.oraclecloud.com`), so the only honest answer from the URL alone is "no idea",
 # and `_host_label` must not reach for the nearest label-shaped thing instead.
-_OPAQUE_TENANT_HOSTS = {"oraclecloud"}
+#
+# `recruitics` is here as well as in `_BOARD_HOSTS` because blocking the vendor name ALONE
+# produced the employer **"Jsv3"** — the pod code, one label to the left, which is precisely how
+# the Oracle fix reproduced its own bug before landing. Unwrapping should mean this line is never
+# reached; it is here for the wrapper that does not carry a destination.
+_OPAQUE_TENANT_HOSTS = {"oraclecloud", "recruitics"}
 
 # Labels that are never the employer's name but don't make the host a job board either
 # (jobs.stripe.com is Stripe's own careers portal, not a board).
@@ -253,6 +267,116 @@ def refine_company_from_posting(company: str | None, full_description: str | Non
     return None
 
 
+#: Path and host labels that are never a company. Structural furniture of an ATS URL: the
+#: product's own nouns, locale codes, and Oracle/Workday UI segments. Deliberately SHORT — the
+#: corroboration requirement below does most of the work, and a long list is another thing to
+#: maintain per vendor, which is the pattern this whole function exists to escape.
+_NEVER_A_TENANT = {
+    "job", "jobs", "career", "careers", "apply", "application", "search", "company",
+    "companies", "about", "detail", "view", "viewjob", "opening", "openings", "position",
+    "positions", "vacancy", "vacancies", "role", "roles", "listing", "listings", "redirect",
+    "go", "www", "en", "us", "en-us", "hcmui", "sites", "external_career_site", "index",
+}
+
+#: How many times a challenger must be named in the posting before it may replace the incumbent.
+#: One mention is a passing reference (a partner, a customer, a competitor); the employer of the
+#: role a posting describes is named repeatedly, in the "About X" block if nowhere else. Measured
+#: on the live corpus: the three real corrections score 3, 7 and 10, and nothing else scores at
+#: all — so this threshold separates cleanly rather than being tuned to the edge.
+_MIN_CHALLENGER_MENTIONS = 3
+
+
+def _tenant_slots(job: dict) -> list[str]:
+    """The two positions in a URL where an ATS puts its tenant, and no others.
+
+    This is structural rather than statistical, and that is the point. Every vendor in the corpus
+    puts the employer in one of exactly two places:
+
+        jobs.jobvite.com/legalzoom/job/oWLtAfwu          first PATH segment
+        job-boards.greenhouse.io/affirm/jobs/7778204003  first PATH segment
+        q2ebanking.wd5.myworkdayjobs.com/Q2/job/...      first HOST label, and first path segment
+        peak6group.wd1.myworkdayjobs.com/apexfintechsolutions/job/...   both
+
+    Everything DEEPER is location, discipline or a requisition id. Allowing those in was the
+    first version of this function, and on the live corpus it was one lucky coincidence away
+    from renaming the PEAK6 row to "Technology" — the path is
+    `/jobs/technology/austin-texas-united-states-of-america/solutions-engineer/JR104975`, and a
+    posting for an engineering job says "technology" plenty of times.
+    """
+    out: list[str] = []
+    for key in ("url", "application_url"):
+        raw = (job.get(key) or "").strip()
+        if not raw or raw.startswith("target:"):
+            continue
+        try:
+            parts = urlparse(raw)
+        except ValueError:
+            continue
+        labels = [x for x in (parts.hostname or "").lower().removeprefix("www.").split(".") if x]
+        segments = [s for s in parts.path.split("/") if s]
+        for cand in labels[:1] + segments[:1]:
+            flat = cand.lower()
+            if flat in _NEVER_A_TENANT or len(flat) < 2:
+                continue
+            # A requisition id or a uuid, not a name.
+            if re.search(r"\d{4,}", flat) or re.fullmatch(r"[0-9a-f-]{16,}", flat):
+                continue
+            out.append(cand)
+    return out
+
+
+def challenge_company_from_path(company: str | None, job: dict) -> str | None:
+    """Replace an employer name the posting never mentions with one it names repeatedly.
+
+    The general form of a bug this codebase has now paid for SIX times — Ats, Hr, Edu, Ouryahoo,
+    Oraclecloud, Recruitics — plus Jobvite, which is what prompted it. Every previous fix added
+    the vendor's name to a blocklist, which only ever works for a vendor somebody has already
+    been burned by. This needs no list: it asks whether the name we resolved is the name the
+    posting talks about.
+
+        jobs.jobvite.com/legalzoom/...   ->  "Jobvite" appears 0 times, "LegalZoom" appears 7
+                                             and the posting opens "About LegalZoom"
+
+    Two conditions, and both are what keep it safe:
+
+    * **The incumbent must be uncorroborated.** A name the posting names is never challenged, so
+      this can only ever fire where the current answer is already unsupported. Nine live rows
+      resolve to a name that appears zero times and are still CORRECT (Scale AI writes itself
+      "Scale AI" against a `scaleai` slug; Texas Children's Hospital and Peak6's parent do not
+      introduce themselves at all) — none of them has a corroborated challenger, so none moves.
+
+    * **The challenger must be corroborated, as a whole word, `_MIN_CHALLENGER_MENTIONS` times.**
+      Same standard `refine_company_from_posting` uses, and for the same reason (§Lessons 52):
+      the posting's own text is the only evidence available that is not another inference. A
+      single mention is a partner or a customer.
+
+    Returns the name AS THE POSTING SPELLS IT — "LegalZoom", not "legalzoom" — or None, which
+    leaves the incumbent exactly as it was.
+    """
+    text = job.get("full_description") or ""
+    if not text:
+        return None
+    # A corroborated incumbent is never challenged.
+    if company and _spelling_in_text(_norm_name(company), text):
+        return None
+
+    best, best_n = None, 0
+    for cand in _tenant_slots(job):
+        spelled = _spelling_in_text(_norm_name(cand), text)
+        if not spelled:
+            continue
+        n = len(re.findall(rf"(?<![A-Za-z0-9]){re.escape(spelled)}(?![A-Za-z0-9])",
+                           text, re.IGNORECASE))
+        if n >= _MIN_CHALLENGER_MENTIONS and n > best_n:
+            best, best_n = spelled, n
+    # No "and this is a different name from the incumbent" check here, deliberately. It was
+    # written, and mutation proved it UNREACHABLE: a candidate that normalises to the incumbent's
+    # name looks the incumbent up in the same text, so the corroboration guard at the top would
+    # already have returned. A guard that cannot fire is worse than no guard, because the next
+    # reader trusts it.
+    return best
+
+
 def _spelling_in_text(flat_name: str, text: str) -> str | None:
     """How the posting writes a name whose letters are `flat_name` — as a WHOLE word.
 
@@ -383,24 +507,133 @@ def _host_label(url: str | None, job: dict | None = None) -> str | None:
     return label
 
 
-def derive_company(job: dict) -> str | None:
-    """Best-effort employer name.
+def unwrap_job_urls(job: dict) -> dict:
+    """See through an ad-network redirect to the posting it points at.
 
-    stored company > JSON-LD > board/ATS path slug > careers hostname > site. A value
-    that is really a job board (Ycombinator, Indeed) is never returned — searching a
-    board for "people who work there" finds the board's own recruiters, not the employer's.
+    A distributor's URL describes the DISTRIBUTOR. `jsv3.recruitics.com/redirect?rx_url=…` had
+    every rule below reading `recruitics`, so the employer resolved to "Recruitics" and the
+    domain to `jsv3.recruitics.com` — a guessed "employer domain" that Apollo will happily file
+    strangers under (§Lessons 68, where exactly that put five City of Atlanta employees on a
+    Texas Children's Hospital job and emailed four of them).
+
+    The destination is already in the URL, percent-encoded, so this needs no network call and no
+    new parsing: `domain.joblink` unwraps it for the outreach link and this is the same string.
+    One implementation, two consumers — the alternative is §Lessons 49 for the sixth time.
+
+    Returns a job dict; the original is never mutated, because callers pass rows they go on to
+    use for other things.
+    """
+    from applypilot.domain.joblink import clean_link
+    out = dict(job or {})
+    for key in ("url", "application_url"):
+        raw = (out.get(key) or "").strip()
+        if not raw or raw.startswith("target:"):
+            continue
+        cleaned = clean_link(raw)
+        # Only when it actually pointed somewhere ELSE. `clean_link` also strips tracking
+        # params, and rewriting a URL here for cosmetic reasons would change what
+        # `find_by_any_url` matches on a row whose stored value is the dirty one.
+        if cleaned and _registrable(cleaned) != _registrable(raw):
+            out[key] = cleaned
+    return out
+
+
+def _registrable(url: str) -> str:
+    """The host of a URL, lowercased, or "" — enough to say "this points somewhere else"."""
+    from urllib.parse import urlsplit
+    try:
+        return urlsplit(url).netloc.lower()
+    except ValueError:
+        return ""
+
+
+def derive_company(job: dict) -> str | None:
+    """The employer, fully resolved and corroborated where the posting allows it.
+
+    THE entry point. It used to be only the first half — the URL rules below — while two
+    CORRECTION steps lived at one call site each, and that is the shape of the recurring bug
+    rather than a detail of it:
+
+        service.py     derive_company + refine_company_from_posting     <- the only complete one
+        web_dashboard  derive_company                                   <- writes `company` AT IMPORT
+        gmail_send     derive_company                                   <- counts the per-company cap
+        eval harness   derive_company                                   <- scored an intermediate
+
+    The import one is the expensive one. It stores the uncorrected name in `jobs.company`, and
+    step 1 below then TRUSTS it, so a hostname guess is laundered into a stored fact that
+    outranks the posting for the rest of the row's life. That is why every previous fix had to be
+    a blocklist entry: by the time anything could see the description, the wrong answer already
+    looked like an operator-supplied one.
+
+    Order: stored company > JSON-LD > board/ATS path slug > careers hostname > site, then
+    `refine_company_from_posting` (tenant affixes: Ouryahoo -> Yahoo) and
+    `challenge_company_from_path` (wrong entity: Jobvite -> LegalZoom). A value that is really a
+    job board is never returned — searching a board for "people who work there" finds the board's
+    own recruiters, not the employer's.
+    """
+    # An ad-network wrapper must be seen through BEFORE any rule reads a host, or every one of
+    # them describes the distributor.
+    return resolve_employer(job)[0]
+
+
+def resolve_employer(job: dict) -> tuple[str | None, str]:
+    """The employer AND how it was arrived at. `derive_company` is this without the second half.
+
+    The provenance is not bookkeeping. It decides two things that were previously decided by
+    enumerating vendors:
+
+    * **Whether a name may be corrected at all.** `hiringOrganization` is the employer stating
+      its own name in machine-readable form on its own posting — evidence, not inference. Running
+      the tenant-slug repair over it trimmed a legal suffix it mistook for an ATS affix and
+      turned "Acme Corp" into "Acme". Correcting a guess is the job; correcting a fact is damage.
+
+    * **Whether the URL's host can be the employer's DOMAIN** (`derive_domain`). This is the
+      distinction that matters most, and it is exactly the difference between the two
+      corrections:
+
+          refined   "Expediagroup" -> "Expedia"      SAME entity, different spelling
+                                                     -> expediagroup.com is still Expedia's
+          challenged "Jobvite"     -> "LegalZoom"    DIFFERENT entity
+                                                     -> jobvite.com belongs to somebody else
+
+      Getting that backwards is §Lessons 68's whole mechanism: a host that is not the employer's
+      becomes the "employer domain", Apollo returns the people who really do work there, and
+      verification confirms them because they genuinely do.
+    """
+    job = unwrap_job_urls(job)
+    name, source = _derive_company_from_urls(job)
+    if not name or source == "json_ld":
+        return name, source
+    text = job.get("full_description")
+    # Both corrections need the posting, so both are no-ops on a row that has not been enriched
+    # yet — which is exactly the import case, and why the stored name must not be trusted
+    # forever. `challenge` runs LAST because it is the only one that can overrule step 1.
+    refined = refine_company_from_posting(name, text)
+    if refined:
+        name, source = refined, "refined"
+    challenged = challenge_company_from_path(name, job)
+    if challenged:
+        name, source = challenged, "challenged"
+    return name, source
+
+
+def _derive_company_from_urls(job: dict) -> tuple[str | None, str]:
+    """The URL-and-stored-field half, with WHERE the answer came from.
+
+    Split out so the corrections above cannot be skipped, and returns its provenance so they can
+    be skipped deliberately for the one source that outranks them.
     """
     # 1. explicit stored company (jobspy now persists it) if it's not a board name.
     #    _BOARD_HOSTS is folded in: 'greenhouse' was in the host list but NOT in _BOARD_SITES,
     #    so a company field reading "Greenhouse" sailed straight through as the employer.
     stored = _clean_company(job.get("company"))
     if stored and (stored.lower() not in _BOARD_NAMES or _company_owns_the_posting(stored, job)):
-        return stored
+        return stored, "stored"
 
     # 2. JSON-LD hiringOrganization from the enriched description
     jl = _from_json_ld(job.get("full_description"))
     if jl:
-        return jl
+        return jl, "json_ld"
 
     # 3. employer slug in a board/ATS URL path (job-boards.greenhouse.io/affirm/...,
     #    ycombinator.com/companies/hamming-ai/...) — the host is the board, not the employer
@@ -409,13 +642,13 @@ def derive_company(job: dict) -> str | None:
         if slug:
             name = _clean_company(titleize_slug(slug))
             if name:
-                return name
+                return name, "path_slug"
 
     # 4. careers hostname from application_url (skip known board hosts)
     host_label = (_host_label(job.get("application_url"), job)
                   or _host_label(job.get("url"), job))
     if host_label:
-        return host_label.capitalize()
+        return host_label.capitalize(), "host_label"
 
     # 5. fall back to site only if it's not a board or ATS name.
     #    _BOARD_NAMES, not _BOARD_SITES: step 1 rejects a board name arriving in `company` and
@@ -425,11 +658,11 @@ def derive_company(job: dict) -> str | None:
     #    anyway. §Lessons 49: a rule implemented at one of its call sites is not implemented.
     site = _clean_company(job.get("site"))
     if site and site.lower() not in _BOARD_NAMES:
-        return site
+        return site, "site"
 
     # `stored` is only reachable here when it IS a board name — return None instead so the
     # caller reports "could not determine employer" rather than searching the board itself.
-    return None
+    return None, ""
 
 
 def derive_domain(job: dict, company: str | None = None) -> str | None:
@@ -441,7 +674,23 @@ def derive_domain(job: dict, company: str | None = None) -> str | None:
     first. A function whose correctness depends on the order its caller does things is a
     function that will be wrong from the second call site.
     """
-    company = company or derive_company(job)
+    # Same reason as `derive_company`, and this is the half that did the damage in §Lessons 68:
+    # an un-unwrapped wrapper yields `jsv3.recruitics.com` as the "employer domain".
+    job = unwrap_job_urls(job)
+    resolved, source = resolve_employer(job)
+    company = company or resolved
+    # A CHALLENGED name means the posting named a different employer than the URL did, so the
+    # URL's host is somebody else's — the ATS vendor's (jobvite.com behind LegalZoom) or a parent
+    # brand's (peak6.com behind Apex Fintech Solutions). Returning it here is the precise
+    # mechanism of §Lessons 68: Apollo is handed a domain, returns the people who really do work
+    # at it, and verification confirms them because they genuinely do.
+    #
+    # No domain is the SAFE outcome, not a failure — Apollo falls back to a name search, and the
+    # name is the one thing the posting corroborated. This deliberately does NOT fire for a
+    # `refined` name: "Expediagroup" -> "Expedia" is one company spelled two ways, and
+    # expediagroup.com is still Expedia's (the live contacts on that row are all at it).
+    if source == "challenged":
+        return None
     # Prefer an employer careers hostname that is not a board/ATS host.
     for key in ("application_url", "url"):
         url = job.get(key)

@@ -12,9 +12,9 @@ campaign happens to be a job search** — see `docs/crm-prd.md` for where that g
 - **Packaging:** Hatchling, `src/` layout, single package `applypilot`
 - **Entry point:** `applypilot = "applypilot.cli:app"` (Typer CLI)
 - **License:** AGPL-3.0-only · **Version:** 0.4.0 (`pyproject.toml`)
-- **Tests:** 1664 passing (`tests/`, 89 files) · ruff clean (line-length 120, py311) · ESLint clean
+- **Tests:** 1760 passing (`tests/`, 92 files) · ruff clean (line-length 120, py311) · ESLint clean
 - **Schema version:** 3 (`applypilot migrate --status`) · **Settings:** 47 declared in `settings.py`
-- **Branch:** everything current lives on `context`, **35 commits ahead of `main`**. `origin/spaces` is pushed; **`context` is LOCAL ONLY**. `main` has
+- **Branch:** everything current lives on `context`, **38 commits ahead of `main`** and **pushed to `origin/context` on 2026-08-10**. `main` has
   none of it. Check `git log --oneline -1` before believing anything here (§Dev workflow).
 
 ## Quick orientation
@@ -140,6 +140,7 @@ harness no longer has to import a web server to test scheduling.
 | `space.py` | **What a Space IS** — a frozen manifest, shaped after `followup.Channel`. `shape` + `tailor_docs` gate the pipeline queues; `tone`/`offer` reach the prompts; `schedules`/`channels` drive the ladders; `offer_deck` and `can_autosend` gate the deck link and the send path. Everything but the five COLUMNS rides in a `config` JSON blob, so a new field is never a schema change. |
 | `target.py` | A company you STATE, not an employer recovered from a URL. `anchor(space, name)` → `target:<space>:<slug>`, hashed into every contact key. `parse_input()` returns rejects rather than dropping them. |
 | `temperature.py` | How an application is DOING, not how far it has travelled. Bands answer **is anything still in motion**, from an interview backwards. **Only a PERSON can reach `warm`**, and finishing the plan moves a job DOWN. §Lessons 54, 55. |
+| `joblink.py` | The posting link fit to SEND. `url` is the posting, `application_url` is the form (§Lessons 82). Strips attribution params and unwraps ad redirects; **never rewrites paths**. `""` means no link, and every caller must treat it that way. |
 
 **Adding a channel is one `Channel` entry plus one prompt** — executed, not claimed:
 `test_adding_a_channel_needs_no_schema_change` defines a channel that exists nowhere in the
@@ -230,12 +231,13 @@ re-reading a thread you have already logged is a no-op rather than a duplicate.
 | `identities` | `repo/spaces.py` | One row per SENDER (mailbox, from-name, deck, limits). Created by 003, **read by nothing yet** — ID-1. |
 | `schema_migrations` | `migrations/` | Version, status, `claimed_at` lease. See §Lessons on the 300s lease. |
 
-Live counts (2026-08-07, a snapshot — these move within minutes of real use, so treat them as
-orders of magnitude and re-measure before reasoning from one): jobs **31** (28 applied,
-**1 interview scheduled**), contacts **227**
-(131 emailed, **7 replied**), touches 94, messages 231, connections 899,
-**2 recorded deck opens** (the first ever — see §Engagement signals). Three Spaces: `job-search`
-(30 jobs), `partnerships` (targets), `gauntlet` (1 job — and it held **zero** until the import
+Live counts (2026-08-10, a snapshot — these move within minutes of real use, so treat them as
+orders of magnitude and re-measure before reasoning from one): jobs **32** (29 applied,
+**1 interview scheduled**, 1 rejected), contacts **231**
+(133 emailed, **8 replied**), touches 128, messages 273, connections 899,
+**2 recorded deck opens** — and only ONE of those is real; the other is stamped ninety seconds
+before the email that carried the link (§Lessons 83). Three Spaces: `job-search`
+(31 jobs), `partnerships` (targets), `gauntlet` (1 job — and it held **zero** until the import
 path started carrying the Space, §Lessons 70). **Schema version 3**.
 
 Contacts nearly tripled on 2026-08-04 — 66 → 185 — because employer resolution was broken in
@@ -561,6 +563,20 @@ being handed a third of what there was not to repeat. `conversation_transcript` 
 `touches.sent_touches` both already existed and `_draft_reply` already used them; this path
 simply never did (§Lessons 39).
 
+**Opening the deck REPLACES the touch intent** (2026-08-10). `interactions.deck_opened_since_we_wrote`
+— the only follow-up with something real to be about. It replaces `_TOUCH_INTENT` rather than
+joining it (§Lessons 40: appending never resolves a contradiction), and the prompt is forbidden
+from revealing how we know, by shape and by named phrasing (§Lessons 83). Anchored on *opened
+since we last wrote*, so the operator previewing their own link before sending is not engagement,
+and later touches do not re-ask about the same click. A reply outranks it; an open implies the
+deck was received, so it is never re-pitched. **Email only** — the deck link is only ever emailed.
+
+**Every job-search email carries the posting link** (2026-08-10, `domain/joblink.py`). Cold email
+and every follow-up touch, with an `ensure_job_link` guarantee — a prompt instruction is not a
+guarantee (§Lessons 9, 12). On the ladder it is unconditional where the DECK is once-only, and
+that asymmetry was measured: `send_followup` transmits the body BARE, with no quoted original, so
+a follow-up otherwise names no role at all. Never on SMS (no links, ever) or a LinkedIn note.
+
 **The deck is offered ONCE.** It used to go in every touch, and `ensure_intro_deck()`
 force-appended the link when the model correctly left it out — a guarantee that guaranteed the
 repetition. Both are conditional now. The already-sent check compares the BASE url: the earlier
@@ -723,6 +739,29 @@ confirmed, never for an unanchored keyword search.
 
 **Every exit logs.** A search that found nobody used to log nothing, making a completed run
 byte-identical to a dead button (§Lessons 15).
+
+### The seventh vendor, and the end of the blocklist (2026-08-10)
+
+`derive_company` is now the WHOLE chain — URL rules, then `refine_company_from_posting` (tenant
+affixes: Ouryahoo → Yahoo), then `challenge_company_from_path` (wrong entity: Jobvite →
+LegalZoom). It was the URL half only, with the corrections bolted onto ONE of four call sites;
+the import path stored the uncorrected name and step 1 then trusted it forever (§Lessons 79).
+
+**The challenge asks whether the posting names the employer we resolved.** A name the posting
+mentions is never challenged; a challenger must be named 3× as a whole word, and only from the
+two structural tenant slots — the host's first label and the FIRST path segment. No vendor list,
+so an ATS nobody has heard of costs nothing.
+
+**`resolve_employer()` returns the name AND its provenance**, and provenance is load-bearing
+twice: `json_ld` is never corrected (it turned "Acme Corp" into "Acme"), and a `challenged` name
+returns **no domain**, because the URL's host belongs to somebody else (§Lessons 80). A
+`refined` name keeps its domain.
+
+**`applypilot doctor --employers`** audits every row at once and separates `challenged` (a
+different company — its contacts work elsewhere) from `refined` (same company, different
+spelling). `--fix-employers` writes them back and never touches contacts. Live: 8 rows
+corrected, and an audit of all 133 sent emails found **0** that reached a domain disagreeing
+with the corrected employer.
 
 ### The fourth way, and the one that did not return zero (2026-08-06)
 
@@ -1519,6 +1558,75 @@ company `"Jobs"` — the same substring bug class, inside the function written t
     forces you to ask who reads it, who writes it, and what it is keyed on — questions nobody
     asks about code that already works.
 
+79. **Seven vendors, one bug, and every fix was another blocklist entry.** Ats, Hr, Edu,
+    Ouryahoo, Oraclecloud, Recruitics, and finally `jobs.jobvite.com/legalzoom/…` resolving to
+    **"Jobvite"** with three `@jobvite.com` contacts stored at `confidence: high` against a
+    LegalZoom role. A blocklist only ever protects against a vendor somebody has already been
+    burned by, so the seventh cost exactly as much as the first.
+    The general rule needs no list: **the employer of a role is named in the posting for that
+    role.** "Jobvite" appears 0 times in its own posting; "LegalZoom" appears 7 and it opens
+    *"About LegalZoom"*. Measured on all 32 rows before writing it — three flip, twenty-nine do
+    not, zero false positives, including **nine rows whose resolved name appears zero times and
+    is still correct**, which is why absence of corroboration can never itself be the trigger.
+    The root cause was PLACEMENT, not logic. `derive_company` was the URL half only, while two
+    correction steps lived at one call site each — and the one that mattered was the import,
+    which stores the uncorrected name so step 1 then TRUSTS it. **A hostname guess laundered
+    into a stored fact outranks the posting forever**, which is precisely why a blocklist was
+    needed at all. §Lessons 49 with four call sites instead of two.
+    Its own failure modes cost two more rounds: blocking the vendor name alone yielded **"Jsv3"**
+    (the pod code, one label left — the Oracle fix's exact mistake), and allowing three path
+    segments instead of one came a coincidence away from renaming PEAK6 to **"Technology"**.
+
+80. **A correct name is worthless while the DOMAIN is still the vendor's.** LegalZoom resolved
+    perfectly and `derive_domain` went on handing Apollo `jobvite.com` — §Lessons 68's whole
+    mechanism, where Apollo returns the people who really do work there and verification
+    confirms them because they genuinely do. Fixing the name is the visible half; the domain is
+    the half that spends credits on strangers.
+    The discriminator is the difference between the two corrections, and it is exact:
+    **`challenged` means a DIFFERENT entity** (Jobvite → LegalZoom, so `jobvite.com` is somebody
+    else's) **while `refined` means the same one spelled differently** (Expediagroup → Expedia,
+    so `expediagroup.com` is still theirs — every live contact on that row is at it). No domain
+    is the SAFE outcome, not a failure: Apollo falls back to a name search, and the name is the
+    one thing the posting corroborated.
+
+81. **The column the operator reads had never been the employer.** The dashboard's Company field
+    was `row["site"]` — the discovery SOURCE — so a LegalZoom application displayed **"Jobvite"**
+    and a Meta one **"Recruitics"**, every day, on the row. `contact_company` sat beside it
+    holding the resolved employer the whole time and driving the connection counts, so the data
+    was present and the label ignored it. Seven of thirty-two rows disagreed, and
+    `dashboard_rows` did not select `company` at all.
+    This is what "the problem has been ongoing" actually was. The resolver bugs were real and
+    rare; the wrong label was on screen constantly. **When a user reports a long-running
+    problem, find what they have been LOOKING at before fixing what you can measure.**
+
+82. **`application_url` is the FORM, not the posting, whatever the name says.** Asked to put the
+    job link in every email; almost all the work was choosing the string. Google's is the
+    RELATIVE `./apply?jobId=…` (unsendable), Peak6's and Expedia's are Workday `/apply`
+    endpoints, Stanford's carries two `?` and is malformed, and nearly every stored `url` is
+    tagged with the aggregator we came through (`utm_source=linkedin`, `gh_src=`, `source=`).
+    Emailing somebody who works there a link to their own application form, labelled with which
+    board we found it on, is the wrong artifact twice over.
+    The rule that fell out: **strip parameters and unwrap redirects, never rewrite paths.** A
+    dropped param cannot change which page loads and an unwrapped redirect resolves to its own
+    destination — both provable. Trimming a trailing `/application` to "recover the posting" is
+    a guess about a URL space we do not own, and §Lessons 32 is what that costs. Result across
+    32 rows: 1,052 characters of tracking removed, 0 rows left unsendable, and a 434-character
+    Recruitics ad redirect unwrapped to the metacareers.com posting inside it.
+
+83. **The deck-open follow-up is the one message with something real to be about — and the one
+    that can least afford to say so.** Every other touch chases silence; this one answers an
+    act. But the signal comes from a beacon on our own site, so revealing it tells a stranger
+    their reading was watched, which converts the best signal in the sequence into the reason
+    they stop replying. Same ban as `noticed` ("NEVER ANNOUNCE THE NOTICING") with higher
+    stakes, because a LinkedIn post is public and someone's browsing is not. The test that
+    makes it checkable: **if a sentence would not make sense to someone who had NOT opened it,
+    do not write it.** The live draft passed by asking a substantive question and offering to
+    "walk through any of it if something stood out" — conditional, and true either way.
+    Anchored on *opened since we last wrote*, never *has ever opened*, and the live data is the
+    argument: of two recorded opens, one is stamped **ninety seconds BEFORE** the email carrying
+    the link — the operator previewing their own `/intro/<name>` (§Lessons 64). "Has ever
+    opened" writes that person a follow-up about a deck they were never sent.
+
 
 Shipped in one session, in this order: **CRM-3a → CRM-1 → CRM-2 → CRM-3b → CRM-4a.**
 Tickets in `docs/tickets/CRM-*.md`; two of them had instructions that were factually wrong
@@ -1902,8 +2010,8 @@ What is actually open now, ordered by leverage:
    the documented `identity_id` freeze **does not exist** — `domain/space.py:240` freezes
    `("id", "shape")` only, so a Space with 133 sent emails is repointable today with no error.
 
-10. **`context` is 35 commits ahead of `main`, and 8 of them exist nowhere but this laptop.**
-    `spaces` is pushed; `context` is not. Merging is still deliberately deferred, and checking
+10. **`context` is 38 commits ahead of `main`, and PUSHED as of 2026-08-10.** Nothing is
+    laptop-only any more. Merging to `main` is still deliberately deferred, and checking
     out `main` gets you a build without Spaces, the deck fix, the Oracle fix, any of the UX work
     or any outreach context. **The `~/.applypilot/` database is not in git either** — latest
     backup `applypilot-20260807-pre-ctx2.db`, taken with the sqlite backup API because the WAL
@@ -2039,9 +2147,8 @@ change still needs the `pip install` above — but that copy gives the file a ne
   and the restart ran anyway, because both were in one chained command (§Lessons 63). Use
   `pgrep -fl "applypilot apply"`; recover an orphaned lock with
   `release_stale_locks(max_age_minutes=0)` and ONLY after pgrep comes back empty.
-- **On branch `context`** (2026-08-10), **35 commits ahead of `main`, and LOCAL ONLY.**
-  `origin/spaces` is pushed and stops 8 commits back; nothing from CTX-1..3, SPACE-0, the ID-1
-  ticket or the two live-bug fixes is off this laptop. `main` last pushed at **`e1f0be6`**. Tags:
+- **On branch `context`** (2026-08-10), **38 commits ahead of `main`**, pushed to
+  `origin/context`. `main` last pushed at **`e1f0be6`**. Tags:
   `stable-arch2/3/5/6` · `stable-e2e-20260730` · `stable-crm-20260731`.
 - **A frontend-only edit needs the `pip install` but NOT a dashboard restart** — the copy gives
   the file a new mtime, `?v=` changes with it, and a normal reload fetches it. A **Python** edit

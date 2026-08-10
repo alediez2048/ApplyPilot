@@ -1,4 +1,11 @@
 # User data (NEVER commit)
+# OAuth tokens. They live in ~/.applypilot/ today, so nothing here is at risk RIGHT NOW — but
+# ID-1 lets an operator name a `token_path` per identity, and a relative one resolves against
+# the repo root, because the Dev workflow starts the dashboard from there. This repo is a PUBLIC
+# fork that cannot be made private, and a push cannot be un-published.
+*token*.json
+tokens/
+credentials*.json
 profile.json
 resume.txt
 resume.pdf

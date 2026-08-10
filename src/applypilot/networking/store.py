@@ -218,16 +218,57 @@ def _norm_email(email: str | None) -> str:
 
 
 def sent_today(conn: sqlite3.Connection | None = None) -> int:
-    """Count emails submitted in the last 24h (for the daily cap)."""
+    """Every email WE sent in the last 24h — first contacts, follow-ups and replies.
+
+    This counted only `contacts.outreach_status='submitted'`, i.e. first contacts, and was
+    therefore wrong in the one direction a cap must never be wrong: it UNDER-counts, so the
+    limit lets more through than it says. Measured against this machine's own history the
+    shortfall is roughly 2.5x, because follow-ups outnumber first contacts once ladders are
+    running.
+
+    It is not a cosmetic gap. `gmail_send` gates all three send doors on this number — outreach
+    (:115), follow-up (:383) and reply (:467) — so two of the three kinds of email it is
+    supposed to be limiting were invisible to it while still consuming the real Gmail quota it
+    exists to protect.
+
+    TWO legs, matching `emails_sent_to_company` next door, which unions exactly the same two for
+    exactly the same reason. On this machine that is 102 first contacts and 107 follow-ups —
+    the cap was seeing under half of what it was limiting.
+
+    **Replies are deliberately NOT the third leg, and that took a measurement to get right.**
+    `send_reply` never calls `mark_sent` (sending a reply must not consume a touch), so its only
+    record is `messages` — which looks like the obvious third source and is a trap. `messages`
+    is a MIRROR of the mailbox, not a log of what this app sent: `_sync_thread` pulls both
+    directions of every thread it reads, so an outbound row there is usually an email already
+    counted above. Measured: of 253 rows with `direction='out'`, **133 are first contacts we
+    had already counted** via `contacts.sent_message_id`, and most of the rest are follow-ups
+    already counted via `touches`. Adding that leg roughly doubles the number rather than
+    correcting it, and for a CAP a phantom doubling blocks real sends.
+
+    Deduplicating is not currently possible: `contacts.sent_message_id` gives a join for first
+    contacts, but `_TOUCH_COLUMNS` has no message-id column, so a synced follow-up cannot be
+    matched back to its touch. So this under-counts by the volume of genuine replies — small
+    (33 threads have any inbound at all) and in the same direction the function was already
+    wrong, rather than introducing a larger error in the other. Giving `touches` a message id
+    is what would close it properly.
+    """
     if conn is None:
         conn = get_connection()
     init_contacts(conn)
     cutoff = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
-    row = conn.execute(
+    first = conn.execute(
         "SELECT COUNT(*) FROM contacts WHERE outreach_status = 'submitted' AND submitted_at >= ?",
         (cutoff,),
-    ).fetchone()
-    return row[0] if row else 0
+    ).fetchone()[0]
+
+    from applypilot.networking.touches import init_touches
+    init_touches(conn)
+    later = conn.execute(
+        "SELECT COUNT(*) FROM touches WHERE channel = 'email' "
+        "AND sent_at IS NOT NULL AND sent_at != '' AND sent_at >= ?", (cutoff,),
+    ).fetchone()[0]
+
+    return int(first) + int(later)
 
 
 def emails_sent_to_company(company: str, conn: sqlite3.Connection | None = None) -> int:

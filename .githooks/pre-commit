@@ -22,7 +22,7 @@ for f in $staged; do
   case "$f" in
     .env|.env.*|*/.env|*/.env.*)
       [ "$f" = ".env.example" ] || { say "BLOCKED  $f  — env file"; fail=1; } ;;
-    *gmail_token*|*oauth_client*|*_token|*token.json|*.pem|*id_rsa*|*.p12|*.pfx)
+    *gmail_token*|*oauth_client*|*_token|*token*.json|*/tokens/*|tokens/*|*credentials*.json|*.pem|*id_rsa*|*.p12|*.pfx)
       say "BLOCKED  $f  — credential file"; fail=1 ;;
     *.db|*.sqlite|*.sqlite3)
       say "BLOCKED  $f  — database (holds contacts and correspondence)"; fail=1 ;;

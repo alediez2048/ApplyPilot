@@ -54,6 +54,13 @@ LEAKS = [
     ("c.json", '{"client_secret": "GOCSPX-abcdef123456ghijkl"}', "OAuth client_secret"),
     ("k.pem", "-----BEGIN RSA PRIVATE KEY-----\nabc\n", "private key"),
     ("gmail_token.json", '{"token": "x"}', "a credential FILENAME"),
+    # ID-1 gives every identity its own token file, and the natural place to put a second one
+    # is a directory. `tokens/business.json` matched NONE of the original globs: not
+    # *gmail_token*, not *_token, and not *token.json (it ends in business.json).
+    ("tokens/business.json", '{"refresh_token": "x"}', "a second identity's token, in a dir"),
+    ("business_token.json", '{"refresh_token": "x"}', "a second token beside the first"),
+    ("tokens/anything.txt", "x", "anything inside a tokens/ directory"),
+    ("credentials.json", '{"installed": {}}', "an OAuth client file by its usual name"),
     ("applypilot.db", "sqlite", "the database — it holds correspondence"),
     ("profile.json", '{"a": 1}', "personal data"),
     ("resume.txt", "name", "personal data"),
@@ -74,6 +81,11 @@ BENIGN = [
     (".env.example", "APOLLO_API_KEY=sk-replace-me-with-your-real-key", "the template"),
     ("t.example", "client_secret: CHANGE-ME-BEFORE-USE", "an example file"),
     ("code.py", '"""Docs mention ya29 tokens conceptually."""', "prose about tokens"),
+    # The widened globs must not start eating ordinary work. `token` appears in this codebase
+    # constantly — the extension's `ext_token`, `DECK_HITS_TOKEN`, `rfc_message_id` plumbing —
+    # and a guard that blocks a normal source file gets --no-verify'd within a week.
+    ("networking/tokenizer.py", "def count_tokens(s): return len(s.split())", "a source file named for tokens"),
+    ("docs/token-design.md", "# How tokens are stored", "a design doc about tokens"),
 ]
 
 

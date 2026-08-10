@@ -268,7 +268,8 @@ def sender_background(profile: dict) -> list[str]:
 
 def draft_variant(*, warm: bool = False, noticed: bool = False, jd_chars: int = 0,
                   deck: bool = False, scheduling: bool = False, style: bool = False,
-                  premise: bool = False, ctx: bool = False, ask: bool = False) -> str:
+                  premise: bool = False, ctx: bool = False, ask: bool = False,
+                  joblink: bool = False) -> str:
     """A compact signature of WHAT WENT INTO a draft, e.g. "cold+jd2k+deck+cal".
 
     Reply rate without this is a single number that can only go up or down for reasons nobody
@@ -305,6 +306,12 @@ def draft_variant(*, warm: bool = False, noticed: bool = False, jd_chars: int = 
         bits.append("ask")
     if deck:
         bits.append("deck")
+    # Near-constant on a jobs Space today (32 of 32 rows yield a link), so it separates
+    # before/after rather than comparing rows — same standing as `premise`. It earns its place
+    # by being the only way to tell a draft written with the posting from one written without,
+    # once both exist in the table.
+    if joblink:
+        bits.append("joblink")
     if scheduling:
         bits.append("cal")
     if style:
@@ -479,9 +486,83 @@ def _known_block(job: dict, brief: bool = False) -> str:
             "none.\n\n")
 
 
+def job_link_for(job: dict, shape: str = "pipeline/jobs") -> str:
+    """The posting URL to reference, or "" when there is none to send.
+
+    ONE derivation per draft, and every consumer takes the string from here — the prompt block,
+    the `ensure_job_link` guarantee and the `draft_variant` tag. Deriving it twice is exactly how
+    `ensure_sender_signoff` came within one line of rewriting every correct sign-off, because the
+    guard re-computed a name the prompt had already computed differently (§Lessons 49).
+
+    Jobs shape only. A targets Space pitches a company; there is no posting, and `posting_link`
+    refuses a `target:` anchor anyway (§Lessons 70 — belt and braces on the write paths).
+    """
+    if shape == "pipeline/targets":
+        return ""
+    from applypilot.domain.joblink import posting_link
+    return posting_link(job)
+
+
+def _job_link_block(link: str, brief: bool = False) -> str:
+    """The prompt block naming the posting.
+
+    The gap it closes: an email could say "the role I applied for" and name nothing checkable.
+    That is worst exactly where the scrape failed — five live rows still carry the placeholder
+    title `{company} uploaded job`, and one sent draft reads *"I just applied for the Betterup
+    role"*, which tells a recruiter at a company with forty openings precisely nothing.
+    """
+    if not link:
+        return ""
+    if brief:
+        return f"THE POSTING (the exact role, include the URL verbatim): {link}\n\n"
+    return (
+        f"THE POSTING BEING REFERRED TO (include this URL verbatim in the EMAIL):\n{link}\n"
+        "How to use it:\n"
+        "- It says WHICH role. A large employer has many openings and the reader cannot be "
+        "expected to guess; naming the role in words and linking it costs one clause.\n"
+        "- Put it where the role is first mentioned, not in a footer. A link at the bottom "
+        "under the sign-off reads as a signature block and gets skimmed past.\n"
+        "- Copy the URL EXACTLY. Do not shorten it, wrap it in a word, re-encode it, or append "
+        "anything to it. A link that does not resolve is worse than no link, because the reader "
+        "clicks it.\n"
+        "- One sentence of your own around it. Do not announce that you are including a link.\n\n"
+    )
+
+
+def ensure_job_link(body: str, url: str) -> str:
+    """Guarantee the posting URL is in `body`. Same shape and same reason as `ensure_intro_deck`.
+
+    A prompt instruction is not a guarantee (§Lessons 9, 12): the model can drop the link,
+    paraphrase it, or split it across a line break, and the result looks like a perfectly good
+    email — which is §Lessons 29's property, the half of a feature that is invisible when wrong.
+
+    Idempotent, and it leaves a naturally-placed link exactly where the model put it. The
+    appended fallback sits ABOVE the sign-off for the same reason the deck sentence does.
+    """
+    if not url:
+        return body
+    if url.rstrip("/") in (body or "").replace("\n", " ").rstrip("/"):
+        return body
+    sentence = JOB_LINK_SENTENCE.format(url=url)
+    body = (body or "").rstrip()
+    paras = list(body.split("\n\n"))
+    if len(paras) >= 2 and _looks_like_signoff(paras[-1]):
+        paras.insert(len(paras) - 1, sentence)
+        return "\n\n".join(p.strip("\n") for p in paras)
+    return f"{body}\n\n{sentence}"
+
+
+#: The fallback wording, used ONLY when the model dropped the link entirely. Deliberately flat
+#: and unmemorable: it is a reference, not a pitch, and §Lessons 42 is what happens when a
+#: quotable sentence lives in this file — the SMS prompt's suggested phrasing came back in 5 of
+#: 5 drafts. This one is never shown to the model, so it cannot be parroted; it only ever
+#: appears in the drafts where the model wrote no link at all.
+JOB_LINK_SENTENCE = "The role I'm referring to: {url}"
+
+
 def _job_user_prompt(sender_bits, contact, relationship, role, company, jd, noticed,
                     context_block, premise_block, sched_block, deck_block, warm_block,
-                    style_block, tone_block, previous):
+                    style_block, tone_block, previous, job_link_block=""):
     """The jobs-shaped prompt.
 
     Extracted from `draft_email` so it can be diffed: `test_a_default_space_changes_the_prompt_by_nothing`
@@ -509,6 +590,10 @@ def _job_user_prompt(sender_bits, contact, relationship, role, company, jd, noti
         f"JOB APPLIED TO:\nRole: {role}\nCompany: {company}\n"
         f"WHAT THE ROLE ACTUALLY INVOLVES (from the posting, the specific thing to react to):\n"
         f"{jd}\n\n"
+        # Directly under the role it identifies, not down with the CTA blocks. The link is a
+        # FACT about which job this is, not a thing being asked for, and the blocks below all
+        # compete for the closing paragraph (§Lessons 40).
+        + job_link_block
         # CTX-2. What the operator KNOWS, against the scrape directly above it, which is
         # everything else this prompt has ever had about a job. Placed above `noticed` because
         # it is the more general of the two operator inputs — person-specific reads closest to
@@ -667,6 +752,10 @@ def draft_email(profile: dict, job: dict, contact: dict, style: str = "", warm: 
     # the jobs prompt as the premise. It reached only the first for three days (CTX-1).
     offer = (getattr(space, "offer", "") or "").strip()
 
+    # The posting URL, cleaned, derived ONCE — the prompt block, the guarantee and the variant
+    # tag all read this one string.
+    job_link = job_link_for(job, shape)
+
     if shape == "pipeline/targets":
         # `full_description` is what the operator pasted about the company, and the offer comes
         # from the Space. In the jobs prompt those two slots are filled the other way round.
@@ -679,7 +768,8 @@ def draft_email(profile: dict, job: dict, contact: dict, style: str = "", warm: 
         user = _job_user_prompt(sender_bits, contact, relationship, role, company, jd,
                                 noticed, _known_block(job), _premise_block(space),
                                 sched_block, deck_block, warm_block,
-                                style_block, tone_block, previous)
+                                style_block, tone_block, previous,
+                                job_link_block=_job_link_block(job_link))
         system = _SYSTEM
 
     client = get_client("light")
@@ -689,7 +779,8 @@ def draft_email(profile: dict, job: dict, contact: dict, style: str = "", warm: 
     )
     variant = draft_variant(warm=warm, noticed=bool(noticed), jd_chars=len(jd),
                             deck=bool(deck), scheduling=bool(link), style=bool(directive),
-                            premise=bool(offer), ctx=bool(context), ask=bool(ask))
+                            premise=bool(offer), ctx=bool(context), ask=bool(ask),
+                            joblink=bool(job_link))
     data = extract_json(raw)
     subject = sanitize_text(str(data.get("subject", ""))).strip()
     body = sanitize_text(str(data.get("body", ""))).strip()
@@ -701,6 +792,10 @@ def draft_email(profile: dict, job: dict, contact: dict, style: str = "", warm: 
         raise ValueError("empty outreach body")
     # Not left to the prompt: the deck goes in EVERY outreach email.
     body = ensure_intro_deck(body, deck)
+    # Nor the posting. A message about a job that does not say WHICH job puts the work of
+    # figuring that out on the recipient, and the rows where it matters most are the ones whose
+    # title is still `{company} uploaded job`.
+    body = ensure_job_link(body, job_link)
     # Nor is the sender's own name. See ensure_sender_signoff — a live draft came back signed
     # "Alexander" with "Sender first name: Alejandro" two lines into the prompt.
     # `_sender_name` — the SAME function the prompt used two hundred lines up. The first version
@@ -748,6 +843,43 @@ _TOUCH_INTENT = {
         "Close the loop with no pressure, leave the door open, and do not ask a question that "
         "demands a reply."),
 }
+
+#: Used INSTEAD OF the ladder above when they have opened the intro deck since our last message.
+#:
+#: Replacing rather than appending is the whole design, and §Lessons 40 is why: the ladder
+#: arrives under the heading `THIS FOLLOW-UP:` and describes chasing someone who has done
+#: nothing. Adding "and ask about the deck" underneath leaves two instructions disagreeing, and
+#: the heading wins every time — that is exactly how SMS drafts kept asking whether the first
+#: email had arrived, of people who had already answered it. A contradiction in a prompt is a
+#: code bug, not a wording problem.
+#:
+#: The hard rule is the second paragraph. Knowing they clicked comes from a beacon on our own
+#: site, and saying so tells a stranger their reading was watched — it converts a warm signal
+#: into a creepy one, and there is no recovering the conversation after that. The codebase
+#: already bans this exact shape for `noticed` ("NEVER ANNOUNCE THE NOTICING"), and the stakes
+#: are higher here because a LinkedIn post is public and this is not. The saving grace is that
+#: the honest version of the question is indistinguishable from an ordinary follow-up: "did
+#: anything in the deck raise questions" is a normal thing to ask someone you sent a deck to.
+_DECK_OPENED_INTENT = (
+    "They have looked at the intro deck since your last message, and they still have not "
+    "replied. That makes this the one follow-up with something real to be about: they spent "
+    "attention on the sender's material and stopped short of answering.\n"
+    "\n"
+    "NEVER SAY, HINT OR IMPLY THAT YOU KNOW THEY OPENED IT. No \"I saw you had a look\", no "
+    "\"since you checked out the deck\", no \"I noticed you opened\". The sender knows because "
+    "of a tracking beacon, and telling a stranger their reading was watched turns the best "
+    "signal in this whole sequence into the reason they never reply. If a sentence would not "
+    "make sense to someone who had NOT opened it, do not write that sentence.\n"
+    "\n"
+    "Write it as an ordinary, warm follow-up that happens to be about the deck's SUBSTANCE:\n"
+    "- Ask ONE specific question about something in the deck. Not \"what did you think?\", "
+    "which is a request for homework, but a question about one concrete thing in it that this "
+    "person in this role would have an opinion on.\n"
+    "- Or offer the natural next step: to walk through any part of it, or to answer anything "
+    "it raised.\n"
+    "- Do NOT paste the deck link again. They have it.\n"
+    "- Short. Two or three sentences. Give an easy out, as always."
+)
 
 
 #: Follow-ups in a targets Space (SPACE-4b). `_FOLLOWUP_SYSTEM` opens "for a job seeker who
@@ -824,12 +956,20 @@ def draft_followup(profile: dict, job: dict, contact: dict, touch: int = 1,
     role = job.get("title") or "the role"
     company = contact.get("company") or job.get("company") or job.get("site") or "the company"
     original_subject = (contact.get("outreach_subject") or f"Question about the {role} role").strip()
-    intent = _TOUCH_INTENT.get(max(1, min(touch, 3)), _TOUCH_INTENT[3])
+    # Did they open the deck since we last wrote? If so that REPLACES the ladder's intent — see
+    # `_DECK_OPENED_INTENT`, and §Lessons 40 for why appending it would change nothing.
+    from applypilot.domain.interactions import deck_opened_since_we_wrote
+    deck_opened = deck_opened_since_we_wrote(contact, touches)
+    intent = (_DECK_OPENED_INTENT if deck_opened
+              else _TOUCH_INTENT.get(max(1, min(touch, 3)), _TOUCH_INTENT[3]))
     directive = _resolve_style(profile, style)
     link = _scheduling_link(profile)
     deck = _intro_deck_url(profile, contact)
 
     sent_on = (contact.get("submitted_at") or "")[:10]
+    # Jobs shape only, and derived once — the block below and the guarantee after the call both
+    # read this string.
+    job_link = job_link_for(job, getattr(space, "shape", "pipeline/jobs"))
 
     # EVERYTHING already said on this thread, not just the first email.
     transcript = conversation_transcript(contact, touches=touches)
@@ -841,7 +981,11 @@ def draft_followup(profile: dict, job: dict, contact: dict, touch: int = 1,
     # had already been sent it twice. What matters is "have they been given the deck", and every
     # variant shares the base. Trailing slash and case normalised for the same reason.
     deck_base = _intro_deck_url(profile) or deck        # no contact → the un-personalised URL
-    deck_sent = bool(deck_base) and deck_base.rstrip("/").lower() in transcript.lower()
+    # `deck_opened` implies it was sent, whatever the transcript says. Opening a link is proof of
+    # receipt that no string match can override, and the two must not disagree — a prompt telling
+    # the model to pitch a deck they have already read, while the intent above asks what they
+    # made of it, is §Lessons 40 rebuilt inside the same function.
+    deck_sent = deck_opened or (bool(deck_base) and deck_base.rstrip("/").lower() in transcript.lower())
 
     user = (
         f"SENDER: {_sender_name(profile)}\n"
@@ -865,6 +1009,16 @@ def draft_followup(profile: dict, job: dict, contact: dict, touch: int = 1,
                  "This is the concrete thing this follow-up offers, so lead with it rather "
                  "than tacking it on.\n\n"
                  if deck else ""))
+        # Unlike the deck, the posting link is carried by EVERY touch, and the difference is not
+        # a judgement call — it was measured. `send_followup` sends `draft_body` BARE: no quoted
+        # original is appended, so threading is the only thing tying the message to the first
+        # email. That is enough for Gmail on a desktop and nothing at all on a phone, where a
+        # follow-up otherwise reads as "just following up" about a role it never names.
+        #
+        # It also does not carry the deck's cost. Re-pitching an OFFER four times is what read as
+        # automated; a reference saying which job this is about is what every human chasing an
+        # application writes, and it is one clause.
+        + _job_link_block(job_link, brief=True)
         + _premise_block(space) + _known_block(job)
         + (f"STYLE DIRECTION (follow closely):\n{directive}\n\n" if directive else "")
         + _voice_block(space)
@@ -893,6 +1047,10 @@ def draft_followup(profile: dict, job: dict, contact: dict, touch: int = 1,
     # had correctly left it out.
     if not deck_sent:
         body = ensure_intro_deck(body, deck)
+    # The posting link IS unconditional here, and the asymmetry with the deck directly above is
+    # the point rather than an oversight: the body ships bare, so every touch has to name the
+    # role on its own. See the block builder in the prompt for the measurement.
+    body = ensure_job_link(body, job_link)
     return {"subject": subject, "body": body}
 
 

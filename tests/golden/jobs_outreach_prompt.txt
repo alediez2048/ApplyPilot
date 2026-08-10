@@ -16,6 +16,14 @@ Company: Acme
 WHAT THE ROLE ACTUALLY INVOLVES (from the posting, the specific thing to react to):
 You will build agent pipelines end to end.
 
+THE POSTING BEING REFERRED TO (include this URL verbatim in the EMAIL):
+http://j/1
+How to use it:
+- It says WHICH role. A large employer has many openings and the reader cannot be expected to guess; naming the role in words and linking it costs one clause.
+- Put it where the role is first mentioned, not in a footer. A link at the bottom under the sign-off reads as a signature block and gets skimmed past.
+- Copy the URL EXACTLY. Do not shorten it, wrap it in a word, re-encode it, or append anything to it. A link that does not resolve is worse than no link, because the reader clicks it.
+- One sentence of your own around it. Do not announce that you are including a link.
+
 SCHEDULING LINK: none provided, invite a quick call/chat without a link.
 
 Write the outreach email. Return the JSON.

@@ -21,6 +21,8 @@ events with no other home are stored: a booking we detected, and something the o
 
 from __future__ import annotations
 
+from applypilot.domain.timeutil import parse_ts
+
 #: Ordered by how much each one tells you. A booking is someone spending time on you; a reply
 #: is someone spending words; a deck view is someone spending attention. An email WE sent is
 #: not engagement at all — it is included because a timeline with only their actions cannot be
@@ -75,6 +77,40 @@ def has_inbound(rows: list[dict] | None) -> bool:
     """True if this person has written to us on any channel. Reads a rendered timeline, so it
     needs no new column and cannot drift from one."""
     return any(r.get("kind") in INBOUND for r in (rows or []))
+
+
+def deck_opened_since_we_wrote(contact: dict, touches: list[dict] | None = None) -> bool:
+    """They clicked the intro deck AFTER the last thing we sent them, and have not replied.
+
+    The one moment a follow-up has something real to be about. Everything else the ladder does is
+    chasing silence; this is the only case where the recipient has done something and the next
+    message can respond to it.
+
+    Anchored on the LAST message we sent rather than on "have they ever opened it", and the live
+    data is why. Of the only two recorded opens at the time this was written:
+
+        contact A   open stamped 19:28:19, our email sent 19:29:47   <- ninety seconds EARLIER
+        contact B   emailed on the 6th,    opened on the 9th         <- genuine
+
+    The first is the operator previewing their own `/intro/<name>` link before hitting send,
+    which §Lessons 64 records as the recipient having read it. A rule reading "has ever opened"
+    calls that engagement and writes a follow-up asking what they thought of a deck they were
+    never sent. Comparing against our last send rejects it for free.
+
+    A reply outranks this entirely: once someone writes back the sequence is terminal and the
+    conversation, not the ladder, decides what to say next.
+    """
+    if (contact.get("replied_at") or "").strip():
+        return False
+    # `deck_last_at` (most recent open), not `deck_viewed_at` (the first). Someone who opened it
+    # once a fortnight ago and again this morning has just done something.
+    opened = parse_ts((contact.get("deck_last_at") or contact.get("deck_viewed_at") or "").strip())
+    if not opened:
+        return False
+    sent = [parse_ts((contact.get("submitted_at") or "").strip())]
+    sent += [parse_ts((t.get("sent_at") or "").strip()) for t in (touches or [])]
+    last_sent = max([s for s in sent if s], default=None)
+    return bool(last_sent) and opened > last_sent
 
 
 def _row(kind: str, at: str, detail: str = "", source: str = "detected") -> dict:

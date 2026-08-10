@@ -438,3 +438,34 @@ def test_a_successful_save_lets_go_of_the_buffer(tmp_path):
     test above would still pass."""
     out = _run_js(tmp_path, _DRIVER)
     assert out["clearedAfterSuccess"] is True
+
+
+# ── the read path that made the whole feature a no-op ───────────────────────
+
+def test_the_drafting_job_dict_carries_the_operator_boxes(db):
+    """CTX-2 shipped with its columns missing from the SELECT the drafter is fed.
+
+    `_network._run` — the Find-contacts button — builds its job dict from `find_by_any_url`,
+    which listed seven columns and neither of these. So the operator could type context onto a
+    row, click Find contacts, and every draft came back written without it, while REGENERATING a
+    draft went through `get()`'s `SELECT *` and read it perfectly. The feature worked on the
+    second path anybody takes and not the first.
+
+    Two days live and invisible, for the reason §Lessons 47 gives: the WRITE side is correct, the
+    read is silent, and what arrives is a plausible empty string rather than an error. Nobody hit
+    it because no row has carried a context yet — which is the only thing that kept it cheap.
+    """
+    repo.set_context("http://j/1", context=CONTEXT, ask=ASK, conn=db)
+    row = repo.find_by_any_url("http://j/1", db)
+    assert row["job_context"] == CONTEXT
+    assert row["job_ask"] == ASK
+
+
+def test_that_dict_still_carries_everything_else_drafting_reads(db):
+    """Guard the guard. The test above passes with the rest of the SELECT deleted, and every
+    column here is one a prompt reads: `space_id` picks WHICH prompt, `url` and
+    `application_url` become the posting link, `full_description` is the role."""
+    row = repo.find_by_any_url("http://j/1", db)
+    for column in ("url", "title", "company", "site", "application_url",
+                   "full_description", "space_id"):
+        assert column in row, f"{column} dropped out of the drafting SELECT"

@@ -65,11 +65,24 @@ def find_by_any_url(url: str, conn: sqlite3.Connection | None = None) -> dict | 
     An operator may paste either one, and imports store both.
     """
     return _dict(_c(conn).execute(
-        # `space_id` is here because DRAFTING reads it: the Space decides which prompt writes
-        # the email. It was left out of this SELECT first, and the effect was a targets contact
-        # drafted with the job-seeker prompt — §Lessons 47, a column the caller needs missing
-        # from the query while the write side worked perfectly.
-        "SELECT url, title, company, site, application_url, full_description, space_id "
+        # This row is what the DRAFTING path is handed — `_network._run` builds the job dict from
+        # here and passes it to `find_contacts_for_job` → `draft_email`. So every column the
+        # prompts read has to be in this list, and each one added below was missing:
+        #
+        # `space_id` decides WHICH prompt writes the email; without it a targets contact was
+        # drafted with the job-seeker prompt.
+        #
+        # `job_context` / `job_ask` are CTX-2's operator boxes. They were absent for two days:
+        # the operator could type context onto a row, click Find contacts, and every draft came
+        # back written without it — while REGENERATING a draft went through `get()`'s `SELECT *`
+        # and read it correctly. So the feature worked on the path nobody takes first. It went
+        # unnoticed only because no row has carried a context yet.
+        #
+        # Same failure both times, and §Lessons 47 names it: a column the caller needs belongs in
+        # the SELECT. Note what makes this shape so durable — the WRITE side is perfect, the read
+        # is silent, and the value that arrives is a plausible empty string rather than an error.
+        "SELECT url, title, company, site, application_url, full_description, space_id, "
+        "job_context, job_ask "
         "FROM jobs WHERE url = ? OR application_url = ? LIMIT 1", (url, url)).fetchone())
 
 
@@ -211,7 +224,7 @@ def dashboard_rows(limit: int = 500, conn: sqlite3.Connection | None = None,
     """
     scope, args = _one_space(space_id)
     return _c(conn).execute(f"""
-        SELECT url, title, site, salary, location, full_description, application_url, detail_error,
+        SELECT url, title, company, site, salary, location, full_description, application_url, detail_error,
                fit_score, score_reasoning, tailored_resume_path, cover_letter_path,
                apply_status, apply_error, apply_attempts, applied_at,
                last_attempted_at, apply_duration_ms, rejected_at, interview_at,

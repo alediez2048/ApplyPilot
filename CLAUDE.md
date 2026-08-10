@@ -12,11 +12,9 @@ campaign happens to be a job search** — see `docs/crm-prd.md` for where that g
 - **Packaging:** Hatchling, `src/` layout, single package `applypilot`
 - **Entry point:** `applypilot = "applypilot.cli:app"` (Typer CLI)
 - **License:** AGPL-3.0-only · **Version:** 0.4.0 (`pyproject.toml`)
-- **Tests:** 1639 passing (`tests/`, 87 files) · ruff clean (line-length 120, py311) · ESLint clean
+- **Tests:** 1664 passing (`tests/`, 89 files) · ruff clean (line-length 120, py311) · ESLint clean
 - **Schema version:** 3 (`applypilot migrate --status`) · **Settings:** 47 declared in `settings.py`
-- **Branch:** the outreach-context work lives on `context`, **4 commits ahead of `spaces`**,
-  which is itself **27 ahead of `main`** — so `context` is **31 ahead of `main`** and is where
-  everything current lives. `origin/spaces` is pushed; **`context` is LOCAL ONLY**. `main` has
+- **Branch:** everything current lives on `context`, **35 commits ahead of `main`**. `origin/spaces` is pushed; **`context` is LOCAL ONLY**. `main` has
   none of it. Check `git log --oneline -1` before believing anything here (§Dev workflow).
 
 ## Quick orientation
@@ -1491,6 +1489,37 @@ company `"Jobs"` — the same substring bug class, inside the function written t
     from inside the feature.
 
 
+77. **A MIRROR is not a LOG, and the rows look identical.** `sent_today()` counted only first
+    contacts — `gmail_send` gates all three send doors on it, so follow-ups and replies were
+    invisible to the cap while consuming the real Gmail quota it exists to protect. Measured:
+    102 first contacts against 107 follow-ups, so it saw under half of what it limited.
+    The fix was two legs. The instructive part is the third leg I added and then removed.
+    `send_reply` records nowhere but `messages`, so `messages` looks like the obvious source —
+    and it is a **mirror of the mailbox**, not a log of what this app did: `_sync_thread` stores
+    both directions of every thread it reads. Measured before believing it: of 253 rows with
+    `direction='out'`, **133 were first contacts already counted** via `contacts.sent_message_id`.
+    Adding that leg roughly DOUBLES the number instead of correcting it, and for a cap a phantom
+    doubling blocks real sends — a worse bug than the undercount, in the opposite direction.
+    The general tell: **a table populated by SYNC has different semantics from one populated by
+    ACTION, even when its rows are the same shape.** Ask what WRITES a row before counting it —
+    §Lessons 70's question, pointed at a read instead of a Space.
+    It cannot currently be deduped: `contacts.sent_message_id` gives a join for first contacts,
+    but `_TOUCH_COLUMNS` has no message id, so a synced follow-up cannot be matched to its
+    touch. Giving `touches` one is what would close it.
+
+78. **Designing a feature is the cheapest way to find bugs in its neighbourhood.** A 10-agent
+    map + adversarial review of ID-1 — a feature that does not exist — surfaced **five defects
+    that are live today and need no second identity**: the `sent_today()` undercount above;
+    `can_autosend` enforced at one of four send doors and `offer_deck` read at one of three
+    drafters (§Lessons 49, twice, in lines the feature would have edited anyway); the documented
+    `identity_id` freeze not existing at all; `.gitignore` carrying no token pattern while the
+    pre-commit hook's globs miss `tokens/business.json`, on a PUBLIC fork; and
+    `_adopt_threads_by_address` collapsing two contacts who share an address, last-writer-wins.
+    None was the thing being designed. They were found because making one value per-identity
+    forces you to ask who reads it, who writes it, and what it is keyed on — questions nobody
+    asks about code that already works.
+
+
 Shipped in one session, in this order: **CRM-3a → CRM-1 → CRM-2 → CRM-3b → CRM-4a.**
 Tickets in `docs/tickets/CRM-*.md`; two of them had instructions that were factually wrong
 before being revised (they told you to write `followup_status`, removed by ARCH-3).
@@ -1854,12 +1883,26 @@ What is actually open now, ordered by leverage:
    orchestration (`run_dashboard_prepare/apply/fill_one/restart/continue`) that are not HTTP
    concerns. Extracting them is the natural companion to debt item 1.
 
-9. **`identities` exists and nothing reads it.** Created by migration 003 with `token_path`,
-   `from_name`, `deck_base_url`, `daily_limit` and the collector columns; ID-1 is what wires
-   them. Until then every Space sends from the one personal mailbox, and `identity_id` freezes
-   on first send — so **do not create a business Space yet**.
+9. **`identities` exists and nothing reads it — and now has a designed ticket.**
+   `docs/tickets/ID-1-per-identity-sender.md` (2026-08-09), from a 10-agent map + adversarial
+   review: 14 commits C0-C13, all three lenses `ship-with-changes`. Until it lands every Space
+   sends from the one personal mailbox, so **do not create a business Space yet**.
+   Three decisions taken, recorded here because they are cheap now and expensive later:
+   **the freeze is strict** — any sent message freezes `identity_id`, email, LinkedIn DM or SMS
+   ("no switching"); **a second identity gets its own HOST**, never a second path on the same
+   site (`/intro/` is hardcoded in three places in `domain/deck.py` and a second path silently
+   breaks `deck-relink` — 0 matches, exit 0); and **a NULL identity column means "inherit the
+   globals" for `personal` ONLY**, because every one of those globals IS the personal mailbox's.
+   An unconditional fallback means a half-configured business identity sends pitches
+   authenticating as, From, and signed as the job-search account, with nothing raising.
+   The rule: **credentials and voice refuse or derive from the identity's own token; policy
+   numbers inherit.**
+   Still open in that ticket and NOT yet built: `can_autosend` is enforced at one of four send
+   doors, `offer_deck` is read at one of three deck-emitting drafters (both §Lessons 49), and
+   the documented `identity_id` freeze **does not exist** — `domain/space.py:240` freezes
+   `("id", "shape")` only, so a Space with 133 sent emails is repointable today with no error.
 
-10. **`context` is 31 commits ahead of `main`, and 4 of them exist nowhere but this laptop.**
+10. **`context` is 35 commits ahead of `main`, and 8 of them exist nowhere but this laptop.**
     `spaces` is pushed; `context` is not. Merging is still deliberately deferred, and checking
     out `main` gets you a build without Spaces, the deck fix, the Oracle fix, any of the UX work
     or any outreach context. **The `~/.applypilot/` database is not in git either** — latest
@@ -1996,9 +2039,9 @@ change still needs the `pip install` above — but that copy gives the file a ne
   and the restart ran anyway, because both were in one chained command (§Lessons 63). Use
   `pgrep -fl "applypilot apply"`; recover an orphaned lock with
   `release_stale_locks(max_age_minutes=0)` and ONLY after pgrep comes back empty.
-- **On branch `context`** (2026-08-08), 4 commits ahead of `spaces`, which is 27 ahead of
-  `main` — **31 ahead of `main` in total, and `context` is LOCAL ONLY.** `origin/spaces` is
-  pushed; nothing of CTX-1..3 is off this laptop. `main` last pushed at **`e1f0be6`**. Tags:
+- **On branch `context`** (2026-08-10), **35 commits ahead of `main`, and LOCAL ONLY.**
+  `origin/spaces` is pushed and stops 8 commits back; nothing from CTX-1..3, SPACE-0, the ID-1
+  ticket or the two live-bug fixes is off this laptop. `main` last pushed at **`e1f0be6`**. Tags:
   `stable-arch2/3/5/6` · `stable-e2e-20260730` · `stable-crm-20260731`.
 - **A frontend-only edit needs the `pip install` but NOT a dashboard restart** — the copy gives
   the file a new mtime, `?v=` changes with it, and a normal reload fetches it. A **Python** edit

@@ -134,13 +134,25 @@ let SPACE_SHAPE = 'pipeline/jobs';
 // 2.5s tick would slam it shut again while the operator is editing.
 let PREMISE_SETTLED = false;
 
-function renderSpaceShape(shape, offer, copy) {
+function renderSpaceShape(shape, offer, copy, voice) {
   SPACE_SHAPE = shape || 'pipeline/jobs';
   const targets = SPACE_SHAPE === 'pipeline/targets';
   const jobs = document.getElementById('jobControls');
   const tgt = document.getElementById('targetControls');
   if (jobs) jobs.hidden = targets;
   if (tgt) tgt.hidden = !targets;
+  // SHEET-1b. In a sheet Space the IMPORTER goes first. Both boxes accept a paste and the one
+  // on top is the one that gets used: a lead sheet went into "Add one company" and became 106
+  // cards, each named after a whole tab-separated row, the header row included.
+  //
+  // Ordered rather than hidden. Adding a single company by hand is still a real thing to do —
+  // removing the control would trade one missing capability for another (§Lessons 43) — but it
+  // is the rarer one here, so it goes second.
+  const add = document.getElementById('targetAddSection');
+  const imp = document.getElementById('sheetImportSection');
+  const sheetFirst = (voice || '') === 'premise';
+  if (add) add.style.order = sheetFirst ? '2' : '1';
+  if (imp) imp.style.order = sheetFirst ? '1' : '2';
   // CTX-1. #premiseControls is deliberately NOT toggled — both shapes have a constant
   // paragraph. It used to live inside #targetControls, so on a jobs Space there was nowhere to
   // type one, which is why `gauntlet` and `job-search` sent the same email as each other.
@@ -2681,7 +2693,7 @@ async function refresh() {
   if (data.space) SPACE_ID = data.space;
   renderSpaceNav(data.spaces, data.space, data.space_note);
   SPACE_TEMPLATES = data.space_templates || SPACE_TEMPLATES;
-  renderSpaceShape(data.space_shape, data.space_offer, data.space_offer_copy);
+  renderSpaceShape(data.space_shape, data.space_offer, data.space_offer_copy, data.space_voice);
   document.getElementById('appDir').textContent = data.app_dir;
   const s = data.stats || {};
   // Counters that mean something for the shape on screen. In a targets Space "Tailored",

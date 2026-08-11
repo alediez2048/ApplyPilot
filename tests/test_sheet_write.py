@@ -337,3 +337,57 @@ def test_a_named_company_with_a_deep_link_still_works(db):
     got = target.parse_line("Ridgeline Logistics — https://www.ridgeline.com/about/team")
     assert got["name"] == "Ridgeline Logistics"
     assert got["domain"] == "ridgeline.com"
+
+
+# ── a spreadsheet row is not a company name ─────────────────────────────────
+
+def test_a_tab_separated_row_is_never_a_company(db):
+    """106 cards were created by pasting a lead sheet into "Add one company". Each was named
+    after a whole row — including the HEADER row, which became the card
+    `Name\\tCompany\\tEmail\\tEmail Status\\tTitle\\t…`.
+
+    A company name never contains a tab. Refused rather than salvaged by taking the first cell:
+    guessing which column holds the company is what the sheet importer does properly with
+    headers, and doing it badly here would produce cards that look right and are wrong for any
+    sheet whose first column is not the company — this operator's is the NAME.
+    """
+    from applypilot.domain import target
+    row = "Tracy Stdic\tZapier\ttracy@zapier.test\tverified\tGlobal Head of Talent"
+    assert target.parse_line(row) is None
+    header = "Name\tCompany\tEmail\tEmail Status\tTitle\tLinkedIn"
+    assert target.parse_line(header) is None
+
+
+def test_the_refusal_points_at_the_importer(db):
+    """"106 not understood" is accurate and useless — the box that reads exactly this is two
+    inches below (§Lessons 15, and §Lessons 89: findable is not findable FROM WHERE THE WORK IS).
+    """
+    _spaces.create_space("t2", "T2", "outreach", shape=sp.TARGETS_SHAPE, conn=db)
+    rows = "\n".join([
+        "Name\tCompany\tEmail",
+        "Tracy Stdic\tZapier\ttracy@zapier.test",
+        "Frank Tiemann\tApex Fintech Services\t",
+    ])
+    out = wd._add_targets({"space": "t2", "text": rows})
+    assert out["ok"] is False
+    assert "spreadsheet row" in out["message"]
+    assert "Import a sheet" in out["message"]
+    assert db.execute("SELECT COUNT(*) FROM jobs WHERE space_id='t2'").fetchone()[0] == 0
+
+
+def test_the_same_rows_import_correctly_through_the_sheet_box(db):
+    """The other half of the pair: what was refused above has to work where it belongs, or the
+    message is sending the operator somewhere that fails too."""
+    rows = "\n".join([
+        "Name\tCompany\tEmail\tTitle",
+        "Tracy Stdic\tZapier\ttracy@zapier.test\tGlobal Head of Talent",
+        "Frank Tiemann\tApex Fintech Services\t\t",
+    ])
+    out = wd._import_sheet({"space": "sheets", "text": rows})
+    assert out["ok"] is True
+    assert sorted(out["cards_added"]) == ["Apex Fintech Services", "Zapier"]
+    assert out["people_added"] == 2
+    got = db.execute("SELECT full_name, title, company FROM contacts "
+                     "WHERE job_url='target:sheets:zapier'").fetchone()
+    assert got["full_name"] == "Tracy Stdic"
+    assert got["title"] == "Global Head of Talent"

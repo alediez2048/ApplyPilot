@@ -1945,6 +1945,9 @@ def _status_payload(space: str = "") -> dict:
         # this adds no statement. Sourced from `domain/space.py` so the label cannot drift from
         # the field.
         "space_offer_copy": _sp.offer_copy(shape, manifest.voice_or_default() if manifest else ""),
+        # SHEET-1b. The browser needs it to order the two paste boxes — the importer goes
+        # first where it is the intended path.
+        "space_voice": manifest.voice_or_default() if manifest else "",
         "space_terminal": terminal,
         # What the + button offers. On the payload rather than a second endpoint: it is three
         # short strings and the panel already re-renders every 2.5s.
@@ -2396,7 +2399,17 @@ def _add_targets(data: dict) -> dict:
     if already:
         bits.append(f"{len(already)} already here")
     if rejected:
-        bits.append(f"{len(rejected)} not understood: " + ", ".join(rejected[:3]))
+        bits.append(f"{len(rejected)} not understood: " + ", ".join(r[:40] for r in rejected[:3]))
+    # SPREADSHEET ROWS GO IN THE OTHER BOX, and saying so is the whole point of this branch.
+    # A paste of 106 tab-separated rows was refused here as "106 not understood", which is
+    # accurate and useless — the operator is two feet from the importer that reads exactly this
+    # (§Lessons 15: a refusal has to name the way out, and §Lessons 89: findable is not the same
+    # as findable FROM WHERE THE WORK IS).
+    if any("\t" in r for r in rejected):
+        return {"ok": False, "added": len(added), "skipped": len(already), "rejected": rejected,
+                "message": (f"That looks like {len(rejected)} spreadsheet row(s), not company "
+                            f"names. Paste it into “Import a sheet” below — it reads the columns "
+                            f"and creates a card per company with its people attached.")}
     return {"ok": bool(added or already), "added": len(added), "skipped": len(already),
             "rejected": rejected,
             "message": " · ".join(bits) or "Nothing recognisable in that."}

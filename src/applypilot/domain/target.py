@@ -106,6 +106,18 @@ def parse_line(line: str) -> dict | None:
     if not raw:
         return None
 
+    # A COMPANY NAME NEVER CONTAINS A TAB. A line with one is a spreadsheet ROW that landed in
+    # the wrong box, and accepting it turns the whole row into a company: 106 cards were created
+    # this way, one of them named
+    # `Name\tCompany\tEmail\tEmail Status\tTitle\t…` — the header row.
+    #
+    # Refused rather than salvaged by taking the first cell. Guessing which column is the company
+    # is exactly what the sheet importer does properly, with headers; doing it badly here would
+    # produce cards that look right and are silently wrong for any sheet whose first column is
+    # not the company (this operator's is the NAME).
+    if "\t" in raw:
+        return None
+
     domain = ""
     had_path = False
     m = _DOMAIN_RE.search(raw)

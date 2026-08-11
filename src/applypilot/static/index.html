@@ -91,8 +91,12 @@
        (§Lessons 43) — here it does not exist at all, and saying otherwise is worse than silence.
        Static markup, toggled by renderSpaceShape(). -->
   <div class="controls" id="targetControls" hidden>
-    <section>
-      <h2>Targets</h2>
+    <!-- SHEET-1b. `order` is set by renderSpaceShape: in a sheet Space the importer comes FIRST,
+         because it is the intended path and the box at the top is the one that gets pasted into.
+         106 junk cards were created by pasting a lead sheet into the box that happened to be
+         above it, and every one of them was a whole row as a company name. -->
+    <section id="targetAddSection">
+      <h2>Add one company</h2>
       <textarea id="targetInput" placeholder="One company per line. “Ridgeline Logistics”, or “Ridgeline Logistics, ridgeline.com”."></textarea>
       <div class="row" style="margin-top:10px; align-items:center">
         <button class="primary" style="font-size:15px; padding:10px 20px" onclick="addTargets(this)">＋ Add targets</button>
@@ -108,7 +112,7 @@
          nothing to revoke. Pasting the sheet's URL instead is what produced the row
          `title="Docs uploaded job", company="Docs"` — the jobs box took the link as a posting
          and docs.google.com's host label became the employer. -->
-    <section>
+    <section id="sheetImportSection">
       <h2>Import a sheet</h2>
       <textarea id="sheetInput" placeholder="Paste rows straight from Google Sheets or Excel, including the header row.
 

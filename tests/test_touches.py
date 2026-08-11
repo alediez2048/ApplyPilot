@@ -277,7 +277,12 @@ def test_a_migrated_database_has_no_ladder_columns_left(db):
     # ladder state and not part of `contact_id` — hashing it would re-key every contact and
     # detach exactly the touches this test exists to protect.
     assert "space_id" in cols
-    assert len(cols) == 41, f"unexpected contacts columns: {sorted(cols)}"
+    # `flagged_at` is the operator's own 💡 marker — the one signal on a contact that is DECIDED
+    # rather than observed. A timestamp for the same reason `replied_at` is one, and deliberately
+    # not in `contact_id`: flagging somebody must not re-key them and detach the touches this
+    # test exists to protect.
+    assert "flagged_at" in cols
+    assert len(cols) == 42, f"unexpected contacts columns: {sorted(cols)}"
 
 
 def test_backfill_moves_state_and_verifies_clean(db):

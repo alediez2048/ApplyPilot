@@ -78,7 +78,24 @@ def _infer_company(url: str) -> str:
     # tailored and cover-lettered against the ATS instead of Salesforce. derive already walks
     # ATS path slugs and host labels correctly; two implementations of "who is the employer"
     # is exactly what the docstring above promises not to have.
-    return _derive.derive_company({"url": url, "application_url": url}) or "Uploaded"
+    # "" when the employer genuinely cannot be told from the URL — a LinkedIn job-view link
+    # carries none. This used to fall back to the literal **"Uploaded"**, which was then stored
+    # in BOTH `company` and `site`, and `site` is what the cover letter addressed itself to. Six
+    # real applications went out saying "Dear Uploaded Hiring Team", one of them to Google.
+    # A placeholder that looks like a name is worse than no name: every downstream consumer
+    # treats it as a fact, and only a human reading the final PDF can tell.
+    return _derive.derive_company({"url": url, "application_url": url}) or ""
+
+
+def _url_host(url: str) -> str:
+    """The host a URL came from, title-cased — a source, never an employer claim."""
+    from urllib.parse import urlparse
+    try:
+        host = (urlparse(url).hostname or "").lower().removeprefix("www.")
+    except ValueError:
+        return ""
+    label = host.split(".")[0] if host else ""
+    return label.capitalize()
 
 
 class CommandRunner:
@@ -1149,19 +1166,39 @@ def _unmark_applied(url: str) -> dict:
     return {"ok": True, "message": "No longer marked as applied"}
 
 
-def _mark_rejected(url: str) -> dict:
-    """Move a job to the rejected pile (apply_status='rejected' + rejected_at). Keeps applied_at
-    so the record that you DID apply survives. Logs a rejection to the activity timeline."""
+#: What each closed status is called, and what happened. The wording is load-bearing on the
+#: `cancelled` side: it is the difference between "they said no" and "the job stopped existing",
+#: and the whole reason the two are separate states.
+_CLOSED_COPY = {
+    "rejected": ("Marked rejected — moved to the rejected pile.", "Moved to rejected pile"),
+    "cancelled": ("Marked cancelled — the posting was removed or the role was pulled. "
+                  "Not a rejection: nothing was decided about you.",
+                  "Closed as cancelled — kept out of your rejection rate"),
+}
+
+
+def _mark_rejected(url: str, status: str = "rejected") -> dict:
+    """Close a job. `rejected` = they said no; `cancelled` = the posting went away.
+
+    Both keep `applied_at`, so the record that you DID apply survives, and both stamp
+    `rejected_at` — that column means "when this left the pipeline" and is what sinks the row and
+    stops it being given a temperature reading. `apply_status` carries WHY, and that is what
+    keeps a pulled requisition out of the rejection rate: a hiring freeze is not an outcome, and
+    counting it as one makes every funnel number about you slightly false.
+    """
     from applypilot.database import log_event
     if not url:
         return {"ok": False, "message": "url required"}
+    if status not in _jobs.CLOSED_STATUSES:
+        return {"ok": False, "message": f"unknown status {status!r}"}
     init_db()
     conn = get_connection()
     if not _jobs.exists(url, conn):
         return {"ok": False, "message": "job not found"}
-    _jobs.mark_rejected(url, conn)
-    log_event(url, "apply", "info", "Marked rejected — moved to the rejected pile.", conn)
-    return {"ok": True, "message": "Moved to rejected pile"}
+    _jobs.mark_rejected(url, conn, status=status)
+    logline, message = _CLOSED_COPY[status]
+    log_event(url, "apply", "info", logline, conn)
+    return {"ok": True, "message": message}
 
 
 def _unmark_rejected(url: str) -> dict:
@@ -1562,6 +1599,11 @@ def _contact_payload(c: dict, company: str | None = None, ladders: dict | None =
         "followup_error": email_l["error"],
         "threaded": bool((c.get("thread_id") or "").strip()
                          or (c.get("rfc_message_id") or "").strip()),
+        # The thread Gmail gave us at SEND time. `threaded` above is the boolean derived from it
+        # and was the only thing on the wire, so the UI could say a thread existed and not link
+        # to it. 141 contacts have one; `reply_to.thread_id` — the other source — exists only
+        # once somebody has answered, which is 11.
+        "thread_id": (c.get("thread_id") or "").strip(),
         "li_followup_count": li_l["count"],
         "li_followup_status": _legacy_followup_status(li_l),
         "li_followup_message": li_l["draft_body"],
@@ -1600,6 +1642,9 @@ def _contact_payload(c: dict, company: str | None = None, ladders: dict | None =
         "deck_viewed_at": c.get("deck_viewed_at") or "",
         "deck_last_at": c.get("deck_last_at") or "",
         "deck_views": c.get("deck_views") or 0,
+        # The operator's own 💡 marker. A boolean on the wire because that is all the row needs;
+        # the timestamp stays in the column for anything that later wants to ask "since when".
+        "flagged": bool((c.get("flagged_at") or "").strip()),
         # CRM-4: the stored conversation (headers only) and, when the other side added this
         # person to a thread, who did it — the handoff a boolean `replied` used to discard.
         "thread": thread or [],
@@ -1856,6 +1901,9 @@ def _status_payload(space: str = "") -> dict:
         "metrics": _metrics_payload(rows, conn, space_id),
         "replies": _replies.status(),
         "gmail_available": _gmail_available(),
+        # On the payload so the toggle and every send control read the SAME answer. A checkbox
+        # holding its own idea of the state is one that disagrees with what actually goes out.
+        "attach_docs": _attach_docs_state(),
         # Whether the token carries gmail.readonly, so the UI can offer "Fetch from Gmail"
         # instead of only a paste box. Cached inside gmail_oauth (keyed on the token file's
         # mtime), so this costs nothing on a 2.5s refresh.
@@ -2814,9 +2862,14 @@ def _import_urls(text: str, space: str = "") -> dict:
             duplicates += 1
             continue
         company = _infer_company(url)
-        title = f"{company} uploaded job"
+        # `site` is the DISCOVERY SOURCE and `company` is the employer; they were both set to the
+        # same guess, which is how a guess ended up in a salutation. When the employer is unknown
+        # the honest source is the host we imported from, and the employer stays empty until
+        # enrichment can corroborate one from the posting text.
+        site = company or _url_host(url)
+        title = f"{company} uploaded job" if company else "Imported job"
         try:
-            _jobs.insert_imported(url, title, company, company, url, conn, space_id=space_id)
+            _jobs.insert_imported(url, title, company, site, url, conn, space_id=space_id)
             inserted += 1
         except Exception:
             duplicates += 1
@@ -2908,6 +2961,26 @@ def _delete_contact(contact_id: str) -> dict:
     sent = " (an email had already been sent to them)" if emailed else ""
     log_event(job_url, "outreach", "info", f"Removed contact: {name}{sent}.", conn)
     return {"ok": True, "message": f"Removed {name}"}
+
+
+def _flag_contact(data: dict) -> dict:
+    """Toggle the operator's 💡 marker on one person.
+
+    The state is sent by the caller rather than flipped here. A server-side toggle races the 2.5s
+    refresh: two clicks arriving either side of a re-render leave the button showing one thing and
+    the database holding the other, and the operator would have no way to tell which is true.
+    The browser knows what it just showed, so it says what it wants.
+    """
+    from applypilot.networking import store as _store
+    cid = str(data.get("contact_id") or "").strip()
+    if not cid:
+        return {"ok": False, "message": "contact_id required"}
+    on = bool(data.get("on"))
+    state = _store.set_flagged(cid, on)
+    if state is None:
+        return {"ok": False, "message": "contact not found"}
+    return {"ok": True, "flagged": state,
+            "message": "Flagged" if state else "Flag removed"}
 
 
 def _save_contact_details(data: dict) -> dict:
@@ -3081,6 +3154,80 @@ def _followup_action(data: dict) -> dict:
         return send_followup(cid)
 
     return {"ok": False, "message": f"unknown action: {raw_action!r}"}
+
+
+def _attach_docs_state() -> bool:
+    """Whether outreach currently attaches the résumé + cover letter.
+
+    Reads the send path's own function rather than the env var, so the dashboard cannot show
+    "on" while the sender does something else — the intro-deck PDF rode along on 34 emails
+    exactly that way, with `doctor --config` reporting it off the whole time.
+    """
+    try:
+        from applypilot.networking.gmail_send import attachments_enabled
+        return attachments_enabled()
+    except Exception:  # noqa: BLE001 — the payload must not 500 over a toggle
+        return True
+
+
+def _bulk_followups(data: dict) -> dict:
+    """Draft or send MANY email follow-ups in one operation.
+
+    Loops `_followup_action` per contact rather than reimplementing anything. That is the whole
+    design: every guard the single-contact path already has — the Space's `can_autosend`, the
+    channel's, the daily limit, the per-company cap, the terminal-sequence check, "no draft
+    yet" — is inherited, and a new guard added there is inherited too. A second send path would
+    be §Lessons 49 aimed at the most irreversible action in the app.
+
+    **The caller names the contacts.** It does not say "send everything due" and let the server
+    re-derive the set: the operator is shown a list and a count, and the button must send THAT
+    list. The background poller runs every five minutes and the due set moves, so a server-side
+    re-derivation could send a message the operator never saw listed.
+
+    Email only. LinkedIn and SMS are copy-paste by design (§Lessons 3) and `channel.can_autosend`
+    would refuse them one at a time anyway; offering them in a bulk control implies an action
+    that does not exist.
+    """
+    action = (data.get("action") or "").strip()
+    if action not in ("draft", "send"):
+        return {"ok": False, "message": f"unknown bulk action {action!r}"}
+    ids = [str(i).strip() for i in (data.get("contact_ids") or []) if str(i).strip()]
+    if not ids:
+        return {"ok": False, "message": "nothing selected"}
+    # A ceiling that is not a policy: it bounds one click's blast radius, and the number is the
+    # count of contacts, not of guards passed. Anything larger is a second click.
+    if len(ids) > _BULK_MAX:
+        return {"ok": False, "message": f"{len(ids)} is more than {_BULK_MAX} in one go — "
+                                        "narrow it down or run it twice"}
+
+    done, failed = [], []
+    for cid in ids:
+        try:
+            res = _followup_action({"contact_id": cid, "action": action})
+        except Exception as exc:  # noqa: BLE001 — one bad row must not abort the batch
+            res = {"ok": False, "message": str(exc)}
+        (done if res.get("ok") else failed).append(
+            {"contact_id": cid, "message": res.get("message") or ""})
+        # A refusal that will repeat for every remaining contact is not worth 56 more attempts,
+        # and on the send path each attempt is a real Gmail call. The daily limit and the
+        # per-company cap are the two that say "stop", as opposed to "not this one".
+        msg = (res.get("message") or "").lower()
+        if not res.get("ok") and ("daily send limit" in msg or "auto-send off" in msg):
+            failed.append({"contact_id": "", "message": "stopped early — the limit above "
+                                                        "applies to every remaining contact"})
+            break
+
+    verb = "drafted" if action == "draft" else "sent"
+    return {"ok": bool(done), "done": len(done), "failed": len(failed),
+            "results": done + failed,
+            "message": (f"{len(done)} {verb}" + (f", {len(failed)} failed" if failed else ""))
+            if done else (failed[0]["message"] if failed else "nothing to do")}
+
+
+#: One click may touch this many contacts. Deliberately larger than today's 57 due and smaller
+#: than "everything, forever" — the point is that a runaway set stops rather than that 57 is
+#: special.
+_BULK_MAX = 100
 
 
 def _delete_job(url: str) -> dict:
@@ -3474,6 +3621,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if path == "/api/contact/details":
                 _json_response(self, _save_contact_details(data))
                 return
+            if path == "/api/contact/flag":
+                _json_response(self, _flag_contact(data))
+                return
             if path == "/api/contact/add-introduced":
                 _json_response(self, _add_introduced_contact(data))
                 return
@@ -3519,6 +3669,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/followup":
                 _json_response(self, _followup_action(data))
+                return
+            if path == "/api/followup/bulk":
+                _json_response(self, _bulk_followups(data))
+                return
+            if path == "/api/attach-docs":
+                from applypilot.networking import gmail_send as _gs
+                on = _gs.set_attachments_enabled(bool(data.get("on")))
+                _json_response(self, {"ok": True, "attach_docs": on,
+                                      "message": ("Résumé + cover letter WILL be attached"
+                                                  if on else
+                                                  "Attachments OFF — emails go without documents")})
                 return
             if path == "/api/contact/followup":
                 from applypilot.networking import store as _store
@@ -3592,7 +3753,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 _json_response(self, _unmark_interview(data.get("url", "")))
                 return
             if path == "/api/mark-rejected":
-                _json_response(self, _mark_rejected(data.get("url", "")))
+                # One endpoint, two reasons. The status is posted rather than inferred, and it
+                # defaults to `rejected` so nothing that already calls this changes behaviour.
+                _json_response(self, _mark_rejected(data.get("url", ""),
+                                                    (data.get("status") or "rejected")))
                 return
             if path == "/api/unmark-rejected":
                 _json_response(self, _unmark_rejected(data.get("url", "")))

@@ -12,9 +12,9 @@ campaign happens to be a job search** — see `docs/crm-prd.md` for where that g
 - **Packaging:** Hatchling, `src/` layout, single package `applypilot`
 - **Entry point:** `applypilot = "applypilot.cli:app"` (Typer CLI)
 - **License:** AGPL-3.0-only · **Version:** 0.4.0 (`pyproject.toml`)
-- **Tests:** 1778 passing (`tests/`, 93 files) · ruff clean (line-length 120, py311) · ESLint clean
+- **Tests:** 1933 passing (`tests/`, 99 files) · ruff clean (line-length 120, py311) · ESLint clean
 - **Schema version:** 3 (`applypilot migrate --status`) · **Settings:** 47 declared in `settings.py`
-- **Branch:** everything current lives on `context`, **39 commits ahead of `main`** and **pushed to `origin/context` on 2026-08-10**. `main` has
+- **Branch:** everything current lives on `context`, **40 commits ahead of `main`**, pushed to `origin/context` — **plus a working tree of UNCOMMITTED work** (§Dev workflow). `main` has
   none of it. Check `git log --oneline -1` before believing anything here (§Dev workflow).
 
 ## Quick orientation
@@ -232,14 +232,17 @@ re-reading a thread you have already logged is a no-op rather than a duplicate.
 | `identities` | `repo/spaces.py` | One row per SENDER (mailbox, from-name, deck, limits). Created by 003, **read by nothing yet** — ID-1. |
 | `schema_migrations` | `migrations/` | Version, status, `claimed_at` lease. See §Lessons on the 300s lease. |
 
-Live counts (2026-08-10, a snapshot — these move within minutes of real use, so treat them as
-orders of magnitude and re-measure before reasoning from one): jobs **32** (29 applied,
-**1 interview scheduled**, 1 rejected), contacts **231**
-(133 emailed, **8 replied**), touches 128, messages 273, connections 899,
-**2 recorded deck opens** — and only ONE of those is real; the other is stamped ninety seconds
-before the email that carried the link (§Lessons 83). Three Spaces: `job-search`
-(31 jobs), `partnerships` (targets), `gauntlet` (1 job — and it held **zero** until the import
-path started carrying the Space, §Lessons 70). **Schema version 3**.
+Live counts (2026-08-11, a snapshot — these move within minutes of real use, so treat them as
+orders of magnitude and re-measure before reasoning from one): jobs **33** (30 applied,
+**1 interview scheduled**, 1 rejected), contacts **243**
+(141 emailed, **9 replied** — the newest is Staci at Stanford, 2026-08-11), touches **205 of
+which 176 are SENT** (the bulk follow-up control's first real use), messages 284, connections
+899, **5 recorded deck opens** — one is stamped ninety seconds BEFORE the email that carried the
+link (the operator previewing their own `/intro/<name>`, §Lessons 83) and one belongs to a
+contact with no `submitted_at` at all, which the *opened since we last wrote* anchor correctly
+scores as nothing.
+Three Spaces: `job-search` (31 jobs), `partnerships` (targets), `gauntlet` (2 jobs — and it held
+**zero** until the import path started carrying the Space, §Lessons 70). **Schema version 3**.
 
 Contacts nearly tripled on 2026-08-04 — 66 → 185 — because employer resolution was broken in
 three separate ways and every one of them returned zero people rather than an error. See
@@ -313,6 +316,48 @@ read at the moment it is needed. **Each tip states its axis** ("They responded �
 GROUPING was the actual explanation — four bands count our own sending, two are about what they
 did — and a per-pill tip has nowhere to put it, so dropping the prefix would keep the vocabulary
 and throw away the point.
+
+**Bulk email follow-ups — on the JOB's Follow-ups tab** (2026-08-10). Fifty-seven were due and
+none had a draft, so clicking through them one at a time was the alternative.
+
+It shipped first as `✉ Follow-ups (57)` in the top console and was **reported three times as not
+existing** (§Lessons 89). It was there and it was in the wrong room. `fuBulkBar` now renders
+above the per-contact cards on a job's Follow-ups tab, where each person already has their own
+`✍ Draft follow-up`: `3 due · 0 drafted · 3 not yet · [✍ Draft all 3] [Send all drafted]`.
+**Draft and Send act on DIFFERENT people** — drafting skips anyone who already has one, or it
+silently discards hand-edits; sending touches only what is written. Each card highlights as the
+batch reaches it (blue → green/red), and the highlight is applied BEFORE the request so the set
+is visible before anything happens rather than only after. It does not render below two
+contacts, because one person is just the button already on their card.
+
+It **loops `_followup_action`** rather than reimplementing a send: every guard the single-contact path has —
+the Space's `can_autosend`, the channel's, the daily limit, the per-company cap, a terminal
+sequence, "no draft yet" — is inherited, and a new one is inherited too. A second send path would
+be §Lessons 49 aimed at the least reversible action in the app.
+
+**The browser names the contacts; the server never re-derives "everything due"** — the reply
+poller moves that set every five minutes, so a re-derivation could send a message the operator
+was never shown. The panel groups by **employer** because that is the unit the recipient
+experiences (6 to Okta inside a minute is not the same act as 6 to six companies, and a flat
+count of 57 hides it), and the send confirm names the count and the employers rather than asking
+"are you sure?". A batch-wide refusal (daily limit, auto-send off) stops the run; a per-contact
+one does not, or one stale row cancels the other fifty-six. Email only — LinkedIn and SMS are
+copy-paste by design, and `stop`/`replied`/`reopen` are refused because bulk-stopping every
+sequence is a different feature. Capped at 100 per click.
+
+**Two ways out that are not an interview** (2026-08-10). `✕ Mark rejected` is an OUTCOME —
+somebody read it and said no. `⊘ Job removed / cancelled` is the posting ceasing to exist: a req
+pulled, a hiring freeze, a role filled internally. Filing the second under the first makes the
+rejection rate describe decisions nobody made. Same terminal behaviour (row sinks, sequences
+leave the 🔔 counter and the bulk list, no temperature reading, one shared `↩ Restore`) and a
+separate `apply_status`, badge and filter pill.
+
+They share `rejected_at`, which means **when this left the pipeline** — the ORDER BY that sinks
+closed rows and the temperature guard that refuses to rate them both read it and neither cares
+why. `apply_status` carries the reason. The risk was not the state: `status === 'rejected'` was
+checked in EIGHT places to mean "closed", so both sides now go through one `isClosed()`
+predicate. Sweeping for the string caught a live miss — the SQL ORDER BY named only `'rejected'`,
+so a cancelled job would have sorted above jobs still being prepared.
 
 **🎯 Interview scheduled is the success metric** (2026-08-03), on the row next to Re-apply. Every
 other number counts EFFORT; this is the only outcome, and the funnel now ends at it. It is also
@@ -506,6 +551,15 @@ the more specific layer always wins.
 instruction to write; facts go early. `brief=True` for the short channels (text, LinkedIn,
 reply) shortens the GUIDANCE and **never drops a field**.
 
+**`Space.must_mention` is a REQUIREMENT, and that is why it is not the premise** (2026-08-10).
+The `gauntlet` premise names GauntletAI twice and **zero of eight drafts mentioned it** —
+including the two that had the premise, because `_premise_block` hands over FACTS and permits
+"leave it out". A requirement says the opposite. Enforced by a RETRY naming what was missing,
+never by appending: a deck LINK can be force-appended because it is one correct string, while a
+required mention is a sentence, and a canned sentence lands identically in every inbox at one
+company (§Lessons 42, 87). Rides the `config` blob, so it cost no schema change. Live: **0/8 →
+4/4**, four different phrasings.
+
 **`job_ask` REPLACES the CTA, it does not join it.** `sched_block` already sets one, and a
 prompt carrying both writes an email that does both, badly (§Lessons 40). The scheduling link
 survives — what the operator overrides is what to ask for, not whether a calendar exists. An
@@ -591,6 +645,18 @@ force-appended the link when the model correctly left it out — a guarantee tha
 repetition. Both are conditional now. The already-sent check compares the BASE url: the earlier
 emails went out as `/intro/` and `INTRO_DECK_PATHS` now builds `/intro/michael`, so matching the
 full link found nothing and re-pitched the deck to a man who had already had it twice.
+
+**Attachments are a toggle on every email card** (`📎 Docs ON · all emails`, 2026-08-10).
+`OUTREACH_ATTACH_DOCS` is read at startup, which makes it a deployment setting rather than
+something you flip between two sends. The override is a FILE in `APP_DIR` — the same reason
+`apply/pause.py` is one — because a toggle that reverts on the 2.5s refresh or a restart sends
+documents somebody had decided not to send, and the only place they would find out is their Sent
+folder. The env var stays the DEFAULT, never the authority. The dashboard renders from
+`gmail_send.attachments_enabled()` itself, so the badge cannot disagree with what goes out — the
+intro-deck PDF rode along on 34 emails while `doctor --config` reported it off, because a default
+lived in two places. It shipped first as a `<span>` beside the EMAIL label and was reported
+broken within the hour (§Lessons 88). **Only the FIRST email attaches anything**; follow-ups
+never did.
 
 **The PDF attachment is gone** (2026-08-03). 3.1 MB riding alongside a link to the same deck, on
 all 34 sent emails, and ON BY ACCIDENT: `_intro_deck_path` defaulted `OUTREACH_ATTACH_DECK` to
@@ -694,6 +760,7 @@ rewrites content *inside* those sections and may not rename, drop, reorder or in
 | Experience never understated | `understated_experience()` — **error**, retryable |
 | Employer names / school present | preserved_* checks — **error** |
 | Cover letter names the employer | `validate_cover_letter(company=…)` — **error** |
+| Cover letter is addressed to the EMPLOYER, not the ATS | salutation read out of the letter — **error** |
 
 **Padding is by COUNT, not by similarity.** A genuine rewrite doesn't resemble its source, so
 prefix-matching classifies every rewrite as new and appends the originals too — 3 rewrites
@@ -703,6 +770,22 @@ become 6 bullets saying the same thing twice.
 titles are background-checkable. The summary must not open by restating a previous title — a
 résumé aimed at "Applied AI Engineer" that begins "Technical Project Manager with 10+ years"
 tells the reader they have the wrong document.
+
+**The letter is addressed to the RESOLVED employer, and the guard reads the letter** (2026-08-10).
+Six applications went out saying "Dear Uploaded Hiring Team" (to Google), "Dear Jobvite" (to
+LegalZoom), "Dear Oraclecloud", "Dear Ouryahoo", "Dear Q2ebanking", "Dear Costargroup" — see
+§Lessons 85. `generate_cover_letter` read `job['site']`, the DISCOVERY SOURCE; it calls
+`derive.resolve_employer` now, and an unknown employer reaches the prompt as a refusal
+("COMPANY: not known… do NOT name or invent an employer") rather than as a blank, because a
+model handed an empty heading invents one.
+
+`_salutation_name` reads who the letter is addressed to OUT OF THE LETTER and compares it to the
+resolved employer, taking nothing from the caller — the old check was handed the same wrong
+string that wrote the letter and passed every time. It is POSITIVE rather than a blocklist: four
+of the six were tenant slugs no list would contain. `_same_employer` tolerates spelling
+("Scale AI" == "Scaleai") by comparing alphanumerics as WHOLE strings, never a substring, so
+"Arm" still cannot match "Armanino". `_infer_company` returns `""` instead of the literal
+"Uploaded", and `company` (the employer) is no longer written with `site` (the source).
 
 **`TAILOR_AGGRESSIVE` is voice-only.** It used to force `validation_mode="lenient"`, disabling
 the fabrication judge and every banned-word check. The real lever was the dashboard, which
@@ -760,6 +843,15 @@ the import path stored the uncorrected name and step 1 then trusted it forever (
 mentions is never challenged; a challenger must be named 3× as a whole word, and only from the
 two structural tenant slots — the host's first label and the FIRST path segment. No vendor list,
 so an ATS nobody has heard of costs nothing.
+
+**The host must BE the employer's** (`_host_is_the_employers`, 2026-08-10). The provenance rule
+below is not enough on its own, and the way it failed is the lesson: `doctor --fix-employers`
+backfilled the CORRECT name into `jobs.company`, so the resolver began answering from step 1 with
+source `stored`, the challenge stopped running, and the domain guard keyed on `challenged` never
+fired. Four `@jobvite.com` people were stored against a LegalZoom role hours after the fix
+(§Lessons 86). The stable question needs no provenance and no list: `legalzoom` vs `jobvite.com`
+is no; `costar` vs `costargroup.com` is yes (a corporate suffix); `arm` vs `armanino.com` is no,
+because the remainder must be a KNOWN suffix rather than any prefix match.
 
 **`resolve_employer()` returns the name AND its provenance**, and provenance is load-bearing
 twice: `json_ld` is never corrected (it turned "Acme Corp" into "Acme"), and a `challenged` name
@@ -1662,6 +1754,86 @@ company `"Jobs"` — the same substring bug class, inside the function written t
     became a character class.
 
 
+85. **Six applications went out addressed to the ATS, and a passing test held the placeholder in
+    place.** "Dear Uploaded Hiring Team" to **Google**. Also "Dear Jobvite" to LegalZoom, "Dear
+    Oraclecloud" to Texas Children's, "Dear Ouryahoo" to Yahoo, "Dear Q2ebanking" to Q2, "Dear
+    Costargroup" to CoStar. All six already submitted by the time anyone read one.
+    Three failures stacked, and only the third is unusual. The letter was generated from
+    `job['site']` — the DISCOVERY SOURCE — so §Lessons 81's bug had a twin in the documents that
+    the dashboard fix did not reach (§Lessons 49, with the most expensive call site left out).
+    `_infer_company` invented the literal **"Uploaded"** when a LinkedIn job-view URL carried no
+    employer, and wrote it into `company` AND `site`, so a guess became a fact in two columns.
+    And `validate_cover_letter` ALREADY required the letter to name the employer, as a blocking
+    error — it passed every time, because it was handed the same wrong string that wrote the
+    letter and the letter did name it (§Lessons 12, in the guard built for exactly this).
+    The part to keep: **`_infer_company("not-a-url") == "Uploaded"` was asserted by a green
+    test.** The placeholder was not an oversight sitting in the code, it was PINNED as correct,
+    so removing it broke a test and anyone who tried put it back. A test can hold a bug in place
+    more firmly than the code does.
+    The new guard reads the salutation OUT OF THE LETTER and takes nothing from the caller, and
+    it is POSITIVE rather than a blocklist — four of the six were tenant slugs ("Ouryahoo",
+    "Costargroup", "Q2ebanking") that no list will ever contain, and "Jobvite" was not on the
+    board list either because it had been fixed by corroboration instead.
+
+86. **A rule about HOW WE ARRIVED at an answer is not a rule about the answer, and storing the
+    right answer disarmed it.** §Lessons 80's domain guard read `if source == "challenged":
+    return None`. It worked. Then `doctor --fix-employers` backfilled `jobs.company` to
+    "LegalZoom" — the correct name — so the resolver began answering from step 1 with source
+    `stored`, the challenge never ran, and the guard never fired. A Find-contacts run stored
+    four people at `@jobvite.com` and `@talemetry.com` against a LegalZoom role, hours after the
+    bug was declared fixed.
+    Both guards that should have stopped it were about PROVENANCE, and provenance is a fact
+    about this run rather than about the row. The replacement asks the stable question instead:
+    **is this hostname the employer's name?** `legalzoom` vs `jobvite.com` is no;
+    `costar` vs `costargroup.com` is yes (a corporate suffix); `arm` vs `armanino.com` is no,
+    because the remainder must be a known suffix and not merely a prefix match (§Lessons 1, in
+    the comparison that decides whose payroll gets emailed).
+    **Writing the correct answer into the database is a legitimate thing to do, so any guard it
+    can switch off is the wrong guard.**
+
+87. **A requirement is not a fact, and `_premise_block` says so out loud.** Asked to make every
+    `gauntlet` email mention the GauntletAI programme. Its premise ALREADY named GauntletAI
+    twice, and **zero of eight live drafts mentioned it** — including the two that had the
+    premise. Nothing was broken: the premise block hands over facts and explicitly permits
+    *"say it in your own words, or leave it out"*, so the model kept the decade at T-Mobile and
+    Verizon and dropped the rest, exactly as instructed.
+    `Space.must_mention` states the opposite thing, and the enforcement is a RETRY, never an
+    append. `ensure_intro_deck` may append because a deck link is a URL — one correct string,
+    and repeating it costs nothing. A required mention has to be a SENTENCE, and a canned
+    sentence lands identically in every inbox at one company, which is §Lessons 42 with the
+    volume turned up. Asking again gets a different sentence; appending gets the same one
+    forever. Measured against the live model: **0/8 → 4/4**, four different phrasings.
+
+88. **A `<span>` that looks like a button is worse than no control at all.** The attachment
+    toggle shipped as a badge beside the EMAIL label — button-shaped, pill-styled, and inert.
+    The first thing it received was a click and a bug report, which was the correct response.
+    §Lessons 43 has now fired seven times as "a control nobody can find"; this is its inverse
+    and it is worse. A missing control is merely absent, and the operator goes looking. A fake
+    one is a promise the page does not keep, and it spends the one click you get. Render a
+    `<button>`, put it in the row where the other actions already are, and if a global setting
+    is displayed on a per-contact card then the LABEL has to say it is global ("Docs ON · all
+    emails") — a per-contact-looking control with global effect is the shape that gets clicked
+    by mistake.
+
+89. **A control in the wrong room is reported as not existing, three times.** The bulk
+    follow-up button shipped as `✉ Follow-ups (57)` in the top console. It rendered, the count
+    updated live, the panel opened, the endpoint worked — and the answer to "can you add a bulk
+    follow-up button" was *"I built that"*, twice, before I went and looked at what the operator
+    was looking at: the **Follow-ups tab of one job**, where every contact already has their own
+    `✍ Draft follow-up`. That is where a bulk version of the same act belongs, and no amount of
+    it working two screens away was going to substitute.
+    §Lessons 43 has been "a control nobody can find" seven times and §Lessons 88 added the
+    inverse. This is the third form: **findable is not the same as findable FROM WHERE THE WORK
+    IS.** The test for a control's placement is not "can it be reached" but "is it beside the
+    thing it acts on" — and the operator saying *I still don't see it* is the measurement,
+    however loudly the DOM disagrees.
+    Two smaller things fell out of the same session. The screenshot I took to prove the button
+    existed was scaled down from the real viewport, so my own click missed it by 165px and I
+    briefly diagnosed a live bug that was not there (§Lessons 46's shape, in a tool rather than
+    an artifact). And the fix has a real design consequence worth keeping: scoped to ONE job, the
+    confirm can name every recipient — eight names you can read, rather than fifty-seven you
+    cannot.
+
 
 Shipped in one session, in this order: **CRM-3a → CRM-1 → CRM-2 → CRM-3b → CRM-4a.**
 Tickets in `docs/tickets/CRM-*.md`; two of them had instructions that were factually wrong
@@ -1978,6 +2150,35 @@ the upgrade path §11 of the Spaces PRD points at. Do the graph when a real ques
 `docs/tickets/UX-README.md` — six dashboard defects reported 2026-08-04, **all six shipped**.
 Three were the same failure: a value one layer computes that the other cannot see.
 
+**`docs/tickets/CO-1-one-employer-many-roles.md`** (2026-08-11) — **the band is BUILT**; the
+contact-keying half is not. Asked for as "bundle the cards for two jobs at one company", and the
+measurement moved it: 0 of 33 employers held a second job, so the first version would have
+rendered for nobody. Fixed by moving the `Google hiring AI Sales Specialist` row out of
+`gauntlet` — which needed more than a Space change, because it carried §Lessons 85's `Uploaded`
+as its company and §Lessons 84's board-sentence as its title, so it would have sat beside the
+other Google job under a different name.
+
+A `tr.co-head` band renders above any employer with 2+ rows and **only** then, collapsible, state
+outside the DOM like `PANEL_OPEN`. **Every number on it is deduplicated across the roles** — two
+rows each reporting "16 contacts" for the same sixteen humans reads as thirty-two — plus
+`⚠ N on both`, which no other surface can show. Order came free: a `Map` over the already-sorted
+list puts each group at its first member's slot, so there is no second ranking to disagree with
+the `ORDER BY`. Live: `▾ Google · 2 roles · 16 people · 7 emailed · 1 replied · 5 follow-ups due`,
+one band across 32 rows.
+**The mutation that survived the first round of tests is the lesson**: fourteen tests of the
+grouping functions all passed against a version that bands every single-role employer, because
+none of them drove `renderJobsTable`. A test that never renders cannot see where a band lands.
+
+The half that is not
+layout is the reason it is written down anyway — `store.contact_id()` hashes **`job_url`**, so
+the same recruiter found for a second role is a second contact row with its own ladder, and
+`skip_known` cannot see them because it excludes per job. **`OUTREACH_COOLDOWN_DAYS` is back on
+(30, 2026-08-11)** and is currently the only guard covering it; its refusal already reads
+*"already emailed X for another role on …"*. It had been `0` since 2026-08-03, and 0 there means
+"matches nothing", not "unlimited" (§Lessons 50). Costs nothing today: 109 sends, 109 distinct
+addresses. `burned_block` is the open half — it is fed per contact, so it is empty in exactly the
+case it exists for.
+
 ## Known debt
 
 The 2026-07-28 architecture review listed six items; **all six were closed by the ARCH set**
@@ -2045,8 +2246,12 @@ What is actually open now, ordered by leverage:
    the documented `identity_id` freeze **does not exist** — `domain/space.py:240` freezes
    `("id", "shape")` only, so a Space with 133 sent emails is repointable today with no error.
 
-10. **`context` is 39 commits ahead of `main`, and PUSHED as of 2026-08-10.** Nothing is
-    laptop-only any more. Merging to `main` is still deliberately deferred, and checking
+10. **`context` is 40 commits ahead of `main` and pushed — but the working tree is NOT.**
+    Uncommitted as of 2026-08-11: the cover-letter addressee guard (§Lessons 85), the
+    host-belongs-to-employer domain rule (§Lessons 86), the deck-open prompt rewrite,
+    `must_mention` (§Lessons 87), the attachment toggle (§Lessons 88), bulk follow-ups on the
+    job's own tab (§Lessons 89), and the cancelled-job state. **Eight features are live on this
+    machine and in no commit anywhere** — and one of them has already sent 48 real follow-ups. Merging to `main` is still deliberately deferred, and checking
     out `main` gets you a build without Spaces, the deck fix, the Oracle fix, any of the UX work
     or any outreach context. **The `~/.applypilot/` database is not in git either** — latest
     backup `applypilot-20260807-pre-ctx2.db`, taken with the sqlite backup API because the WAL
@@ -2055,8 +2260,11 @@ What is actually open now, ordered by leverage:
 6. ~~**No per-company outreach cap.**~~ **CLOSED 2026-08-03** (`OUTREACH_COMPANY_CAP`, default
    8). Kept for the number: six companies were already OVER the cap the moment it shipped, three
    of them at 10 emails. Nothing had counted per employer, because the daily limit is global and
-   the cooldown is per address. **All three caps are set to 0 (unlimited) on this machine since
-   2026-08-04, deliberately** — see §Lessons 50 for what 0 used to mean.
+   the cooldown is per address. All three were set to 0 on this machine on 2026-08-04,
+   deliberately — see §Lessons 50 for what 0 used to mean. **`OUTREACH_COOLDOWN_DAYS` went back
+   to 30 on 2026-08-11** (CO-1): it is the only guard against the same person being emailed about
+   a SECOND role, which the contact keying makes invisible everywhere else. The daily limit and
+   the company cap are still 0.
 
 7. **`@react-pdf` is a major version behind** (3.4.5 installed, 4.5.1 current). The textkit
    layout crash in §Lessons 10 may be fixed upstream; the renderer now survives it either way,
@@ -2182,7 +2390,7 @@ change still needs the `pip install` above — but that copy gives the file a ne
   and the restart ran anyway, because both were in one chained command (§Lessons 63). Use
   `pgrep -fl "applypilot apply"`; recover an orphaned lock with
   `release_stale_locks(max_age_minutes=0)` and ONLY after pgrep comes back empty.
-- **On branch `context`** (2026-08-10), **39 commits ahead of `main`**, pushed to
+- **On branch `context`** (2026-08-10), **40 commits ahead of `main`**, pushed to
   `origin/context`. `main` last pushed at **`e1f0be6`**. Tags:
   `stable-arch2/3/5/6` · `stable-e2e-20260730` · `stable-crm-20260731`.
 - **A frontend-only edit needs the `pip install` but NOT a dashboard restart** — the copy gives

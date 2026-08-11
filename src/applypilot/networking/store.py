@@ -110,6 +110,17 @@ _CONTACT_COLUMNS: dict[str, str] = {
     # the hash. Two people at one company pursued in two Spaces are two rows because their
     # anchors differ, not because this column does.
     "space_id": "TEXT NOT NULL DEFAULT 'job-search'",
+    # The operator marking a person as one they care about. A TIMESTAMP, not a boolean, for the
+    # same reason `replied_at` and `deck_viewed_at` are: NULL is a complete answer ("not
+    # flagged") and the value carries when it happened, which a 0/1 throws away for nothing.
+    #
+    # Rides the additive dict, never a migration. `get_connection()` does not call `init_db`, so
+    # `ensure_contacts_columns` can run FIRST — a migration touching a column declared here is a
+    # duplicate-column error one way round and a missing-column error the other (§Spaces).
+    #
+    # Deliberately NOT part of `contact_id()`. Flagging somebody would otherwise re-key them and
+    # detach their touches, sequences and messages — the same reason `space_id` stays out.
+    "flagged_at": "TEXT",
 }
 
 
@@ -798,6 +809,29 @@ def mark_connected_now(contact_id: str, conn: sqlite3.Connection | None = None) 
         (now, now, contact_id),
     )
     conn.commit()
+
+
+def set_flagged(contact_id: str, on: bool, conn: sqlite3.Connection | None = None) -> bool | None:
+    """Mark or unmark a person the operator wants to keep an eye on. Returns the state in force.
+
+    Reads BACK rather than echoing its argument. A setter that returns what it was handed reports
+    success for a write that never landed, and the button would then render a state nothing
+    stored — the same failure `set_attachments_enabled` is written to avoid.
+
+    `None` means there is no such contact, which is different from "not flagged" and the caller
+    has to be able to tell them apart.
+    """
+    if conn is None:
+        conn = get_connection()
+    init_contacts(conn)
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute("UPDATE contacts SET flagged_at = ?, updated_at = ? WHERE id = ?",
+                 (now if on else None, now, contact_id))
+    conn.commit()
+    row = conn.execute("SELECT flagged_at FROM contacts WHERE id = ?", (contact_id,)).fetchone()
+    if row is None:
+        return None
+    return bool((row[0] or "").strip())
 
 
 def delete_contact(contact_id: str, conn: sqlite3.Connection | None = None) -> bool:

@@ -216,6 +216,28 @@
   tbody tr:not(.job-foot):not(.contacts-row):hover td { background:#f8f9fa; }
   .job-cell .job-title { font-weight:600; color:var(--text); }
   .job-cell .job-co { font-size:12.5px; color:var(--muted); margin-top:2px; }
+
+  /* CO-1: one employer, many roles. The header is a band, not a row — it must not read as a
+     job you could act on, because it carries no per-application control and never will. */
+  tr.co-head > td { padding:0; background:var(--surface2); border-bottom:1px solid var(--line); }
+  .co-toggle {
+    display:flex; align-items:baseline; gap:10px; width:100%; padding:7px 12px;
+    background:none; border:0; text-align:left; cursor:pointer; font:inherit; color:var(--text);
+  }
+  .co-toggle:hover { background:#f1f3f5; }
+  .co-caret { color:var(--muted); font-size:11px; width:10px; }
+  .co-name { font-weight:700; font-size:13px; letter-spacing:.01em; }
+  .co-stats { font-size:12px; color:var(--muted); font-variant-numeric:tabular-nums; }
+  /* Not styled like the counts beside it. It is the one thing on the band that asks you to do
+     something, and CO-1 is the ticket explaining why nothing else on the page can show it. */
+  .co-dupe {
+    margin-left:auto; font-size:11.5px; font-weight:600; color:#8a5300;
+    background:#fff4e0; border:1px solid #f0d9ad; border-radius:999px; padding:1px 8px;
+  }
+  /* The rail is what makes a member row read as belonging to the band above it. Applied to the
+     job-foot too, or the group visually ends halfway through its first row. */
+  tr.co-member > td:first-child { box-shadow:inset 3px 0 0 var(--line); }
+  tr.co-member.job-foot > td { box-shadow:inset 3px 0 0 var(--line); }
   /* Tags replaced the Links column. Chips wrap within a fixed-ish width so a job with five
      facets does not stretch the column and squeeze the description. */
   .tags-cell { font-size:13px; max-width:230px; }
@@ -486,6 +508,20 @@
     border-bottom:1px solid #f1f3f5; cursor:pointer; }
   .prow:hover { background:var(--surface2); }
   .prow.is-open { background:var(--surface2); border-bottom-color:transparent; }
+  /* 💡 the operator's own marker. The unflagged state is a visible ○ rather than nothing: a
+     control that only appears on hover is a control nobody knows exists (§Lessons 43). */
+  .flagbtn {
+    flex-shrink:0; width:22px; height:22px; padding:0; line-height:1; font-size:12px;
+    border:1px solid transparent; border-radius:50%; background:none; cursor:pointer;
+    color:var(--faint); display:flex; align-items:center; justify-content:center;
+  }
+  .flagbtn:hover { background:#fff4e0; border-color:#f0d9ad; color:var(--muted); }
+  .flagbtn.on { font-size:13px; }
+  /* Accent the whole row, not just the button — "the people I care about" has to be findable by
+     scanning a list of fifteen, which a 22px icon at the far left is not. */
+  .prow.is-flagged { background:#fffaf0; box-shadow:inset 3px 0 0 #e8a33d; }
+  .prow.is-flagged:hover { background:#fff4e0; }
+  .prow.is-flagged .pname { font-weight:700; }
   .prow .av { width:24px; height:24px; border-radius:50%; color:#fff; flex-shrink:0;
     display:flex; align-items:center; justify-content:center; font-size:10px; font-weight:600; }
   .pwho { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
@@ -614,6 +650,14 @@
   .apollo-link:hover { text-decoration:underline; }
   .apollo-alt { color:var(--faint); font-size:10.5px; margin-left:5px; text-decoration:none; }
   .apollo-alt:hover { text-decoration:underline; color:#5b3df5; }
+  /* Gmail, beside LinkedIn and Apollo. The same two-weight idiom: the strong one opens the
+     conversation, the faint one only opens a search — so they cannot be mistaken for each
+     other at a glance. Gmail red rather than the Apollo purple, because the destination is
+     what the colour is naming. */
+  .cmeta .gm-link { color:#c5221f; font-weight:600; text-decoration:none; font-size:inherit; }
+  .cmeta .gm-link:hover { text-decoration:underline; }
+  .gm-alt { color:var(--faint); font-size:10.5px; text-decoration:none; }
+  .gm-alt:hover { text-decoration:underline; color:#c5221f; }
   .c-howto { font-size:11px; line-height:1.45; color:var(--muted); background:var(--surface3);
     border-radius:6px; padding:6px 8px; }
   .c-howto b { color:var(--text); }
@@ -683,6 +727,10 @@
   .st-red    { background:#fbeae8; color:#b91c1c; border-color:#e6a6a0; font-weight:700; }
   .st-green  { background:var(--green-soft); color:var(--green); border-color:#a9e0c2; }
   .st-rejected { background:#eceaea; color:#7a7570; border-color:#d6d3ce; }
+  /* Cancelled sits beside Rejected and must not read as a worse version of it — the job simply
+     stopped existing. Same muted family, a cooler cast, so the pair scans as "closed, two
+     reasons" rather than as a severity ladder. */
+  .st-cancelled { background:#eaecef; color:#6b7280; border-color:#d3d7de; }
   /* Application filter pills. */
   .job-filters { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:14px; }
   .filter-pill { background:var(--surface); border:1px solid var(--line2); border-radius:999px; padding:6px 14px;
@@ -1140,3 +1188,41 @@
 .ns-t-name { font-weight: 700; font-size: 14px; color: var(--text); }
 .ns-t-blurb { font-size: 12.5px; line-height: 1.45; color: var(--muted); }
 .ns-status { margin-top: 10px; font-size: 13px; font-weight: 600; color: var(--yellow); }
+
+/* Bulk follow-ups (2026-08-10). Grouped by employer on purpose: six people at one company
+   hearing from you inside a minute is a different act from six people at six companies, and a
+   flat count of 57 hides it. */
+.bulk-panel { margin-top: 10px; padding: 12px 14px; border: 1px solid var(--line, #e5e7eb);
+              border-radius: 8px; background: var(--panel, #fafafa); }
+.bulk-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.bulk-breakdown { margin-top: 8px; max-height: 220px; overflow-y: auto; }
+.bulk-co { display: flex; align-items: baseline; gap: 8px; padding: 3px 0;
+           border-bottom: 1px solid var(--line-soft, #f0f0f0); font-size: 13px; }
+.bulk-co-n { min-width: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.bulk-co-name { font-weight: 600; min-width: 160px; }
+.bulk-co-people { color: var(--muted, #6b7280); font-size: 12px; }
+.bulk-results { margin-top: 8px; max-height: 180px; overflow-y: auto; }
+.bulk-line { font-size: 12px; color: var(--muted, #6b7280); padding: 2px 0; }
+
+/* The attachment toggle, in the card's action row with Save / Regenerate / Copy / Send. It was
+   a <span> next to the EMAIL label first: button-shaped, not a button, and the first thing it
+   got was a click and a bug report. OFF is amber rather than grey because it is the state that
+   changes what leaves the building. */
+.attach-btn { font-weight: 600; }
+.attach-btn.attach-off { background: #fef3c7; border-color: #fcd34d; color: #92400e; }
+
+/* Bulk draft/send on a job's Follow-ups tab. The global console button did the same job and was
+   reported three times as not existing — a bulk control belongs beside the things it acts on
+   (§Lessons 43). */
+.fu-bulk { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin:8px 0 12px;
+           padding:8px 10px; border:1px solid var(--line,#e5e7eb); border-radius:8px;
+           background:var(--panel,#fafafa); }
+.fu-bulk-n { font-weight:700; font-variant-numeric:tabular-nums; }
+.fu-bulk-sub { font-size:12px; color:var(--muted,#6b7280); margin-right:auto; }
+.fu-bulk-status { font-size:12px; font-weight:600; color:var(--muted,#6b7280); }
+
+/* Which person the batch is on. Transient by design — refresh() rebuilds the tab every 2.5s, so
+   this marks the moment the operator is watching rather than storing a state that could drift. */
+.fu-card.fu-working { border-color:#93c5fd; background:#eff6ff; }
+.fu-card.fu-ok      { border-color:#86efac; background:#f0fdf4; }
+.fu-card.fu-failed  { border-color:#fca5a5; background:#fef2f2; }

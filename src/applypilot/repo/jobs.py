@@ -233,7 +233,10 @@ def dashboard_rows(limit: int = 500, conn: sqlite3.Connection | None = None,
         WHERE {QUEUE_SQL}{scope}
         ORDER BY
           CASE
-            WHEN apply_status = 'rejected' THEN 6            -- rejected pile sinks to the bottom
+            -- Both closed states sink. Naming only 'rejected' here left a cancelled job
+            -- sorting with LIVE work, above jobs still being prepared — the exact silent miss
+            -- that `isClosed()` exists to prevent on the other side of the wire.
+            WHEN apply_status IN ('rejected', 'cancelled') THEN 6
             WHEN applied_at IS NOT NULL THEN 0
             WHEN apply_status = 'in_progress' THEN 1
             WHEN tailored_resume_path IS NOT NULL THEN 2
@@ -441,11 +444,30 @@ def unmark_applied(url: str, conn: sqlite3.Connection | None = None) -> None:
     conn.commit()
 
 
-def mark_rejected(url: str, conn: sqlite3.Connection | None = None) -> str:
+#: The two ways a job leaves the pipeline without an interview. They share a TIMESTAMP and
+#: differ in REASON, which is the whole point of keeping them apart:
+#:
+#:   rejected   they evaluated you and said no. An outcome, and it belongs in the funnel.
+#:   cancelled  the posting is gone — req pulled, hiring freeze, filled internally. Nothing to
+#:              do with you, and counting it as a rejection makes the rejection rate a lie.
+#:
+#: `rejected_at` carries both because the column means "when this left the pipeline", and every
+#: consumer that reads it — the ORDER BY that sinks closed rows, the temperature band that
+#: refuses to rate them — wants exactly that. `apply_status` carries the why. Renaming the column
+#: would cost a migration to say something the pair already says (the `job_url` → `anchor`
+#: rename is deferred for the same reason).
+CLOSED_STATUSES = ("rejected", "cancelled")
+
+
+def mark_rejected(url: str, conn: sqlite3.Connection | None = None,
+                  status: str = "rejected") -> str:
+    """Close a job: `rejected` (they said no) or `cancelled` (the posting went away)."""
+    if status not in CLOSED_STATUSES:
+        raise ValueError(f"unknown closed status {status!r}; expected one of {CLOSED_STATUSES}")
     conn = _c(conn)
     now = _now()
-    conn.execute("UPDATE jobs SET apply_status = 'rejected', rejected_at = ? WHERE url = ?",
-                 (now, url))
+    conn.execute("UPDATE jobs SET apply_status = ?, rejected_at = ? WHERE url = ?",
+                 (status, now, url))
     conn.commit()
     return now
 

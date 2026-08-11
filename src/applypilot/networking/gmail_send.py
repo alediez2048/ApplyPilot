@@ -126,9 +126,57 @@ def can_send(contact: dict, confirm_unverified: bool = False) -> tuple[bool, str
     return True, "ok"
 
 
-def _attachments_enabled() -> bool:
-    """Attach the tailored resume + cover letter PDFs to outreach emails (default on)."""
+#: The operator's override, a FILE rather than a process variable. It has to outlive a dashboard
+#: restart: a toggle that silently reverts to "attach" sends documents somebody had decided not
+#: to send, and they would only find out from their Sent folder.
+_ATTACH_FLAG = "attach_docs.flag"
+
+
+def _attach_flag_path():
+    from applypilot import config
+    return config.APP_DIR / _ATTACH_FLAG
+
+
+def attachments_enabled() -> bool:
+    """Whether the first email carries the résumé + cover letter PDFs.
+
+    Operator override first, `OUTREACH_ATTACH_DOCS` as the default. The env var stays the
+    DEFAULT rather than the authority, because a setting read at startup cannot be a control the
+    operator flips between two sends — and a default in two places is two defaults, which is how
+    the intro-deck PDF rode along on all 34 sent emails while `doctor --config` reported it off.
+    """
+    override = _read_attach_flag()
+    if override is not None:
+        return override
     return os.environ.get("OUTREACH_ATTACH_DOCS", "1").lower() in {"1", "true", "yes", "on"}
+
+
+def _read_attach_flag() -> bool | None:
+    """True/False from the flag file, or None when the operator has never set one."""
+    try:
+        raw = _attach_flag_path().read_text(encoding="utf-8").strip().lower()
+    except Exception:  # noqa: BLE001 — no flag, unreadable flag: fall back to the default
+        return None
+    if raw in ("1", "true", "on", "yes"):
+        return True
+    if raw in ("0", "false", "off", "no"):
+        return False
+    return None
+
+
+def set_attachments_enabled(on: bool) -> bool:
+    """Persist the override. Returns what is now in force, read back rather than assumed."""
+    from applypilot import config
+    try:
+        config.APP_DIR.mkdir(parents=True, exist_ok=True)
+        _attach_flag_path().write_text("1" if on else "0", encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Could not persist the attachment toggle: %s", exc)
+    return attachments_enabled()
+
+
+#: Kept as the old private name so nothing that already calls it changes behaviour.
+_attachments_enabled = attachments_enabled
 
 
 def _applicant_slug() -> str:

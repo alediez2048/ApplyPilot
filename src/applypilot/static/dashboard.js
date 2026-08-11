@@ -441,6 +441,7 @@ const STATUS_META = {
   failed:          { icon: '✗',  label: 'Failed',          cls: 'st-red' },
   applied:         { icon: '✓',  label: 'Applied',         cls: 'st-green' },
   rejected:        { icon: '✕',  label: 'Rejected',        cls: 'st-rejected' },
+  cancelled:       { icon: '⊘',  label: 'Cancelled',       cls: 'st-cancelled' },
 };
 
 // ── Job filter buckets: map the 12 granular statuses → a few meaningful stages you filter by. ──
@@ -454,9 +455,21 @@ const JOB_BUCKETS = {
   applied:   { label: 'Applied',     icon: '✅',  statuses: ['applied'],
                tip: 'Submitted. Where the outreach and follow-up work happens' },
   rejected:  { label: 'Rejected',    icon: '✕',   statuses: ['rejected'],
-               tip: 'Out of the pipeline. No follow-ups, and no temperature reading' },
+               tip: 'They said no. An outcome, and it counts in your funnel' },
+  // Separate from Rejected on purpose. A pulled requisition, a hiring freeze or a role filled
+  // internally is not a decision about you, and filing it under Rejected makes the rejection
+  // rate describe something that never happened.
+  cancelled: { label: 'Cancelled',   icon: '⊘',   statuses: ['cancelled'],
+               tip: 'The posting went away — req pulled, frozen, or filled internally. Not a rejection' },
 };
-const JOB_FILTER_ORDER = ['all','needs_you','progress','applied','rejected'];
+const JOB_FILTER_ORDER = ['all','needs_you','progress','applied','rejected','cancelled'];
+
+// A job that has LEFT the pipeline, for whichever reason. `status === 'rejected'` was checked in
+// eight separate places to mean this, and adding a second closed status by scattering a second
+// magic string beside each one is §Lessons 49 with a guarantee of missing one — the miss would
+// be silent, and it would show up as a cancelled job still being offered follow-ups.
+const CLOSED_STATUSES = ['rejected', 'cancelled'];
+function isClosed(j) { return CLOSED_STATUSES.includes(j && j.status); }
 let JOB_FILTER = 'all';  // client-side view state; persists across the 2.5s auto-refresh
 
 function jobInBucket(j, bucketKey) {
@@ -788,6 +801,9 @@ function emailBadge(s) {
   return '<span class="ebadge none">no email</span>';
 }
 let GMAIL_AVAIL = false;
+// Mirrors `attach_docs` from /api/status. The card reads this rather than the checkbox's own
+// state, so what the row SAYS and what the sender DOES cannot disagree.
+let ATTACH_DOCS = true;
 // gmail.readonly granted? Decides whether we can offer "⤓ Fetch from Gmail" at all. False on a
 // default install, where pasting is the only path.
 let CONTENT_SCOPE = false;
@@ -816,6 +832,18 @@ function draftBlock(c, wantEmail, wantLi) {
     if (sent) sendBtn = `<span class="sent-tag">✓ Gmail sent</span>`;
     else if (!GMAIL_AVAIL) sendBtn = `<button disabled title="Set GMAIL_ADDRESS + GMAIL_APP_PASSWORD">Send email</button>`;
     else sendBtn = `<button class="send" onclick="sendEmail('${esc(c.id)}', ${c.email_status==='verified'}, this)">Send email</button>`;
+    // A real button, in the row with the other actions. The first version was a <span> beside
+    // the EMAIL label: it looked exactly like a control, and the first thing anyone did was
+    // click it and report that it was broken. Rendering something button-shaped that is not a
+    // button is a worse §Lessons 43 than hiding it — a hidden control is merely missing, a fake
+    // one is a promise the page does not keep.
+    //
+    // It is GLOBAL and the label says so, because it lives on one person's card and changes
+    // every email. "Docs ON/OFF · all emails" is the shortest form of that which still fits.
+    const attachBtn = sent ? '' : `<button class="attach-btn${ATTACH_DOCS ? '' : ' attach-off'}"
+        onclick="toggleAttachDocs(this)"
+        title="Attach the tailored résumé + cover letter to the FIRST email of every outreach thread. This is a global setting, not per contact. Follow-ups never attach.">
+        📎 ${ATTACH_DOCS ? 'Docs ON' : 'Docs OFF'} · all emails</button>`;
     emailHtml = `
       <div class="d-label">Email</div>
       <input class="d-subj" value="${subj}" placeholder="Subject…" ${sent?'disabled':''} />
@@ -825,6 +853,7 @@ function draftBlock(c, wantEmail, wantLi) {
         ${sent?'':`<button onclick="saveDraft('${esc(c.id)}', this)">Save</button>
         <button class="secondary" onclick="regenDraft('${esc(c.id)}', this)">Regenerate</button>`}
         <button onclick="copyDraft(this)">Copy email</button>
+        ${attachBtn}
         ${sendBtn}
         ${followupButton(c)}
       </div>`;
@@ -1262,14 +1291,48 @@ function contactRow(c) {
       c.deck_views > 1 ? ` — ${c.deck_views} times, last ${esc(shortDate(c.deck_last_at))}` : ''
     }">👁 opened the deck${c.deck_views > 1 ? ` ×${c.deck_views}` : ''}</span>`);
   if (c.phone) pills.push(`<span class="pill on">📱</span>`);
+  // 💡 The operator's own marker — "this is one of the people I care about here". It is the ONE
+  // signal on this row that is not derived from what happened; everything else says what the
+  // system observed, and this says what the human decided.
+  //
+  // On the COLLAPSED row, and a real <button>, not a span dressed as one (§Lessons 88 — the
+  // attachment toggle shipped as a `<span>` and the first thing it got was a click and a bug
+  // report). `stopPropagation`, or pressing it opens the contact panel underneath.
+  const flag = `<button class="flagbtn${c.flagged ? ' on' : ''}" aria-pressed="${!!c.flagged}"
+      title="${c.flagged ? 'Remove your flag' : 'Flag this person — the row stays marked until you press it again'}"
+      onclick="event.stopPropagation();toggleFlag('${esc(c.id)}', this)">${c.flagged ? '💡' : '○'}</button>`;
   return `
-    <div class="prow ${open ? 'is-open' : ''}" onclick="toggleContact('${esc(c.id)}')">
+    <div class="prow ${open ? 'is-open' : ''}${c.flagged ? ' is-flagged' : ''}" onclick="toggleContact('${esc(c.id)}')">
+      ${flag}
       <span class="av" style="background:${avatarColor(c.full_name)}">${initials(c.full_name)}</span>
       <span class="pwho"><span class="pname">${esc(c.full_name)}</span> <span class="prole">— ${esc(c.title)}</span>
         ${c.hot ? `<span class="chip conn">🤝</span>` : ''}</span>
       <span class="pills">${c.confidence === 'medium' ? `<span class="pill warn" title="Nothing confirms this person works there — no company email and no employer on file">? unconfirmed</span>` : ''}${pills.filter(Boolean).join('')}<span class="caret">${open ? '▾' : '▸'}</span></span>
     </div>
     ${open ? contactPanel(c) : ''}`;
+}
+
+//: Flip the marker. The state is decided HERE and sent, never toggled on the server: two clicks
+//: either side of the 2.5s refresh would otherwise leave the button and the database disagreeing
+//: with no way to tell which is right.
+//:
+//: The button repaints before the request goes out, because a marker that waits up to 2.5s to
+//: appear reads as a dead control and gets clicked again (§Lessons 43). It is put back if the
+//: write fails — an optimistic paint that cannot be undone is just a lie with better timing.
+async function toggleFlag(cid, btn) {
+  const want = !btn.classList.contains('on');
+  btn.classList.toggle('on', want);
+  btn.textContent = want ? '💡' : '○';
+  btn.setAttribute('aria-pressed', String(want));
+  btn.closest('.prow').classList.toggle('is-flagged', want);
+  const r = await post('/api/contact/flag', { contact_id: cid, on: want ? 1 : '' });
+  if (!r.ok) {
+    btn.classList.toggle('on', !want);
+    btn.textContent = !want ? '💡' : '○';
+    btn.setAttribute('aria-pressed', String(!want));
+    btn.closest('.prow').classList.toggle('is-flagged', !want);
+    alert(r.message || 'Could not save that flag');
+  }
 }
 // Channels become tabs inside the open contact, so the email draft, the LinkedIn note and
 // the phone field stop competing for the same vertical space.
@@ -1282,13 +1345,48 @@ function contactRow(c) {
 // panel had inverted.
 // Gmail can always show what we cannot. Under the metadata scope the honest answer to "where is
 // her reply?" is "one click away, and here is the link" — an href, no backend, no scope change.
+//: TWO sources, and the order matters. `reply_to.thread_id` is read off a thread somebody
+//: actually answered on — 11 contacts. `contacts.thread_id` is what Gmail handed back when we
+//: SENT — 141. Reading only the first meant the link was missing for 130 people we have a real
+//: thread with, which is most of them.
 function gmailThreadUrl(c) {
-  const tid = (c.reply_to || {}).thread_id || '';
+  const tid = ((c.reply_to || {}).thread_id || c.thread_id || '').trim();
   return tid ? `https://mail.google.com/mail/u/0/#all/${encodeURIComponent(tid)}` : '';
 }
+
+//: When no thread was ever captured, search Gmail for the address instead of rendering nothing.
+//: This is not a consolation prize — it is the ONLY thing that finds the conversations the
+//: stored `thread_id` cannot: a thread they started, a reply from a different address, or one
+//: where we were merely Cc'd. Those are exactly the threads `replies.sync_all_with()` exists to
+//: catch, and the same reason it searches by address rather than by id.
+function gmailSearchUrl(c) {
+  const e = (c.email || '').trim();
+  return e ? `https://mail.google.com/mail/u/0/#search/${encodeURIComponent(e)}` : '';
+}
+
 function gmailLink(c, label) {
   const u = gmailThreadUrl(c);
   return u ? `<a class="gm-link" href="${esc(u)}" target="_blank" rel="noopener">${label}</a>` : '';
+}
+
+//: The meta-row link, beside LinkedIn and Apollo. Always offered when there is an address —
+//: a link that is present for some contacts and absent for others is one the operator stops
+//: looking for (§Lessons 43).
+//:
+//: The LABEL is honest about which of the two it is, because they do different things: one opens
+//: the conversation, the other opens a search that may return nothing. Same idiom the row
+//: already uses one link to the left — `Apollo ↗` for the profile, faint `search ↗` when all we
+//: can do is look.
+function gmailMetaLink(c) {
+  const thread = gmailThreadUrl(c);
+  if (thread)
+    return ` · <a class="gm-link" href="${esc(thread)}" target="_blank" rel="noopener"
+      title="Open this conversation in Gmail">✉ Gmail ↗</a>`;
+  const search = gmailSearchUrl(c);
+  if (!search) return '';
+  return ` · <a class="gm-alt" href="${esc(search)}" target="_blank" rel="noopener"
+      title="No thread was captured for ${esc(c.full_name || 'this contact')} — this searches Gmail for ${esc(c.email)}"
+      >✉ Gmail search ↗</a>`;
 }
 // "5 days ago" / "6 hours ago" / "just now". `days >= 1 ? Nd : 'today'` called a reply from
 // 20 hours ago "today" when it had landed yesterday evening.
@@ -1616,6 +1714,7 @@ function contactPanel(c) {
         ${c.linkedin_url ? ` · <a href="${esc(c.linkedin_url)}" target="_blank">LinkedIn ↗</a>` : ''}
         ${c.apollo_url ? ` · <a class="apollo-link" href="${esc(c.apollo_url)}" target="_blank" rel="noopener">Apollo ↗</a>` : ''}
         ${c.apollo_search_url ? `<a class="apollo-alt" href="${esc(c.apollo_search_url)}" target="_blank" rel="noopener">search ↗</a>` : ''}
+        ${gmailMetaLink(c)}
         ${c.phone ? ` · 📱 <a href="tel:${esc(c.phone)}">${esc(c.phone)}</a> <a class="sms" href="sms:${esc(c.phone)}">text</a>` : ''}
         ${c.connection_company ? `<span class="conn-co"> · ${esc(c.connection_company)}</span>` : ''}
         ${c.verify_note ? `<div class="verify-note ${esc(c.confidence)}">${c.confidence === 'high' ? '✓' : '?'} ${esc(c.verify_note)}</div>` : ''}
@@ -1949,7 +2048,7 @@ function pendingActions(jobs) {
   for (const j of js) {
     // A rejected job has left the pipeline; an interviewing job has ARRIVED. Both are done
     // asking for work, and leaving either in the counter keeps the badge permanently lit.
-    if (j.status === 'rejected' || j.interview_at) continue;
+    if (isClosed(j) || j.interview_at) continue;
     add('replies', j, (j.awaiting_reply || []).length);
     // A conversation that stalled outranks every cold ladder: they already engaged, which is
     // the hardest part, and letting it go quiet wastes the only thing outreach is for. Capped
@@ -1974,7 +2073,7 @@ function pendingActions(jobs) {
   }
   // Per-channel breakdown for the follow-ups line, so "6 follow-ups due" can say which kind.
   const channels = FOLLOWUP_CHANNELS.map(ch => ({
-    ...ch, n: js.reduce((a, j) => a + (j.status === 'rejected' ? 0 : dueByChannel(j)[ch.name]), 0),
+    ...ch, n: js.reduce((a, j) => a + (isClosed(j) ? 0 : dueByChannel(j)[ch.name]), 0),
   })).filter(c => c.n > 0);
 
   const live = groups.filter(x => x.n > 0);
@@ -2217,6 +2316,103 @@ function renderMetrics(mx) {
 // Renders the jobs table from a payload ALREADY IN HAND. Split out of refresh() so typing in
 // the search box re-filters locally instead of refetching /api/status — that endpoint costs 50
 // SQL statements, and putting it behind a keystroke is §Lessons 11 and 26 with a new trigger.
+// ---- CO-1: one employer, many roles ----------------------------------------
+//
+// Two roles at one company are two APPLICATIONS and one RELATIONSHIP. The row stays the unit for
+// the application — every control on it (the ⋯ menu, the four tabs, the status strip, Re-apply,
+// the two documents) is written against one job, and §Lessons 43/89 is what moving them costs.
+// What gets a header is the relationship: the same humans, counted ONCE.
+//
+// Collapsed state survives the 2.5s rewrite of #jobs, like PANEL_OPEN and TAB_OPEN.
+const CO_COLLAPSED = new Set();
+
+//: Group the ALREADY-FILTERED rows. Grouping the whole set instead would print "3 roles" above
+//: two visible ones whenever a filter hid the third — a header that describes rows it is not
+//: sitting on top of.
+//:
+//: Order comes free. A Map keeps insertion order, so walking `shown` (already in the server's
+//: ORDER BY) puts every group at its FIRST member's position — which is the best-member rule the
+//: ticket asked for, without a second ranking that could disagree with the sort beside it.
+//: Picking the worst instead would bury live work under a dead requisition.
+function groupByEmployer(shown) {
+  const groups = new Map();
+  for (const j of shown) {
+    const key = (j.company || '').trim().toLowerCase();
+    // No employer, no group. A row whose company never resolved (§Lessons 85's "Uploaded", now
+    // "") must not collect every other unresolved row into one meaningless bundle.
+    if (!key) { groups.set(`__solo__${j.url}`, { name: '', jobs: [j] }); continue; }
+    if (!groups.has(key)) groups.set(key, { name: j.company, jobs: [] });
+    groups.get(key).jobs.push(j);
+  }
+  return [...groups.entries()].map(([key, g]) => ({ key, ...g }));
+}
+
+//: What is TRUE of the employer rather than of one posting. Every number here is deduplicated
+//: across the roles, because the point of the header is that these are the same people: two rows
+//: each showing "8 contacts" for the same eight humans is the misreading this exists to stop.
+//:
+//: Computed from the payload already on screen — no new query, and `/api/status` has six
+//: statements of headroom (§The dashboard).
+function employerStats(jobs) {
+  const person = c => (c.email || '').trim().toLowerCase() || `id:${c.id}`;
+  const seen = new Map();     // person -> Set of job urls they appear on
+  const people = new Map();   // person -> the contact record (first seen wins)
+  for (const j of jobs) {
+    for (const c of (j.contacts || [])) {
+      const k = person(c);
+      if (!seen.has(k)) { seen.set(k, new Set()); people.set(k, c); }
+      seen.get(k).add(j.url);
+    }
+  }
+  const all = [...people.values()];
+  const due = new Set();
+  for (const j of jobs) for (const d of ((j.followups || {}).due || [])) due.add(d.id);
+  return {
+    roles: jobs.length,
+    people: all.length,
+    emailed: all.filter(c => c.emailed || c.submitted_at).length,
+    replied: all.filter(c => c.replied_at || c.last_reply).length,
+    due: due.size,
+    // THE number this header exists for. One person on two roles is one person who can receive
+    // the same pitch twice, and nothing else on the page can show it — each row shows its own
+    // contacts and both look complete. See CO-1: `contact_id` hashes job_url, so they are
+    // genuinely separate rows with separate ladders.
+    shared: [...seen.values()].filter(s => s.size > 1).length,
+  };
+}
+
+function coHeadRow(g) {
+  const s = employerStats(g.jobs);
+  const open = !CO_COLLAPSED.has(g.key);
+  const bits = [`${s.roles} roles`];
+  if (s.people) bits.push(`${s.people} ${s.people === 1 ? 'person' : 'people'}`);
+  if (s.emailed) bits.push(`${s.emailed} emailed`);
+  if (s.replied) bits.push(`${s.replied} replied`);
+  if (s.due) bits.push(`${s.due} follow-up${s.due === 1 ? '' : 's'} due`);
+  // Not a count among the others. It is a warning, and it reads as one.
+  const dupe = s.shared
+    ? `<span class="co-dupe" title="${s.shared} ${s.shared === 1 ? 'person is' : 'people are'} stored separately on more than one of these roles, each with their own follow-up ladder. They can receive the same pitch twice.">⚠ ${s.shared} on both</span>`
+    : '';
+  return `
+    <tr class="co-head${open ? '' : ' co-shut'}">
+      <td colspan="4">
+        <button class="co-toggle" onclick="toggleCoGroup(${tagArg(g.key)})"
+                aria-expanded="${open}"
+                title="${open ? 'Collapse' : 'Expand'} the ${esc(g.name)} roles">
+          <span class="co-caret">${open ? '▾' : '▸'}</span>
+          <span class="co-name">${esc(g.name)}</span>
+          <span class="co-stats">${bits.map(esc).join(' · ')}</span>
+          ${dupe}
+        </button>
+      </td>
+    </tr>`;
+}
+
+function toggleCoGroup(key) {
+  if (CO_COLLAPSED.has(key)) CO_COLLAPSED.delete(key); else CO_COLLAPSED.add(key);
+  rerenderJobs();
+}
+
 function renderJobsTable(allJobs, editing) {
   renderJobFilters(allJobs);
   renderActiveTags();
@@ -2246,24 +2442,38 @@ function renderJobsTable(allJobs, editing) {
   // The one destructive write: replacing #jobs discards whatever is being typed inside it.
   // Everything above has already run, so the header, badge and logs stay live while you type.
   if (editing) return;
-  document.getElementById('jobs').innerHTML = shown.map(j => {
-    return `
-    <tr class="${j.interview_at ? 'row-won' : ''}">
-      <td class="status-cell"><div class="status-head">${badge(j.status)}${j.interview_at ? ` <span class="won-chip" title="Scheduled ${esc(fmtDate(j.interview_at))}">${wonLabel(j).icon} ${esc(wonLabel(j).label.toLowerCase())}</span>` : ''}</div>${j.status === 'rejected' && j.rejected_at ? `<div class="rejected-on">Rejected ${fmtDate(j.rejected_at)}</div>` : (j.applied_at ? `<div class="applied-on">Applied ${fmtDate(j.applied_at)}</div>` : '')}</td>
-      <td class="job-cell"><div class="job-title">${esc(j.title)}</div><div class="job-co">${esc(j.company)}</div>${matchedVia(j)}</td>
+  // Grouped, but only where grouping says something. A header over one row is furniture, and a
+  // collapsed group still has to be re-openable — so the header renders whatever the state is
+  // and only the MEMBER rows come and go.
+  document.getElementById('jobs').innerHTML = groupByEmployer(shown).map(g => {
+    const grouped = g.jobs.length > 1;
+    const head = grouped ? coHeadRow(g) : '';
+    if (grouped && CO_COLLAPSED.has(g.key)) return head;
+    return head + g.jobs.map(j => jobRows(j, grouped)).join('');
+  }).join('');
+  // A <details> restored with the `open` attribute does NOT fire `toggle` on parse, so the
+  // 2.5s refresh would leave an already-open menu unpositioned. Re-measure them here.
+  document.querySelectorAll('details.rowmenu[open]').forEach(positionRowMenu);
+}
+
+//: One job's two rows — the row itself and its `job-foot`. Extracted from `renderJobsTable`
+//: unchanged so the grouping above has something to interleave headers with; `inGroup` only
+//: adds the indent rail.
+function jobRows(j, inGroup) {
+  const co = inGroup ? ' co-member' : '';
+  return `
+    <tr class="${j.interview_at ? 'row-won' : ''}${co}">
+      <td class="status-cell"><div class="status-head">${badge(j.status)}${j.interview_at ? ` <span class="won-chip" title="Scheduled ${esc(fmtDate(j.interview_at))}">${wonLabel(j).icon} ${esc(wonLabel(j).label.toLowerCase())}</span>` : ''}</div>${isClosed(j) && j.rejected_at ? `<div class="rejected-on">${j.status === 'cancelled' ? 'Cancelled' : 'Rejected'} ${fmtDate(j.rejected_at)}</div>` : (j.applied_at ? `<div class="applied-on">Applied ${fmtDate(j.applied_at)}</div>` : '')}</td>
+      <td class="job-cell"><div class="job-title">${esc(j.title)}</div>${inGroup ? '' : `<div class="job-co">${esc(j.company)}</div>`}${matchedVia(j)}</td>
       <td class="desc"><div class="desc-text">${esc(j.description)}</div></td>
       <td class="tags-cell">${jobTags(j).map(t =>
         `<button class="tag-chip${TAG_FILTER.has(t.k) ? ' on' : ''}" onclick="event.stopPropagation();toggleTag(${tagArg(t.k)})" title="Filter by ${esc(t.value)}">${esc(t.label)}</button>`
       ).join('') || '<span class="tags-none">—</span>'}</td>
     </tr>
-    <tr class="job-foot"><td colspan="4">
+    <tr class="job-foot${co}"><td colspan="4">
       ${stepStrip(j)}
       ${PANEL_OPEN.has(j.url) ? jobTabs(j) + `<div class="pane">${jobPane(j)}</div>` : ''}
     </td></tr>`;
-  }).join('');
-  // A <details> restored with the `open` attribute does NOT fire `toggle` on parse, so the
-  // 2.5s refresh would leave an already-open menu unpositioned. Re-measure them here.
-  document.querySelectorAll('details.rowmenu[open]').forEach(positionRowMenu);
 }
 
 // Re-filter without hitting the network. LAST_JOBS is the payload the most recent refresh
@@ -2328,6 +2538,9 @@ async function refresh() {
   renderMetrics(data.metrics);
   NET_AVAIL = !!data.networking_available;
   GMAIL_AVAIL = !!data.gmail_available;
+  // The button that reads this is re-rendered by the contact card on every tick, so there is
+  // nothing to sync by hand — and nothing to fight a click mid-toggle.
+  ATTACH_DOCS = data.attach_docs !== false;
   CONTENT_SCOPE = !!data.content_scope;
   if (data.poll_every_s) POLL_EVERY_S = data.poll_every_s;
   const allJobs = data.jobs || [];
@@ -2335,6 +2548,9 @@ async function refresh() {
   // bulk Gmail fetch has to know which contacts a job has, and an inline onclick cannot be
   // handed an array.
   LAST_JOBS = allJobs;
+  // The badge on the ✉ Follow-ups button, and the open panel's list if it is showing. Both read
+  // LAST_JOBS, so they cannot drift from the table beside them.
+  renderBulkDue();
   renderTodo(allJobs);
   renderAccounts(data.accounts);
   renderJobsTable(allJobs, editing);
@@ -2364,8 +2580,21 @@ async function unmarkInterview(url, btn) {
 }
 async function markRejected(url, btn) {
   if (!confirm('Move this application to the rejected pile?')) return;
+  return closeJob(url, btn, 'rejected');
+}
+// The posting went away — req pulled, hiring freeze, filled internally. Same terminal state as a
+// rejection (row greys, sequences stop, no temperature reading) and a different FACT, so it is
+// stored and counted separately. The confirm says which, because the two are one menu row apart
+// and only one of them belongs in a funnel.
+async function markCancelled(url, btn) {
+  if (!confirm('Close this as removed / cancelled?\n\n' +
+               'For a posting that was pulled, frozen, or filled internally. It stops every ' +
+               'sequence like a rejection does, but it is NOT counted as one.')) return;
+  return closeJob(url, btn, 'cancelled');
+}
+async function closeJob(url, btn, status) {
   btn.disabled = true;
-  const r = await post('/api/mark-rejected', {url});
+  const r = await post('/api/mark-rejected', {url, status});
   if (r.ok) refresh(); else { btn.disabled = false; alert(r.message || 'Failed'); }
 }
 async function unmarkRejected(url, btn) {
@@ -2554,7 +2783,7 @@ function nextAction(j) {
   const u = `decodeURIComponent('${encodeURIComponent(j.url)}')`;
   const cl = j.checklist || {};
   const cs = j.contacts || [];
-  if (j.status === 'rejected') return '';
+  if (isClosed(j)) return '';
   if (j.interview_at)
     return `<span class="won-next" title="Scheduled ${esc(fmtDate(j.interview_at))}">${
       wonLabel(j).icon} ${esc(wonLabel(j).done)}</span>`;
@@ -2565,7 +2794,9 @@ function nextAction(j) {
   if (j.status === 'needs_human')
     return `<button class="primary" onclick="continueJob(${u}, this)">▶ Continue</button>`;
   if (j.status === 'failed')
-    return `<button class="secondary" onclick="restartJob(${u}, this, false)">🔄 Restart end-to-end</button>`;
+    // What this button does belongs ON the button. It used to be appended to the failure line
+    // under the strip, where it read as part of the error message.
+    return `<button class="secondary" title="Regenerates the résumé and cover letter, then applies again from scratch." onclick="restartJob(${u}, this, false)">🔄 Restart end-to-end</button>`;
   if (!cs.length)
     return NET_AVAIL ? `<button onclick="findContacts(${u})">Find contacts</button>` : '';
   // A human who wrote to you outranks every ladder. Follow-ups chase people who said nothing;
@@ -2848,6 +3079,7 @@ function fuWhen(h) {
 function followupBody(j, f) {
   const byId = {}; (j.contacts || []).forEach(c => byId[c.id] = c);
   let out = `<div class="fu-sched">Sequence: ${f.schedule.map((h,i)=>`touch ${i+1} at ${fuWhen(h).replace('in ','')}`).join(' · ')}</div>`;
+  out += fuBulkBar(j, f, byId);
   if (f.due.length) {
     out += f.due.map(d => followupCard(byId[d.id], d, f.total_touches)).join('');
   } else {
@@ -2915,6 +3147,90 @@ function liCopyOpen(cid, encUrl, btn) {
   btn.textContent = 'Copied ✓ — paste in the chat, then "I sent it"';
   setTimeout(() => { btn.textContent = 'Copy + open LinkedIn'; }, 4000);
 }
+// ── Bulk draft / send, on the job's own Follow-ups tab ──────────────────────
+//
+// The global console button does the same job across every application, and it was reported
+// three times as not existing — because this is where the work is actually done. A bulk control
+// belongs beside the things it acts on, not two screens up (§Lessons 43, again).
+//
+// Scoped to THIS job's due list, which is also what makes it safe to read: eight names you can
+// see, not fifty-seven you cannot.
+function fuBulkBar(j, f, byId) {
+  const due = (f.due || []).map(d => byId[d.id]).filter(Boolean);
+  if (due.length < 2) return '';                    // one contact is just the button on the card
+  const drafted = due.filter(c => (c.followup_message || '').trim());
+  const undrafted = due.length - drafted.length;
+  const key = `decodeURIComponent('${encodeURIComponent(j.url)}')`;
+
+  // Disabled with the REASON on it rather than hidden: "nothing to send yet" is a state the
+  // operator needs to understand, and a control that vanishes reads as a bug (§Lessons 41).
+  const draftBtn = undrafted
+    ? `<button class="secondary" onclick="fuBulk(${key}, 'draft', this)">✍ Draft all ${undrafted}</button>`
+    : `<button class="secondary" disabled title="Every due follow-up already has a draft">✍ Draft all</button>`;
+  const sendBtn = drafted.length
+    ? `<button class="send" onclick="fuBulk(${key}, 'send', this)">Send all ${drafted.length} drafted</button>`
+    : `<button class="send" disabled title="Draft them first — there is nothing written to send">Send all drafted</button>`;
+
+  return `<div class="fu-bulk">
+    <span class="fu-bulk-n">${due.length} due</span>
+    <span class="fu-bulk-sub">${drafted.length} drafted · ${undrafted} not yet</span>
+    ${draftBtn}${sendBtn}
+    <span class="fu-bulk-status" data-bulk-status></span>
+  </div>`;
+}
+
+async function fuBulk(url, action, btn) {
+  const j = (LAST_JOBS || []).find(x => x.url === url);
+  if (!j) return;
+  const byId = {}; (j.contacts || []).forEach(c => byId[c.id] = c);
+  let due = ((j.followups || {}).due || []).map(d => byId[d.id]).filter(Boolean);
+  // Sending acts ONLY on what is already written. Drafting acts only on what is not — otherwise
+  // "Draft all" silently discards drafts the operator has edited by hand.
+  due = action === 'send'
+    ? due.filter(c => (c.followup_message || '').trim())
+    : due.filter(c => !(c.followup_message || '').trim());
+  if (!due.length) return;
+
+  if (action === 'send') {
+    const who = due.map(c => c.full_name).join(', ');
+    if (!confirm(`Send ${due.length} follow-up email(s) for ${j.contact_company || j.company}?\n\n` +
+                 `${who}\n\nThis cannot be undone.`)) return;
+  }
+
+  const status = btn.parentElement.querySelector('[data-bulk-status]');
+  const was = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = action === 'draft' ? 'Drafting…' : 'Sending…';
+  // Highlight the cards this is about to touch, so it is obvious WHO is included before anything
+  // happens — the whole reason this belongs on the job rather than in a global panel.
+  due.forEach(c => fuFlash(c.id, 'working'));
+  if (status) status.textContent = `${due.length} queued…`;
+
+  try {
+    const r = await post('/api/followup/bulk', { action, contact_ids: due.map(c => c.id) });
+    if (status) status.textContent = r.message || (r.ok ? 'done' : 'failed');
+    const failed = new Set((r.results || []).filter(x => x.contact_id && !x.ok).map(x => x.contact_id));
+    due.forEach(c => fuFlash(c.id, failed.has(c.id) ? 'failed' : 'ok'));
+  } catch (e) {
+    if (status) status.textContent = String(e);
+    due.forEach(c => fuFlash(c.id, 'failed'));
+  } finally {
+    btn.disabled = false;
+    btn.textContent = was;
+    refresh();
+  }
+}
+
+// Mark one person's card. `refresh()` rebuilds the tab every 2.5s, so this is a signal for the
+// moment the operator is watching, not stored state.
+function fuFlash(cid, state) {
+  const card = document.querySelector(`.fu-card[data-cid="${cid}"]`);
+  if (!card) return;
+  card.classList.remove('fu-working', 'fu-ok', 'fu-failed');
+  card.classList.add(state === 'working' ? 'fu-working' : state === 'failed' ? 'fu-failed' : 'fu-ok');
+}
+
+
 function followupCard(c, d, totalTouches) {
   if (!c) return '';
   const has = !!(c.followup_message || '').trim();
@@ -2981,14 +3297,67 @@ function activityHtml(events) {
 // ONE primary action per row. Restart / rejected / delete are secondary and live in the
 // ⋯ menu — they were adding two or three stacked lines to every row, including finished
 // ones whose only useful content is the badge and the date.
+//: Why an apply FAILED, in English. The row used to print the raw code and then run straight
+//: into the Restart button's own description with nothing between them, so the line read:
+//:
+//:     copilot_violation_agent_submitted Regenerates materials, then re-applies.
+//:
+//: Two unrelated sentences welded together — one about what happened, one about what a button
+//: would do — and the half that mattered was a machine token. Reported as "what does this mean?".
+//:
+//: The button's description moved ONTO the button (§Lessons 88: a control describes itself where
+//: it is), and the raw code is kept as the hover text here, because it is the exact thing to
+//: search the logs for and no sentence replaces it.
+const FAIL_WHY = {
+  // The agent pressed Submit in a mode whose whole purpose is that YOU press Submit. Nobody
+  // reviewed it — and it may genuinely have gone out, which is why the wording refuses to say
+  // it did not. `applied_at` stays empty until a human confirms (§Lessons 19).
+  copilot_violation_agent_submitted:
+    'The agent submitted this itself, which co-pilot mode is meant to prevent — so it was never '
+    + 'reviewed. It may still have reached the employer. Check, then "✅ Mark as applied" in the ⋯ menu if it did.',
+  dryrun_violation_agent_submitted:
+    'This was a dry run and the agent submitted anyway. Check whether the employer received it.',
+  no_result_line: 'The agent stopped without saying how it went. The form may already be complete.',
+  timeout: 'The agent ran out of time with the form part-filled.',
+  unknown: 'The agent finished without a clear result.',
+  expired: 'The posting is gone — the listing expired or was taken down.',
+  captcha: 'A captcha blocked it, and captchas are yours to solve, not the agent’s.',
+  login_issue: 'It could not get past the sign-in. Try 🔐 Sign in first, then restart.',
+  account_required: 'This employer requires an account before you can apply. 🔐 Sign in first.',
+  sso_required: 'The site demands single sign-on, which the agent cannot complete.',
+  already_applied: 'The site says you have already applied to this one.',
+  not_eligible_location: 'The posting rules you out on location.',
+  not_eligible_salary: 'The posting rules you out on pay.',
+  not_a_job_application: 'That link is not an application form.',
+  unsafe_permissions: 'The form asked for something the agent is not allowed to give.',
+  unsafe_verification: 'It needed an identity check the agent must not attempt.',
+  site_blocked: 'The site blocked automated access.',
+  cloudflare_blocked: 'Cloudflare blocked automated access.',
+  blocked_by_cloudflare: 'Cloudflare blocked automated access.',
+};
+
+//: The code, in English, or the code itself when it is one nobody has written a sentence for —
+//: never a generic "it failed", which throws away the only thing that says what to do next.
+function failWhy(code) {
+  const c = (code || '').trim();
+  if (!c) return 'The last attempt failed.';
+  return FAIL_WHY[c] || `The last attempt failed: ${c}`;
+}
+
 // Explanatory line under the strip, for the states where the next action needs context.
 function nextHint(j) {
   if (j.status === 'ready_to_submit')
     return 'Review &amp; submit in the open Chrome window, then confirm.';
   if (j.status === 'needs_human')
     return esc(BLOCKER_ASK[j.apply_error] || BLOCKER_ASK.blocker);
-  if (j.status === 'failed')
-    return `${j.apply_error ? esc(j.apply_error) : 'Last attempt failed.'} Regenerates materials, then re-applies.`;
+  if (j.status === 'failed') {
+    const raw = (j.apply_error || '').trim();
+    // The code survives as hover text. It is what you grep the apply log for, and an English
+    // sentence is not a substitute for it.
+    return raw
+      ? `<span title="${esc(raw)}">${esc(failWhy(raw))}</span>`
+      : esc(failWhy(''));
+  }
   return '';
 }
 // "Sign in first" — for employers whose ATS makes you register before you can apply
@@ -3015,7 +3384,7 @@ function signinButton(j) {
   // Nothing to sign in TO. A target is a company, not an application form behind an ATS wall.
   if (isTargetRow(j)) return '';
   if (j.signin_open) return '';
-  if (['applied', 'ready_to_submit', 'rejected', 'in_progress'].includes(j.status)) return '';
+  if (isClosed(j) || ['applied', 'ready_to_submit', 'in_progress'].includes(j.status)) return '';
   const u = `decodeURIComponent('${encodeURIComponent(j.url)}')`;
   return `<button class="restart-inline" onclick="signIn(${u}, this)" title="Open this application in Chrome so you can register or log in. The session is saved, so later applications to this employer skip it.">🔐 Sign in first</button>`;
 }
@@ -3056,7 +3425,7 @@ async function signinDone(url, fill, btn) {
 // the 🎯 chip, and a second control saying the same thing is noise. Undo lives in the ⋯ menu,
 // which is the right home for a rare, corrective action.
 function interviewButton(j) {
-  if (j.status === 'rejected' || j.status === 'in_progress') return '';
+  if (isClosed(j) || j.status === 'in_progress') return '';
   const u = `decodeURIComponent('${encodeURIComponent(j.url)}')`;
   // The undo lives HERE, not only in the ⋯ menu. Marking an interview is the one action that
   // halts every sequence on a job, so misclicking it is expensive — and the revert was buried
@@ -3079,7 +3448,7 @@ function restartButton(j) {
   // There is no application to re-apply to. Omitted rather than disabled: a disabled button
   // asserts the action exists and is unavailable, and here it does not exist (§Lessons 43).
   if (isTargetRow(j)) return '';
-  if (j.status === 'in_progress' || j.status === 'rejected' || j.status === 'failed') return '';
+  if (isClosed(j) || j.status === 'in_progress' || j.status === 'failed') return '';
   const u = `decodeURIComponent('${encodeURIComponent(j.url)}')`;
   const applied = j.status === 'applied';
   return `<button class="restart-inline" onclick="restartJob(${u}, this, ${applied})" title="Regenerate materials, then run the whole application again from scratch">🔄 Re-apply</button>`;
@@ -3125,9 +3494,19 @@ function rowMenu(j) {
       ? `<button onclick="unmarkApplied(${u}, this)">↩ Not applied<span>Undo — keeps the agent's run history</span></button>`
       : `<button onclick="markApplied(${u}, this)">✅ Mark as applied<span>You applied to this yourself</span></button>`);
   }
-  items.push(j.status === 'rejected'
-    ? `<button onclick="unmarkRejected(${u}, this)">↩ Restore<span>Move back out of the rejected pile</span></button>`
-    : `<button onclick="markRejected(${u}, this)">✕ Mark rejected<span>Move to the rejected pile</span></button>`);
+  // Two ways OUT that are not an interview, and they are different facts. "Rejected" is an
+  // outcome — somebody read it and said no. "Cancelled" is the posting ceasing to exist: a req
+  // pulled, a hiring freeze, a role filled internally. Filing the second under the first makes
+  // the rejection rate describe decisions nobody made.
+  //
+  // Both are reversible from the same Restore, because `rejected_at` is one column meaning
+  // "when it left" and undoing either is the same operation.
+  if (isClosed(j)) {
+    items.push(`<button onclick="unmarkRejected(${u}, this)">↩ Restore<span>Move back into the pipeline</span></button>`);
+  } else {
+    items.push(`<button onclick="markRejected(${u}, this)">✕ Mark rejected<span>They said no — counts in your funnel</span></button>`);
+    items.push(`<button onclick="markCancelled(${u}, this)">⊘ Job removed / cancelled<span>Posting pulled or frozen — not a rejection</span></button>`);
+  }
   items.push(`<button class="danger" onclick="deleteJob(${u}, ${label})">🗑 Delete<span>Remove this job and its contacts</span></button>`);
   return `<details class="rowmenu" ${ROWMENU_OPEN.has(j.url) ? 'open' : ''} ontoggle="onRowMenuToggle(this, ${u})">
     <summary title="More actions">⋯</summary>
@@ -3205,3 +3584,138 @@ async function markSubmitted(url, btn) {
 }
 setInterval(refresh, 2500);
 refresh();
+
+// ── Bulk email follow-ups ───────────────────────────────────────────────────
+//
+// Clicking through 57 due follow-ups one at a time is what this replaces. The design point is
+// that the operator SEES the set before it goes: bulk send is the least reversible action in
+// the app, and this session already produced two "what the hell went out" moments where the
+// answer was only visible after the fact.
+//
+// The list is built from LAST_JOBS — the payload already on screen — so the ids sent are the
+// ids shown. The server does NOT re-derive "everything due": the poller moves that set every
+// five minutes, and a re-derivation could send a message that was never listed.
+
+function bulkDueContacts() {
+  const rows = [];
+  for (const j of (LAST_JOBS || [])) {
+    if (j.interview_at || j.rejected_at) continue;   // left the pipeline; nothing to chase
+    for (const item of ((j.followups || {}).due || [])) {
+      rows.push({ id: item.id, name: item.full_name || item.name || 'contact',
+                  company: j.contact_company || j.company || 'Unknown', touch: item.touch || 1 });
+    }
+  }
+  return rows;
+}
+
+function renderBulkDue() {
+  const rows = bulkDueContacts();
+  const badge = document.getElementById('bulkDueCount');
+  if (badge) badge.textContent = rows.length ? `(${rows.length})` : '';
+  const box = document.getElementById('bulkBreakdown');
+  if (!box) return rows;
+  if (!rows.length) {
+    box.innerHTML = '<div class="hint">Nothing is due right now.</div>';
+    return rows;
+  }
+  // Grouped BY COMPANY, because that is the unit the recipient experiences. Six people at Okta
+  // hearing from you inside a minute is a different thing from six people at six companies, and
+  // it is invisible in a flat count of 57.
+  const byCo = {};
+  for (const r of rows) (byCo[r.company] = byCo[r.company] || []).push(r);
+  const parts = Object.keys(byCo).sort().map(co => {
+    const n = byCo[co].length;
+    const names = byCo[co].map(r => esc(r.name)).join(', ');
+    return `<div class="bulk-co"><span class="bulk-co-n">${n}</span>
+              <span class="bulk-co-name">${esc(co)}</span>
+              <span class="bulk-co-people">${names}</span></div>`;
+  });
+  box.innerHTML = `<div class="hint" style="margin-bottom:6px">${rows.length} follow-up(s) due to
+      ${Object.keys(byCo).length} employer(s). Every one is a real email.</div>` + parts.join('');
+  return rows;
+}
+
+function toggleBulkFollowups(force) {
+  const p = document.getElementById('bulkPanel');
+  if (!p) return;
+  p.hidden = force === false ? true : !p.hidden;
+  if (!p.hidden) renderBulkDue();
+}
+
+async function bulkFollowups(action, btn) {
+  const rows = renderBulkDue();
+  if (!rows.length) return;
+  const status = document.getElementById('bulkStatus');
+  const out = document.getElementById('bulkResults');
+
+  if (action === 'send') {
+    // The one confirm in this flow, and it names the number and the employers rather than
+    // asking "are you sure?" — a dialog that does not say what will happen is a dialog people
+    // click through.
+    const cos = [...new Set(rows.map(r => r.company))];
+    const ok = confirm(
+      `Send ${rows.length} follow-up email(s) now, to ${cos.length} employer(s)?\n\n` +
+      cos.slice(0, 8).map(c => `  • ${c}: ${rows.filter(r => r.company === c).length}`).join('\n') +
+      (cos.length > 8 ? `\n  …and ${cos.length - 8} more` : '') +
+      `\n\nThis cannot be undone. Anything without a draft is skipped.`);
+    if (!ok) return;
+  }
+
+  const was = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = action === 'draft' ? 'Drafting…' : 'Sending…';
+  if (status) status.textContent = `${rows.length} queued…`;
+  try {
+    const r = await post('/api/followup/bulk',
+                         { action, contact_ids: rows.map(x => x.id) });
+    if (status) status.textContent = r.message || (r.ok ? 'done' : 'failed');
+    // Failures are listed individually. A batch that reports "12 sent, 5 failed" and does not
+    // say WHICH five leaves the operator to diff the board by hand.
+    const bad = (r.results || []).filter(x => x.contact_id && !x.ok && x.message);
+    if (out) {
+      const byId = {};
+      for (const x of rows) byId[x.id] = x;
+      out.innerHTML = (r.results || [])
+        .filter(x => x.message)
+        .map(x => {
+          const who = byId[x.contact_id];
+          const label = who ? `${esc(who.name)} · ${esc(who.company)}` : '';
+          return `<div class="bulk-line">${label ? label + ' — ' : ''}${esc(x.message)}</div>`;
+        }).join('');
+    }
+    if (bad.length === 0 && out && !r.results?.length) out.innerHTML = '';
+  } catch (e) {
+    if (status) status.textContent = String(e);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = was;
+    refresh();
+  }
+}
+
+
+// ── Global attachment toggle ────────────────────────────────────────────────
+//
+// Server-persisted rather than a page variable: it has to survive the 2.5s refresh AND a
+// dashboard restart. A toggle that quietly reverts to "attach" sends documents somebody had
+// decided not to send, and the only place they would find out is their Sent folder.
+//
+// Only the FIRST outreach email ever attached anything — follow-ups never did — so this changes
+// cold outreach and nothing else.
+async function toggleAttachDocs(btn) {
+  const want = !ATTACH_DOCS;
+  btn.disabled = true;
+  try {
+    const r = await post('/api/attach-docs', { on: want });
+    // Read back what the SERVER now holds rather than trusting the click. If the write failed,
+    // the label must show the truth instead of an intent nothing honoured.
+    ATTACH_DOCS = r.attach_docs !== false;
+    const s = document.getElementById('importStatus');
+    if (s) s.textContent = r.message || '';
+  } catch {
+    // Leave ATTACH_DOCS alone; refresh() below re-renders from the served state.
+  } finally {
+    btn.disabled = false;
+    refresh();
+  }
+}

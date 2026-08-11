@@ -14,7 +14,7 @@ campaign happens to be a job search** — see `docs/crm-prd.md` for where that g
 - **License:** AGPL-3.0-only · **Version:** 0.4.0 (`pyproject.toml`)
 - **Tests:** 2038 passing (`tests/`, 103 files) · ruff clean (line-length 120, py311) · ESLint clean
 - **Schema version:** 3 (`applypilot migrate --status`) · **Settings:** 48 declared in `settings.py`
-- **Branch:** everything current lives on `context`, **43 commits ahead of `main`**, pushed to `origin/context`, working tree CLEAN as of 2026-08-11 (§Dev workflow). `main` has
+- **Branch:** everything current lives on `context`, **46 commits ahead of `main`**, pushed to `origin/context`, working tree CLEAN as of 2026-08-11 (§Dev workflow). `main` has
   none of it. Check `git log --oneline -1` before believing anything here (§Dev workflow).
 
 ## Quick orientation
@@ -2342,8 +2342,8 @@ What is actually open now, ordered by leverage:
    the documented `identity_id` freeze **does not exist** — `domain/space.py:240` freezes
    `("id", "shape")` only, so a Space with 133 sent emails is repointable today with no error.
 
-10. **`context` is 43 commits ahead of `main`, pushed, and the working tree is CLEAN**
-    (2026-08-11, `63e2194`). The twelve features that had been live on this machine and in no
+10. **`context` is 46 commits ahead of `main`, pushed, and the working tree is CLEAN**
+    (2026-08-11, `4fdf95f`). The twelve features that had been live on this machine and in no
     commit anywhere went out in three: employer resolution + the cover-letter addressee
     (§Lessons 85, 86), outreach `must_mention` + the deck-open intent (§Lessons 87), and the
     dashboard set — employer bundling, readable failures, the 💡 flag, the Gmail link, bulk
@@ -2487,7 +2487,7 @@ change still needs the `pip install` above — but that copy gives the file a ne
   and the restart ran anyway, because both were in one chained command (§Lessons 63). Use
   `pgrep -fl "applypilot apply"`; recover an orphaned lock with
   `release_stale_locks(max_age_minutes=0)` and ONLY after pgrep comes back empty.
-- **On branch `context`** (2026-08-11, `63e2194`), **43 commits ahead of `main`**, pushed to
+- **On branch `context`** (2026-08-11, `4fdf95f`), **46 commits ahead of `main`**, pushed to
   `origin/context`, nothing uncommitted. `main` last pushed at **`e1f0be6`**. Tags:
   `stable-arch2/3/5/6` · `stable-e2e-20260730` · `stable-crm-20260731`.
 - **A frontend-only edit needs the `pip install` but NOT a dashboard restart** — the copy gives

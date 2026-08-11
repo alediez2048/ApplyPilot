@@ -57,6 +57,11 @@ _FIELDS: dict[str, tuple[str, ...]] = {
 
 _NORM = re.compile(r"[^a-z0-9]+")
 
+#: A single pasted URL. Deliberately not limited to docs.google.com — Excel Online, Dropbox
+#: Paper, Notion and Airtable links are the same mistake, and a list of hosts only ever protects
+#: against the one somebody has already been burned by (§Lessons 79).
+_LOOKS_LIKE_A_LINK = re.compile(r"^\s*https?://\S+\s*$", re.I)
+
 
 def _norm(s: str | None) -> str:
     return _NORM.sub("", (s or "").strip().lower())
@@ -153,6 +158,19 @@ def parse(text: str) -> dict:
     raw = (text or "").strip("\n")
     if not raw.strip():
         raise SheetError("Nothing pasted.")
+
+    # A LINK IS NOT THE DATA, and this is the error the operator actually hits. Reading a
+    # spreadsheet from its URL needs Google credentials; the whole point of this feature is that
+    # it needs none, because copying the CELLS puts them on the clipboard already.
+    #
+    # Checked before the header logic so the message says the useful thing. Without it the
+    # refusal was "No company column found. Columns seen: https://docs.google.com/spreadsheets/…"
+    # — technically true, and it sends someone off to add a Company column to a URL.
+    if _LOOKS_LIKE_A_LINK.match(raw.strip()) and "\n" not in raw.strip():
+        raise SheetError(
+            "That is a link to the sheet, not the sheet. Open it, select the rows including the "
+            "header, copy, and paste them here — nothing is read from the URL and no Google "
+            "access is needed.")
 
     delim = _sniff(raw)
     rows = [r for r in csv.reader(io.StringIO(raw), delimiter=delim)]

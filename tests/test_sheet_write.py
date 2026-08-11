@@ -302,3 +302,38 @@ def test_the_endpoint_writes_into_the_space_on_screen(db):
     wd._import_sheet({"space": "other", "text": SHEET})
     assert db.execute("SELECT COUNT(*) FROM jobs WHERE space_id='other'").fetchone()[0] == 2
     assert db.execute("SELECT COUNT(*) FROM jobs WHERE space_id='sheets'").fetchone()[0] == 0
+
+
+# ── a URL is never a company ────────────────────────────────────────────────
+
+def test_the_targets_box_refuses_a_document_link(db):
+    """What the operator actually did: pasted a Google Sheets URL into "＋ Add targets" and got
+    the card "spreadsheets/d/1HreblDeVn3vDFlmy4fROR9OThwd5tsld2PQkmtvG8qQ/edit?gid=…".
+
+    `parse_line` stripped `docs.google.com` as a domain and the leftover PATH became the company
+    name. Same family as "Ats", "Hr", "Edu" and — from this same link a day earlier — "Docs":
+    a URL turning into an employer (§Lessons 20, 52, 79)."""
+    from applypilot.domain import target
+    url = ("https://docs.google.com/spreadsheets/d/"
+           "1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/edit?gid=373473585#gid=373473585")
+    assert target.parse_line(url) is None
+
+    parsed, rejected = target.parse_input(url)
+    assert parsed == [] and rejected == [url]
+
+
+def test_a_bare_domain_is_still_a_company(db):
+    """The rule is about a PATH, not about URLs. "ridgeline.com" is a company stated as a
+    domain and must keep working — refusing it would be a worse bug than the one being fixed."""
+    from applypilot.domain import target
+    assert target.parse_line("ridgeline.com") == {"name": "Ridgeline", "domain": "ridgeline.com"}
+    assert target.parse_line("https://www.ridgeline.com") == {"name": "Ridgeline",
+                                                              "domain": "ridgeline.com"}
+
+
+def test_a_named_company_with_a_deep_link_still_works(db):
+    """The name was given explicitly, so the path is just a note."""
+    from applypilot.domain import target
+    got = target.parse_line("Ridgeline Logistics — https://www.ridgeline.com/about/team")
+    assert got["name"] == "Ridgeline Logistics"
+    assert got["domain"] == "ridgeline.com"

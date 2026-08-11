@@ -107,18 +107,39 @@ def parse_line(line: str) -> dict | None:
         return None
 
     domain = ""
+    had_path = False
     m = _DOMAIN_RE.search(raw)
     if m:
         domain = m.group(1).lower()
-        raw = (raw[:m.start()] + " " + raw[m.end():]).strip()
+        after = raw[m.end():]
+        # Whether the URL carried a PATH, which decides whether a bare link can name a company
+        # at all. `ridgeline.com` is a company stated as a domain. A link to a document on a
+        # platform is not: `docs.google.com/spreadsheets/d/1Hre…/edit` names Google's product,
+        # and the path is a file id.
+        had_path = bool(after.strip(" /?#")) and raw[m.end() - 1:m.end()] in "/?#"
+        raw = (raw[:m.start()] + " " + after).strip()
 
     # Separators a human uses between a name and a note. Everything after the FIRST one is
     # dropped: the name is what identifies the row, and a trailing note would change the slug.
     name = re.split(r"\s+[—–|]\s+|,\s+", raw, maxsplit=1)[0].strip(" -—–|,")
 
-    if not name and domain:
+    # A URL PATH IS NOT A COMPANY NAME, and it reached one. Pasting a Google Sheets link here
+    # created the card "spreadsheets/d/1HreblDeVn3vDFlmy4fROR9OThwd5tsld2PQkmtvG8qQ/edit?gid=…"
+    # — the host was stripped as a domain and the leftover path became the employer.
+    #
+    # Discarded rather than salvaged. Falling back to the host's label is what the jobs path
+    # does and it is the exact mechanism behind "Ats", "Hr", "Edu", "Oraclecloud" and — from
+    # this same link, a day earlier — "Docs" (§Lessons 20, 52, 79). On a platform host the
+    # label names the PRODUCT, never the company, and no list of platforms is needed to see it:
+    # a slash means we are looking at a path.
+    if "/" in name or name.lower().startswith("http"):
+        name = ""
+
+    if not name and domain and not had_path:
         # "ridgeline.com" on its own — the label before the TLD is the best name available, and
-        # saying so beats refusing a line the operator clearly meant.
+        # saying so beats refusing a line the operator clearly meant. Only with NO path: a bare
+        # domain is a company stated as a domain, a deep link is a document on somebody's
+        # platform.
         name = domain.split(".")[0].replace("-", " ").title()
     if not slug(name):
         return None

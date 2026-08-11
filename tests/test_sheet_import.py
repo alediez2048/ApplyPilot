@@ -276,3 +276,48 @@ def test_the_parser_is_pure():
         assert banned not in imported, f"domain/sheet.py imports {banned}"
     assert not any(m.startswith("applypilot.networking") or m.startswith("applypilot.web")
                    for m in imported), f"domain/sheet.py reaches outside domain/: {imported}"
+
+
+# ── a link is not the data ──────────────────────────────────────────────────
+
+SHEET_URL = ("https://docs.google.com/spreadsheets/d/"
+             "1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/edit?gid=373473585#gid=373473585")
+
+
+def test_pasting_the_LINK_says_so_instead_of_blaming_the_headers():
+    """What the operator actually did, twice. Reading a sheet from its URL needs Google
+    credentials; copying the CELLS needs none, which is the whole reason this feature is a paste.
+
+    Before this the refusal read "No company column found. Columns seen: https://docs.google…"
+    — true, and it sends someone off to add a Company column to a URL (§Lessons 15: a refusal
+    has to name the way out)."""
+    with pytest.raises(sheet.SheetError) as e:
+        sheet.parse(SHEET_URL)
+    msg = str(e.value)
+    assert "link to the sheet, not the sheet" in msg
+    assert "select the rows" in msg
+    assert "column" not in msg.lower(), "still blaming the headers for a pasted URL"
+
+
+@pytest.mark.parametrize("url", [
+    "https://docs.google.com/spreadsheets/d/abc/edit",
+    "https://acme.sharepoint.com/:x:/r/sites/x/Doc.xlsx",
+    "https://www.notion.so/Some-Table-abc123",
+    "https://airtable.com/appXXXX/tblYYYY",
+])
+def test_any_document_link_gets_the_same_answer(url):
+    """No host list. Excel Online, Notion and Airtable are the same mistake, and a blocklist only
+    ever covers the vendor somebody was already burned by (§Lessons 79)."""
+    with pytest.raises(sheet.SheetError) as e:
+        sheet.parse(url)
+    assert "not the sheet" in str(e.value)
+
+
+def test_a_url_INSIDE_a_real_paste_is_not_mistaken_for_a_link():
+    """Guard the guard: a Website column full of URLs must still import."""
+    out = sheet.parse("\n".join([
+        TSV(["Company", "Name", "Website"]),
+        TSV(["Ridgeline", "Dana", "https://ridgeline.test/about"]),
+    ]))
+    assert out["people"][0]["full_name"] == "Dana"
+    assert out["companies"][0]["domain"] == "ridgeline.test"

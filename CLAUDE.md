@@ -14,7 +14,7 @@ campaign happens to be a job search** — see `docs/crm-prd.md` for where that g
 - **License:** AGPL-3.0-only · **Version:** 0.4.0 (`pyproject.toml`)
 - **Tests:** 1933 passing (`tests/`, 99 files) · ruff clean (line-length 120, py311) · ESLint clean
 - **Schema version:** 3 (`applypilot migrate --status`) · **Settings:** 47 declared in `settings.py`
-- **Branch:** everything current lives on `context`, **40 commits ahead of `main`**, pushed to `origin/context` — **plus a working tree of UNCOMMITTED work** (§Dev workflow). `main` has
+- **Branch:** everything current lives on `context`, **43 commits ahead of `main`**, pushed to `origin/context`, working tree CLEAN as of 2026-08-11 (§Dev workflow). `main` has
   none of it. Check `git log --oneline -1` before believing anything here (§Dev workflow).
 
 ## Quick orientation
@@ -2246,16 +2246,17 @@ What is actually open now, ordered by leverage:
    the documented `identity_id` freeze **does not exist** — `domain/space.py:240` freezes
    `("id", "shape")` only, so a Space with 133 sent emails is repointable today with no error.
 
-10. **`context` is 40 commits ahead of `main` and pushed — but the working tree is NOT.**
-    Uncommitted as of 2026-08-11: the cover-letter addressee guard (§Lessons 85), the
-    host-belongs-to-employer domain rule (§Lessons 86), the deck-open prompt rewrite,
-    `must_mention` (§Lessons 87), the attachment toggle (§Lessons 88), bulk follow-ups on the
-    job's own tab (§Lessons 89), and the cancelled-job state. **Eight features are live on this
-    machine and in no commit anywhere** — and one of them has already sent 48 real follow-ups. Merging to `main` is still deliberately deferred, and checking
-    out `main` gets you a build without Spaces, the deck fix, the Oracle fix, any of the UX work
-    or any outreach context. **The `~/.applypilot/` database is not in git either** — latest
-    backup `applypilot-20260807-pre-ctx2.db`, taken with the sqlite backup API because the WAL
-    routinely holds more than the main file (4.1 MB against 1.8 MB when it was taken).
+10. **`context` is 43 commits ahead of `main`, pushed, and the working tree is CLEAN**
+    (2026-08-11, `63e2194`). The twelve features that had been live on this machine and in no
+    commit anywhere went out in three: employer resolution + the cover-letter addressee
+    (§Lessons 85, 86), outreach `must_mention` + the deck-open intent (§Lessons 87), and the
+    dashboard set — employer bundling, readable failures, the 💡 flag, the Gmail link, bulk
+    follow-ups, the attachment toggle and the cancelled state (§Lessons 88, 89).
+    Merging to `main` is still deliberately deferred, and checking out `main` gets you a build
+    without Spaces, the deck fix, the Oracle fix, any of the UX work or any outreach context.
+    **The `~/.applypilot/` database is not in git either** — latest backup
+    `applypilot-20260811-pre-co1-move.db`, taken with the sqlite backup API because the WAL
+    routinely holds more than the main file (4.1 MB against 1.8 MB once).
 
 6. ~~**No per-company outreach cap.**~~ **CLOSED 2026-08-03** (`OUTREACH_COMPANY_CAP`, default
    8). Kept for the number: six companies were already OVER the cap the moment it shipped, three
@@ -2390,8 +2391,8 @@ change still needs the `pip install` above — but that copy gives the file a ne
   and the restart ran anyway, because both were in one chained command (§Lessons 63). Use
   `pgrep -fl "applypilot apply"`; recover an orphaned lock with
   `release_stale_locks(max_age_minutes=0)` and ONLY after pgrep comes back empty.
-- **On branch `context`** (2026-08-10), **40 commits ahead of `main`**, pushed to
-  `origin/context`. `main` last pushed at **`e1f0be6`**. Tags:
+- **On branch `context`** (2026-08-11, `63e2194`), **43 commits ahead of `main`**, pushed to
+  `origin/context`, nothing uncommitted. `main` last pushed at **`e1f0be6`**. Tags:
   `stable-arch2/3/5/6` · `stable-e2e-20260730` · `stable-crm-20260731`.
 - **A frontend-only edit needs the `pip install` but NOT a dashboard restart** — the copy gives
   the file a new mtime, `?v=` changes with it, and a normal reload fetches it. A **Python** edit

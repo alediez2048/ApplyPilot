@@ -20,6 +20,10 @@ function switchSpace(id) {
   if (!id || id === SPACE_ID) return;
   SPACE_ID = id;
   LAST_JOBS = [];
+  // Or the skip-if-unchanged compare in renderJobsTable is against the PREVIOUS Space's markup.
+  // Two Spaces rendering identical HTML is far-fetched; an empty one and another empty one is
+  // not, and the failure mode is a tab that renders nothing at all.
+  LAST_JOBS_HTML = null;
   JOB_DESC.clear();
   JOB_DESC_LOADED = false;
   const url = new URL(location.href);
@@ -813,6 +817,12 @@ let ATTACH_DOCS = true;
 let CONTENT_SCOPE = false;
 //: The most recent /api/status jobs array, for click handlers that run after render.
 let LAST_JOBS = [];
+//: The exact HTML last written into #jobs. The 2.5s poll rebuilds that subtree from scratch, and
+//: in the steady state it rebuilds it IDENTICALLY — so comparing against this skips the write
+//: entirely and leaves the operator's scroll position, text selection and open menus alone.
+//: It is the rendered string rather than a hash or a payload fingerprint on purpose: it is the
+//: thing actually being written, so it cannot disagree with what is on screen.
+let LAST_JOBS_HTML = null;
 //: How often the dashboard's background poller runs, mirrored from the server so the
 //: Interactions tab can state the real cadence instead of a hardcoded guess.
 let POLL_EVERY_S = 300;
@@ -2061,7 +2071,27 @@ function renderProgress(progress, stats) {
 // re-render while a field in that subtree has focus; it resumes as soon as you click away.
 function isEditingJobs() {
   const el = document.activeElement;
-  return !!(el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') && el.closest('#jobs'));
+  if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') && el.closest('#jobs')) return true;
+  return hasSelectionInJobs();
+}
+
+//: Is the operator part-way through selecting something inside #jobs?
+//:
+//: Focus is not enough, and "I can't copy the text" is what that costs. A selection dragged
+//: across a job description, a conversation transcript or a draft lives on the SELECTION, not on
+//: `activeElement` — none of those are inputs, so the guard above returns false for all of them
+//: and the next tick rebuilt the nodes out from under the drag. Inside a textarea it is the same
+//: story once the pointer leaves the field.
+//:
+//: Only a non-collapsed range counts: a plain caret is `isCollapsed`, and treating that as
+//: "busy" would freeze the table for anyone who merely clicked once.
+function hasSelectionInJobs() {
+  const sel = typeof getSelection === 'function' ? getSelection() : null;
+  if (!sel || sel.isCollapsed || !sel.rangeCount) return false;
+  const jobs = document.getElementById('jobs');
+  if (!jobs) return false;
+  const within = n => !!(n && (n.nodeType === 1 ? n : n.parentElement)?.closest?.('#jobs'));
+  return within(sel.anchorNode) || within(sel.focusNode);
 }
 const BASE_TITLE = 'ApplyPilot Operator';
 // Jobs already acknowledged by looking at the tab. A badge that counts EVERY actionable row
@@ -2524,16 +2554,39 @@ function renderJobsTable(allJobs, editing) {
   }
   // The one destructive write: replacing #jobs discards whatever is being typed inside it.
   // Everything above has already run, so the header, badge and logs stay live while you type.
-  if (editing) return;
+  //
+  // Re-checked HERE rather than trusting the `editing` argument. `refresh()` computes that flag
+  // BEFORE `await fetch(...)`, so it describes the page ~100ms ago: click into a draft during
+  // that window and the guard says "not editing", the write lands, and the focus, selection and
+  // scroll position all go. §Lessons 26's shape — the cheap check was in the right place for a
+  // synchronous function and this one stopped being synchronous.
+  if (editing || isEditingJobs()) return;
   // Grouped, but only where grouping says something. A header over one row is furniture, and a
   // collapsed group still has to be re-openable — so the header renders whatever the state is
   // and only the MEMBER rows come and go.
-  document.getElementById('jobs').innerHTML = groupByEmployer(shown).map(g => {
+  const html = groupByEmployer(shown).map(g => {
     const grouped = g.jobs.length > 1;
     const head = grouped ? coHeadRow(g) : '';
     if (grouped && CO_COLLAPSED.has(g.key)) return head;
     return head + g.jobs.map(j => jobRows(j, grouped)).join('');
   }).join('');
+  // Nothing changed -> do not touch the DOM. This is the fix for "it keeps taking me back up
+  // when I scroll" and for text being uncopyable, and both were the same cause: `innerHTML =`
+  // destroys and rebuilds every node under #jobs, which resets each textarea's scrollTop to 0
+  // and collapses any selection — every 2.5 seconds, forever. Scrolling a textarea does not
+  // move `document.activeElement`, so the focus guard above never saw it.
+  //
+  // Measured on the live dashboard: two /api/status bodies 3s apart were IDENTICAL across
+  // 1.65 MB except two `due_in_h` countdowns on one contact, which is an HOURLY change. So the
+  // steady state re-rendered a byte-identical tree ~1,440 times an hour for nothing.
+  //
+  // A string compare of what we were about to write is the whole guard — no diffing library, no
+  // keyed nodes, and it cannot go stale because it IS the output. When something really does
+  // change the write still happens immediately.
+  const el = document.getElementById('jobs');
+  if (html === LAST_JOBS_HTML) return;
+  LAST_JOBS_HTML = html;
+  el.innerHTML = html;
   // A <details> restored with the `open` attribute does NOT fire `toggle` on parse, so the
   // 2.5s refresh would leave an already-open menu unpositioned. Re-measure them here.
   document.querySelectorAll('details.rowmenu[open]').forEach(positionRowMenu);

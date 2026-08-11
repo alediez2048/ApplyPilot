@@ -785,9 +785,15 @@ def test_typing_in_a_contact_field_does_not_freeze_the_rest_of_the_page(tmp_path
 
     table = src[src.index("function renderJobsTable"):]
     table = table[:table.index("\n}\n")]
-    guard = table.index("if (editing) return;")
-    assert table.index("getElementById('jobs').innerHTML") > guard, (
+    # The guard is re-evaluated AT the write rather than trusting the argument: `refresh()`
+    # samples `editing` before `await fetch(...)`, so by the time the write runs that flag is
+    # ~100ms stale and a click into a draft inside that window used to land the write anyway.
+    guard = table.index("if (editing || isEditingJobs()) return;")
+    assert table.index("el.innerHTML = html") > guard, (
         "the jobs table is rewritten even while a field inside it has focus")
+    # Behaviour, not spelling: this file greps (§Lessons 48), and the executable version —
+    # unchanged HTML skips the write, a live selection blocks it, a text-node anchor is found —
+    # is in tests/test_jobs_table_stability.py.
     # …and the local re-render path must respect the same guard, or typing in a contact note
     # while the search box has a value would still wipe the field.
     assert "renderJobsTable(LAST_JOBS || [], isEditingJobs())" in src, (

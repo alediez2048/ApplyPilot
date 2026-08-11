@@ -140,6 +140,18 @@ class Space:
     #: The constant pitch (§7.1). In a job search the DESCRIPTION varies per row and the pitch
     #: is constant; in an outreach Space that inverts, so this lives here and not on a row.
     offer: str = ""
+    #: Things EVERY message in this Space must mention. Distinct from `offer`, and the
+    #: difference is the whole reason this field exists rather than a longer premise: `offer` is
+    #: a paragraph of FACTS the model may draw on, and its block says so out loud ("say it in
+    #: your own words, or leave it out"). Measured on the live `gauntlet` Space — whose premise
+    #: names GauntletAI twice — **zero of eight drafts mentioned it**, including the two that had
+    #: the premise. The model kept the T-Mobile and Verizon half and dropped the rest, which is
+    #: correct behaviour for a fact it was told it could omit.
+    #:
+    #: A requirement is not a fact. This is checked after generation and retried, because a
+    #: prompt instruction is not a guarantee (§Lessons 9, 12) — and it is NEVER force-appended,
+    #: because a canned sentence in every draft at one company is §Lessons 42.
+    must_mention: tuple[str, ...] = ()
     channels: tuple[str, ...] = ("email", "linkedin", "sms")
     schedules: dict = field(default_factory=dict)
     offer_deck: bool = True
@@ -208,8 +220,9 @@ class Space:
             blob = {}
         if isinstance(blob, dict):
             data.update({k: v for k, v in blob.items() if k in known and k not in cls.COLUMNS})
-        if "channels" in data:
-            data["channels"] = tuple(data["channels"] or ())
+        for seq in ("channels", "must_mention"):
+            if seq in data:
+                data[seq] = tuple(data[seq] or ())
         return cls(**data)
 
     def config_json(self) -> str:
@@ -225,8 +238,9 @@ class Space:
         mine, base = asdict(self), asdict(blank)
         out = {k: v for k, v in mine.items()
                if k not in self.COLUMNS and v != base[k]}
-        if "channels" in out:
-            out["channels"] = list(out["channels"])
+        for seq in ("channels", "must_mention"):
+            if seq in out:
+                out[seq] = list(out[seq])
         return json.dumps(out, sort_keys=True)
 
     def with_(self, **changes) -> Space:

@@ -369,7 +369,7 @@ Return ONLY JSON: {"subject": "...", "body": "...", "linkedin_note": "..."}
 
 
 def _pitch_user_prompt(sender_bits, contact, company, about_them, offer, noticed,
-                       sched_block, deck_block, style_block, tone_block, previous):
+                       sched_block, deck_block, style_block, tone_block, previous, space=None):
     """The targets-shaped prompt (`spaces-prd.md` §7.1).
 
     The inversion is the whole point: in a job search the DESCRIPTION varies per row and the
@@ -405,7 +405,9 @@ def _pitch_user_prompt(sender_bits, contact, company, about_them, offer, noticed
            "to report that you looked is the most recognisable automated-outreach shape there "
            "is. If the sentence could be deleted and the observation still stand, delete it.\n\n"
            if noticed else "")
-        + sched_block + deck_block + style_block + tone_block
+        + sched_block + deck_block + style_block
+        + _must_mention_block(space)
+        + tone_block
         + burned_block(previous)
         + "Write the email. Return the JSON."
     )
@@ -432,6 +434,60 @@ def _voice_block(space) -> str:
     with them and loses (§Lessons 40)."""
     tone = (getattr(space, "tone", "") or "").strip()
     return f"VOICE FOR THIS CAMPAIGN (applies to every message in it):\n{tone}\n\n" if tone else ""
+
+
+def must_mention_of(space) -> tuple:
+    """Terms every message in this Space has to name. One reader, so nobody re-derives it."""
+    return tuple(t for t in (getattr(space, "must_mention", ()) or ()) if str(t).strip())
+
+
+def _must_mention_block(space, brief: bool = False) -> str:
+    """A REQUIREMENT, worded as one. Deliberately unlike `_premise_block`.
+
+    The premise hands over facts and says the model may put them in its own words or leave them
+    out — which is right for a premise, and is why the live `gauntlet` Space, whose premise names
+    GauntletAI twice, produced **zero of eight drafts mentioning it**. The model kept the decade
+    at T-Mobile and Verizon and dropped the rest. Nothing was broken; it was told it could.
+
+    So this says the opposite, and says it last, next to the instruction to write. It still does
+    not dictate a SENTENCE: naming the required phrasing is how the SMS prompt's suggested wording
+    came back in five of five drafts (§Lessons 42), and several people at one company reading the
+    identical clause proves a machine wrote both.
+    """
+    terms = must_mention_of(space)
+    if not terms:
+        return ""
+    listed = ", ".join(f'"{t}"' for t in terms)
+    if brief:
+        return (f"MUST MENTION: {listed}. Required even here — work it in naturally, in your own "
+                "words, in a few.\n\n")
+    return (
+        f"REQUIRED IN THIS MESSAGE: {listed}\n"
+        "This is a requirement of the campaign, not a fact to consider. Every message in this "
+        "Space names it.\n"
+        "- Work it in where it belongs in the argument, not bolted onto the end. A sentence "
+        "whose only job is to satisfy this reads exactly like what it is.\n"
+        "- YOUR OWN WORDS each time, and a different shape each time. Several people at one "
+        "company receive these and sit near each other; the same clause in two of them proves a "
+        "machine wrote both.\n"
+        "- The term itself must appear. Do not paraphrase the NAME.\n\n"
+    )
+
+
+def missing_mentions(text: str, space) -> list:
+    """Which required terms this draft failed to name. Empty means it complied.
+
+    Case-insensitive and punctuation-tolerant on the term, because "GauntletAI", "Gauntlet AI"
+    and "GauntletAI's" are the same mention and refusing two of them would send the model into a
+    retry it cannot win.
+    """
+    flat = "".join(ch for ch in (text or "").lower() if ch.isalnum())
+    out = []
+    for term in must_mention_of(space):
+        needle = "".join(ch for ch in str(term).lower() if ch.isalnum())
+        if needle and needle not in flat:
+            out.append(str(term))
+    return out
 
 
 def _premise_block(space, brief: bool = False) -> str:
@@ -610,7 +666,7 @@ def ensure_requisition(body: str, title: str, req: str) -> str:
 
 def _job_user_prompt(sender_bits, contact, relationship, role, company, jd, noticed,
                     context_block, premise_block, sched_block, deck_block, warm_block,
-                    style_block, tone_block, previous, posting_ref_block=""):
+                    style_block, tone_block, previous, posting_ref_block="", must_mention_block=""):
     """The jobs-shaped prompt.
 
     Extracted from `draft_email` so it can be diffed: `test_a_default_space_changes_the_prompt_by_nothing`
@@ -683,10 +739,54 @@ def _job_user_prompt(sender_bits, contact, relationship, role, company, jd, noti
         # LAST, immediately before the instruction to write. A constraint placed above the
         # scheduling and deck blocks competes with them and loses — §Lessons 40: two
         # instructions in one prompt disagreeing is a code bug, not a wording problem.
+        + must_mention_block
         + tone_block
         + burned_block(previous)
         + "Write the outreach email. Return the JSON."
     )
+
+
+def _chat_meeting_requirements(client, system: str, user: str, space,
+                               *, max_tokens: int, temperature: float, tries: int = 2) -> str:
+    """Generate, and regenerate ONCE if a required term is missing.
+
+    `Space.must_mention` is a requirement, and a prompt instruction is not a guarantee
+    (§Lessons 9, 12). Measured before this existed: the `gauntlet` premise names GauntletAI twice
+    and none of eight drafts mentioned it.
+
+    A retry rather than an append, and that is the load-bearing choice. `ensure_intro_deck` can
+    append because a deck link is a URL — there is one correct string and repeating it costs
+    nothing. A required MENTION has to be a sentence, and a canned sentence lands identically in
+    every inbox at one company, which is the failure §Lessons 42 recorded when the SMS prompt's
+    own suggested wording came back in five of five drafts. Asking again gets a different
+    sentence; appending gets the same one forever.
+
+    The last attempt is returned even if it still falls short. Refusing to draft would leave the
+    operator with nothing to edit, and `draft_variant` records what happened either way — a draft
+    that misses the term is visible and fixable; no draft is neither.
+    """
+    messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+    raw = ""
+    for attempt in range(max(1, tries)):
+        raw = client.chat(messages, max_tokens=max_tokens, temperature=temperature)
+        missing = missing_mentions(raw, space)
+        if not missing:
+            return raw
+        if attempt + 1 >= tries:
+            log.warning("draft still missing required mention(s): %s", ", ".join(missing))
+            break
+        # Named in the RETRY rather than louder in the original prompt: two instructions
+        # disagreeing is not fixed by volume (§Lessons 40), and this one is a correction to a
+        # specific attempt rather than a standing rule.
+        messages = messages + [
+            {"role": "assistant", "content": raw},
+            {"role": "user", "content":
+                "That draft never mentions " + ", ".join(f'"{m}"' for m in missing) +
+                ". It is required in every message in this campaign. Rewrite it so the term "
+                "appears, worked into the argument rather than bolted on, and change the "
+                "surrounding sentence rather than inserting a stock one. Return the JSON."},
+        ]
+    return raw
 
 
 def draft_email(profile: dict, job: dict, contact: dict, style: str = "", warm: bool = False,
@@ -810,21 +910,20 @@ def draft_email(profile: dict, job: dict, contact: dict, style: str = "", warm: 
         user = _pitch_user_prompt(sender_bits, contact, company,
                                   job.get("full_description"), offer,
                                   noticed, sched_block, deck_block, style_block,
-                                  tone_block, previous)
+                                  tone_block, previous, space=space)
         system = _PITCH_SYSTEM
     else:
         user = _job_user_prompt(sender_bits, contact, relationship, role, company, jd,
                                 noticed, _known_block(job), _premise_block(space),
                                 sched_block, deck_block, warm_block,
                                 style_block, tone_block, previous,
-                                posting_ref_block=_posting_ref_block(posting_ref, contact))
+                                posting_ref_block=_posting_ref_block(posting_ref, contact),
+                                must_mention_block=_must_mention_block(space))
         system = _SYSTEM
 
     client = get_client("light")
-    raw = client.chat(
-        [{"role": "system", "content": system}, {"role": "user", "content": user}],
-        max_tokens=400, temperature=0.8,  # a bit higher for warmth/variety
-    )
+    raw = _chat_meeting_requirements(client, system, user, space,
+                                     max_tokens=400, temperature=0.8)
     variant = draft_variant(warm=warm, noticed=bool(noticed), jd_chars=len(jd),
                             deck=bool(deck), scheduling=bool(link), style=bool(directive),
                             premise=bool(offer), ctx=bool(context), ask=bool(ask),
@@ -909,24 +1008,33 @@ _TOUCH_INTENT = {
 #: the honest version of the question is indistinguishable from an ordinary follow-up: "did
 #: anything in the deck raise questions" is a normal thing to ask someone you sent a deck to.
 _DECK_OPENED_INTENT = (
-    "They have looked at the intro deck since your last message, and they still have not "
-    "replied. That makes this the one follow-up with something real to be about: they spent "
-    "attention on the sender's material and stopped short of answering.\n"
+    "They have looked at the intro deck since your last message and still have not replied. "
+    "Ask what they made of it.\n"
+    "\n"
+    "THE DECK IS THE SENDER'S OWN. They wrote it and sent it. NEVER write as though the sender "
+    "read it, discovered something in it, or was struck by it: \"one thing that stuck with me "
+    "from the deck\", \"what I found interesting in the deck\" and anything like them are "
+    "nonsense, because it is their material. The sender is asking for the RECIPIENT'S reaction "
+    "to something they sent.\n"
     "\n"
     "NEVER SAY, HINT OR IMPLY THAT YOU KNOW THEY OPENED IT. No \"I saw you had a look\", no "
     "\"since you checked out the deck\", no \"I noticed you opened\". The sender knows because "
     "of a tracking beacon, and telling a stranger their reading was watched turns the best "
-    "signal in this whole sequence into the reason they never reply. If a sentence would not "
-    "make sense to someone who had NOT opened it, do not write that sentence.\n"
+    "signal in this whole sequence into the reason they never reply.\n"
+    "This costs nothing, because the natural question is identical either way: asking what "
+    "somebody made of a deck you sent them reads the same to a person who read it and a person "
+    "who did not. Phrase it so it would make sense to BOTH.\n"
     "\n"
-    "Write it as an ordinary, warm follow-up that happens to be about the deck's SUBSTANCE:\n"
-    "- Ask ONE specific question about something in the deck. Not \"what did you think?\", "
-    "which is a request for homework, but a question about one concrete thing in it that this "
-    "person in this role would have an opinion on.\n"
-    "- Or offer the natural next step: to walk through any part of it, or to answer anything "
-    "it raised.\n"
+    "Write it short and direct:\n"
+    "- Ask for their reaction to the deck. Plainly. \"Curious what you made of it\", \"did "
+    "anything in it land\", \"any questions it raised\" are all fine, in your own words.\n"
+    "- You MAY point at one part of it the sender wants their view on, but as the AUTHOR "
+    "offering it, not as a reader reporting on it: \"the part on X\" rather than \"what "
+    "struck me about X\".\n"
+    "- ONE question, answerable in a line. Not an essay prompt about the future of their "
+    "industry, which is homework and gets no reply.\n"
     "- Do NOT paste the deck link again. They have it.\n"
-    "- Short. Two or three sentences. Give an easy out, as always."
+    "- Two or three sentences, and an easy out."
 )
 
 
@@ -1066,6 +1174,7 @@ def draft_followup(profile: dict, job: dict, contact: dict, touch: int = 1,
         # automated; a reference saying which job this is about is what every human chasing an
         # application writes, and it is one clause.
         + _posting_ref_block(posting_ref, contact, brief=True)
+        + _must_mention_block(space, brief=True)
         + _premise_block(space) + _known_block(job)
         + (f"STYLE DIRECTION (follow closely):\n{directive}\n\n" if directive else "")
         + _voice_block(space)

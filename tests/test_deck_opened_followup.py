@@ -156,9 +156,9 @@ def test_the_prompt_forbids_revealing_that_we_know():
     """The line between a warm follow-up and telling a stranger they were watched."""
     user = _prompt(_contact(deck_last_at="2026-08-09T19:02:51Z"))
     assert "NEVER SAY, HINT OR IMPLY THAT YOU KNOW THEY OPENED IT" in user
-    # And the test of the rule rather than its wording: a sentence that only makes sense to
-    # someone who DID open it is the thing being banned.
-    assert "would not make sense to someone who had NOT opened it" in user
+    # And the checkable form of the rule: the question has to read the same to someone who
+    # opened it and someone who did not.
+    assert "make sense to BOTH" in user
 
 
 @pytest.mark.parametrize("phrase", ["I saw you had a look", "since you checked out the deck",
@@ -185,3 +185,37 @@ def test_it_applies_on_the_final_touch_too():
     user = _prompt(_contact(deck_last_at="2026-08-09T19:02:51Z"), touch=3)
     assert "looked at the intro deck" in user
     assert outreach._TOUCH_INTENT[3] not in user
+
+
+# ── it is the SENDER'S deck ─────────────────────────────────────────────────
+
+def test_the_prompt_says_whose_deck_it_is():
+    """The draft this rule exists to stop opened:
+
+        "Jordan, one thing that stuck with me from the deck: you've been building identity
+         infrastructure while AI systems are becoming the primary way enterprises interact
+         with their data."
+
+    The sender WROTE that deck. Writing as though they read it and were struck by something is
+    nonsense in the first clause, and it is what the model reached for when told to ask about the
+    deck's substance while never implying the recipient had opened it — pretending the SENDER was
+    the reader satisfied both instructions and made no sense.
+
+    The ask was always simpler: they looked at it, so ask what they made of it.
+    """
+    user = _prompt(_contact(deck_last_at="2026-08-09T19:02:51Z"))
+    assert "THE DECK IS THE SENDER'S OWN" in user
+    assert "one thing that stuck with me from the deck" in user, (
+        "the phrasing that actually shipped is no longer named as banned")
+
+
+def test_it_asks_for_their_reaction_rather_than_setting_homework():
+    """The other half of that draft: "How do you think about identity and access control
+    shifting as AI agents start making autonomous decisions on behalf of users?" is an essay
+    prompt to a stranger who has not replied yet. An earlier version of this prompt explicitly
+    ruled OUT "what did you think?" as a request for homework — backwards. Asking what somebody
+    made of a deck you sent them is the normal thing, and it costs them one line."""
+    user = _prompt(_contact(deck_last_at="2026-08-09T19:02:51Z"))
+    assert "Ask what they made of it" in user
+    assert "answerable in a line" in user
+    assert "homework" in user

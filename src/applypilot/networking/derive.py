@@ -665,6 +665,54 @@ def _derive_company_from_urls(job: dict) -> tuple[str | None, str]:
     return None, ""
 
 
+#: Suffixes a company bolts onto its own careers hostname. `costargroup.com` is CoStar's,
+#: `metacareers.com` is Meta's, `expediagroup.com` is Expedia's. Nothing else may be appended:
+#: the remainder must be one of these words exactly, so "arm" does NOT match "armanino"
+#: (remainder "anino") — §Lessons 1, in the comparison that decides whose payroll gets emailed.
+_HOST_SUFFIXES = {"group", "groupinc", "careers", "career", "jobs", "job", "hiring", "talent",
+                  "inc", "corp", "corporation", "co", "holdings", "hq", "global", "people"}
+
+
+def _host_is_the_employers(host: str, company: str) -> bool:
+    """Whether this hostname belongs to the employer we resolved.
+
+    The guard that was missing when a LegalZoom search was handed `jobvite.com` and returned four
+    Jobvite employees. There WAS a guard — `derive_domain` skipped a host on the board list — and
+    two things defeated it: `jobvite` was never on that list (it was fixed by corroboration
+    instead), and the newer provenance check keyed on `source == "challenged"`, which stopped
+    being true the moment the corrected name was written back to `jobs.company`. **A rule that
+    depends on how we arrived at an answer this run is not a rule about the answer.**
+
+    So this asks the stable question instead: is the host the company's name? It needs no list,
+    and it cannot be defeated by storing the right answer.
+
+        legalzoom  vs jobvite.com       -> no
+        apexfintechsolutions vs peak6.com -> no
+        costar     vs costargroup.com   -> yes, "group"
+        meta       vs metacareers.com   -> yes, "careers"
+        arm        vs arm.com           -> yes, exactly
+
+    Rejecting is SAFE and accepting wrongly is not: with no domain Apollo falls back to a name
+    search on the employer the posting corroborated, and `confirm_employer_domain` can still
+    recover one with Apollo's agreement. With a wrong domain it returns real people who really
+    do work somewhere else, and verification confirms them because they genuinely do
+    (§Lessons 68).
+    """
+    # The REGISTRABLE label, not the first one. `careers.arm.com` is Arm's — reading "careers"
+    # off the front rejected arm.com, stanford.edu and ey.com, every one of them correct and
+    # confirmed by the addresses their contacts actually use. `_employer_domain` already strips
+    # the hiring-portal prefixes and is the one implementation of that.
+    label = _norm_name(_employer_domain(host or "").split(".")[0])
+    name = _norm_name(company or "")
+    if not label or not name:
+        return False
+    if label == name:
+        return True
+    if label.startswith(name):
+        return label[len(name):] in _HOST_SUFFIXES
+    return False
+
+
 def derive_domain(job: dict, company: str | None = None) -> str | None:
     """Best-effort employer domain for Apollo's q_organization_domains_list[].
 
@@ -708,6 +756,11 @@ def derive_domain(job: dict, company: str | None = None) -> str | None:
         # Apollo gets no domain and falls back to a fuzzy name search — the thing that put
         # five people from the wrong "Zello" on a Zello job.
         if _is_board_host(host) and not _company_owns_the_posting(company or job.get("company") or "", job):
+            continue
+        # And the host must actually be the employer's. The board list above only catches
+        # vendors somebody has already been burned by — `jobvite` was not on it, and a LegalZoom
+        # search was handed `jobvite.com` and stored four Jobvite employees as the contacts.
+        if not _host_is_the_employers(host, company or job.get("company") or ""):
             continue
         return _employer_domain(host)
     return None

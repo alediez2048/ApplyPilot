@@ -550,6 +550,81 @@ def validate_tailored_resume(text: str, profile: dict, original_text: str = "") 
 
 # ── Cover Letter Validation ──────────────────────────────────────────────
 
+#: Names that are not employers but reach `jobs.company` and `jobs.site` anyway. Two families:
+#: strings this app INVENTED (`_infer_company` fell back to the literal "Uploaded" for years),
+#: and fragments of a URL or a job title that survived resolution ("External", "Community",
+#: "Myworkdayjobs"). Distinct from the board/ATS list, which is about real vendors.
+_PLACEHOLDER_EMPLOYERS = {
+    "uploaded", "untitled", "unknown", "n/a", "na", "none", "null", "tbd",
+    "external", "community", "careers", "career", "jobs", "job", "hiring", "company",
+}
+
+
+def _is_usable_employer(name: str) -> bool:
+    """False for a job board, an ATS vendor, or a placeholder this app made up.
+
+    Reuses `derive._BOARD_NAMES` rather than restating it — that set is where every vendor this
+    codebase has been burned by already lives (Ats, Hr, Edu, Oraclecloud, Recruitics, Jobvite),
+    and a second copy would go stale the first time one is added (§Lessons 49).
+    """
+    flat = (name or "").strip().lower()
+    if not flat or flat in _PLACEHOLDER_EMPLOYERS:
+        return False
+    try:
+        from applypilot.networking.derive import _BOARD_NAMES
+    except Exception:  # noqa: BLE001 — validation must never crash on an import
+        return True
+    return flat not in _BOARD_NAMES
+
+
+#: "Dear Acme Hiring Team," / "Dear Acme Team," / "Dear Acme,". Deliberately narrow: it must not
+#: match "Dear Hiring Manager", which is the correct fallback when no employer is known and is
+#: what twelve existing letters correctly use.
+_SALUTATION = re.compile(
+    r"^\s*Dear\s+(.+?)(?:\s+(?:Hiring\s+)?(?:Team|Manager|Committee|Panel))?\s*[,:]",
+    re.IGNORECASE | re.MULTILINE)
+
+
+def _salutation_name(text: str) -> str:
+    """Who the letter is addressed to, read from the letter itself.
+
+    Independent of every value the caller passed, which is the entire reason it exists.
+    """
+    match = _SALUTATION.search(text or "")
+    if not match:
+        return ""
+    name = match.group(1).strip(" ,:")
+    # "Dear Hiring Manager" and friends name no company — nothing to judge.
+    # The trailing "Team"/"Manager" is already stripped by the pattern, so these are the STEMS:
+    # "Dear Recruiting Team," arrives here as "Recruiting". Getting that wrong flags a correct
+    # generic salutation as a bad company name, which would block the very fallback this check
+    # tells the generator to use.
+    if name.lower() in {"hiring", "sir", "madam", "sir or madam", "all", "team", "there",
+                        "recruiter", "recruiting", "recruitment", "talent", "talent acquisition",
+                        "people", "hr", "human resources", "future colleagues", "colleagues"}:
+        return ""
+    return name
+
+
+def _same_employer(addressee: str, company: str) -> bool:
+    """Whether the salutation names the employer, tolerating how it is SPELLED.
+
+    `companies_match` compares token sequences, so "Scale AI" and "Scaleai" are different names
+    to it — and that is correct for its own jobs (picking an Apollo org, matching a connection's
+    self-reported employer), where a loose rule is how §Lessons 1 happened.
+
+    Here the question is narrower: a live letter opens "Dear Scale AI" while `jobs.company` holds
+    the slug "Scaleai", and the letter is RIGHT. Comparing the alphanumerics as whole strings
+    settles it without loosening anything — it is full-string equality, never a substring test,
+    so "Arm" still cannot match "Armanino".
+    """
+    from applypilot.domain.company import companies_match, norm_company
+    if companies_match(addressee, company):
+        return True
+    flat = lambda n: "".join(ch for ch in norm_company(n) if ch.isalnum())  # noqa: E731
+    return bool(flat(addressee)) and flat(addressee) == flat(company)
+
+
 def validate_cover_letter(text: str, mode: str = "normal", company: str = "") -> dict:
     """Programmatic validation of a cover letter.
 
@@ -570,11 +645,60 @@ def validate_cover_letter(text: str, mode: str = "normal", company: str = "") ->
     warnings: list[str] = []
     text_lower = text.lower()
 
-    # 0. The company must be named. A letter whose body is genuinely tailored but which
+    # 0a. The letter must not be ADDRESSED TO a job board, an ATS vendor or a placeholder.
+    #
+    #     Six real applications went out before this existed: "Dear Uploaded Hiring Team" to
+    #     Google, "Dear Jobvite" to LegalZoom, "Dear Oraclecloud" to Texas Children's Hospital,
+    #     "Dear Ouryahoo" to Yahoo, "Dear Q2ebanking" to Q2, "Dear Costargroup" to CoStar.
+    #
+    #     The check below (0b) could not catch any of them, and the reason is the whole point of
+    #     putting this one FIRST: it asks whether the letter names `company`, and `company` was
+    #     the same wrong string that wrote the letter. A validator whose input is derived from
+    #     its own demand cannot fail (§Lessons 12).
+    #
+    #     So this reads the salutation OUT OF THE LETTER and judges that, taking nothing from the
+    #     caller. It stays true however the employer was resolved, and it would have blocked all
+    #     six regardless of what was passed in.
+    #     A blocklist cannot do this job and the first version of this check tried. Four of the
+    #     six were TENANT SLUGS — "Ouryahoo", "Costargroup", "Q2ebanking" — which no list will
+    #     ever contain, and "Jobvite" was not in `_BOARD_NAMES` either because it was fixed by
+    #     corroboration rather than by enumeration. The rule has to be positive:
+    #
+    #         the name in the salutation must BE the employer we resolved from the posting,
+    #         and when we resolved none, the letter must name none.
+    #
+    #     `company` is safe to compare against now, and was not before: it used to arrive as
+    #     `job['site']`, the same string that wrote the letter. It is `resolve_employer`'s answer
+    #     now, corroborated against the posting's own text.
+    addressee = _salutation_name(text)
+    addressed_correctly = False
+    if addressee:
+        if not company or not _is_usable_employer(company):
+            errors.append(
+                f"Cover letter is addressed to '{addressee}' but no employer could be resolved "
+                f"for this job. Use a generic salutation rather than naming a guess.")
+        elif not _same_employer(addressee, company):
+            errors.append(
+                f"Cover letter is addressed to '{addressee}', but the employer is '{company}'. "
+                f"An ATS tenant slug or job board is not the company.")
+        elif not _is_usable_employer(addressee):
+            errors.append(
+                f"Cover letter is addressed to '{addressee}', which is a job board, an ATS "
+                f"vendor or a placeholder — not an employer.")
+        else:
+            addressed_correctly = True
+
+    # 0b. The company must be named. A letter whose body is genuinely tailored but which
     #    never says who it is addressed to reads as a template — and that is the first
     #    thing a human notices. An ERROR (retryable) rather than a warning: it is cheap to
     #    regenerate and expensive to send.
-    if company:
+    #
+    #    Skipped when the caller could not resolve an employer: demanding that the letter name
+    #    `""` is meaningless, and demanding it name a placeholder is how this went wrong.
+    #    Skipped when the salutation already matched the employer: the letter demonstrably names
+    #    it, and a stem search would disagree over spelling alone. A live letter opens "Dear
+    #    Scale AI" while `jobs.company` holds "Scaleai" — correct, and it failed this check.
+    if company and _is_usable_employer(company) and not addressed_correctly:
         stem = re.split(r"[,.]| Inc| LLC| Ltd| Corp", company.strip(), maxsplit=1)[0].strip()
         if len(stem) >= 3 and stem.lower() not in text_lower:
             msg = f"Cover letter never names the company ({stem})."

@@ -42,5 +42,19 @@ def test_import_and_contact_discovery_never_disagree(url, _e):
     assert _infer_company(url) == derive.derive_company({"url": url, "application_url": url})
 
 
-def test_an_unparseable_url_falls_back_rather_than_crashing():
-    assert _infer_company("not-a-url") == "Uploaded"
+def test_an_unresolvable_url_yields_NO_company_rather_than_a_placeholder():
+    """This test used to assert `== "Uploaded"`, and that is the sharpest thing in this file.
+
+    The placeholder was not an oversight sitting in the code — it was PINNED HERE as correct
+    behaviour, so anyone who removed it broke a green test and put it back. Meanwhile
+    `_infer_company` writes both `company` AND `site`, and the cover letter addressed itself to
+    `site`, so six real applications went out saying "Dear Uploaded Hiring Team" — one of them to
+    Google, one to LegalZoom saying "Dear Jobvite", one to Texas Children's Hospital saying "Dear
+    Oraclecloud".
+
+    "" is a real answer and every consumer must handle it. A placeholder that looks like a name
+    is worse than no name, because everything downstream treats it as a fact and only a human
+    reading the final PDF can tell.
+    """
+    assert _infer_company("not-a-url") == ""
+    assert _infer_company("https://www.linkedin.com/jobs/view/4449383611/") == ""

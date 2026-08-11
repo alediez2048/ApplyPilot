@@ -254,3 +254,68 @@ def test_the_dashboard_query_selects_the_company_column():
     src = inspect.getsource(repo.dashboard_rows)
     select = src[src.index("SELECT"):src.index("FROM jobs")]
     assert "company" in select, "dashboard_rows stopped selecting `company`"
+
+
+# ── the host must be the employer's, whatever the name's provenance ─────────
+
+def test_a_legalzoom_search_is_never_handed_the_ats_domain():
+    """This shipped, was "fixed", and shipped again the same day.
+
+    A LegalZoom Find-contacts run stored four people at `@jobvite.com` / `@jobvite-inc.com` /
+    `@talemetry.com` — the ATS vendor's own staff. The employer NAME was right by then; the
+    domain was not, and the domain is what Apollo searches.
+
+    Two guards failed. `derive_domain` skipped hosts on the board list, and `jobvite` was never
+    on it — it was fixed by corroboration instead. And the provenance check keyed on
+    `source == "challenged"`, which stopped being true the moment the corrected name was written
+    back to `jobs.company`: the resolver then answers from step 1 with source "stored" and the
+    challenge never runs. **A rule about how we arrived at an answer is not a rule about the
+    answer**, and backfilling the right name is exactly what disarmed it.
+    """
+    job = {"url": "https://jobs.jobvite.com/legalzoom/job/oWLtAfwu",
+           "application_url": "https://jobs.jobvite.com/legalzoom/job/oWLtAfwu/apply",
+           "company": "LegalZoom", "site": "Jobvite",
+           "full_description": "About LegalZoom. LegalZoom is on a mission. LegalZoom hires."}
+    assert derive.resolve_employer(job)[0] == "LegalZoom"
+    assert derive.derive_domain(job) is None
+
+
+def test_the_stored_correct_name_does_not_disarm_the_guard():
+    """The regression in its purest form: the SAME row before and after the backfill must both
+    refuse the vendor's domain. Before, `company` was "Jobvite" and the challenge fired; after,
+    `company` is "LegalZoom" and it does not."""
+    base = {"url": "https://jobs.jobvite.com/legalzoom/job/x",
+            "application_url": "https://jobs.jobvite.com/legalzoom/job/x",
+            "full_description": "About LegalZoom. LegalZoom is on a mission. LegalZoom hires."}
+    assert derive.derive_domain(dict(base, company="Jobvite")) is None
+    assert derive.derive_domain(dict(base, company="LegalZoom")) is None
+
+
+def test_a_parent_brands_domain_is_not_the_subsidiarys():
+    """`careers.peak6.com` hosts the posting; the hiring entity is Apex Fintech Solutions. Eight
+    contacts were stored at peak6.com under that row."""
+    job = {"url": "https://careers.peak6.com/jobs/technology/austin/solutions-engineer/JR104975",
+           "application_url": "https://peak6group.wd1.myworkdayjobs.com/apexfintechsolutions/job/x",
+           "company": "Apex Fintech Solutions",
+           "full_description": "Apex Fintech Solutions powers innovation. Apex Fintech "
+                               "Solutions builds custody. Join Apex Fintech Solutions."}
+    assert derive.derive_domain(job) is None
+
+
+@pytest.mark.parametrize("host,company,ok", [
+    ("careers.arm.com", "Arm", True),              # the registrable label, not "careers"
+    ("careersearch.stanford.edu", "Stanford", True),
+    ("careers.ey.com", "Ey", True),
+    ("costargroup.com", "CoStar", True),           # a corporate suffix
+    ("metacareers.com", "Meta", True),             # a careers suffix
+    ("careers.expediagroup.com", "Expedia", True),
+    ("jobs.jobvite.com", "LegalZoom", False),
+    ("careers.peak6.com", "Apex Fintech Solutions", False),
+    ("eohh.fa.us2.oraclecloud.com", "Texas Children's Hospital", False),
+    # §Lessons 1, inside the comparison that decides whose payroll gets emailed. The remainder
+    # must be a known suffix, so a prefix alone is not a match.
+    ("armanino.com", "Arm", False),
+    ("jobsight.com", "Jobs", False),
+])
+def test_the_host_must_be_the_employers(host, company, ok):
+    assert derive._host_is_the_employers(host, company) is ok

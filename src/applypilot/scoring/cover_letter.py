@@ -129,6 +129,27 @@ def _strip_preamble(text: str) -> str:
 
 # ── Core Generation ──────────────────────────────────────────────────────
 
+def _employer_for_letter(job: dict) -> str:
+    """The employer to address the letter to, or "" when we genuinely do not know.
+
+    "" is a real answer that the caller must handle. Every previous version of this reached for
+    the nearest string-shaped thing instead — `job['site']`, or `_infer_company`'s literal
+    fallback "Uploaded" — and a cover letter is the one artifact where a wrong name is read by a
+    human before anything else in it.
+
+    Resolution is delegated, never re-implemented: `derive.resolve_employer` is the same function
+    contact discovery uses, so a vendor it learns about is learned about here too (§Lessons 49).
+    """
+    try:
+        from applypilot.networking import derive
+        name, _source = derive.resolve_employer(job)
+    except Exception:  # noqa: BLE001 — a resolver failure must not block a document
+        name = None
+    from applypilot.scoring.validator import _is_usable_employer
+    candidate = (name or job.get("company") or "").strip()
+    return candidate if _is_usable_employer(candidate) else ""
+
+
 def generate_cover_letter(
     resume_text: str, job: dict, profile: dict,
     max_retries: int = 3, validation_mode: str = "normal",
@@ -154,10 +175,19 @@ def generate_cover_letter(
     if _aggressive_enabled():
         validation_mode = "lenient"
 
+    # `site` is the DISCOVERY SOURCE — "Jobvite", "Recruitics", "Workday", or the literal
+    # "Uploaded" this app invented when it could not tell. Reading it here is how six real
+    # applications went out addressed "Dear Uploaded Hiring Team", "Dear Jobvite Hiring Team",
+    # "Dear Oraclecloud Hiring Team". `resolve_employer` is the one place that knows the
+    # difference, and it returns None rather than guessing (§Lessons 79).
+    employer = _employer_for_letter(job)
     job_text = (
         f"TITLE: {job['title']}\n"
-        f"COMPANY: {job['site']}\n"
-        f"LOCATION: {job.get('location', 'N/A')}\n\n"
+        # An empty COMPANY is honest and the prompt handles it. Naming a placeholder is not.
+        + (f"COMPANY: {employer}\n" if employer else
+           "COMPANY: not known. Address the letter \"Dear Hiring Manager,\" and do NOT name or "
+           "invent an employer anywhere in it.\n")
+        + f"LOCATION: {job.get('location', 'N/A')}\n\n"
         f"DESCRIPTION:\n{(job.get('full_description') or '')[:6000]}"
     )
 
@@ -187,8 +217,7 @@ def generate_cover_letter(
         letter = sanitize_text(letter)  # auto-fix em dashes, smart quotes
         letter = _strip_preamble(letter)  # remove any "Here is the letter:" prefix
 
-        validation = validate_cover_letter(letter, mode=validation_mode,
-                                           company=job.get('site', ''))
+        validation = validate_cover_letter(letter, mode=validation_mode, company=employer)
         if validation["passed"]:
             return letter
 

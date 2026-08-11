@@ -1242,8 +1242,21 @@ function peopleList(j) {
          + addContactForm(j);
   }
   intro += anotherRoundPrompt(j, cs) + addContactForm(j);
-  const hot = cs.filter(c => c.hot), cold = cs.filter(c => !c.hot);
+  // 💡 outranks the hot/cold split and is pulled OUT of both groups rather than sorted to the
+  // front of its own. Every other grouping here is derived — `hot` means "you already know
+  // them", which the system worked out — and this is the one the operator DECIDED, so it wins.
+  // Sorting within a group would leave a flagged cold contact below fifteen hot ones, which is
+  // not "the top" by any reading of it.
+  //
+  // It is a GROUP, not a silent reordering, for the same reason the other two are: a row that
+  // moved for an unstated reason reads as a bug. The header names the reason and carries the
+  // count, and pulling flagged people out keeps the other two counts honest — they say what is
+  // rendered beneath them, not what would have been.
+  const flagged = cs.filter(c => c.flagged);
+  const rest = cs.filter(c => !c.flagged);
+  const hot = rest.filter(c => c.hot), cold = rest.filter(c => !c.hot);
   let out = intro + bulkBar(j);
+  if (flagged.length) out += `<div class="ppl-group flagged">💡 Highlighted <span class="ppl-g-n">${flagged.length}</span></div>` + flagged.map(c => contactRow(c)).join('');
   if (hot.length)  out += `<div class="ppl-group hot">🔥 People you know here <span class="ppl-g-n">${hot.length}</span></div>` + hot.map(c => contactRow(c)).join('');
   if (cold.length) out += `<div class="ppl-group cold">🧊 New contacts <span class="ppl-g-n">${cold.length}</span></div>` + cold.map(c => contactRow(c)).join('');
   return `<div class="plist">${out}</div>`;
@@ -1345,6 +1358,27 @@ async function toggleFlag(cid, btn) {
     btn.setAttribute('aria-pressed', String(!want));
     btn.closest('.prow').classList.toggle('is-flagged', !want);
     alert(r.message || 'Could not save that flag');
+    return;
+  }
+  // Then MOVE it to the Highlighted group. The paint above is instant but leaves the row where
+  // it was, and the next natural refresh is up to 2.5s away — long enough that the click reads
+  // as "the bulb lit and nothing happened", which is how half the controls in this file got
+  // reported as broken.
+  //
+  // `rerenderJobs()` renders from LAST_JOBS, so the flag has to be written there first or the
+  // row re-renders with its OLD value and drops straight back down — §Lessons 21, a value one
+  // layer holds that the other cannot see. Mirrors the server's READ-BACK (`r.flagged`), never
+  // the optimistic `want`: the POST is what decided, and the two cannot be allowed to disagree.
+  setFlagIn(LAST_JOBS, cid, !!r.flagged);
+  rerenderJobs();
+}
+
+//: Write a flag into the payload the renderer reads. Contact ids are unique across jobs, so this
+//: scans every job rather than needing to know which one the row belongs to. The next refresh
+//: overwrites LAST_JOBS wholesale with the server's answer, so this only has to survive ~2.5s.
+function setFlagIn(jobs, cid, on) {
+  for (const j of (jobs || [])) {
+    for (const c of (j.contacts || [])) if (c.id === cid) c.flagged = on;
   }
 }
 // Channels become tabs inside the open contact, so the email draft, the LinkedIn note and

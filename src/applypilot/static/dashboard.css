@@ -930,6 +930,14 @@
   .cm-nobody { font-size:11.5px; color:var(--faint); font-style:italic; margin-top:4px; }
   .cm-join { font-size:11px; color:#046c3c; font-weight:600; margin-top:3px; }
   .cm-gap { align-self:center; font-size:11px; color:var(--faint); padding:2px 0; }
+  /* The gap was plain text and the messages behind it were unreachable. It reads as a control
+     now, or nobody discovers there is anything to press. */
+  .cm-gap .linklike { font-size:11px; color:var(--muted); text-decoration:underline dotted; }
+  .cm-gap .linklike:hover { color:var(--accent); text-decoration:underline; }
+  /* Says the message was CUT, so a sentence stopping mid-word reads as a stored bound rather
+     than as the message having been lost. */
+  .cm-clip { margin-left:4px; font-size:10.5px; color:var(--faint); font-style:italic;
+             white-space:nowrap; cursor:help; }
   .conv-turn { display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; }
   .conv-acts { display:flex; gap:10px; align-items:center; font-weight:400; }
   .gm-link { font-size:11px; white-space:nowrap; }

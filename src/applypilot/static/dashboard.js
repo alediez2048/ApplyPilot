@@ -789,6 +789,10 @@ function badge(status) {
   if (!m) return `<span class="badge st-muted">${esc(status || 'new')}</span>`;
   return `<span class="badge ${m.cls}"><span class="st-icon">${m.icon}</span> ${esc(m.label)}</span>`;
 }
+//: The auto-sync snippet cap, SERVED rather than hardcoded — `messages.py` owns it, and a bound
+//: written down twice is two bounds that drift. 0 until the first payload lands, which reads as
+//: "nothing is clipped" and is the safe way to be wrong for 2.5 seconds.
+let CONV_SNIPPET_MAX = 0;
 let NET_AVAIL = false;
 async function findContacts(url, skipKnown) {
   const r = await post('/api/network', {url, per_job: 5, skip_known: skipKnown ? 1 : ''});
@@ -1417,23 +1421,44 @@ function conversationView(c) {
       : '';
   const intro = c.introduced_by
     ? `<div class="th-intro">👋 ${esc(c.introduced_by)} added them to this thread</div>` : '';
-  // Long threads collapse in the middle. This block is re-rendered every 2.5s and an
-  // unbounded list pushes the composer — the only thing you came here to use — off screen.
-  const shown = msgs.length > 6
+  // Long threads collapse in the middle. This block is re-rendered every 2.5s and an unbounded
+  // list pushes the composer — the only thing you came here to use — off screen.
+  //
+  // The collapse was UNEXPANDABLE, and that is the bug rather than the collapsing. An eight
+  // message thread with Google rendered three and said "· 5 earlier messages ·" as plain text,
+  // so the middle of a live conversation — including the reply that asked a question — was
+  // stored, on the wire, and unreachable. Reported as "I'm not getting the entire interaction",
+  // which is what it looked like. It is a button now, and the expanded state survives the 2.5s
+  // refresh like every other open thing on this page.
+  const full = CONV_EXPANDED.has(c.id);
+  const shown = (msgs.length > 6 && !full)
     ? [msgs[0], {_gap: msgs.length - 3}, ...msgs.slice(-2)]
     : msgs;
   let seenCc = [];
   const rows = shown.map(m => {
-    if (m._gap) return `<div class="cm-gap">· ${m._gap} earlier messages ·</div>`;
+    if (m._gap)
+      return `<div class="cm-gap"><button class="linklike" onclick="expandConv('${esc(c.id)}')"
+        >· show ${m._gap} earlier message${m._gap === 1 ? '' : 's'} ·</button></div>`;
     const html = convMessage(c, m, seenCc);
     seenCc = (m.cc_addrs || []).map(x => addrOf(x));
     return html;
   }).join('');
+  // Offered only once expanded, and only when there was something to expand. A permanent
+  // "collapse" on a four-message thread is a control for a state that cannot happen.
+  const shut = (full && msgs.length > 6)
+    ? `<div class="cm-gap"><button class="linklike" onclick="collapseConv('${esc(c.id)}')"
+       >· collapse ·</button></div>` : '';
   return `<div class="conv">${banner}${intro}
-    <div class="conv-msgs">${rows}</div>
+    <div class="conv-msgs">${rows}${shut}</div>
     ${replyBox(c)}
   </div>`;
 }
+
+//: Which threads the operator has opened out. Outside the DOM, because `refresh()` rewrites
+//: #jobs every 2.5s — the same reason PANEL_OPEN, TAB_OPEN and CONTACT_OPEN live here.
+const CONV_EXPANDED = new Set();
+function expandConv(cid) { CONV_EXPANDED.add(cid); rerenderJobs(); }
+function collapseConv(cid) { CONV_EXPANDED.delete(cid); rerenderJobs(); }
 function addrOf(raw) {
   const m = /<([^>]+)>/.exec(String(raw || ''));
   return (m ? m[1] : String(raw || '')).trim().toLowerCase();
@@ -1459,8 +1484,16 @@ function convMessage(c, m, prevCc) {
   const firstOutIdx = (c.thread || []).findIndex(x => (x.direction || '') !== 'in');
   const isFirstOut = mine && (c.thread || []).indexOf(m) === firstOutIdx;
   const body = m.snippet || (isFirstOut ? (c.outreach_message || '') : '');
+  // A message sitting exactly on the auto-sync cap was CUT, and nothing said so — it simply
+  // stopped mid-sentence, which reads as the message having been lost rather than as the
+  // deliberate 200-character bound CRM-4b chose. Naming it also surfaces the way to get more:
+  // "⤓ Fetch from Gmail" pulls the same thread at PASTED_MAX and is otherwise a button whose
+  // purpose is invisible until you press it.
+  const clipped = (m.snippet || '').length >= CONV_SNIPPET_MAX
+    ? `<span class="cm-clip" title="ApplyPilot stores the first ${CONV_SNIPPET_MAX} characters of an automatically synced message. Use “⤓ Fetch from Gmail” above to pull this thread in full.">…truncated</span>`
+    : '';
   const text = body
-    ? `<div class="cm-body">${esc(body)}</div>`
+    ? `<div class="cm-body">${esc(body)}${clipped}</div>`
     // Never the "not stored" line on our OWN message — saying that about something we sent
     // reads as data loss rather than a scope we chose.
     : (mine ? `<div class="cm-nobody">Sent from ApplyPilot.</div>`
@@ -2542,6 +2575,7 @@ async function refresh() {
   // nothing to sync by hand — and nothing to fight a click mid-toggle.
   ATTACH_DOCS = data.attach_docs !== false;
   CONTENT_SCOPE = !!data.content_scope;
+  CONV_SNIPPET_MAX = data.snippet_max || 0;
   if (data.poll_every_s) POLL_EVERY_S = data.poll_every_s;
   const allJobs = data.jobs || [];
   // Kept for handlers that need the payload AFTER a click rather than during render — the

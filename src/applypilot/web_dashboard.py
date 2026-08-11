@@ -1908,6 +1908,11 @@ def _status_payload(space: str = "") -> dict:
         # instead of only a paste box. Cached inside gmail_oauth (keyed on the token file's
         # mtime), so this costs nothing on a 2.5s refresh.
         "content_scope": _content_scope(),
+        # The auto-sync snippet cap, read from the module that ENFORCES it. Hardcoding 200 in
+        # the frontend would be a second copy of a bound the store layer owns, and a default in
+        # two places is two defaults — the intro-deck PDF rode along on 34 real emails while
+        # `doctor --config` reported it off, for exactly this reason.
+        "snippet_max": _snippet_max(),
         # The real poller cadence, so the UI states it rather than hardcoding a guess
         # that silently becomes wrong the moment the interval changes.
         "poll_every_s": _replies.interval_s,
@@ -3154,6 +3159,12 @@ def _followup_action(data: dict) -> dict:
         return send_followup(cid)
 
     return {"ok": False, "message": f"unknown action: {raw_action!r}"}
+
+
+def _snippet_max() -> int:
+    """The auto-sync snippet cap, from the module that enforces it — never a second literal."""
+    from applypilot.networking import messages as _m
+    return _m.SNIPPET_MAX
 
 
 def _attach_docs_state() -> bool:

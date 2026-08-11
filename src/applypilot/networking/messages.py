@@ -11,10 +11,20 @@ That matters because `tick` may run hourly forever.
 
 from __future__ import annotations
 
+import html
 import json
 import sqlite3
 
 from applypilot.database import get_connection, schema_ready
+
+
+def _decode(text: str | None) -> str:
+    """Gmail hands back HTML-escaped snippet text. Store what a person would read.
+
+    `html.unescape` is idempotent on already-clean text, which is what makes it safe to run over
+    the existing rows as well as over every new one.
+    """
+    return html.unescape(text or "")
 
 _MESSAGE_COLUMNS: dict[str, str] = {
     # Gmail's id dedupes, but it is NOT the key on its own: one message legitimately belongs to
@@ -113,7 +123,15 @@ def upsert_messages(rows: list[dict], conn: sqlite3.Connection | None = None) ->
             new += 1
         # Truncated HERE, at the write, not at the caller. A cap that lives in the caller is
         # one a future caller forgets; this one cannot be bypassed by any path into the table.
-        snippet = ((r.get("snippet") or "").strip() or existing.get(key, ""))[:SNIPPET_MAX]
+        #
+        # DECODED first, and before the cap. Gmail's API returns `snippet` HTML-ESCAPED — the
+        # apostrophe in "I'm" arrives as `&#39;` — and storing that raw put the entity through
+        # the dashboard's own `esc()` a second time, so 70 of 99 stored messages rendered
+        # "I&#39;m" on screen. Decoding at render would fix the display and leave the table
+        # holding markup; decoding here means one representation, and the cap then counts
+        # CHARACTERS a person reads rather than the 5 bytes an apostrophe costs.
+        snippet = _decode(r.get("snippet")).strip() or existing.get(key, "")
+        snippet = snippet[:SNIPPET_MAX]
         conn.execute(
             "INSERT OR REPLACE INTO messages (message_id, thread_id, contact_id, job_url, "
             "direction, from_addr, from_name, to_addrs, cc_addrs, subject, sent_at, synced_at, "
@@ -206,8 +224,11 @@ def set_reply_text(contact_id: str, text: str, conn: sqlite3.Connection | None =
         "ORDER BY sent_at DESC LIMIT 1", (contact_id,)).fetchone()
     if not row:
         return False
+    # Decoded here too. This path does its own UPDATE rather than going through
+    # `upsert_messages`, so the fix there does not reach it — and "⤓ Fetch from Gmail" pulls
+    # from the same API that escapes the text in the first place (§Lessons 49).
     conn.execute("UPDATE messages SET snippet = ? WHERE message_id = ?",
-                 ((text or "").strip()[:PASTED_MAX], row[0]))
+                 (_decode(text).strip()[:PASTED_MAX], row[0]))
     conn.commit()
     return True
 

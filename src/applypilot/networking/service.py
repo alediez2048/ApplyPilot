@@ -9,8 +9,14 @@ from __future__ import annotations
 
 import logging
 
+from applypilot.domain import geo
 from applypilot.domain import linkedin_thread as _lt
 from applypilot.networking import derive, providers, rank, store, verify
+
+
+def _exclusions() -> tuple[str, ...]:
+    """One reader, shared with the query-side filter — two would drift into disagreeing."""
+    return providers.exclusions()
 
 log = logging.getLogger(__name__)
 
@@ -314,6 +320,11 @@ def find_contacts_for_job(
 
     stored_contacts: list[dict] = []
     rejected: list[str] = []
+    #: Dropped for LOCATION, kept separate from `rejected`. They are different findings: a
+    #: rejection means "this person does not work there", an exclusion means "they do, and they
+    #: are not the desk we are writing to". Folding them together makes a targeting choice look
+    #: like a data-quality failure in the one place anyone reads (§Lessons 15).
+    excluded: list[str] = []
     considered: list[dict] = []
     cursor = 0
 
@@ -345,7 +356,10 @@ def find_contacts_for_job(
                 "linkedin_url": rev.get("linkedin_url") or c.get("linkedin_url"),
                 "email": rev.get("email"),
                 "email_status": rev.get("email_status", "none"),
-                "location": c.get("location"),
+                # ENRICHMENT first. The search response has no location at all — it carries
+                # `has_city`/`has_state`/`has_country`, booleans about whether the data exists —
+                # which is why `contacts.location` was empty on all 244 stored rows.
+                "location": rev.get("location") or c.get("location") or "",
                 "seniority": c.get("seniority"),
                 "match_reason": c.get("match_reason"),
                 "source": c.get("source") or providers.active() or "apollo",
@@ -354,6 +368,21 @@ def find_contacts_for_job(
             # Self-check before this reaches the dashboard. Catches the contacts an org-name
             # filter alone misses — Apollo returns people with no email whose employer is
             # plainly someone else (a freelance resume writer on a "Writer" job).
+            # Excluded location. Apollo's own `person_not_locations` already kept these out of
+            # the search, so this fires only when their filter and their record disagree — but
+            # it runs on BOTH layers and on any future provider, and a filter enforced solely by
+            # the vendor is not enforced (§Lessons 49).
+            #
+            # It comes BEFORE verification deliberately: the two answer different questions
+            # ("do they work here" vs "is this the right desk"), and a person dropped for
+            # location should not also be logged as failing an employer check they never took.
+            place = geo.is_excluded(contact.get("location"), _exclusions())
+            if place:
+                log.info("Skipping %s — located in %s (%s)",
+                         contact.get("full_name"), place.title(), contact.get("location"))
+                excluded.append(contact.get("full_name") or "?")
+                continue
+            # Self-check before this reaches the dashboard.
             v = verify.verify_contact({**contact, "company": c.get("company"),
                                        "from_domain_search": c.get("from_domain_search"),
                                        "domain_source": domain_source},
@@ -420,21 +449,42 @@ def find_contacts_for_job(
             f"dropped {len(rejected)} who work elsewhere"
         log.info("Verification dropped %d contact(s) at %s: %s",
                  len(rejected), company, ", ".join(rejected))
+    # Said out loud, and said SEPARATELY. A search that quietly kept 2 of 5 because three people
+    # were in an excluded place looks identical to a company Apollo barely covers — §Lessons 15,
+    # which is the whole reason every exit from this function logs.
+    if excluded:
+        result["excluded"] = excluded
+        places = ", ".join(sorted({p.title() for p in _exclusions()})) or "an excluded place"
+        result["note"] = (result["note"] + "; " if result["note"] else "") + \
+            f"skipped {len(excluded)} in {places}"
+        log.info("Location filter skipped %d contact(s) at %s: %s",
+                 len(excluded), company, ", ".join(excluded))
     hot_n = result.get("hot", 0)
     dropped = f" Dropped {len(rejected)} who work elsewhere." if rejected else ""
+    skipped = (f" Skipped {len(excluded)} based in "
+               f"{', '.join(sorted({p.title() for p in _exclusions()}))}.") if excluded else ""
     if stored_contacts:
         warm = f", {hot_n} you already know" if hot_n else ""
         _log(f"Found {len(stored_contacts)} contact(s) at {company or 'the employer'} — "
-             f"{result['revealed']} with a verified email{warm}.{dropped}")
+             f"{result['revealed']} with a verified email{warm}.{dropped}{skipped}")
     else:
         # Nobody survived. This is the case that used to be silent, and it is the one the
         # operator most needs explained: the search DID run and DID spend credits. Naming the
         # people who were dropped is what makes an ambiguous employer diagnosable — Apollo
         # lists three orgs called "Zello", none with a domain to disambiguate them.
         who = f" ({', '.join(rejected[:4])})" if rejected else ""
-        _log(f"No contacts kept at {company or 'the employer'} — considered "
-             f"{result['found']} and dropped {len(rejected)} who work elsewhere{who}. "
-             f"The employer name may match more than one company.", "warn")
+        # An empty result caused by the location filter has a DIFFERENT fix — widen the setting,
+        # not the employer name — so it must not be reported as an ambiguous company.
+        if excluded and not rejected:
+            _log(f"No contacts kept at {company or 'the employer'} — all {len(excluded)} "
+                 f"considered are based in "
+                 f"{', '.join(sorted({p.title() for p in _exclusions()}))}. "
+                 f"Change OUTREACH_EXCLUDE_LOCATIONS to keep them.", "warn")
+        else:
+            _log(f"No contacts kept at {company or 'the employer'} — considered "
+                 f"{result['found']} and dropped {len(rejected)} who work elsewhere{who}"
+                 f"{skipped} "
+                 f"The employer name may match more than one company.", "warn")
     return result
 
 
@@ -510,7 +560,15 @@ def _find_hot_contacts(job: dict, company: str | None, cold_selected: list[dict]
             "match_reason": "🤝 connection — you already know them",
             "source": "connection",  # marks the HOT layer
             "apollo_id": rev.get("apollo_id"),
+            "location": rev.get("location") or "",
         }
+        # The hot layer has no Apollo SEARCH to filter, so the query-side exclusion cannot reach
+        # it — this is the only place it applies. Same rule, one shared function.
+        place = geo.is_excluded(contact.get("location"), _exclusions())
+        if place:
+            log.info("Skipping connection %s — located in %s (%s)",
+                     contact.get("full_name"), place.title(), contact.get("location"))
+            continue
         cid = store.upsert_contact(contact)
         contact["id"] = cid
         if draft:  # warm draft even without an email (the DM path works for connections)

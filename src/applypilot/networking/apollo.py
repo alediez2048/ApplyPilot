@@ -90,6 +90,7 @@ def search_people(
     titles: list[str] | None = None,
     seniorities: list[str] | None = None,
     keywords: str | None = None,
+    not_locations: list[str] | None = None,
     per_page: int = 25,
     page: int = 1,
 ) -> list[dict]:
@@ -97,6 +98,13 @@ def search_people(
     if not _api_key():
         return []
     payload: dict = {"page": page, "per_page": per_page}
+    if not_locations:
+        # Apollo filters SERVER-SIDE, which is the whole reason to do it here rather than after.
+        # Location is not in this response at all (see below), so a client-side exclusion would
+        # have to enrich everyone first — paying a credit per person specifically to learn they
+        # should be dropped. Verified against the live API: `person_locations: [India]` and
+        # `person_not_locations: [India]` return sets with ZERO overlap on the same query.
+        payload["person_not_locations"] = not_locations
     if domains:
         payload["q_organization_domains_list"] = domains
     if organization_ids:
@@ -129,7 +137,15 @@ def search_people(
                 x for x in (p.get("first_name"), p.get("last_name")) if x),
             "title": p.get("title"),
             "seniority": p.get("seniority"),
-            "location": p.get("city") or p.get("state") or p.get("country"),
+            # NOT available here, and this line used to pretend otherwise. The search response
+            # carries `has_city` / `has_state` / `has_country` — BOOLEANS saying the data exists
+            # — and never the values, so `city or state or country` was None on every result and
+            # `contacts.location` was empty on all 244 stored rows. The real values arrive from
+            # the enrichment response; `bulk_enrich` reads them now.
+            #
+            # Left as an explicit None with this comment rather than deleted, because the
+            # plausible-looking mapping is exactly what would be re-added.
+            "location": None,
             "company": (p.get("organization") or {}).get("name"),
         })
     return out
@@ -217,8 +233,23 @@ def bulk_enrich(apollo_ids: list[str], *, reveal_personal_emails: bool = True) -
             # surname out. The caller decides whether to take it; this only stops throwing it
             # away.
             "full_name": _full_name(m),
+            # Same class of bug as the surname above, found the same way: the enrichment
+            # response carries city/state/country and the mapper read four fields and dropped
+            # the rest, so `contacts.location` was empty on all 244 rows while Apollo had been
+            # returning the answer every time.
+            "location": _location(m),
         }
     return result
+
+
+def _location(m: dict) -> str:
+    """City, state, country — as much as Apollo gives, joined for a human to read.
+
+    Not `city or state or country`: "Bengaluru" alone and "Bengaluru, Karnataka, India" are the
+    same person, and only one of them can be matched against an excluded COUNTRY.
+    """
+    parts = [str(m.get(k) or "").strip() for k in ("city", "state", "country")]
+    return ", ".join(p for p in parts if p)
 
 
 def _full_name(m: dict) -> str:
@@ -273,5 +304,9 @@ def match_by_identity(people: list[dict], *, reveal_personal_emails: bool = True
             "linkedin_url": m.get("linkedin_url") or p.get("linkedin_url"),
             "apollo_id": m.get("id"),
             "full_name": _full_name(m),
+            # The hot layer needs this too. Reading it in `bulk_enrich` alone would exclude cold
+            # candidates and silently keep every one of your own connections, whatever the
+            # setting says (§Lessons 49).
+            "location": _location(m),
         }
     return result

@@ -15,9 +15,26 @@ from __future__ import annotations
 import logging
 import re
 
+from applypilot.domain import geo
 from applypilot.networking import apollo, rank
 
 log = logging.getLogger(__name__)
+
+
+def exclusions() -> tuple[str, ...]:
+    """Places discovery will not keep people from. Read per call, not at import.
+
+    A module-level read makes this a deployment setting that needs a restart to change — which
+    is what `OUTREACH_ATTACH_DOCS` turned out to be, and why it needed a file override bolted on
+    later. There is no reason to pay that here: one env lookup per search is free next to an
+    HTTP round trip.
+    """
+    import os
+    return geo.parse_exclusions(os.environ.get("OUTREACH_EXCLUDE_LOCATIONS", "India"))
+
+
+def excluded_query_terms() -> list[str]:
+    return geo.query_terms(exclusions())
 
 
 def active() -> str | None:
@@ -92,7 +109,8 @@ def search_mix(company: str | None, domain: str | None, role: str | None,
     keywords = None if (domain or org_ids) else company
     common = {"domains": [domain] if domain else None,
               "organization_ids": org_ids or None,
-              "keywords": keywords, "per_page": per_page}
+              "keywords": keywords, "per_page": per_page,
+              "not_locations": excluded_query_terms()}
 
     peers: list[dict] = []
     tried: list[str] = []
@@ -170,6 +188,7 @@ def search(company: str | None, domain: str | None, role: str | None,
         organization_ids=org_ids or None,
         keywords=None if (domain or org_ids) else company,
         titles=titles,
+        not_locations=excluded_query_terms(),
         per_page=per_page,
     )
     # A title filter that matches nobody is worse than no filter when we already KNOW the
@@ -182,6 +201,10 @@ def search(company: str | None, domain: str | None, role: str | None,
             domains=[domain] if domain else None,
             organization_ids=org_ids or None,
             titles=None,
+            # The widening path drops the TITLE filter, never the location one. Forgetting it
+            # here would mean the exclusion silently stops applying to exactly the searches that
+            # return the most people (§Lessons 49).
+            not_locations=excluded_query_terms(),
             per_page=per_page,
         )
         if cands:

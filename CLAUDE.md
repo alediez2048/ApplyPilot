@@ -12,8 +12,8 @@ campaign happens to be a job search** — see `docs/crm-prd.md` for where that g
 - **Packaging:** Hatchling, `src/` layout, single package `applypilot`
 - **Entry point:** `applypilot = "applypilot.cli:app"` (Typer CLI)
 - **License:** AGPL-3.0-only · **Version:** 0.4.0 (`pyproject.toml`)
-- **Tests:** 1933 passing (`tests/`, 99 files) · ruff clean (line-length 120, py311) · ESLint clean
-- **Schema version:** 3 (`applypilot migrate --status`) · **Settings:** 47 declared in `settings.py`
+- **Tests:** 2038 passing (`tests/`, 103 files) · ruff clean (line-length 120, py311) · ESLint clean
+- **Schema version:** 3 (`applypilot migrate --status`) · **Settings:** 48 declared in `settings.py`
 - **Branch:** everything current lives on `context`, **43 commits ahead of `main`**, pushed to `origin/context`, working tree CLEAN as of 2026-08-11 (§Dev workflow). `main` has
   none of it. Check `git log --oneline -1` before believing anything here (§Dev workflow).
 
@@ -142,6 +142,7 @@ harness no longer has to import a web server to test scheduling.
 | `temperature.py` | How an application is DOING, not how far it has travelled. Bands answer **is anything still in motion**, from an interview backwards. **Only a PERSON can reach `warm`**, and finishing the plan moves a job DOWN. §Lessons 54, 55. |
 | `joblink.py` | URL normalisation, for SEEING THROUGH rather than sending. `derive.unwrap_job_urls` calls `clean_link` before any employer rule reads a hostname — without it an ad redirect makes every rule describe the distributor (§Lessons 79). Strips attribution params, unwraps redirects, **never rewrites paths**. |
 | `jobref.py` | How to NAME a job in a message: `{title, req}`. The title is the hard half — 11 of 33 live rows carry one that must never be quoted (§Lessons 84). `""` is a real answer and the caller must handle it. |
+| `geo.py` | Places contact discovery will not keep people from (`OUTREACH_EXCLUDE_LOCATIONS`, default `India`). A country is matched through its CITIES, because Apollo returns both "Bengaluru" and "Bengaluru, Karnataka, India". Whole words — "India" is inside **Indiana**. Three cities are AMBIGUOUS (`delhi`, `madras`, `hyderabad`) and need their country named, because Delhi/Ohio and Madras/Oregon are real. A blank location is always KEPT. |
 
 **Adding a channel is one `Channel` entry plus one prompt** — executed, not claimed:
 `test_adding_a_channel_needs_no_schema_change` defines a channel that exists nowhere in the
@@ -219,11 +220,11 @@ re-reading a thread you have already logged is a no-op rather than a duplicate.
 | Table | Owner | Purpose |
 |-------|-------|---------|
 | `jobs` (37 cols) | `database.py` | The 6-stage state machine. `_ALL_COLUMNS` is its source of truth. Holds **targets too** — a targets row is a `jobs` row keyed `target:<space>:<slug>` (SPACE-1a D1). |
-| `contacts` (41 cols) | `networking/store.py` | People per job + outreach + verification. |
+| `contacts` (42 cols) | `networking/store.py` | People per job + outreach + verification. `test_a_migrated_database_has_no_ladder_columns_left` locks the COUNT, so a new column has to be argued for in that test. |
 | `touches` | `networking/touches.py` | One follow-up touch per row, ANY channel. `seq` is per (contact, channel). |
 | `sequences` | `networking/touches.py` | Terminal state per (contact, channel): `stopped` / `replied`. |
 | `connections` | `networking/connections.py` | Imported LinkedIn CSV. |
-| `messages` | `networking/messages.py` | **CRM-4 conversation memory.** Thread HEADERS only — no body/snippet column exists, and a test asserts it. Keyed by Gmail's message id, so re-syncing is a no-op. `rfc_message_id` is what lets a reply chain `References` across the whole thread. |
+| `messages` | `networking/messages.py` | **CRM-4 conversation memory.** Headers plus ONE content column: `snippet`, capped at the WRITE (`SNIPPET_MAX` 200 auto / `PASTED_MAX` 2000 pasted) and **decoded** there too, since Gmail returns it HTML-escaped (§Lessons 90). *This row said "no body/snippet column exists, and a test asserts it" for two sessions — CRM-4b added one and the index was never corrected.* Keyed by `(message_id, contact_id)`, so re-syncing is a no-op. `rfc_message_id` is what lets a reply chain `References` across the whole thread. |
 | `interactions` | `networking/interactions_store.py` | Events with nowhere else to live: a detected booking, an operator-logged LinkedIn profile view. Derived facts are NOT copied here — they are computed at render time so they cannot drift. |
 | `job_events` | `database.py` | Per-job activity log. Append is best-effort, never raises. |
 
@@ -266,7 +267,7 @@ apply_error,agent_id,verification_confidence`), plus `rejected_at`, and the two 
 
 **`contacts` groups:** identity · outreach(`outreach_subject/message/status,sent_message_id`) ·
 threading(`thread_id,rfc_message_id`) · LinkedIn invite(`dm_status,dm_sent_at`) ·
-operator(`phone,notes`) · verification(`confidence,verify_note`) · SMS(`sms_sent_at`) · deck(`deck_slug,deck_viewed_at,deck_last_at,deck_views`).
+operator(`phone,notes`,**`flagged_at`** — the 💡 marker, the one signal on a contact the human DECIDES rather than the system derives) · verification(`confidence,verify_note`) · SMS(`sms_sent_at`) · deck(`deck_slug,deck_viewed_at,deck_last_at,deck_views`) · **`location`** (from ENRICHMENT, never the search — §Lessons 91).
 **Follow-up state is NOT here** — it is `touches` / `sequences`, keyed by channel (ARCH-3).
 
 ---
@@ -375,6 +376,26 @@ sat collapsed below it. A sent email cannot be edited: offering it as a form is 
 action that does not exist, and it pushed the only actionable thing off screen. `hasConversation()`
 is the single branch — timeline first, composer anchored under it, the sent outreach as one entry
 in that timeline. §Lessons 31.
+
+**A long thread collapses in the middle and the gap is a BUTTON** (2026-08-11, §Lessons 90). Over
+six messages it renders first + last two — the panel is rewritten every 2.5s and an unbounded list
+pushes the composer off screen — but the gap was PLAIN TEXT for months, so five stored messages of
+a live Google conversation were countable and unreadable. `CONV_EXPANDED` lives outside the DOM
+like `PANEL_OPEN`. A message sitting on `SNIPPET_MAX` carries `…truncated` pointing at
+⤓ Fetch from Gmail, because a sentence that stops mid-word is indistinguishable from one that was
+lost; the cap is SERVED from `messages.py`, never written twice.
+
+**💡 flags a contact** (2026-08-11). Every other signal on a contact row is derived — replied,
+due, exhausted, opened the deck. This is the only one the operator DECIDES. On the collapsed row
+(a marker you must expand to see is one nobody sees), a real `<button>`, and the whole row is
+accented rather than just the icon, because "the people I care about here" has to survive scanning
+fifteen of them. The browser decides the state and the server stores what it is told — a
+server-side toggle races the 2.5s refresh.
+
+**A Gmail link sits beside LinkedIn and Apollo** on the contact meta row. It reads
+`contacts.thread_id` (143 contacts) as well as `reply_to.thread_id` (11, and the only source it
+used to have), falling back to a Gmail SEARCH by address — which is the only thing that finds a
+thread they started, a reply from another address, or one we were merely Cc'd on.
 
 **The row carries three derived things** (UX-3/5/6, 2026-08-04), all computed from data the
 payload already loads — no new query, budget unmoved:
@@ -703,6 +724,21 @@ this wide open: the daily limit is global and the cooldown is per ADDRESS, so se
 company times three touches is 21 emails and nothing objects. Measured before writing it — Webai,
 Wander and Salesforce had already received **10 emails each**. Counted per COMPANY across every
 job, follow-ups included, because that is the unit the recipient experiences.
+
+**Excluded locations** (`OUTREACH_EXCLUDE_LOCATIONS`, default `India`, 2026-08-11 — §Lessons 91).
+A US job search reaches a company's US recruiting org; the same employer's Bangalore desk is the
+wrong one for an Austin req. It is a **FILTER at discovery and never a delete** — nothing stored
+is altered, including anyone already emailed. Two layers: Apollo's own `person_not_locations` (so
+an excluded person is never enriched and costs no credit — verified live, zero overlap between
+the include and exclude sets) plus our own check on the ENRICHED location, which is the only one
+the hot layer sees. Skips are reported **separately from rejections**: "does not work there" and
+"works there, wrong desk" are different findings, and merged they make a targeting choice read as
+a data-quality failure. An empty result caused by the filter names the setting rather than
+blaming an ambiguous employer.
+
+**`contacts.location` is populated again** as of the same change. It had been empty on all 244
+rows because the search-response mapper read `city or state or country` off a payload that
+carries only `has_city`/`has_state`/`has_country`.
 
 **`draft_variant`** records what produced each draft (`cold+jd2k+noticed+deck+cal`) so reply rate
 can be attributed. Inputs, not a version number: a version goes stale the moment a prompt is
@@ -1834,6 +1870,54 @@ company `"Jobs"` — the same substring bug class, inside the function written t
     confirm can name every recipient — eight names you can read, rather than fifty-seven you
     cannot.
 
+90. **"I'm not getting the entire interaction" — and every message was already there.** Reported
+    on the Google thread. Measured before touching anything: **all 8 messages stored, with text,
+    on the wire.** Three unrelated things made a complete conversation read as a truncated one,
+    and the diagnosis had to separate them before any of them could be fixed.
+    **The collapse had no way out.** Over six messages the panel rendered first + last two and
+    printed `· 5 earlier messages ·` **as plain text** — so the middle of a live conversation,
+    including the reply that asked a question, was stored and unreachable. The collapsing itself
+    is right (the panel re-renders every 2.5s and an unbounded list pushes the composer off
+    screen); the bug is that a count is not a control. §Lessons 43's family, and the sharpest
+    version of it: the data was on screen as a NUMBER and could not be read.
+    **Every apostrophe rendered `I&#39;m`, on 70 of 99 stored messages.** Gmail's API returns
+    `snippet` HTML-ESCAPED and we stored it raw, so the dashboard's own `esc()` escaped the `&` a
+    second time. Fixed at the WRITE, not at render — decoding on display fixes the screen and
+    leaves the table holding markup that the prompts, the metrics and every later reader would
+    have to know about. Decoded BEFORE the cap, too, or 200 means 200 bytes and an apostrophe
+    costs five of them.
+    **A message at the cap stopped mid-sentence and said nothing.** `SNIPPET_MAX` is a
+    deliberate bound, not data loss — but the two look identical, and the way to get more
+    (⤓ Fetch from Gmail, at `PASTED_MAX`) was a button whose purpose was invisible until pressed.
+    The cap is SERVED from `messages.py` rather than written in the frontend: a bound in two
+    places is two bounds, which is how the intro-deck PDF rode along on 34 real emails.
+    Known artifact, stated rather than discovered: decoding shortened the 71 backfilled rows
+    below 200, so they are truncated and will NOT carry the mark. Only new messages will.
+
+91. **A filter is not a delete, and the field it needed was empty on every row.** Asked to
+    "auto delete contacts we find where the people are based in India". Two things had to change
+    before the request could even be evaluated.
+    **It is a FILTER at discovery.** `delete_contact` also wipes `touches`, `sequences`,
+    `messages` and `interactions` — so an automatic, irreversible delete driven by a fuzzy
+    provider field would destroy a live ladder, or a replied-to thread, on one bad location
+    string. Filtering before the write makes that unreachable and touches no stored contact.
+    **`contacts.location` was empty on all 244 rows**, so the filter as described could not have
+    matched anybody. Apollo's SEARCH response carries `has_city` / `has_state` / `has_country` —
+    BOOLEANS about whether the data exists — and never the values, so `city or state or country`
+    was `None` every time. The values come from ENRICHMENT, where the mapper read four fields and
+    dropped the rest: the same bug, in the same function, that had left 162 of 185 contacts
+    first-name-only. A plausible-looking mapping is the hardest kind to see.
+    **The vendor can filter, and that is worth checking before writing one.** Verified live:
+    `person_locations:[India]` and `person_not_locations:[India]` return sets with ZERO overlap,
+    so an excluded person is never enriched and never costs a credit. Our own check still runs on
+    the enriched location, because a filter enforced only by the vendor is not enforced and the
+    hot layer has no search to filter at all.
+    **The false positive was found by a test, not by review**: "Delhi Township, Ohio" excluded as
+    India. Delhi, Madras and Hyderabad are all real places elsewhere, so those three need their
+    country named — §Lessons 1 with geography instead of company names, and `India` is inside
+    **Indiana**. A blank location is always KEPT: dropping on a missing field shrinks every
+    search on data quality rather than on the rule (§Lessons 34).
+
 
 Shipped in one session, in this order: **CRM-3a → CRM-1 → CRM-2 → CRM-3b → CRM-4a.**
 Tickets in `docs/tickets/CRM-*.md`; two of them had instructions that were factually wrong
@@ -2051,6 +2135,18 @@ from the Accounts panel. **Cookies stay**, so no wall is paid twice.
 runs `apply --copilot --resume`, which reconnects on the live CDP port
 (`resume_now = resume and chrome_alive_on_port(port)`) and falls back to a fresh launch only
 when the window is gone.
+
+**A failed row says WHY in English** (2026-08-11, §Lessons 90's sibling). It used to print the
+raw code with the Restart button's own description appended to it, so a live row read
+`copilot_violation_agent_submitted Regenerates materials, then re-applies.` — two unrelated
+sentences welded together, reported twice as "what does this mean?". The button's description
+moved onto the button; `FAIL_WHY` carries a sentence for all **19** codes the launcher can
+produce, with the raw token kept as hover text because it is what you grep the apply log for. A
+test reads those codes OUT of `launcher.py`, since nothing else connects the two files. The
+copilot wording deliberately refuses to say the application did not arrive — `applied_at` is
+empty and the agent said it submitted, and nothing can tell which is true (§Lessons 19). **The
+UI still offers no `Mark submitted ✓` on a `failed` row**, though the server endpoint accepts it;
+the way out today is `⋯` → ✅ Mark as applied.
 
 **🔐 Sign in first** opens that same persistent profile with **no agent attached**, so an
 account is created deliberately *before* a run rather than discovered mid-form. Sessions

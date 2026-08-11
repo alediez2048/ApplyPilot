@@ -1944,7 +1944,7 @@ def _status_payload(space: str = "") -> dict:
         # for the same reason `space_templates` is — the panel already re-renders every 2.5s and
         # this adds no statement. Sourced from `domain/space.py` so the label cannot drift from
         # the field.
-        "space_offer_copy": _sp.offer_copy(shape),
+        "space_offer_copy": _sp.offer_copy(shape, manifest.voice_or_default() if manifest else ""),
         "space_terminal": terminal,
         # What the + button offers. On the payload rather than a second endpoint: it is three
         # short strings and the panel already re-renders every 2.5s.
@@ -2402,6 +2402,65 @@ def _add_targets(data: dict) -> dict:
             "message": " · ".join(bits) or "Nothing recognisable in that."}
 
 
+def _import_sheet(data: dict) -> dict:
+    """SHEET-1. A pasted spreadsheet -> company cards + the people at them.
+
+    Refused in a jobs-shaped Space, and the refusal is the useful part: pasting a Google Sheets
+    URL into the JOBS box is what produced the row `title="Docs uploaded job", company="Docs"`
+    — `_URL_RE` took the link as a posting and `docs.google.com`'s host label became the
+    employer, for the eighth time (§Lessons 20, 52, 79). Nothing crashed and the row looked real.
+
+    The Space comes from `_resolve_space`, never from the posted id: filing rows under an id that
+    does not resolve puts them in a Space with no tab, the one place nothing can reach them again
+    (§Lessons 70).
+    """
+    init_db()
+    conn = get_connection()
+    space_id, _, _ = _resolve_space((data or {}).get("space", ""), conn)
+    manifest = _spaces.load(space_id, conn) if space_id else None
+    if manifest is None or manifest.shape != _spaces.TARGETS_SHAPE:
+        return {"ok": False,
+                "message": "A sheet of companies and people belongs to an outreach Space. "
+                           "This one holds job postings."}
+
+    from applypilot.networking import sheet_import
+    try:
+        return sheet_import.import_sheet(space_id, (data or {}).get("text", ""), conn)
+    except sheet_import.SheetError as e:
+        # A header problem is not a row problem. Merged, "fix your Company column" reads as
+        # "three of your rows are bad" and the operator goes looking in the wrong place.
+        return {"ok": False, "message": str(e)}
+
+
+def _attach_posting(data: dict) -> dict:
+    """SHEET-1 C4. A company card gains a job posting, without becoming a different row.
+
+    The anchor is deliberately NOT taken from the request. A caller that could name the new url
+    could re-key the card, and re-keying orphans every contact and ladder on it — silently, with
+    a card that renders empty and nothing to say why.
+    """
+    init_db()
+    conn = get_connection()
+    url = str((data or {}).get("url") or "").strip()
+    if not url:
+        return {"ok": False, "message": "url required"}
+    try:
+        out = _jobs.attach_posting(
+            url,
+            title=str((data or {}).get("title") or ""),
+            application_url=str((data or {}).get("application_url") or ""),
+            description=str((data or {}).get("description") or ""),
+            conn=conn)
+    except ValueError as e:
+        return {"ok": False, "message": str(e)}
+    if not out["changed"]:
+        return {"ok": False, "message": "Nothing to attach — add a title, a link or a description."}
+    from applypilot.database import log_event
+    log_event(url, "system", "ok", "Posting attached: " + ", ".join(out["changed"]), conn)
+    return {"ok": True, "changed": out["changed"],
+            "message": "Posting attached to this company."}
+
+
 def _create_space(data: dict) -> dict:
     """Create a Space from a template (the + button).
 
@@ -2509,7 +2568,7 @@ def _save_offer(data: dict) -> dict:
     # CTX-1. "Offer saved." is the wrong word on a jobs Space, where the same paragraph is the
     # premise. One field, two names, and the confirmation has to use the one on the label above
     # the box the operator just typed into.
-    what = sp.offer_copy(manifest.shape)["title"]
+    what = sp.offer_copy(manifest.shape, manifest.voice_or_default())["title"]
     return {"ok": True, "message": f"{what} saved." if offer else f"{what} cleared."}
 
 
@@ -3733,6 +3792,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/import":
                 _json_response(self, _import_urls(data.get("urls", ""), data.get("space", "")))
+                return
+            if path == "/api/import-sheet":
+                _json_response(self, _import_sheet(data))
+                return
+            if path == "/api/attach-posting":
+                _json_response(self, _attach_posting(data))
                 return
             if path == "/api/prepare":
                 min_score = int(data.get("min_score") or 1)

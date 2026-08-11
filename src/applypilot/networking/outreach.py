@@ -368,6 +368,144 @@ Return ONLY JSON: {"subject": "...", "body": "...", "linkedin_note": "..."}
   penalises them in invite notes."""
 
 
+#: The premise shape (SHEET-1). A THIRD system prompt, and the reason it is third rather than a
+#: flag on one of the other two is the same reason `_PITCH_SYSTEM` is not `_SYSTEM` with caveats:
+#: the opening line decides what the email is, and appended text never wins against it
+#: (§Lessons 40).
+#:
+#: What it is FOR: a Space whose rows are companies imported from a spreadsheet, with no posting
+#: to apply to. `_SYSTEM` assumes "someone at a company they just applied to" — there is no
+#: application. `_PITCH_SYSTEM` assumes "proposing a piece of work" — there is no proposal. The
+#: campaign's own paragraph is the message, and the person's name, title and employer are the
+#: only other facts available.
+#:
+#: Most of the hard rules below are `_PITCH_SYSTEM`'s verbatim, deliberately: they are about
+#: writing to a stranger who did not ask to hear from you, which is equally true here. What
+#: differs is the four lines saying what the email IS.
+_PREMISE_SYSTEM = """You write short, plain first emails to someone at a company the sender wants
+to work with. Not a job application — there is no posting and none is implied. Not a sales pitch
+— nothing is being sold. Not a cover letter.
+
+The sender will give you ONE paragraph about themselves and what they are looking for. That
+paragraph is the substance of this email. Your job is to say it to THIS person, in your own
+words, in a way that earns a reply.
+
+The person receiving this did not ask to hear from you, and you know almost nothing about them
+beyond their name, their title and where they work. Pretending otherwise is what makes outreach
+read as spam.
+
+Hard rules:
+- SHORT. Under 120 words. Length reads as need.
+- Say what the sender is looking for PLAINLY, in the first two sentences. Not a riddle, not a
+  build-up, not "I'll keep this brief".
+- Use the paragraph as FACTS, never as sentences. Every person in this campaign is written from
+  that same paragraph, so reusing its wording means they all receive the identical claim.
+- Aim it at THEM. Their title is usually the only thing you know about them, and it is enough to
+  decide what part of the paragraph is worth saying to this particular person. What matters to a
+  recruiter is not what matters to an engineer.
+- Never invent anything about their company. No product, no funding round, no recent
+  announcement, no problem they have. If you were told nothing about them, say less.
+- Exactly ONE question, answerable in a sentence. "Is your team hiring?" and "Are you the right
+  person to ask?" are good. "Would you be open to exploring opportunities?" is not, because it
+  asks them to do the thinking.
+- Give an explicit out. One clause saying it is fine to ignore this or to say no.
+- Never claim you applied to anything, never reference a specific role unless the sender named
+  one, and never claim a referral or a shared connection you were not given.
+- No urgency, no scarcity, no flattery that could be pasted into any other email, no "quick
+  question" as a subject line.
+- NEVER use an em dash (—), en dash (–), or any long dash. Not one, anywhere. It is the clearest
+  signal that text was pasted out of a chatbot, and a reader who spots one re-reads the whole
+  message as machine-written. Use a comma, a full stop, or rewrite the sentence. A plain hyphen
+  in a compound word ("large-scale") is fine.
+- SEVERAL PEOPLE AT THE SAME COMPANY GET THESE, and they sit near each other. Anything
+  recognisably similar across two of them proves a machine wrote both. Reach for a different
+  sentence shape, not a synonym swap.
+
+Return ONLY JSON: {"subject": "...", "body": "...", "linkedin_note": "..."}
+- `subject`: lowercase-ish, specific, no "quick question", no company name alone.
+- `body`: plain text, real line breaks, signed off with the sender's first name.
+- `linkedin_note`: under 300 characters, a connection request note. NO LINKS, LinkedIn
+  penalises them in invite notes."""
+
+
+def _premise_led_block(space) -> str:
+    """The premise as the SUBJECT of the email.
+
+    Deliberately NOT `_premise_block`, which says the opposite in as many words — *"It is
+    background, not the subject. A message that is only the premise is about the sender"*, and
+    *"say it in your own words each time, or leave it out"*. Both are right where they are: in a
+    jobs Space the posting is the subject and the premise explains why this role, so permission
+    to omit it is correct.
+
+    Here there is no posting. Handing the model a block that says "leave it out" and then
+    expecting the email to be about it is §Lessons 40 — two instructions disagreeing is a code
+    bug, and the heading wins. So this REPLACES it rather than being appended to it, and the old
+    block is untouched for the two shapes that still want it as background.
+
+    What survives from the original, because it is not about emphasis: facts-never-phrasing. It
+    matters MORE here, not less. `offer` is per SPACE, so a parroted sentence lands in every
+    inbox in the campaign — the largest repetition exposure in the app, larger than `job_context`
+    (per row) and `noticed` (per person).
+    """
+    premise = (getattr(space, "offer", "") or "").strip()
+    if not premise:
+        return ""
+    return (
+        "WHAT THE SENDER IS LOOKING FOR (verbatim, from them — this is the SUBSTANCE of the "
+        f"email):\n{premise}\n"
+        "How to use it:\n"
+        "- This is what the email is ABOUT. Say it plainly in the first two sentences.\n"
+        "- FACTS, never sentences to reuse. Every person in this campaign is written from this "
+        "same paragraph, so reusing its wording means every recipient gets the identical claim "
+        "and any two of them can see a machine wrote both.\n"
+        "- Choose the part of it that is worth saying to THIS person, given their title. You do "
+        "not have to use all of it, and a shorter email that lands is better than a complete "
+        "one that does not.\n\n")
+
+
+def _premise_user_prompt(sender_bits, contact, company, about_them, noticed,
+                         sched_block, deck_block, style_block, tone_block, previous, space=None):
+    """The premise-led prompt (SHEET-1).
+
+    Structurally close to `_pitch_user_prompt` because the available FACTS are the same — a
+    person, their title, their employer, and one constant paragraph. What differs is which of
+    those is the subject, and that difference is carried by `_premise_led_block` and
+    `_PREMISE_SYSTEM` rather than by rearranging the headings.
+
+    `about_them` is whatever the operator typed into the card's Job tab and is usually empty.
+    The prompt SAYS SO rather than leaving a blank heading: a model handed "WHAT THEY DO:"
+    followed by nothing invents something, and an invented fact about the recipient's own
+    company is the one error there is no recovering from.
+    """
+    from applypilot.domain.burned import burned_block
+    them = (about_them or "").strip()
+    return (
+        "SENDER:\n" + "\n".join(sender_bits) + "\n\n"
+        "WHO YOU ARE WRITING TO:\n"
+        f"Name: {contact.get('full_name', '')}\n"
+        f"Title: {contact.get('title', '')}\n"
+        f"Company: {company}\n\n"
+        + _premise_led_block(space)
+        + (f"WHAT THIS COMPANY DOES (what the sender knows, react to THIS):\n{them}\n\n"
+           if them else
+           "WHAT THIS COMPANY DOES: not recorded. You know the company name and this person's "
+           "title and NOTHING ELSE about them. Do not invent a product, a market, a funding "
+           "round, a recent announcement or a problem they have. Write the opening from their "
+           "TITLE instead, and keep it shorter because you have less to say.\n\n")
+        + (f"WHAT THE SENDER NOTICED ABOUT THIS PERSON (verbatim, from looking at their "
+           f"profile):\n{noticed}\n"
+           "ENGAGE WITH THE SUBSTANCE, NEVER ANNOUNCE THE NOTICING. Any sentence whose job is "
+           "to report that you looked is the most recognisable automated-outreach shape there "
+           "is. If the sentence could be deleted and the observation still stand, delete it.\n\n"
+           if noticed else "")
+        + sched_block + deck_block + style_block
+        + _must_mention_block(space)
+        + tone_block
+        + burned_block(previous)
+        + "Write the email. Return the JSON."
+    )
+
+
 def _pitch_user_prompt(sender_bits, contact, company, about_them, offer, noticed,
                        sched_block, deck_block, style_block, tone_block, previous, space=None):
     """The targets-shaped prompt (`spaces-prd.md` §7.1).
@@ -904,7 +1042,20 @@ def draft_email(profile: dict, job: dict, contact: dict, style: str = "", warm: 
     # opening sentence reads as machine-forwarded, which is what this replaced.
     posting_ref = posting_ref_for(job, shape)
 
-    if shape == "pipeline/targets":
+    # SHEET-1. What a ROW is (`shape`) and what the EMAIL is (`voice`) were one decision, so a
+    # company-shaped Space was forced into the pitch. `voice_or_default()` returns exactly what
+    # this branch used to hardcode, which is why no existing Space moves and the golden file
+    # does not budge.
+    voice = space.voice_or_default() if hasattr(space, "voice_or_default") else (
+        "pitch" if shape == "pipeline/targets" else "jobseeker")
+
+    if voice == "premise":
+        user = _premise_user_prompt(sender_bits, contact, company,
+                                    job.get("full_description"), noticed,
+                                    sched_block, deck_block, style_block,
+                                    tone_block, previous, space=space)
+        system = _PREMISE_SYSTEM
+    elif voice == "pitch":
         # `full_description` is what the operator pasted about the company, and the offer comes
         # from the Space. In the jobs prompt those two slots are filled the other way round.
         user = _pitch_user_prompt(sender_bits, contact, company,

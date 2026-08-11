@@ -1,0 +1,237 @@
+"""A pasted spreadsheet -> companies and the people at them. Pure — no SQL, no HTTP.
+
+SHEET-1. The unit here is the COMPANY and the row is a PERSON, which is the inversion that makes
+this a different parser from `domain/target.py`:
+
+    target.parse_input   one COMPANY per line, typed by hand
+    sheet.parse          one PERSON per row, with their company repeated on every one of theirs
+
+Grouping those people under their company IS the bundling the operator asked for. The company
+name is STATED rather than recovered from a URL, so none of `networking/derive.py` runs — the
+2,000 lines of rules that produced the employers "Ouryahoo", "Edu", "Ats", "Oraclecloud",
+"Jobvite" and (the paste that prompted this ticket) "Docs".
+
+**Google Sheets puts TSV on the clipboard.** That is the whole integration: no OAuth, no API key,
+no token on disk, nothing to revoke. Worth stating because the obvious build is a Sheets
+integration and it buys nothing — the URL cannot be read without credentials, which is exactly
+what pasting one into the jobs box already proved.
+
+Two properties drive the design, and both come from what real exports look like rather than from
+what would be convenient:
+
+**Columns are found by HEADER, never by position.** Every tool exports them in its own order, and
+a positional parser silently files job titles as names — a mistake that is invisible until an
+email opens "Hi VP Engineering".
+
+**A first/last name pair is normal.** Every CRM export splits them, so they are JOINED rather
+than rejected.
+"""
+
+from __future__ import annotations
+
+import csv
+import io
+import re
+
+from applypilot.domain.target import slug
+
+#: How many data rows one paste may carry. A sheet is not a paste past this point — it wants a
+#: file upload, a progress bar and a resumable write, which is a different feature. The caller
+#: REPORTS the overflow rather than silently keeping the first N (§Lessons: no silent caps).
+MAX_ROWS = 500
+
+#: Header spellings, normalised to letters only. `_norm("Full Name") == "fullname"`.
+#: Ordered longest-first within each field so "firstname" cannot be eaten by "name".
+_FIELDS: dict[str, tuple[str, ...]] = {
+    "company": ("company", "companyname", "organization", "organisation", "org", "employer",
+                "account", "accountname"),
+    "first": ("firstname", "first", "givenname", "forename"),
+    "last": ("lastname", "last", "surname", "familyname"),
+    "name": ("fullname", "name", "contact", "contactname", "person"),
+    "title": ("title", "position", "role", "jobtitle", "headline"),
+    "email": ("email", "emailaddress", "workemail", "mail"),
+    "linkedin": ("linkedin", "linkedinurl", "linkedinprofile", "li", "profile", "profileurl"),
+    "domain": ("domain", "website", "url", "companywebsite", "site", "companydomain"),
+    "notes": ("notes", "note", "comment", "comments", "context"),
+}
+
+_NORM = re.compile(r"[^a-z0-9]+")
+
+
+def _norm(s: str | None) -> str:
+    return _NORM.sub("", (s or "").strip().lower())
+
+
+def _sniff(text: str) -> str:
+    """Tab or comma. Sheets and Excel both put TAB on the clipboard; a saved file is CSV.
+
+    Decided on the HEADER LINE only, and by count rather than by `csv.Sniffer`, which throws on
+    short or irregular input and would make a two-column paste unreadable. A company name with a
+    comma in it ("Ridgeline Logistics, Inc.") is common enough that guessing comma from the whole
+    document would split it.
+    """
+    head = (text or "").lstrip().splitlines()[0] if (text or "").strip() else ""
+    return "\t" if head.count("\t") >= head.count(",") and "\t" in head else ","
+
+
+def header_map(row: list[str]) -> dict[str, int]:
+    """Column name -> index, for the fields we understand. Unknown columns are ignored.
+
+    First match wins per FIELD, so a sheet carrying both "Name" and "Full Name" does not end up
+    with the second overwriting the first for no stated reason.
+    """
+    out: dict[str, int] = {}
+    for i, cell in enumerate(row):
+        n = _norm(cell)
+        if not n:
+            continue
+        for field, spellings in _FIELDS.items():
+            if field not in out and n in spellings:
+                out[field] = i
+                break
+    return out
+
+
+def _cell(row: list[str], idx: int | None) -> str:
+    if idx is None or idx >= len(row):
+        return ""
+    return (row[idx] or "").strip()
+
+
+_URL_JUNK = re.compile(r"^https?://(www\.)?", re.I)
+
+
+def _linkedin(value: str) -> str:
+    """Accept a full URL, a bare path, or a handle. Stored as given otherwise.
+
+    Not validated beyond looking like a profile: an operator's sheet may carry a company page or
+    a search link, and refusing the row over it loses the person's name and title too.
+    """
+    v = (value or "").strip()
+    if not v:
+        return ""
+    if v.startswith("/in/") or v.startswith("in/"):
+        return "https://www.linkedin.com/" + v.lstrip("/")
+    return v
+
+
+def _person_name(row: list[str], hm: dict[str, int]) -> str:
+    """`name`, or first + last joined. Every CRM export splits them."""
+    whole = _cell(row, hm.get("name"))
+    if whole:
+        return whole
+    parts = [_cell(row, hm.get("first")), _cell(row, hm.get("last"))]
+    return " ".join(p for p in parts if p).strip()
+
+
+def _domain(value: str) -> str:
+    v = _URL_JUNK.sub("", (value or "").strip().lower()).split("/")[0].strip()
+    return v if "." in v else ""
+
+
+class SheetError(ValueError):
+    """The paste cannot be read at all — distinct from rows that individually failed."""
+
+
+def parse(text: str) -> dict:
+    """A pasted sheet -> {companies, people, rejected, dropped, headers}.
+
+    `companies` is one entry per distinct company SLUG, in first-seen order, each carrying the
+    name as first written and a domain if any row supplied one.
+
+    `people` carry `company_slug`, so the caller never re-derives the grouping and cannot
+    disagree with it.
+
+    `rejected` is a list of {line, reason, text} — per ROW, with the spreadsheet's own line
+    number so the operator can go and look at it. "Imported 38 of 41" naming the three is a
+    result they can act on; "imported 38" is one they cannot (§Lessons 15).
+
+    Raises `SheetError` when the paste has no company column, because that is the one field with
+    no fallback — everything else can be blank. The message NAMES the headers that were found,
+    or the operator is left guessing which of their columns we failed to recognise.
+    """
+    raw = (text or "").strip("\n")
+    if not raw.strip():
+        raise SheetError("Nothing pasted.")
+
+    delim = _sniff(raw)
+    rows = [r for r in csv.reader(io.StringIO(raw), delimiter=delim)]
+    rows = [r for r in rows if any((c or "").strip() for c in r)]
+    if not rows:
+        raise SheetError("Nothing pasted.")
+
+    hm = header_map(rows[0])
+    found = [c.strip() for c in rows[0] if (c or "").strip()]
+    if "company" not in hm:
+        raise SheetError(
+            "No company column found. Add a column headed 'Company'. "
+            f"Columns seen: {', '.join(found) or '(none)'}")
+    if "name" not in hm and "first" not in hm and "last" not in hm:
+        raise SheetError(
+            "No name column found. Add a column headed 'Name' (or 'First Name' / 'Last Name'). "
+            f"Columns seen: {', '.join(found)}")
+
+    body = rows[1:]
+    dropped = max(0, len(body) - MAX_ROWS)
+    body = body[:MAX_ROWS]
+
+    companies: dict[str, dict] = {}
+    people: list[dict] = []
+    rejected: list[dict] = []
+    # Deduplicated per COMPANY, not globally: the same person legitimately appears under two
+    # employers in a sheet accumulated over time, and those are two contacts on two cards.
+    seen_email: set[tuple[str, str]] = set()
+    seen_name: set[tuple[str, str]] = set()
+
+    for offset, row in enumerate(body):
+        line = offset + 2                      # 1-based, and row 1 is the header
+        text_of = delim.join(c for c in row).strip()
+        company = _cell(row, hm.get("company"))
+        cslug = slug(company)
+        if not cslug:
+            rejected.append({"line": line, "reason": "no company", "text": text_of})
+            continue
+        full_name = _person_name(row, hm)
+        if not full_name:
+            rejected.append({"line": line, "reason": "no name", "text": text_of})
+            continue
+
+        email = _cell(row, hm.get("email")).lower()
+        if email and "@" not in email:
+            # Kept as a PERSON, dropped as an address. A malformed cell is not a reason to lose
+            # the name and title, and storing it would send mail nowhere.
+            rejected.append({"line": line, "reason": f"unusable email {email!r} — person kept",
+                             "text": text_of})
+            email = ""
+
+        key_e = (cslug, email)
+        key_n = (cslug, full_name.strip().lower())
+        if (email and key_e in seen_email) or key_n in seen_name:
+            rejected.append({"line": line, "reason": "duplicate of an earlier row",
+                             "text": text_of})
+            continue
+        if email:
+            seen_email.add(key_e)
+        seen_name.add(key_n)
+
+        domain = _domain(_cell(row, hm.get("domain")))
+        entry = companies.setdefault(cslug, {"slug": cslug, "name": company.strip(),
+                                             "domain": domain, "people": 0})
+        # First non-empty domain wins; a later blank must not erase one an earlier row supplied.
+        if domain and not entry["domain"]:
+            entry["domain"] = domain
+        entry["people"] += 1
+
+        people.append({
+            "company_slug": cslug,
+            "company": entry["name"],
+            "full_name": full_name.strip(),
+            "title": _cell(row, hm.get("title")),
+            "email": email,
+            "linkedin_url": _linkedin(_cell(row, hm.get("linkedin"))),
+            "notes": _cell(row, hm.get("notes")),
+            "line": line,
+        })
+
+    return {"companies": list(companies.values()), "people": people,
+            "rejected": rejected, "dropped": dropped, "headers": sorted(hm)}

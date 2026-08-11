@@ -34,7 +34,10 @@ SHAPES = (JOBS_SHAPE, TARGETS_SHAPE)
 #: A template decides what the copy SOUNDS like. Two of the three share a shape, which is the
 #: central claim of `spaces-prd.md`: business outreach and a business CRM are the same machine
 #: pointed at the same kind of row, and the difference between them is who is sending.
-TEMPLATES = ("jobs", "outreach", "business")
+TEMPLATES = ("jobs", "outreach", "business", "sheet")
+
+#: What the first email IS, independent of what a ROW is (SHEET-1). See `Space.voice`.
+VOICES = ("jobseeker", "pitch", "premise")
 
 #: The templates the UI offers TODAY. `business` is deliberately not among them: it differs
 #: from `outreach` by `identity_id` and wording alone, `identity_id` is frozen once a Space has
@@ -42,7 +45,7 @@ TEMPLATES = ("jobs", "outreach", "business")
 #: from the personal mailbox permanently. That is not the business Space anyone wanted, and a
 #: button that produces it is worse than a missing button. Unlocked by ID-1, which is one entry
 #: in this tuple.
-OFFERED_TEMPLATES = ("jobs", "outreach")
+OFFERED_TEMPLATES = ("jobs", "outreach", "sheet")
 
 #: What each template is FOR, in the operator's words. Lives here rather than in the HTML so the
 #: picker cannot describe a template differently from what `TEMPLATE_DEFAULTS` actually builds.
@@ -57,6 +60,10 @@ TEMPLATE_BLURB = {
     "business": ("Business",
                  "The same machine as Partnerships, sending as the business. "
                  "Needs a separate mailbox (ID-1), so it is not offered yet."),
+    "sheet": ("From a spreadsheet",
+              "Rows are companies you import from a sheet, with the people already listed. "
+              "No job posting needed — every email is written from this campaign's own "
+              "paragraph. Attach a posting to a company later if one turns up."),
 }
 
 #: What the Space's one constant paragraph is CALLED, per shape (CTX-1). Beside `TEMPLATE_BLURB`
@@ -88,13 +95,22 @@ OFFER_COPY = {
 }
 
 
-def offer_copy(shape: str) -> dict:
-    """The heading, placeholder and hint for this shape's constant paragraph.
+def offer_copy(shape: str, voice: str = "") -> dict:
+    """The heading, placeholder and hint for this Space's constant paragraph.
+
+    Keyed on the SHAPE, except where the voice disagrees with it — which is the case SHEET-1
+    created. A company-shaped Space written in the `premise` voice was labelled "Your offer"
+    and told the operator the field was *"what you are proposing"*, when what it actually feeds
+    is a job-seeker's paragraph about themselves. That is §Lessons 72's shape: a field described
+    as one thing and read as another, which is how `offer` ended up wired into one of two shapes
+    and typeable in neither.
 
     Falls back to the jobs wording rather than to empty strings: a shape this does not know is
     still a Space with an `offer`, and rendering an unlabelled textarea is the §Lessons 41
     failure — a control the operator cannot name is one they do not use.
     """
+    if voice == "premise":
+        return dict(OFFER_COPY[JOBS_SHAPE])
     return dict(OFFER_COPY.get(shape) or OFFER_COPY[JOBS_SHAPE])
 
 
@@ -158,6 +174,27 @@ class Space:
     can_autosend: bool = True
     terminal: str = "interview"
 
+    #: What the first email IS (SHEET-1). Separate from `shape`, which says what a ROW is —
+    #: those were one decision and should not have been. A company-shaped Space was forced into
+    #: the pitch voice, so "a card per company, in the job-seeker campaign's own words" could
+    #: not be expressed at all.
+    #:
+    #:   ""          derive from the shape, which is exactly what happened before this existed
+    #:   "jobseeker" `_SYSTEM` — writing to someone at a company you have applied to
+    #:   "pitch"     `_PITCH_SYSTEM` — proposing a specific piece of work
+    #:   "premise"   `_PREMISE_SYSTEM` — the campaign's own paragraph IS the message
+    #:
+    #: Empty by default so no existing Space moves: the resolver below returns precisely what
+    #: the shape branch used to hardcode.
+    voice: str = ""
+
+    def voice_or_default(self) -> str:
+        """The voice to write in. Never returns "" — a caller branching on this must not have
+        to know the shape rules as well."""
+        if self.voice:
+            return self.voice
+        return "pitch" if self.shape == TARGETS_SHAPE else "jobseeker"
+
     def __post_init__(self) -> None:
         """Refuse a manifest that cannot mean anything, at construction.
 
@@ -174,6 +211,11 @@ class Space:
             raise ValueError(f"unknown template {self.template!r}; expected one of {TEMPLATES}")
         if self.terminal not in TERMINALS:
             raise ValueError(f"unknown terminal {self.terminal!r}; expected one of {TERMINALS}")
+        # An unknown voice would fall through to the shape default and write the WRONG KIND OF
+        # EMAIL silently — a typo'd `voice="premis"` sending pitches from a job-search campaign,
+        # with nothing anywhere saying so. Same argument as the shape check above.
+        if self.voice and self.voice not in VOICES:
+            raise ValueError(f"unknown voice {self.voice!r}; expected one of {VOICES}")
 
     # ── what the engine asks of a Space ──
 
@@ -288,6 +330,23 @@ TEMPLATE_DEFAULTS: dict[str, dict] = {
         "tailor_docs": False,
         "schedules": {"email": [120, 288]},
         "tone": "Writing as the business, not personally.",
+    },
+    # SHEET-1. Companies you import from a spreadsheet, with the people already known — so the
+    # row is a company (targets) while the message is the JOB SEARCH's own paragraph rather
+    # than a proposal. That combination is the entire reason `voice` exists: before it, picking
+    # the company-shaped row forced the pitch, and picking the job-seeker words forced a posting.
+    #
+    # `terminal` is `interview`, not `booked`: this is a job search that happens to be organised
+    # by company, and success is the same thing it is in every other job-search Space.
+    #
+    # The email ladder keeps the job-search cadence (the global 48/96/168) rather than
+    # outreach's slower one — these are companies the operator is pursuing for work, not
+    # strangers being sold to.
+    "sheet": {
+        "shape": TARGETS_SHAPE,
+        "terminal": "interview",
+        "tailor_docs": False,
+        "voice": "premise",
     },
 }
 

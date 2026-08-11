@@ -188,6 +188,40 @@ async function addTargets(btn) {
   refresh();
 }
 
+// SHEET-1. A pasted spreadsheet becomes one card per company and one contact per person.
+//
+// The paste is NEVER cleared, even on a clean import. `addTargets` above can clear its box
+// because it holds a handful of typed lines; this one holds a range copied out of a sheet the
+// operator may have spent an afternoon assembling, and re-importing a GROWN version of it is
+// the normal way to use this. Throwing that away to signal success is a bad trade.
+async function importSheet(btn) {
+  const box = document.getElementById('sheetInput');
+  const out = document.getElementById('sheetStatus');
+  const rej = document.getElementById('sheetRejects');
+  const text = (box.value || '').trim();
+  rej.hidden = true; rej.innerHTML = '';
+  if (!text) { out.textContent = 'Paste some rows first, including the header row.'; return; }
+  btn.disabled = true;
+  const label = btn.textContent;
+  btn.textContent = 'Importing…';
+  const r = await post('/api/import-sheet', {space: SPACE_ID, text});
+  btn.disabled = false;
+  btn.textContent = label;
+  out.textContent = r.message || '';
+  // Skipped rows are listed with the line number the operator sees in their own sheet. A count
+  // alone is not something anyone can act on (§Lessons 15) — "3 skipped" sends them hunting,
+  // "line 7: no company" sends them to line 7.
+  const bad = r.rejected || [];
+  if (bad.length) {
+    rej.hidden = false;
+    rej.innerHTML = '<b>Skipped rows</b><br>' + bad.slice(0, 25).map(x =>
+      `line ${esc(String(x.line || '?'))}: ${esc(x.reason || '')}` +
+      (x.text ? ` <span class="muted">${esc(String(x.text).slice(0, 70))}</span>` : '')
+    ).join('<br>') + (bad.length > 25 ? `<br><span class="muted">…and ${bad.length - 25} more</span>` : '');
+  }
+  refresh();
+}
+
 async function saveOffer(btn) {
   const box = document.getElementById('offerInput');
   const out = document.getElementById('offerStatus');

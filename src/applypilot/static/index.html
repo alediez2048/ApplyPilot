@@ -102,6 +102,30 @@
         — the employer is stated rather than recovered from an ATS hostname, which is where
         “Ouryahoo”, “Edu” and “Ats” came from.</div>
     </section>
+
+    <!-- SHEET-1. Copying a range out of Google Sheets or Excel puts TAB-separated text on the
+         clipboard, so pasting IS the integration: no OAuth, no API key, nothing stored and
+         nothing to revoke. Pasting the sheet's URL instead is what produced the row
+         `title="Docs uploaded job", company="Docs"` — the jobs box took the link as a posting
+         and docs.google.com's host label became the employer. -->
+    <section>
+      <h2>Import a sheet</h2>
+      <textarea id="sheetInput" placeholder="Paste rows straight from Google Sheets or Excel, including the header row.
+
+Company	Name	Position	Email	LinkedIn
+Ridgeline Logistics	Dana Okafor	VP Engineering	dana@ridgeline.test	/in/danaokafor
+Ridgeline Logistics	Sam Iyer	Staff Engineer
+Northwind	Alex Roy	Head of Talent	alex@northwind.test"></textarea>
+      <div class="row" style="margin-top:10px; align-items:center">
+        <button class="primary" style="font-size:15px; padding:10px 20px" onclick="importSheet(this)">↥ Import sheet</button>
+      </div>
+      <p id="sheetStatus" class="hint" style="margin-top:10px; font-weight:600"></p>
+      <div id="sheetRejects" class="hint" hidden></div>
+      <div class="hint">One row per PERSON, with their company repeated. Columns are matched by
+        their heading, not their order, so any export works — <b>Company</b> and a name are the
+        only two required. <b>First Name</b> / <b>Last Name</b> are joined. Re-pasting a longer
+        sheet later adds the new rows and leaves everything else alone.</div>
+    </section>
   </div>
 
   <div class="controls" id="jobControls">

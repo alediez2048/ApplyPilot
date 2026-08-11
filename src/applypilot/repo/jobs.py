@@ -287,6 +287,49 @@ def add_target(space_id: str, name: str, domain: str = "",
     return {"url": url, "name": name, "added": True}
 
 
+def attach_posting(url: str, *, title: str = "", application_url: str = "",
+                   description: str = "", conn: sqlite3.Connection | None = None) -> dict:
+    """Give an existing card a job posting, IN PLACE (SHEET-1 C4).
+
+    **The anchor never moves, and that is the whole function.** `store.contact_id()` hashes
+    `job_url`, and on a target row the anchor IS the `job_url` — so replacing it with the
+    posting's URL silently orphans every contact, every `touches` ladder, every `sequences` row
+    and every stored message on that card. Nothing would error; the card would simply render
+    with no people. That is CO-1's failure with a new trigger, and it is why this is an UPDATE of
+    three columns rather than the insert it looks like it should be.
+
+    `title`, `application_url` and `full_description` already exist on every `jobs` row and sit
+    empty on a target, so this needs no schema change — the row was always able to hold a
+    posting, nothing had ever put one there.
+
+    Only fills what it is GIVEN: a caller that knows the link but not the description must not
+    blank a description the operator typed. Returns the fields that changed.
+    """
+    c = _c(conn)
+    row = c.execute("SELECT url, company FROM jobs WHERE url = ?", (url,)).fetchone()
+    if not row:
+        raise ValueError(f"no such row: {url!r}")
+
+    sets: dict[str, str] = {}
+    if (title or "").strip():
+        sets["title"] = title.strip()
+    if (application_url or "").strip():
+        sets["application_url"] = application_url.strip()
+    if (description or "").strip():
+        sets["full_description"] = description.strip()
+        # It has a description now, so it is no longer owed a scrape and must not read as one
+        # that failed (§Lessons 44: a partial with nothing in it is a permanent silent death).
+        sets["detail_error"] = ""
+        sets["detail_scraped_at"] = _now()
+    if not sets:
+        return {"url": url, "changed": []}
+
+    assignments = ", ".join(f"{k} = ?" for k in sets)
+    c.execute(f"UPDATE jobs SET {assignments} WHERE url = ?", [*sets.values(), url])
+    c.commit()
+    return {"url": url, "changed": sorted(sets)}
+
+
 def in_progress(conn: sqlite3.Connection | None = None) -> list[dict]:
     """Jobs an apply agent is working on RIGHT NOW.
 

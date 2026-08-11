@@ -49,6 +49,13 @@ class Channel:
     ready: tuple[tuple[str, tuple[str, ...] | None], ...] = field(default=())
     can_autosend: bool = True          # LinkedIn is copy-paste only — CLAUDE.md §Lessons
     prefix: str = ""                   # payload key prefix, for the dashboard's field names
+    # Does this channel have a LADDER at all, or is the first message the whole of it?
+    #
+    # Data, not a branch, for the same reason every other line here is: "how many touches and
+    # how far apart" and "any touches beyond the first" are the same kind of question. A channel
+    # with `follows_up=False` still exists everywhere else — it still drafts, still records that
+    # it was used, still shows its tab and its pill — it simply never becomes work that is owed.
+    follows_up: bool = True
     # How this channel names itself in operator-facing text ("LinkedIn sequence stopped").
     # Email's is empty because it is the unmarked case — "sequence stopped" already means email.
     # This is a field rather than a lookup because the dashboard had the last per-channel
@@ -67,18 +74,41 @@ EMAIL = Channel(
     prefix="",
 )
 
-# Slower on purpose: someone who just accepted your invite is a long-lived, low-urgency
-# thread, and nudging a brand-new connection after 48h reads badly.
+# NO LADDER (2026-08-11). The connection invitation is the whole channel: send it, and you are
+# done. `follows_up=False`, and everything else about LinkedIn is unchanged.
+#
+# The operator's reason is the correct one and the data agrees loudly. An invite that has not
+# been ACCEPTED is not a delivered message — `dm_status` has only `sent` and `manual`, both
+# meaning WE sent it, and no `accepted` state exists anywhere in the schema (§Lessons 35). So a
+# ladder anchored on `dm_sent_at` schedules follow-ups to people who may never have seen the
+# first one, and then counts each of them as work the operator has failed to do.
+#
+# Measured at the moment this was switched off:
+#
+#     170 contacts carried dm_sent_at, so the ladder applied to all of them
+#      13 LinkedIn follow-ups had ever been sent, against 177 emails
+#      30 sat drafted and unsent — written, paid for, abandoned
+#      87 sequences had been STOPPED BY HAND, against 13 sends
+#      32 were due right now, against 11 for email
+#
+# 87 manual stops against 13 sends is the whole argument: the operator had been switching this
+# off one contact at a time for weeks. And at 32 of 43 it was three quarters of everything the
+# 🔔 counter claimed was outstanding — a badge that is mostly work you have decided not to do
+# is one you stop reading, which is the failure CRM-3a exists to prevent.
+#
+# The schedule is kept rather than deleted: it is what the ladder WOULD be, and re-enabling is
+# one word. LINKEDIN_FOLLOWUP_SCHEDULE stays declared for the same reason.
 LINKEDIN = Channel(
     name="linkedin",
     env_var="LINKEDIN_FOLLOWUP_SCHEDULE",
-    default_schedule=(120, 288),             # 5d / 12d
+    default_schedule=(120, 288),             # 5d / 12d — unused while follows_up is False
     start_field="dm_sent_at",
     # An invite must have been RECORDED; dm_status is what proves one went out.
     ready=(("linkedin_url", None), ("dm_status", ("sent", "manual"))),
     can_autosend=False,
     prefix="li_",
     label="LinkedIn ",
+    follows_up=False,
 )
 
 # Texting is the most intrusive channel here and the only one that arrives on a lock screen,
@@ -203,22 +233,31 @@ def exhausted(contact: dict, ladders: dict[str, dict] | None = None,
 
 
 def channels_for(space=None) -> tuple:
-    """The channels a Space offers, in registry order.
+    """The channels that run a LADDER here, in registry order.
 
-    A Space may narrow the set (SPACE-4) — a business campaign that never texts should not show
-    a Text tab or count an SMS ladder as outstanding work. Names that match no registered
+    Two filters, and the ORDER of them is load-bearing.
+
+    First the Space narrows the set (SPACE-4) — a business campaign that never texts should not
+    show a Text tab or count an SMS ladder as outstanding work. Names that match no registered
     channel are IGNORED rather than raising: a manifest is operator-editable config, and a typo
-    must not take the follow-up engine down for every Space at once.
+    must not take the follow-up engine down for every Space at once. That is why an empty
+    selection falls back to all channels — the fallback exists for the TYPO, where rendering
+    nothing would look identical to nobody being due (§Lessons 15).
 
-    An EMPTY result falls back to all channels, deliberately. A Space with no channels can send
-    nothing, and silently offering nothing is the failure §Lessons 15 is about — the panel would
-    render empty and look identical to one where nobody is due.
+    Then `follows_up` drops channels that have no ladder by design. This one is applied AFTER
+    the fallback and is never undone by it: a Space whose only channel is LinkedIn genuinely has
+    no ladders, and returning all three there would resurrect the very ladder this flag turns
+    off — the §Lessons 15 fallback firing on a case it was not written for.
+
+    Callers wanting "which channels exist at all" want `CHANNELS`; this is only ever asked by
+    the two ladder functions below.
     """
     names = getattr(space, "channels", None)
-    if not names:
-        return CHANNELS
-    chosen = tuple(c for c in CHANNELS if c.name in set(names))
-    return chosen or CHANNELS
+    base = CHANNELS
+    if names:
+        chosen = tuple(c for c in CHANNELS if c.name in set(names))
+        base = chosen or CHANNELS
+    return tuple(c for c in base if c.follows_up)
 
 
 def touch_state(contact: dict, channel: Channel, schedule: list[int], now: datetime,

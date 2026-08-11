@@ -296,51 +296,46 @@ def _ladders(**by_channel):
     return {("c1", ch): {**EMPTY_LADDER, **vals} for ch, vals in by_channel.items()}
 
 
-def test_linkedin_followup_due_after_the_invite_window():
+def test_the_linkedin_ladder_is_off(monkeypatch):
+    """The invitation is the whole channel (2026-08-11). Seven tests here used to pin a two-touch
+    ladder at 5d/12d; this replaces them, through the same dashboard entry point they used.
+
+    The operator's reason is the one the schema already agreed with: `dm_status` holds only
+    `sent` and `manual`, both meaning WE sent it, and no `accepted` state exists anywhere
+    (§Lessons 35). So an invite is not a delivered message, and a ladder anchored on
+    `dm_sent_at` was scheduling nudges to people who may never have seen the first one — then
+    counting each as work the operator had failed to do.
+
+    Not even a configured schedule brings it back: the flag is on the CHANNEL, and the env var
+    only ever chose the cadence.
+    """
     cl = wd._followup_panel([_li_contact()])
-    assert cl["li_due_count"] == 1
-    assert cl["li_due"][0]["full_name"] == "Sumit Singh" and cl["li_due"][0]["touch"] == 1
+    assert not any(k.startswith("li_") for k in cl), \
+        f"LinkedIn still reports ladder work: {sorted(k for k in cl if k.startswith('li_'))}"
+
+    monkeypatch.setenv("LINKEDIN_FOLLOWUP_SCHEDULE", "1,2")
+    assert not any(k.startswith("li_") for k in wd._followup_panel([_li_contact()])), \
+        "a schedule in the environment re-enabled a ladder the registry turned off"
 
 
-def test_linkedin_followup_not_due_immediately_after_connecting():
-    """Nudging a brand-new connection after a day reads badly — default is 5 days."""
-    cl = wd._followup_panel([_li_contact(dm_sent_at=_dt(1))])
-    assert cl["li_due_count"] == 0 and len(cl["li_waiting"]) == 1
+def test_an_invite_nobody_accepted_creates_no_work():
+    """The whole point, stated as the operator stated it: sending the connect request is enough,
+    and a pending invite must never become something they have not done.
+
+    A contact invited a week ago with no email at all now owes NOTHING. Before this change they
+    owed touch 1 of 2, and 32 of the 43 follow-ups due across the live database were this.
+    """
+    cl = wd._followup_panel([_li_contact(dm_sent_at=_dt(7))])
+    assert cl["due_count"] == 0
+    assert sum(v for k, v in cl.items() if k.endswith("due_count")) == 0
 
 
-def test_linkedin_needs_a_recorded_invite_to_schedule_anything():
-    """Sumit's real row had dm_status='' — an invite sent before tracking existed."""
-    cl = wd._followup_panel([_li_contact(dm_status="", dm_sent_at="")])
-    assert cl["li_due_count"] == 0 and cl["li_waiting"] == []
-
-
-def test_linkedin_replied_or_stopped_halts_the_ladder():
-    for status in ("replied", "stopped"):
-        cl = wd._followup_panel([_li_contact()],
-                                _ladders(linkedin={"sequence_status": status}))
-        assert cl["li_due_count"] == 0, f"{status} must stop the sequence"
-
-
-def test_linkedin_ladder_finishes_after_the_last_touch():
-    # default LinkedIn ladder is 2 touches
-    cl = wd._followup_panel([_li_contact()], _ladders(linkedin={"count": 2}))
-    assert cl["li_due_count"] == 0
-
-
-def test_linkedin_schedule_is_configurable(monkeypatch):
-    c = [_li_contact(dm_sent_at=_dt(3))]
-    monkeypatch.setenv("LINKEDIN_FOLLOWUP_SCHEDULE", "24,48")
-    assert wd._followup_panel(c)["li_due_count"] == 1
-    monkeypatch.setenv("LINKEDIN_FOLLOWUP_SCHEDULE", "240")
-    assert wd._followup_panel(c)["li_due_count"] == 0
-
-
-def test_email_and_linkedin_ladders_are_independent(tmp_path, monkeypatch):
-    """An emailed-and-followed-up contact can still owe a LinkedIn message, and vice versa."""
+def test_the_email_ladder_is_untouched_by_any_of_this():
+    """Guard the guard. Turning every ladder off also passes the two tests above."""
     c = _li_contact(email="s@x.com", emailed=True, submitted_at=_dt(9))
-    cl = wd._followup_panel([c], _ladders(email={"count": 1, "last_sent_at": _dt(0)}))
-    assert cl["due_count"] == 0          # email follow-up was just sent
-    assert cl["li_due_count"] == 1       # LinkedIn still owed
+    assert wd._followup_panel([c])["due_count"] == 1
+    just_sent = wd._followup_panel([c], _ladders(email={"count": 1, "last_sent_at": _dt(0)}))
+    assert just_sent["due_count"] == 0
 
 
 def test_marking_a_linkedin_touch_goes_through_the_same_function_as_email(tmp_path, monkeypatch):

@@ -821,13 +821,17 @@ def test_the_touch_total_travels_with_the_contact():
     reaches the caller's dict. Same object-identity trap as §Lessons 21. The assertion below
     pins that difference so nobody "simplifies" the fixture and quietly tests nothing.
     """
-    from applypilot.domain.followup import EMAIL, LINKEDIN, channel_schedule, followup_panel
+    from applypilot.domain.followup import EMAIL, SMS, channel_schedule, followup_panel
 
+    # SMS is the second ladder, not LinkedIn — LinkedIn has `follows_up=False` since
+    # 2026-08-11, so `li_followup_total` is never annotated and asserting on it would test
+    # nothing while looking like a two-channel check.
     payload = {"id": "c1", "full_name": "X", "email": "a@b.com", "emailed": True,
-               "sent_message_id": "m1", "submitted_at": "2020-01-01T00:00:00+00:00"}
+               "sent_message_id": "m1", "submitted_at": "2020-01-01T00:00:00+00:00",
+               "phone": "+1 555 0100", "sms_sent_at": "2020-01-01T00:00:00+00:00"}
     followup_panel([payload])
     assert payload["followup_total"] == len(channel_schedule(EMAIL))
-    assert payload["li_followup_total"] == len(channel_schedule(LINKEDIN))
+    assert payload["sms_followup_total"] == len(channel_schedule(SMS))
 
     raw = {"id": "c2", "full_name": "Y", "email": "b@b.com", "sent_message_id": "m1",
            "submitted_at": "2020-01-01T00:00:00+00:00"}

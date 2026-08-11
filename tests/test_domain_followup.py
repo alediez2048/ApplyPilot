@@ -165,22 +165,47 @@ def test_naive_timestamps_do_not_crash():
 
 # ── the panel ───────────────────────────────────────────────────────────────
 
-def test_panel_separates_the_two_channels():
-    panel = followup_panel([emailed(), connected()], now=NOW)
-    assert panel["due_count"] == 1 and panel["li_due_count"] == 1
+def test_panel_separates_the_channels():
+    """Email and TEXT, not email and LinkedIn — LinkedIn has no ladder since 2026-08-11, so
+    using it here would assert separation between one real bucket and one that never exists."""
+    panel = followup_panel([emailed(), texted()], now=NOW)
+    assert panel["due_count"] == 1 and panel["sms_due_count"] == 1
     assert panel["due"][0]["full_name"] == "Jane"
-    assert panel["li_due"][0]["full_name"] == "Sumit"
+    assert panel["sms_due"][0]["full_name"] == "Dana"
+
+
+def test_linkedin_reports_no_ladder_at_all():
+    """The invitation is the whole channel. A contact with a recorded invite and no reply used
+    to be owed two nudges — 32 of the 43 follow-ups due across the live database, for a channel
+    whose `dm_status` only ever proves WE sent something (§Lessons 35: there is no `accepted`
+    state anywhere in the schema, so the ladder was chasing people who may never have seen the
+    first message).
+
+    Asserted on the PANEL, which is what the counter, the tab badge and `tick` all read."""
+    panel = followup_panel([connected()], now=NOW)
+    assert not any(k.startswith("li_") for k in panel), \
+        f"LinkedIn still reports ladder work: {[k for k in panel if k.startswith('li_')]}"
+
+
+def test_the_linkedin_engine_still_works_it_is_just_never_asked():
+    """The flag belongs to the REGISTRY, not to the arithmetic. `touch_state` is pure and still
+    computes a LinkedIn ladder correctly — nothing calls it, because `channels_for` no longer
+    returns the channel. Keeping those separate is what makes re-enabling one word."""
+    state, _ = touch_state(connected(), LINKEDIN, channel_schedule(LINKEDIN), NOW, ladder())
+    assert state == "due"
+    assert LINKEDIN.follows_up is False
+    assert LINKEDIN in CHANNELS, "LinkedIn must stay registered — it still drafts and records"
 
 
 def test_ladders_are_independent():
-    """One person can owe a LinkedIn message while their email ladder is done."""
-    both = emailed(linkedin_url="https://l/in/j", dm_status="manual", dm_sent_at=ago(days=9))
+    """One person can owe a text while their email ladder is done."""
+    both = emailed(phone="+1 555 0100", sms_sent_at=ago(days=5))
     panel = followup_panel([both], now=NOW, ladders={
         ("c1", "email"): ladder(sequence_status="replied"),
-        ("c1", "linkedin"): ladder(),
+        ("c1", "sms"): ladder(),
     })
-    assert panel["due_count"] == 0        # email stopped on reply
-    assert panel["li_due_count"] == 1     # LinkedIn still owed
+    assert panel["due_count"] == 0         # email stopped on reply
+    assert panel["sms_due_count"] == 1     # the text ladder is still owed
 
 
 def test_panel_annotates_contacts_for_the_per_contact_buttons():

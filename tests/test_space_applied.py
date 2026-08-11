@@ -225,10 +225,16 @@ def test_the_manifest_beats_the_environment(monkeypatch):
     assert fu.channel_schedule(fu.EMAIL, space) == [99]
 
 
+#: The channels that actually run a ladder. NOT `fu.CHANNELS` — LinkedIn is registered but has
+#: `follows_up=False`, so it never appears in a panel. Derived rather than spelled out, or this
+#: file pins today's channel list and fails the next time one is added.
+LADDER_CHANNELS = tuple(c for c in fu.CHANNELS if c.follows_up)
+
+
 def test_a_space_can_narrow_the_channel_set():
     space = sp.from_template("p", "P", "outreach", channels=("email",))
     assert [c.name for c in fu.channels_for(space)] == ["email"]
-    assert fu.channels_for(None) == fu.CHANNELS
+    assert fu.channels_for(None) == LADDER_CHANNELS
 
 
 def test_an_unknown_channel_name_is_ignored_not_fatal():
@@ -246,19 +252,33 @@ def test_a_channel_set_that_matches_nothing_falls_back_to_all():
     §Lessons 15: silently offering nothing is the failure mode, not the safe default.
     """
     space = sp.from_template("p", "P", "outreach", channels=("carrier-pigeon",))
-    assert fu.channels_for(space) == fu.CHANNELS
+    assert fu.channels_for(space) == LADDER_CHANNELS
+
+
+def test_a_space_whose_only_channel_has_no_ladder_gets_NOTHING():
+    """The typo fallback must not resurrect a ladder that is off by design.
+
+    `channels_for` applies two filters and the order decides this case: the Space narrows first
+    (so a typo can fall back to every channel), and `follows_up` is applied AFTER and is never
+    undone by that fallback. Reversed, a LinkedIn-only Space would match one real channel, be
+    emptied by the flag, hit the §Lessons 15 fallback and come back with email and SMS ladders
+    for a campaign that asked for neither.
+    """
+    space = sp.from_template("p", "P", "outreach", channels=("linkedin",))
+    assert fu.channels_for(space) == ()
 
 
 def test_the_panel_only_reports_the_channels_a_space_offers():
     contacts = [{"id": "c1", "full_name": "Sarah Chen", "email": "a@x.test", "emailed": True,
                  "submitted_at": "2026-01-01T00:00:00+00:00",
-                 "linkedin_url": "https://l/in/a", "dm_status": "sent",
-                 "dm_sent_at": "2026-01-01T00:00:00+00:00"}]
+                 "phone": "+1 555 0100", "sms_sent_at": "2026-01-01T00:00:00+00:00"}]
     full = fu.followup_panel(contacts)
     narrow = fu.followup_panel(contacts, space=sp.from_template("p", "P", "outreach",
                                                                channels=("email",)))
-    assert "li_due" in full
-    assert "li_due" not in narrow, "a channel the Space does not offer still reported work"
+    # SMS rather than LinkedIn: this asserts that a SECOND ladder is reported and then dropped,
+    # and LinkedIn no longer has one to drop, so using it here would pass for the wrong reason.
+    assert "sms_due" in full
+    assert "sms_due" not in narrow, "a channel the Space does not offer still reported work"
     assert "due" in narrow
 
 

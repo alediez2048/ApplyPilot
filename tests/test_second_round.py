@@ -66,15 +66,19 @@ def test_a_reply_disqualifies_however_it_was_recorded():
 
 
 def test_one_channel_finishing_is_not_enough():
-    """`finished` is per-CHANNEL. Someone whose email ladder is done but whose LinkedIn sequence
-    is still running has not gone quiet — they have a channel left, and calling that "no
-    response" sends you shopping while a live sequence is mid-flight."""
-    both = _emailed(linkedin_url="https://l/in/j", dm_status="manual", dm_sent_at=ago(days=1))
+    """`finished` is per-CHANNEL. Someone whose email ladder is done but whose TEXT sequence is
+    still running has not gone quiet — they have a channel left, and calling that "no response"
+    sends you shopping while a live sequence is mid-flight.
+
+    Email + SMS, not email + LinkedIn: LinkedIn stopped having a ladder on 2026-08-11, so it can
+    no longer be the channel that is "still running" and this would assert nothing.
+    """
+    both = _emailed(phone="+1 555 0100", sms_sent_at=ago(days=1))
     ladders = {"email": _ladder(count=3, last=ago(days=10)),
-               "linkedin": _ladder(count=0)}       # invited yesterday, first touch not due
+               "sms": _ladder(count=0)}            # texted yesterday, first touch not due
     assert exhausted(both, ladders, NOW) is False
 
-    ladders["linkedin"] = _ladder(count=2, last=ago(days=20))   # now spent too
+    ladders["sms"] = _ladder(count=2, last=ago(days=20))        # now spent too
     assert exhausted(both, ladders, NOW) is True
 
 

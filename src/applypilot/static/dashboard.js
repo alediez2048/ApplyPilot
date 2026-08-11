@@ -1104,7 +1104,16 @@ async function regenSms(cid, btn) {
 function contactNotes(c) {
   // Apollo will not hand a direct dial to a local tool (reveal_phone_number is
   // webhook-only), so the number is copied out of the Apollo UI by hand and kept here.
-  const open = (NOTES_OPEN.has(c.id) || c.phone || c.notes) ? ' open' : '';
+  //
+  // It defaults OPEN when there is NO number, which is the inverse of what it used to do.
+  // The composer directly above says "Add a phone number below and Save" and is DISABLED
+  // until one exists — so the only case that needs this block is the one case it was
+  // collapsed for, while everyone who already had a number got it expanded. Reported as
+  // "the text feature is not working", which is exactly what a disabled control plus a
+  // hidden way to enable it is (§Lessons 43, 88, 89: findable is not the same as findable
+  // FROM WHERE THE WORK IS, and the operator saying it does not work is the measurement).
+  const wants = !c.phone || c.notes;
+  const open = (NOTES_OPEN.has(c.id) || (wants && !NOTES_CLOSED.has(c.id))) ? ' open' : '';
   const key = encodeURIComponent(c.id);
   return `
     <details class="cnotes"${open} ontoggle="onNotesToggle(this, decodeURIComponent('${key}'))">
@@ -1914,7 +1923,14 @@ function avatarColor(name) {
   return _AVATAR_COLORS[h % _AVATAR_COLORS.length];
 }
 const NOTES_OPEN = new Set(); // contact ids whose phone/notes panel is expanded (survives refresh)
-function onNotesToggle(el, cid) { if (el.open) NOTES_OPEN.add(cid); else NOTES_OPEN.delete(cid); }
+//: Explicitly COLLAPSED, which has to be recorded separately now that the default is open.
+//: With one set, "never touched" and "closed by hand" are the same state — so a block that
+//: defaults open would spring back open on the next 2.5s refresh and could never be shut.
+const NOTES_CLOSED = new Set();
+function onNotesToggle(el, cid) {
+  if (el.open) { NOTES_OPEN.add(cid); NOTES_CLOSED.delete(cid); }
+  else { NOTES_CLOSED.add(cid); NOTES_OPEN.delete(cid); }
+}
 function bulkBar(j) {
   const cs = j.contacts || [];
   const emailN = cs.filter(c => c.email && c.outreach_message && !c.emailed && c.email_status === 'verified').length;

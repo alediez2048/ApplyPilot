@@ -36,6 +36,8 @@ So the payload assertions below are the point of this file, not the ghost state 
 from __future__ import annotations
 
 import json
+import shutil
+import re
 import subprocess
 from pathlib import Path
 
@@ -46,6 +48,16 @@ from applypilot import web_dashboard as wd
 from applypilot.repo import jobs as repo
 
 from browser_stubs import BROWSER_GLOBALS
+
+BROWSER_STUBS_MIN = BROWSER_GLOBALS + """
+const el = () => ({ innerHTML:'', textContent:'', hidden:false, value:'', style:{},
+  closest:()=>el(), querySelector:()=>el(), querySelectorAll:()=>[], setAttribute(){},
+  getAttribute:()=>null, addEventListener(){}, appendChild(){}, classList:{add(){},remove(){},
+  toggle(){}}, dataset:{} });
+globalThis.document = { getElementById:()=>el(), querySelector:()=>el(),
+  querySelectorAll:()=>[], addEventListener(){}, body:el(), hasFocus:()=>false,
+  activeElement:null };
+"""
 
 
 @pytest.fixture()
@@ -263,3 +275,100 @@ console.log(JSON.stringify({
     assert out["notInCancelled"] is False
     assert out["cancelledNotInGhost"] is False, "cancelled jobs are showing under Ghost jobs"
     assert out["rejectedNotInGhost"] is False
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node not available")
+def test_all_three_closed_states_are_greyed_and_an_open_one_is_not(tmp_path):
+    """Rejected, cancelled and ghost grey out as ONE — "not in play" is the same fact whichever
+    way it ended, and the badge already carries which.
+
+    Driven through the render rather than asserted on the class list, because the class is only
+    useful if it reaches the row (§Lessons 94). The negative cases are the point: greying
+    everything satisfies the first three assertions and tells the operator nothing.
+    """
+    src = _js()
+    script = tmp_path / "greyed.mjs"
+    script.write_text(
+        BROWSER_STUBS_MIN + """
+const SRC = """ + json.dumps(src) + """;
+const F = (new Function(SRC + '; return { jobRows };'))();
+const j = (over) => ({url:'u'+Math.random(), title:'T', company:'C', description:'d',
+  status:'imported', interview_at:'', rejected_at:'', applied_at:'', contacts:[],
+  followups:{}, interactions:[], transcripts:[], ...over});
+const out = {};
+for (const st of ['rejected','cancelled','ghost','applied','imported','failed'])
+  out[st] = F.jobRows(j({status:st, rejected_at:'2026-08-01T00:00:00+00:00'}), false);
+out.won = F.jobRows(j({status:'rejected', interview_at:'2026-08-05T00:00:00+00:00'}), false);
+console.log(JSON.stringify(out));
+""", encoding="utf-8")
+    proc = subprocess.run(["node", str(script)], capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr[:2000]
+    out = json.loads(proc.stdout.strip().splitlines()[-1])
+
+    for st in ("rejected", "cancelled", "ghost"):
+        assert "row-closed" in out[st], f"a {st} job is not greyed out"
+    # Both directions. Greying every row satisfies the loop above and says nothing.
+    for st in ("applied", "imported", "failed"):
+        assert "row-closed" not in out[st], f"an open {st} job was greyed out"
+    # An interview outranks a closed status: it is arrival, not departure, and it has its own
+    # colour. Without the ordering both classes would land on one row.
+    assert "row-won" in out["won"] and "row-closed" not in out["won"]
+
+
+def test_the_grey_is_visibly_different_from_the_row_beside_it():
+    """§Lessons 43: the won row shipped 2.7% off white and "the click did nothing" — the feature
+    worked perfectly and the result was imperceptible. Measured, not eyeballed."""
+    css = (Path(wd.__file__).parent / "static" / "dashboard.css").read_text(encoding="utf-8")
+    block = css[css.index("tr.row-closed td {"):]
+    bg = re.search(r"background:(#[0-9a-fA-F]{6})", block).group(1)
+
+    def lum(h):
+        parts = [int(h[i:i + 2], 16) / 255 for i in (1, 3, 5)]
+        conv = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in parts]
+        return 0.2126 * conv[0] + 0.7152 * conv[1] + 0.0722 * conv[2]
+
+    delta = (lum("#ffffff") - lum(bg)) / lum("#ffffff") * 100
+    assert delta >= 8, (
+        f"the closed-row grey is only {delta:.1f}% darker than the white row beside it — "
+        "that is the imperceptible-change bug again")
+
+
+def test_no_rule_dims_a_control_inside_a_closed_row():
+    """↩ Restore and the ⋯ menu live in the greyed area, and a dimmed control reads as disabled
+    (§Lessons 43, 88).
+
+    Asserted as "nothing dims them" rather than "this selector un-dims them". The first version
+    checked for `tr.row-closed + tr.job-foot .step-strip button { opacity:1 }` — and that class
+    DOES NOT EXIST (the markup renders `.strip`), so it was asserting the presence of a rule that
+    matched nothing, which is §Lessons 71's shape: an assertion that cannot fail. Found by reading
+    the live DOM instead of the stylesheet.
+    """
+    css = (Path(wd.__file__).parent / "static" / "dashboard.css").read_text(encoding="utf-8")
+    for block in re.finditer(r"([^{}]+)\{([^{}]*)\}", css):
+        selector, body = block.group(1).strip(), block.group(2)
+        if "row-closed" not in selector:
+            continue
+        if not re.search(r"button|details|\.rowmenu|\.strip\b", selector):
+            continue
+        dim = re.search(r"opacity\s*:\s*([\d.]+)", body)
+        assert not (dim and float(dim.group(1)) < 1), (
+            f"`{selector}` dims a control inside a closed row (opacity {dim.group(1)}). "
+            "The grey already says the row is closed; dimming the way out of it costs the click.")
+
+
+def test_the_selectors_the_closed_row_styles_are_real():
+    """Every class named in a `row-closed` rule must be one the frontend actually emits.
+
+    `.step-strip` and `.row-menu` were both invented — the real names are `.strip` and
+    `.rowmenu` — so two rules styled nothing at all. They were copied from the `row-won` block,
+    where the same two have been dead since they were written.
+    """
+    css = (Path(wd.__file__).parent / "static" / "dashboard.css").read_text(encoding="utf-8")
+    js = (Path(wd.__file__).parent / "static" / "dashboard.js").read_text(encoding="utf-8")
+    named = set()
+    for block in re.finditer(r"([^{}]+)\{[^{}]*\}", css):
+        if "row-closed" in block.group(1):
+            named.update(re.findall(r"\.([a-z][a-z0-9-]+)", block.group(1)))
+    named -= {"row-closed", "job-foot"}          # the row classes themselves, set here
+    for cls in sorted(named):
+        assert cls in js, f"`.{cls}` is styled on a closed row but the frontend never emits it"

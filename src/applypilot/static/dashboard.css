@@ -344,6 +344,29 @@
      on this exact feature: the first was a won row greyed 2.7% off white. Present in the DOM
      and imperceptible is the same as absent. */
   tr.row-won + tr.job-foot .step-strip button { opacity:1; }
+  /* Rejected, cancelled and ghost — greyed as one, because "not in play" is the same fact
+     whichever way it ended. The BADGE carries which (they have their own colours and their own
+     filter pills); the row carries only that it is done.
+
+     #e8eaed is ~18% darker than the white row beside it, chosen by measuring rather than by eye.
+     The won row shipped at 2.7% and the state change was reported as "it does nothing" because
+     it was imperceptible (§Lessons 43). A neutral rail rather than a coloured one: red would
+     read as an alarm on a row whose whole point is that nothing is owed. */
+  tr.row-closed td { background:#e8eaed; color:var(--muted); }
+  tr.row-closed td:first-child { box-shadow:inset 4px 0 0 #9aa3ab; }
+  tr.row-closed .job-title { color:var(--soft); }
+  tr.row-closed .desc-text, tr.row-closed .job-co, tr.row-closed .tag-chip { opacity:.6; }
+  tr.row-closed + tr.job-foot td { background:#e8eaed; box-shadow:inset 4px 0 0 #9aa3ab; }
+  /* NOTHING inside the foot is dimmed, deliberately. ↩ Restore and the ⋯ menu live there, and a
+     greyed-out control reads as disabled (§Lessons 43, 88) — the grey background already says
+     the row is closed, so dimming the way out of it buys nothing and costs the click.
+
+     The first version of this copied `.step-strip` from the `row-won` rules above. That class
+     does not exist: the markup renders `.strip`, and the menu is `.rowmenu`, not `.row-menu`.
+     Both `row-won` lines have therefore been dead since they were written — they dim nothing and
+     un-dim nothing, so they cancel out and nobody noticed. Checked against the live DOM, not the
+     stylesheet. */
+
   .won-chip {
     display:inline-block; font:700 11px/1.6 var(--font); padding:2px 10px; margin-left:6px;
     border-radius:999px; background:var(--green); color:#fff;

@@ -3140,7 +3140,7 @@ function onDescKey(e) {
 function jobRows(j, inGroup) {
   const co = inGroup ? ' co-member' : '';
   return `
-    <tr class="${j.interview_at ? 'row-won' : ''}${co}">
+    <tr class="${j.interview_at ? 'row-won' : (isClosed(j) ? 'row-closed' : '')}${co}">
       <td class="status-cell"><div class="status-head">${badge(j.status)}${j.interview_at ? ` <span class="won-chip" title="Scheduled ${esc(fmtDate(j.interview_at))}">${wonLabel(j).icon} ${esc(wonLabel(j).label.toLowerCase())}</span>` : ''}</div>${isClosed(j) && j.rejected_at ? `<div class="rejected-on">${esc(closedLabel(j.status))} ${fmtDate(j.rejected_at)}</div>` : (j.applied_at ? `<div class="applied-on">Applied ${fmtDate(j.applied_at)}</div>` : '')}</td>
       <td class="job-cell">${editable(j, 'title', j.title, 'job-title')}${inGroup ? '' : editable(j, 'company', j.company, 'job-co')}${matchedVia(j)}</td>
       <td class="desc">${descCell(j)}</td>

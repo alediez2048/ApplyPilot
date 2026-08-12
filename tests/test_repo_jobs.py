@@ -194,6 +194,8 @@ def test_sql_lives_only_in_the_data_layer():
         "networking/store.py", "networking/touches.py",      # per-table repositories
         "networking/messages.py",                            # the CRM-4 conversation store
         "networking/interactions_store.py",                  # the `interactions` table's own repository
+        "networking/transcripts.py",                         # the `transcripts` table's own repository
+        "migrations/m004_transcripts.py",                    # a migration IS DDL
         "networking/connections.py", "networking/backfill_touches.py",
         # --- not yet migrated (remaining ARCH-4 scope) ---
         "enrichment/detail.py", "apply/launcher.py", "view.py", "cli.py", "pipeline.py",

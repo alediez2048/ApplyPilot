@@ -1,6 +1,6 @@
 # GRAN-1 — Meeting transcripts on a contact
 
-**Size:** M (paste) · L (Granola API) · **Depends on:** nothing · **Status:** Designed 2026-08-12. Not built.
+**Size:** M (paste) · L (Granola API) · **Depends on:** nothing · **Status:** Phases 1 and 2 BUILT 2026-08-12. Phase 3 blocked on a Business plan.
 
 Asked for as: *"the ability to add transcripts of conference meetings, phone calls and others to
 any contact I interact with."*
@@ -98,7 +98,7 @@ invite looked similar, and only the first should ever be quoted back with confid
 
 ---
 
-## Phase 1 — Paste a transcript (ship this first, and possibly only this)
+## Phase 1 — Paste a transcript ✅ BUILT
 
 **Needs no plan, no install, no API key, no credential, nothing to revoke.** It is the same
 integration strategy that already works twice here: the sheet import is a paste because Google
@@ -121,7 +121,7 @@ LinkedIn from outside the browser was abandoned twice (§Lessons 3).
 
 **Cost:** ~1 day including tests. One migration, one endpoint, one panel section.
 
-## Phase 2 — What a transcript is FOR
+## Phase 2 — What a transcript is FOR ✅ BUILT
 
 Storing it is worthless on its own; this is the half that pays.
 
@@ -146,7 +146,7 @@ SUBJECT LINES 89% identical. Reading the prompt would have shown neither.
 
 **Cost:** ~1 day, most of it generating drafts and reading them.
 
-## Phase 3 — Granola API, IF the plan allows it
+## Phase 3 — Granola API, IF the plan allows it ⛔ NOT BUILT
 
 **Do not start this without confirming the plan.** One check settles it: Granola desktop →
 Settings → Connectors → API keys. If there is no key to create, this phase does not exist.
@@ -193,3 +193,40 @@ define a source that exists nowhere in the codebase, drive it end to end, assert
 3. **Should a transcript reach the DRAFTS at all**, or is it a record you read yourself? Phase 2
    is the expensive half and the one with the repetition and disclosure risks; Phase 1 stands
    alone without it.
+
+
+---
+
+## What shipped, 2026-08-12
+
+Phases 1 and 2, migration **004**. Schema version 3 → 4.
+
+| | |
+|---|---|
+| `domain/transcript.py` | pure — cleaning, the id, the excerpt fallback, `prompt_block` |
+| `networking/transcripts.py` | the two tables' repository |
+| `migrations/m004_transcripts.py` | `transcripts` + `transcript_contacts` |
+| `/api/contact/transcript`, `-body`, `-delete` | save, read one, detach |
+| `📝 Meetings` in the contact panel | list, paste box, read, remove |
+| `_met_block(contact)` in `outreach.py` | wired into **all six** drafters |
+| `interactions.MET` | weight 0, not engagement (§Lessons 35) |
+
+**Two bugs found by running it rather than reading it**, both the shapes this repo already
+records:
+
+- **The same paste stored twice.** The id was seeded with a `started_at` that defaulted to
+  `now()`, so the default moved between two calls and every paste was a new row. §Lessons 22 —
+  idempotence has to be tested by running it twice.
+- **`/api/status` went 74 → 90 statements.** The readiness probe ran a `SELECT` on every call
+  (§Lessons 11) and the attach was hooked inside the per-job loop. Now `schema_ready` plus ONE
+  query for the whole payload; measured live at 0.255s and 1.67 MB.
+
+**A survivor worth recording:** `test_it_is_bounded_so_ten_meetings_do_not_become_the_prompt`
+passed `limit=2` explicitly, so raising the DEFAULT to 999 left it green while every prompt would
+have carried every meeting ever stored. A test that supplies the value it is checking cannot see
+the value that ships.
+
+**Not proven:** Phase 2 has never been generated against the live model. Every test asserts the
+prompt *tells* the model not to quote the call, which is not the same as it obeying — §Lessons 42
+and the 2026-08-12 CTX measurement both say inspection cannot answer this. Do that before
+trusting it.

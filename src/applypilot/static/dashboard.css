@@ -572,6 +572,29 @@
   .chan span.add { border-style:dashed; color:var(--faint); }
   .chan span.add.on { border-style:dashed; background:var(--surface2); color:var(--soft); }
 
+  /* 📝 Meeting transcripts. A row per call: when, what, the summary, how long. */
+  .tr-row { display:grid; grid-template-columns:auto minmax(0,1fr) minmax(0,2fr) auto auto auto;
+    gap:8px; align-items:baseline; padding:5px 0; border-top:1px solid var(--line);
+    font-size:12px; }
+  .tr-wrap .cnote-body > .tr-row:first-of-type { border-top:none; }
+  .tr-when { color:var(--muted); font-variant-numeric:tabular-nums; white-space:nowrap; }
+  .tr-title { font-weight:650; }
+  .tr-sum { color:var(--soft); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .tr-len { color:var(--faint); font-size:11px; font-variant-numeric:tabular-nums; }
+  .tr-del { font-size:11px; }
+  /* The full text, opened deliberately. Bounded and scrollable: a 40 KB transcript rendered at
+     full height pushes everything below it off the page, which is the scroll problem SPACE-0
+     measured at 8,939px. */
+  .tr-full { max-height:320px; overflow:auto; margin:6px 0 8px; padding:8px 10px;
+    background:var(--surface2); border:1px solid var(--line); border-radius:6px;
+    font-size:11.5px; line-height:1.5; white-space:pre-wrap; font-family:inherit; }
+  .tr-form { display:flex; flex-direction:column; gap:6px; margin-top:8px; }
+  .tr-form input, .tr-form textarea { width:100%; font-size:12px; padding:5px 6px;
+    border:1px solid #d7e2ec; border-radius:5px; font-family:inherit; resize:vertical; }
+  .tr-msg:not(:empty) { font-size:11px; color:var(--red); background:var(--red-soft);
+    border-radius:5px; padding:5px 8px; }
+  @media (max-width:700px) { .tr-row { grid-template-columns:1fr; } }
+
   /* The pane that ADDS the missing identifier. */
   .draft.add-id .add-does { font-size:11.5px; color:var(--soft); line-height:1.5; margin:2px 0 7px; }
   .draft.add-id .c-add { width:100%; font-size:12px; padding:6px 7px; border:1px solid #d7e2ec;

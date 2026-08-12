@@ -13,7 +13,7 @@ campaign happens to be a job search** — see `docs/crm-prd.md` for where that g
 - **Entry point:** `applypilot = "applypilot.cli:app"` (Typer CLI)
 - **License:** AGPL-3.0-only · **Version:** 0.4.0 (`pyproject.toml`)
 - **Tests:** 2247 passing (`tests/`, 112 files) · ruff clean (line-length 120, py311) · ESLint clean
-- **Schema version:** 3 (`applypilot migrate --status`) · **Settings:** 48 declared in `settings.py`
+- **Schema version:** 4 (`applypilot migrate --status`) · **Settings:** 48 declared in `settings.py`
 - **Branch:** everything current lives on `context`, **61 commits ahead of `main`**, pushed to `origin/context`, working tree CLEAN as of 2026-08-12 (§Dev workflow). `main` has
   none of it. Check `git log --oneline -1` before believing anything here (§Dev workflow).
 
@@ -63,7 +63,7 @@ stops the moment a job hands over — see §Lessons 8, which cost two filled app
 | `repo/spaces.py` | The `spaces` / `identities` registries. `jobs_shaped_ids()` and `document_making_ids()` gate the pipeline stages and RAISE on an empty registry rather than returning `[]`. |
 | `scoring/resume_sections.py` | Parses the BASE résumé into its own sections. The base résumé is the template; tailoring rewrites content inside it. |
 | `settings.py` | **Every env var, one registry.** Types, defaults, validators, secret flags. Malformed values fail at startup naming the variable. `.env.example` is generated from it. |
-| `migrations/` | Numbered `mNNN_*.py` with `up(conn)`, run at startup after the additive column pass. **Migrations must be idempotent** — this app gets killed mid-operation. `001` = the ARCH-3 touches backfill, `002` = messages per contact, `003` = the `spaces` / `identities` registries. **A migration must never touch a column the additive dicts declare** — they race (§Spaces). |
+| `migrations/` | Numbered `mNNN_*.py` with `up(conn)`, run at startup after the additive column pass. **Migrations must be idempotent** — this app gets killed mid-operation. `001` = the ARCH-3 touches backfill, `002` = messages per contact, `003` = the `spaces` / `identities` registries, `004` = GRAN-1's transcripts. **A migration must never touch a column the additive dicts declare** — they race (§Spaces). |
 | `static/` | `index.html` · `dashboard.css` · `dashboard.js`. Served from `/static/…?v=<version>-<mtime>`; the page itself is `no-store`. One **classic** script, not a module — ~56 inline `onclick=` attributes resolve against the global object. |
 
 ### `discovery/` · `enrichment/` · `scoring/`
@@ -227,6 +227,7 @@ re-reading a thread you have already logged is a no-op rather than a duplicate.
 | `connections` | `networking/connections.py` | Imported LinkedIn CSV. |
 | `messages` | `networking/messages.py` | **CRM-4 conversation memory.** Headers plus ONE content column: `snippet`, capped at the WRITE (`SNIPPET_MAX` 200 auto / `PASTED_MAX` 2000 pasted) and **decoded** there too, since Gmail returns it HTML-escaped (§Lessons 90). *This row said "no body/snippet column exists, and a test asserts it" for two sessions — CRM-4b added one and the index was never corrected.* Keyed by `(message_id, contact_id)`, so re-syncing is a no-op. `rfc_message_id` is what lets a reply chain `References` across the whole thread. |
 | `interactions` | `networking/interactions_store.py` | Events with nowhere else to live: a detected booking, an operator-logged LinkedIn profile view. Derived facts are NOT copied here — they are computed at render time so they cannot drift. |
+| `transcripts` / `transcript_contacts` | `networking/transcripts.py` | **GRAN-1 meeting transcripts.** One row per MEETING plus a join, because a call has several attendees and storing 20-50KB per person duplicates the blob. NOT in `messages` — that is keyed on Gmail's own message id with `thread_id`/`rfc_message_id`, which a meeting has none of, and its `snippet` caps at 200/2000 (live mean 75). `matched_by` is provenance: `manual` (the operator chose) vs `email` (an exact address match) — §Lessons 34/86, a guess laundered into a stored fact. |
 | `job_events` | `database.py` | Per-job activity log. Append is best-effort, never raises. |
 
 | `ats_accounts` | `repo/accounts.py` | One row per **auth realm** — the thing one sign-in covers. `have_account` (about us) is deliberately separate from `kind` (about the site). |
@@ -2284,6 +2285,22 @@ company `"Jobs"` — the same substring bug class, inside the function written t
     back — §Lessons 85's `_infer_company("not-a-url") == "Uploaded"`, where a test held a bug in
     place more firmly than the code did. It is rewritten around the new decision rather than
     deleted, and it now asserts the pane contains an INPUT, not that the sentence is gone.
+
+99. **A test that supplies the value it is checking cannot see the value that ships.**
+    `prompt_block(rows, limit=2)` is what the test called, so raising the DEFAULT from 2 to 999
+    left it green — and every draft would then have carried every meeting ever stored with that
+    person. The parameter worked perfectly; the shipped behaviour was unguarded. Assert the
+    default, and pass an explicit value only to prove the override ALSO works.
+    Two more from the same build, both already written down and both walked into again:
+    **the same paste stored twice**, because the transcript id was seeded with a `started_at`
+    that defaulted to `now()` — so the default moved between two calls and idempotence was
+    impossible (§Lessons 22, found by calling `save` twice and reading the ids). And
+    **`/api/status` went 74 → 90 statements**: the readiness probe ran a `SELECT` on every call
+    (§Lessons 11) and the attach was hooked inside the per-job loop instead of once for the
+    payload. Six statements of headroom is thin enough that a feature can eat it in one commit.
+    And a mutation that hit the WRONG function reported as a survivor: the line
+    `if (!r.ok) { msg.textContent = ...; return; }` exists in two handlers, so `replace(old, new, 1)`
+    mutated the first one. A mutation harness must assert its target is UNIQUE, not merely present.
 
 Shipped in one session, in this order: **CRM-3a → CRM-1 → CRM-2 → CRM-3b → CRM-4a.**
 Tickets in `docs/tickets/CRM-*.md`; two of them had instructions that were factually wrong

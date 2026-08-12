@@ -1931,6 +1931,7 @@ def _status_payload(space: str = "") -> dict:
     stats_dict["lifetime_errors"] = lifetime["errors"] or 0
     command_status = _runner.status()
 
+    _attach_transcripts(jobs, conn)
     return {
         "stats": stats_dict,
         "jobs": jobs,
@@ -2312,6 +2313,30 @@ def _temperature(row, contacts: list, ladders: dict | None,
         return None
 
 
+def _attach_transcripts(jobs: list, conn) -> None:
+    """Hang each person's meetings on that person — ONE query for the WHOLE payload.
+
+    Deliberately not inside the per-job loop beside `_attach_interactions`. That is where it was
+    written first and it cost a statement per job on a path that re-renders every 2.5 seconds and
+    had six statements of headroom: 74 became 90 with eight jobs on screen. §Lessons 11 with a
+    different unit — the hot path is hot for everything, not just the thing you instrumented.
+
+    Summaries only; `body_len` is what lets the panel say how long a transcript is without
+    shipping 40 KB per contact on every refresh.
+    """
+    everyone = [c.get("id") for j in jobs for c in (j.get("contacts") or []) if c.get("id")]
+    by_contact = {}
+    if everyone:
+        try:
+            from applypilot.networking import transcripts as _tr
+            by_contact = _tr.for_contacts(everyone, conn)
+        except Exception:  # noqa: BLE001 — a missing table must not blank the dashboard
+            log.debug("Could not attach transcripts", exc_info=True)
+    for j in jobs:
+        for c in (j.get("contacts") or []):
+            c["transcripts"] = by_contact.get(c.get("id")) or []
+
+
 def _attach_interactions(job_url: str, contacts: list, conn) -> None:
     """Hang each person's engagement events on that person, in place.
 
@@ -2332,6 +2357,7 @@ def _attach_interactions(job_url: str, contacts: list, conn) -> None:
         contact["engaged"] = bool(person.get("engaged"))
 
 
+
 def _interactions_for_job(job_url: str, contacts: list, conn) -> dict:
     """Everything these people have DONE, as one timeline per person.
 
@@ -2346,6 +2372,79 @@ def _interactions_for_job(job_url: str, contacts: list, conn) -> dict:
     except Exception:  # noqa: BLE001
         log.debug("Could not build interactions", exc_info=True)
         return {"people": [], "total": 0, "engaged": 0}
+
+
+def _save_transcript(data: dict) -> dict:
+    """Attach a pasted meeting transcript to one or more contacts. GRAN-1 phase 1.
+
+    A paste, deliberately — the same integration strategy as the sheet import and the LinkedIn
+    thread reader, and for the same reason: it needs no plan, no install, no API key and nothing
+    to revoke. Granola's own API exists but is **Business/Enterprise only**, so the automated
+    route is gated on a subscription rather than on code.
+
+    **Attribution is the operator's choice, never an inference.** Granola diarizes by AUDIO
+    SOURCE (microphone vs system audio), not by speaker, so a transcript cannot say which of
+    three attendees said something. Anything claiming otherwise would be inventing it — and the
+    invention would be quoted back to the person it was invented about.
+    """
+    init_db()
+    conn = get_connection()
+    from applypilot.domain import transcript as _t
+    from applypilot.networking import transcripts as _tr
+
+    ids = [str(c) for c in (data.get("contact_ids") or []) if c]
+    if not ids:
+        return {"ok": False, "message": "pick at least one person this call was with"}
+    missing = [c for c in ids if not _store.contact_ref(c, conn)]
+    if missing:
+        return {"ok": False, "message": f"unknown contact {missing[0]}"}
+    try:
+        out = _tr.save(body=str(data.get("body") or ""), contact_ids=ids,
+                       title=str(data.get("title") or ""),
+                       started_at=str(data.get("started_at") or ""),
+                       summary=str(data.get("summary") or ""),
+                       source=str(data.get("source") or "paste"),
+                       matched_by=_tr.MANUAL, conn=conn)
+    except _t.TranscriptError as e:
+        return {"ok": False, "message": str(e)}
+
+    # Recorded on the timeline as OUR OWN action, weight 0. Attending a call is not evidence the
+    # other side is engaged — that depends on who asked for it, which nothing here knows
+    # (§Lessons 35, where a LinkedIn invite we sent made every contact read as engaged).
+    from applypilot.domain import interactions as _ix
+    from applypilot.networking import interactions_store as _ixs
+    for cid in ids:
+        row = _store.contact_ref(cid, conn)
+        _ixs.record(cid, _ix.MET, at=(data.get("started_at") or ""),
+                    detail=(str(data.get("title") or "") or "Meeting")[:200], source="manual",
+                    job_url=(row or {}).get("job_url", ""), conn=conn)
+        _store.log_contact_event(cid, "info", "Added a meeting transcript.", conn)
+
+    what = "Saved" if out["added"] else "Updated"
+    note = (" No summary supplied, so the opening of the call is standing in — paste Granola's "
+            "summary to improve what the drafts see." if out["summary_is_excerpt"] else "")
+    return {"ok": True, "id": out["id"],
+            "message": f"{what} the transcript for {len(ids)} "
+                       f"{'person' if len(ids) == 1 else 'people'}.{note}"}
+
+
+def _transcript_body(data: dict) -> dict:
+    """One meeting's full text, fetched deliberately — it never rides `/api/status`."""
+    init_db()
+    from applypilot.networking import transcripts as _tr
+    row = _tr.body_for(str(data.get("id") or ""), get_connection())
+    if not row:
+        return {"ok": False, "message": "transcript not found"}
+    return {"ok": True, **row}
+
+
+def _delete_transcript(data: dict) -> dict:
+    """Detach one person from a meeting; the meeting goes when nobody is left on it."""
+    init_db()
+    from applypilot.networking import transcripts as _tr
+    n = _tr.detach(str(data.get("id") or ""), str(data.get("contact_id") or ""),
+                   get_connection())
+    return {"ok": bool(n), "message": "removed" if n else "not attached to that contact"}
 
 
 def _log_interaction(data: dict) -> dict:
@@ -3864,6 +3963,15 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/contact/fetch-reply":
                 _json_response(self, _fetch_reply_text(data))
+                return
+            if path == "/api/contact/transcript":
+                _json_response(self, _save_transcript(data))
+                return
+            if path == "/api/contact/transcript-body":
+                _json_response(self, _transcript_body(data))
+                return
+            if path == "/api/contact/transcript-delete":
+                _json_response(self, _delete_transcript(data))
                 return
             if path == "/api/contact/interaction":
                 _json_response(self, _log_interaction(data))

@@ -2041,6 +2041,7 @@ function contactPanel(c) {
       </div>
       <div class="chan">${tab('email','✉ Email')}${tab('linkedin','🔗 LinkedIn')}${tab('phone','💬 Text' + (c.sms_sent_at ? ' ✓' : ''))}</div>
       ${body}
+      ${transcriptSection(c)}
       ${engagementLog(c)}
       <div class="crow-del"><button class="link-danger" onclick="deleteContact('${esc(c.id)}', decodeURIComponent('${encodeURIComponent(c.full_name || '')}'), ${!!c.emailed})">🗑 Not at this company — remove</button></div>
     </div>`;
@@ -2141,6 +2142,108 @@ async function logLinkedinMsg(cid, kind, btn) {
 // Our own actions are never engagement. `dm_status` is sent|manual, both meaning WE sent it,
 // and counting those is how the retired tab reported "3/3 engaged" when the honest number
 // across every job was 2 of 58 (§Lessons 35).
+// ── 📝 Meeting transcripts ──────────────────────────────────────────────────
+//
+// GRAN-1 phase 1. A PASTE, and that is the whole integration: Granola's own API is
+// Business/Enterprise only, so an automated route is gated on a subscription rather than on
+// code. The same reasoning that made the sheet import and the LinkedIn thread reader pastes —
+// no plan, no install, no API key, nothing to revoke.
+//
+// Beside the conversation rather than in a tab of its own. §Lessons 89: findable is not the same
+// as findable FROM WHERE THE WORK IS, and what was said on a call belongs with the person.
+
+//: Which contacts have the paste box open. Outside the DOM like PANEL_OPEN — #jobs is replaced
+//: wholesale every 2.5s.
+const TR_OPEN = new Set();
+function toggleTranscript(cid) {
+  if (TR_OPEN.has(cid)) TR_OPEN.delete(cid); else TR_OPEN.add(cid);
+  rerenderJobs(true);
+}
+
+function transcriptSection(c) {
+  const rows = c.transcripts || [];
+  const open = TR_OPEN.has(c.id);
+  const list = rows.map(t => `
+    <div class="tr-row">
+      <span class="tr-when">${esc(shortDate(t.started_at))}</span>
+      <span class="tr-title">${esc(t.title || 'Meeting')}</span>
+      <span class="tr-sum">${esc(t.summary || '')}</span>
+      <span class="tr-len">${Math.round((t.body_len || 0) / 1000)}k</span>
+      <button class="linklike" onclick="showTranscript('${esc(t.id)}', this)">Read</button>
+      <button class="link-danger tr-del"
+        onclick="dropTranscript('${esc(t.id)}','${esc(c.id)}')" title="Remove from this contact">✕</button>
+    </div>`).join('');
+  return `<details class="cnotes tr-wrap"${rows.length ? ' open' : ''}>
+      <summary>📝 Meetings${rows.length ? ` (${rows.length})` : ''}</summary>
+      <div class="cnote-body">
+        ${list || '<div class="hint" style="margin:0">No transcripts yet.</div>'}
+        ${open ? `
+          <div class="tr-form" data-cid="${esc(c.id)}">
+            <input class="tr-title-in" placeholder="Title — e.g. Intro call" />
+            <input class="tr-date" type="date" />
+            <textarea class="tr-sum-in" rows="2"
+              placeholder="Summary (paste Granola's). Leave empty and the opening of the call stands in."></textarea>
+            <textarea class="tr-body-in" rows="6"
+              placeholder="Paste the transcript here — open the note, select all, copy."></textarea>
+            <div class="dbtns">
+              <button class="primary" onclick="saveTranscript(this)">Save transcript</button>
+              <button class="ghost" onclick="toggleTranscript('${esc(c.id)}')">Cancel</button>
+            </div>
+            <div class="tr-msg"></div>
+            <div class="sms-hint">Attached to <b>${esc(c.full_name)}</b>. A call with several
+              people is stored once and attached to each of them separately.</div>
+          </div>`
+        : `<button class="secondary" onclick="toggleTranscript('${esc(c.id)}')">＋ Add a transcript</button>`}
+      </div>
+    </details>`;
+}
+
+async function saveTranscript(btn) {
+  const f = btn.closest('.tr-form');
+  const msg = f.querySelector('.tr-msg');
+  const body = fieldVal(f, '.tr-body-in');
+  if (!body.trim()) { msg.textContent = 'Paste the transcript first.'; return; }
+  btn.disabled = true;
+  const was = btn.textContent;
+  btn.textContent = 'Saving…';
+  const r = await post('/api/contact/transcript', {
+    contact_ids: [f.getAttribute('data-cid')],
+    body, title: fieldVal(f, '.tr-title-in'),
+    summary: fieldVal(f, '.tr-sum-in'),
+    started_at: fieldVal(f, '.tr-date') ? fieldVal(f, '.tr-date') + 'T12:00:00+00:00' : '',
+  });
+  btn.disabled = false;
+  btn.textContent = was;
+  // The paste is NEVER cleared on failure -- it may be the only copy the operator has in hand,
+  // and re-copying a long note out of another app is not a thing to make anyone do twice.
+  if (!r.ok) { msg.textContent = r.message || 'Could not save that.'; return; }
+  TR_OPEN.delete(f.getAttribute('data-cid'));
+  refresh();
+}
+
+//: The body is not on the wire — `/api/status` carries summaries and a LENGTH so the panel can
+//: say how long a call was without shipping 40 KB per contact every 2.5 seconds.
+async function showTranscript(id, btn) {
+  btn.disabled = true;
+  const r = await post('/api/contact/transcript-body', {id});
+  btn.disabled = false;
+  if (!r || r.ok === false) { alert((r && r.message) || 'Could not load it.'); return; }
+  const box = btn.closest('.tr-row');
+  const already = box.parentNode.querySelector('.tr-full');
+  if (already) already.remove();
+  const pre = document.createElement('pre');
+  pre.className = 'tr-full';
+  pre.textContent = r.body || '';
+  box.parentNode.insertBefore(pre, box.nextSibling);
+}
+
+async function dropTranscript(id, cid) {
+  if (!confirm('Remove this transcript from this contact?\n\nIf nobody else is attached to it, the transcript is deleted.')) return;
+  const r = await post('/api/contact/transcript-delete', {id, contact_id: cid});
+  if (!r.ok) alert(r.message || 'Could not remove it.');
+  refresh();
+}
+
 function engagementLog(c) {
   const rows = (c.interactions || []).map(r => `
     <div class="ix-row ${esc(r.kind)}">

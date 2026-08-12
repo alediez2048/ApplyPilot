@@ -1348,3 +1348,90 @@ def test_both_reachability_fields_are_offered(tmp_path):
       console.log(JSON.stringify(F.addContactForm(J)));""")
     for field in ("name", "email", "linkedin", "by"):
         assert f"'{field}'" in out, f"the {field} field is missing from the form"
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node not available")
+def test_the_transcript_section_renders_and_posts_what_was_typed(tmp_path):
+    """GRAN-1's panel, driven through `contactPanel` and then through `saveTranscript`.
+
+    Rendering a form proves nothing about what its button sends — §Lessons 94, where 36 passing
+    tests called the editor's functions directly, none drove the render, and the feature was
+    completely broken.
+    """
+    fresh = _contact(id="t1", full_name="Dana Okafor")
+    fresh["transcripts"] = []
+    had = _contact(id="t2", full_name="Sam Iyer")
+    had["transcripts"] = [{"id": "abc", "title": "Intro call", "started_at": "2026-08-01T10:00:00+00:00",
+                           "summary": "They are hiring two engineers.", "body_len": 41200,
+                           "source": "paste", "matched_by": "manual"}]
+
+    script = tmp_path / "tr.mjs"
+    script.write_text(
+        _STUBS
+        + f"const SRC = {json.dumps(_page_js())};\n"
+        + f"const CASES = {json.dumps({'fresh': fresh, 'had': had})};\n"
+        + _TABS_DRIVER
+    )
+    proc = subprocess.run(["node", str(script)], capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, f"node failed:\n{proc.stderr[:2000]}"
+    out = json.loads(proc.stdout.strip().splitlines()[-1])
+
+    # The section is on every contact, including one with nothing stored — that is where the
+    # first transcript gets added, so hiding it until one exists hides the way in (§Lessons 41).
+    assert "📝 Meetings" in out["fresh"]
+    assert "toggleTranscript" in out["fresh"], "no way to open the paste box"
+    assert "No transcripts yet" in out["fresh"]
+
+    # A stored one shows what it is, how long it is, and both ways out.
+    assert "Intro call" in out["had"]
+    assert "They are hiring two engineers" in out["had"]
+    assert "41k" in out["had"], "the length is not shown, so a 40 KB call looks like a note"
+    assert "showTranscript" in out["had"] and "dropTranscript" in out["had"]
+    assert "📝 Meetings (1)" in out["had"]
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node not available")
+def test_saving_a_transcript_keeps_the_paste_when_the_server_refuses(tmp_path):
+    """The pasted text may be the only copy in hand. Clearing the box on a failure makes somebody
+    re-copy a long note out of another app — the same reason the sheet import never clears."""
+    script = tmp_path / "trsave.mjs"
+    script.write_text(
+        _STUBS
+        + f"const SRC = {json.dumps(_page_js())};\n"
+        + """
+const fields = { '.tr-body-in': { value: 'Dana: we are hiring.' },
+                 '.tr-title-in': { value: 'Intro call' },
+                 '.tr-sum-in': { value: '' },
+                 '.tr-date': { value: '2026-09-01' },
+                 '.tr-msg': { textContent: '' } };
+const form = { getAttribute: () => 'c9', querySelector: (s) => fields[s] || null };
+const btn = { disabled:false, textContent:'Save transcript', closest: () => form };
+const seen = {};
+const F = (new Function(SRC + `
+  post = async (p, payload) => { globalThis.__seen.path = p; globalThis.__seen.body = payload;
+                                 return { ok: false, message: 'nothing pasted' }; };
+  refresh = () => { globalThis.__seen.refreshed = true; };
+  return { saveTranscript, TR_OPEN };`))();
+globalThis.__seen = seen;
+F.TR_OPEN.add('c9');
+await F.saveTranscript(btn);
+console.log(JSON.stringify({ path: seen.path, body: seen.body, msg: fields['.tr-msg'].textContent,
+  stillTyped: fields['.tr-body-in'].value, stillOpen: F.TR_OPEN.has('c9'),
+  refreshed: !!seen.refreshed, enabled: btn.disabled === false }));
+""", encoding="utf-8")
+    proc = subprocess.run(["node", str(script)], capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, f"node failed:\n{proc.stderr[:2000]}"
+    out = json.loads(proc.stdout.strip().splitlines()[-1])
+
+    assert out["path"] == "/api/contact/transcript"
+    assert out["body"]["contact_ids"] == ["c9"]
+    assert out["body"]["body"] == "Dana: we are hiring."
+    assert out["body"]["title"] == "Intro call"
+    # A date typed as a day must reach the server as a timestamp, or the row sorts wrong.
+    assert out["body"]["started_at"].startswith("2026-09-01T")
+
+    assert out["msg"] == "nothing pasted", "the refusal was not shown"
+    assert out["stillTyped"] == "Dana: we are hiring.", "the paste was thrown away on a failure"
+    assert out["stillOpen"] is True, "the form closed over a failed save"
+    assert out["refreshed"] is False, "refreshed after a failure, hiding the error"
+    assert out["enabled"] is True, "the button stayed disabled after a failure"

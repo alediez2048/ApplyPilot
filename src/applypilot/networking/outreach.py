@@ -10,6 +10,7 @@ import logging
 import os
 import re
 
+from applypilot.domain import transcript as _t_mod
 from applypilot.llm import get_client
 from applypilot.scoring.tailor import extract_json
 from applypilot.scoring.validator import sanitize_text
@@ -659,6 +660,31 @@ def _premise_block(space, brief: bool = False) -> str:
             "reads worse than no connection.\n\n")
 
 
+def _met_block(contact: dict, brief: bool = False) -> str:
+    """What was said on a call with THIS PERSON. GRAN-1 phase 2, and CTX's tier 4.
+
+    The strongest context there is: `noticed` is one line typed after glancing at a profile,
+    `job_context` is a paragraph about the company, and this is what they actually said. It sits
+    with the FACTS, early in the prompt — the voice goes last on every path.
+
+    **Summaries only.** A body runs 20–50 KB and §Lessons 40 is that the loudest block in a
+    prompt wins; dropped in whole it would swamp the posting, the premise and the voice at once.
+
+    Loaded here when the caller did not already carry them, because the dashboard enriches the
+    contact payload and the CLI does not. A read on a drafting path is affordable — that path
+    ends in an LLM call — and the alternative is a fifth parameter through six prompt builders
+    that four of them would forget (§Lessons 73).
+    """
+    rows = contact.get("transcripts")
+    if rows is None:
+        try:
+            from applypilot.networking import transcripts as _tr
+            rows = _tr.for_contact(contact.get("id") or "")
+        except Exception:  # noqa: BLE001 — never block a draft on the meetings table
+            rows = []
+    return _t_mod.prompt_block(rows, limit=1 if brief else 2)
+
+
 def _known_block(job: dict, brief: bool = False) -> str:
     """What the operator knows about THIS employer and role, against the scrape."""
     known = (job.get("job_context") or "").strip()[:1200]
@@ -1060,7 +1086,7 @@ def draft_email(profile: dict, job: dict, contact: dict, style: str = "", warm: 
                                     job.get("full_description"), noticed,
                                     sched_block, deck_block, style_block,
                                     tone_block, previous, space=space,
-                                    known_block=_known_block(job))
+                                    known_block=_known_block(job) + _met_block(contact))
         system = _PREMISE_SYSTEM
     elif voice == "pitch":
         # `full_description` is what the operator pasted about the company, and the offer comes
@@ -1072,7 +1098,8 @@ def draft_email(profile: dict, job: dict, contact: dict, style: str = "", warm: 
         system = _PITCH_SYSTEM
     else:
         user = _job_user_prompt(sender_bits, contact, relationship, role, company, jd,
-                                noticed, _known_block(job), _premise_block(space),
+                                noticed, _known_block(job) + _met_block(contact),
+                                _premise_block(space),
                                 sched_block, deck_block, warm_block,
                                 style_block, tone_block, previous,
                                 posting_ref_block=_posting_ref_block(posting_ref, contact),
@@ -1333,7 +1360,7 @@ def draft_followup(profile: dict, job: dict, contact: dict, touch: int = 1,
         # application writes, and it is one clause.
         + _posting_ref_block(posting_ref, contact, brief=True)
         + _must_mention_block(space, brief=True)
-        + _premise_block(space) + _known_block(job)
+        + _premise_block(space) + _known_block(job) + _met_block(contact)
         + (f"STYLE DIRECTION (follow closely):\n{directive}\n\n" if directive else "")
         + _voice_block(space)
         + "Write the follow-up. Return the JSON."
@@ -1574,6 +1601,7 @@ def draft_reply(profile: dict, job: dict, contact: dict, thread: list | None = N
         + "Everything above marked YOU is already in their inbox. Do not repeat any of it.\n\n"
         + (f"SCHEDULING LINK (use it only if they want to talk): {link}\n\n" if link else "")
         + _premise_block(space, brief=True) + _known_block(job, brief=True)
+        + _met_block(contact, brief=True)
         + (f"STYLE DIRECTION (follow closely, it overrides the default voice):\n{directive}\n\n"
            if directive else "")
         + _voice_block(space)
@@ -1647,6 +1675,7 @@ def draft_linkedin_followup(profile: dict, job: dict, contact: dict, touch: int 
            "penalises them in connection-request notes. Offer it in your own words; the full "
            "URL must appear verbatim.\n\n" if deck else "")
         + _premise_block(space, brief=True) + _known_block(job, brief=True)
+        + _met_block(contact, brief=True)
         + (f"STYLE DIRECTION (follow closely):\n{directive}\n\n" if directive else "")
         + _voice_block(space)
         + "Write the LinkedIn follow-up. Return the JSON."
@@ -1883,6 +1912,7 @@ def draft_sms(profile: dict, job: dict, contact: dict, touch: int = 0,
            if replied and not said else "")
         + f"\nTHIS MESSAGE: {intent}\n\n"
         + _premise_block(space, brief=True) + _known_block(job, brief=True)
+        + _met_block(contact, brief=True)
         + (f"STYLE DIRECTION (follow closely):\n{directive}\n\n" if directive else "")
         + _voice_block(space)
         + f"Write the text message. Under {_SMS_LIMIT} characters. Return the JSON."

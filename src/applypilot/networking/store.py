@@ -851,6 +851,14 @@ def delete_contact(contact_id: str, conn: sqlite3.Connection | None = None) -> b
             conn.execute(f"DELETE FROM {table} WHERE contact_id = ?", (contact_id,))
         except sqlite3.OperationalError:
             pass  # table not created yet on a fresh DB
+    # Transcripts are NOT in that loop, because a meeting is shared: several contacts point at
+    # one row, so a bare DELETE would leave the others attached to a transcript that no longer
+    # exists. `detach` removes this person and drops the meeting only once nobody is left.
+    try:
+        from applypilot.networking import transcripts as _tr
+        _tr.delete_for_contact(contact_id, conn)
+    except sqlite3.OperationalError:
+        pass  # tables not created yet on a fresh DB
     cur = conn.execute("DELETE FROM contacts WHERE id = ?", (contact_id,))
     conn.commit()
     return cur.rowcount == 1

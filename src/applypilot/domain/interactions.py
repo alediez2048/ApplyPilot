@@ -36,10 +36,17 @@ BOOKED, REPLIED, DECK, PROFILE_VIEW, CONNECTED, SENT, NOTE = (
 #: meaning WE sent an invite, so nothing recorded what they sent back.
 LINKEDIN_IN, LINKEDIN_OUT = "linkedin_in", "linkedin_out"
 
+#: A meeting the operator attended and stored a transcript of (GRAN-1). OUR OWN action, weight 0
+#: and NOT engagement — whether a call means the other side is interested depends on who asked
+#: for it, and nothing here knows that. §Lessons 35 is the LinkedIn invite that made three jobs
+#: read "3/3 engaged" before anybody had done a thing; a booking detected from cal.com is still
+#: the signal, because that one is them spending their own time.
+MET = "met"
+
 #: `LINKEDIN_IN` sits with REPLIED: someone writing to you on LinkedIn is the same act as
 #: someone writing to you by email, and it is the strongest signal short of booking time.
 WEIGHT = {BOOKED: 5, REPLIED: 4, LINKEDIN_IN: 4, PROFILE_VIEW: 3, DECK: 2,
-          CONNECTED: 0, SENT: 0, LINKEDIN_OUT: 0, NOTE: 0}
+          CONNECTED: 0, SENT: 0, LINKEDIN_OUT: 0, NOTE: 0, MET: 0}
 
 LABEL = {
     BOOKED: "Booked a call",
@@ -50,11 +57,12 @@ LABEL = {
     PROFILE_VIEW: "Viewed your LinkedIn profile",
     CONNECTED: "You sent a LinkedIn invite",
     SENT: "You emailed them",
+    MET: "You met — transcript stored",
     NOTE: "Note",
 }
 
 ICON = {BOOKED: "📅", REPLIED: "💬", LINKEDIN_IN: "🔗", LINKEDIN_OUT: "↪", DECK: "👁",
-        PROFILE_VIEW: "🔗", CONNECTED: "🤝", SENT: "✉", NOTE: "📝"}
+        PROFILE_VIEW: "🔗", CONNECTED: "🤝", SENT: "✉", NOTE: "📝", MET: "👥"}
 
 #: Signals that mean the PERSON did something. Our own actions are context, not engagement.
 #:

@@ -1174,6 +1174,12 @@ _CLOSED_COPY = {
     "cancelled": ("Marked cancelled — the posting was removed or the role was pulled. "
                   "Not a rejection: nothing was decided about you.",
                   "Closed as cancelled — kept out of your rejection rate"),
+    # A ghost job is not a cancelled one: cancelled means something real stopped, this means it
+    # never started. Kept apart because what a ghost measures is the SOURCE — a board or an
+    # employer worth avoiding — and folding it into `cancelled` throws that away.
+    "ghost": ("Marked a ghost job — the opening was never real. An evergreen requisition, a "
+              "repost, or a listing kept up for appearances. Not a rejection: nobody read it.",
+              "Closed as a ghost job — kept out of your rejection rate"),
 }
 
 
@@ -1744,8 +1750,17 @@ def _status_payload(space: str = "") -> dict:
         # too, so checking tailored_resume_path first used to clobber 'ready_to_submit' -> 'ready'.
         apply_status = row["apply_status"] or ""
         _APPLY_STATES = {"needs_human", "ready_to_submit", "in_progress", "dryrun"}
-        if apply_status == "rejected":
-            status = "rejected"          # rejected pile — top precedence (even over applied)
+        # EVERY closed state takes top precedence, read from the one tuple rather than named
+        # here. This line said `== "rejected"` and it was a LIVE bug the whole time `cancelled`
+        # existed: a cancelled job that had been applied to fell through to `applied`, and one
+        # that had not fell all the way to `imported`. So it never carried the ⊘ badge, never
+        # appeared under its own filter, and — because `isClosed()` reads this wire value —
+        # stayed in the 🔔 counter and kept being offered follow-ups. Exactly the failure
+        # `test_cancelled_job.py` was written to prevent, shipped anyway, because every test in
+        # that file checks the repo or greps the JS and none of them drives this function.
+        # §Lessons 47's shape: the WRITE was perfect and the read dropped it silently.
+        if apply_status in _jobs.CLOSED_STATUSES:
+            status = apply_status        # closed pile — top precedence (even over applied)
         elif row["applied_at"]:
             status = "applied"
         elif apply_status in _APPLY_STATES:

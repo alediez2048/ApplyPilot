@@ -736,6 +736,10 @@
      stopped existing. Same muted family, a cooler cast, so the pair scans as "closed, two
      reasons" rather than as a severity ladder. */
   .st-cancelled { background:#eaecef; color:#6b7280; border-color:#d3d7de; }
+  /* Distinguishable from Cancelled at a glance — the two sit next to each other in the
+     filter strip and a grey pill beside a grey pill is one pill (§Lessons 43: the won row
+     was greyed 2.7% against white and the click 'did nothing'). */
+  .st-ghost { background:#f1ecfb; color:#6d5296; border-color:#ddd2f0; }
   /* Application filter pills. */
   .job-filters { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:14px; }
   .filter-pill { background:var(--surface); border:1px solid var(--line2); border-radius:999px; padding:6px 14px;

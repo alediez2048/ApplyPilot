@@ -492,6 +492,7 @@ const STATUS_META = {
   applied:         { icon: '✓',  label: 'Applied',         cls: 'st-green' },
   rejected:        { icon: '✕',  label: 'Rejected',        cls: 'st-rejected' },
   cancelled:       { icon: '⊘',  label: 'Cancelled',       cls: 'st-cancelled' },
+  ghost:           { icon: '👻', label: 'Ghost job',       cls: 'st-ghost' },
 };
 
 // ── Job filter buckets: map the 12 granular statuses → a few meaningful stages you filter by. ──
@@ -511,15 +512,25 @@ const JOB_BUCKETS = {
   // rate describe something that never happened.
   cancelled: { label: 'Cancelled',   icon: '⊘',   statuses: ['cancelled'],
                tip: 'The posting went away — req pulled, frozen, or filled internally. Not a rejection' },
+  // Its own bucket rather than a flavour of Cancelled. Cancelled means something real STOPPED;
+  // this means it never started, and the two teach opposite things — one is bad luck, the other
+  // is a board or an employer worth avoiding next time.
+  ghost:     { label: 'Ghost jobs',   icon: '👻',  statuses: ['ghost'],
+               tip: 'The opening was never real — evergreen req, endless repost, listing kept up for show. Not a rejection' },
 };
-const JOB_FILTER_ORDER = ['all','needs_you','progress','applied','rejected','cancelled'];
+const JOB_FILTER_ORDER = ['all','needs_you','progress','applied','rejected','cancelled','ghost'];
 
 // A job that has LEFT the pipeline, for whichever reason. `status === 'rejected'` was checked in
 // eight separate places to mean this, and adding a second closed status by scattering a second
 // magic string beside each one is §Lessons 49 with a guarantee of missing one — the miss would
 // be silent, and it would show up as a cancelled job still being offered follow-ups.
-const CLOSED_STATUSES = ['rejected', 'cancelled'];
+const CLOSED_STATUSES = ['rejected', 'cancelled', 'ghost'];
 function isClosed(j) { return CLOSED_STATUSES.includes(j && j.status); }
+//: What a closed row says above its date. A ternary handled two states and would have
+//: printed 'Rejected' for a ghost job — the same silent miss the predicate above exists to
+//: prevent, one line lower.
+const CLOSED_LABELS = { rejected: 'Rejected', cancelled: 'Cancelled', ghost: 'Ghost job' };
+function closedLabel(status) { return CLOSED_LABELS[status] || 'Closed'; }
 let JOB_FILTER = 'all';  // client-side view state; persists across the 2.5s auto-refresh
 
 function jobInBucket(j, bucketKey) {
@@ -2645,7 +2656,7 @@ function jobRows(j, inGroup) {
   const co = inGroup ? ' co-member' : '';
   return `
     <tr class="${j.interview_at ? 'row-won' : ''}${co}">
-      <td class="status-cell"><div class="status-head">${badge(j.status)}${j.interview_at ? ` <span class="won-chip" title="Scheduled ${esc(fmtDate(j.interview_at))}">${wonLabel(j).icon} ${esc(wonLabel(j).label.toLowerCase())}</span>` : ''}</div>${isClosed(j) && j.rejected_at ? `<div class="rejected-on">${j.status === 'cancelled' ? 'Cancelled' : 'Rejected'} ${fmtDate(j.rejected_at)}</div>` : (j.applied_at ? `<div class="applied-on">Applied ${fmtDate(j.applied_at)}</div>` : '')}</td>
+      <td class="status-cell"><div class="status-head">${badge(j.status)}${j.interview_at ? ` <span class="won-chip" title="Scheduled ${esc(fmtDate(j.interview_at))}">${wonLabel(j).icon} ${esc(wonLabel(j).label.toLowerCase())}</span>` : ''}</div>${isClosed(j) && j.rejected_at ? `<div class="rejected-on">${esc(closedLabel(j.status))} ${fmtDate(j.rejected_at)}</div>` : (j.applied_at ? `<div class="applied-on">Applied ${fmtDate(j.applied_at)}</div>` : '')}</td>
       <td class="job-cell"><div class="job-title">${esc(j.title)}</div>${inGroup ? '' : `<div class="job-co">${esc(j.company)}</div>`}${matchedVia(j)}</td>
       <td class="desc"><div class="desc-text">${esc(j.description)}</div></td>
       <td class="tags-cell">${jobTags(j).map(t =>
@@ -2774,6 +2785,17 @@ async function markCancelled(url, btn) {
                'For a posting that was pulled, frozen, or filled internally. It stops every ' +
                'sequence like a rejection does, but it is NOT counted as one.')) return;
   return closeJob(url, btn, 'cancelled');
+}
+// A ghost job is not a cancelled one, and the confirm says which. Cancelled is bad luck;
+// this is a listing that was never going to be filled — an evergreen requisition, a role
+// reposted every few weeks, a board kept stocked to look like growth. Marking it records the
+// SOURCE, which is the only thing a ghost job can teach.
+async function markGhost(url, btn) {
+  if (!confirm('Close this as a ghost job?\n\n' +
+               'For a listing that was never a real opening — evergreen requisition, endless ' +
+               'repost, or kept up for appearances. It stops every sequence like a rejection ' +
+               'does, but it is NOT counted as one: nobody read it.')) return;
+  return closeJob(url, btn, 'ghost');
 }
 async function closeJob(url, btn, status) {
   btn.disabled = true;
@@ -3677,10 +3699,12 @@ function rowMenu(j) {
       ? `<button onclick="unmarkApplied(${u}, this)">↩ Not applied<span>Undo — keeps the agent's run history</span></button>`
       : `<button onclick="markApplied(${u}, this)">✅ Mark as applied<span>You applied to this yourself</span></button>`);
   }
-  // Two ways OUT that are not an interview, and they are different facts. "Rejected" is an
+  // Three ways OUT that are not an interview, and they are different facts. "Rejected" is an
   // outcome — somebody read it and said no. "Cancelled" is the posting ceasing to exist: a req
-  // pulled, a hiring freeze, a role filled internally. Filing the second under the first makes
-  // the rejection rate describe decisions nobody made.
+  // pulled, a hiring freeze, a role filled internally. "Ghost" is a listing that was never a
+  // real opening at all. Filing any of them under Rejected makes the rejection rate describe
+  // decisions nobody made, and folding ghost into cancelled loses the one thing it teaches:
+  // cancelled is bad luck, ghost is a source worth avoiding.
   //
   // Both are reversible from the same Restore, because `rejected_at` is one column meaning
   // "when it left" and undoing either is the same operation.
@@ -3689,6 +3713,7 @@ function rowMenu(j) {
   } else {
     items.push(`<button onclick="markRejected(${u}, this)">✕ Mark rejected<span>They said no — counts in your funnel</span></button>`);
     items.push(`<button onclick="markCancelled(${u}, this)">⊘ Job removed / cancelled<span>Posting pulled or frozen — not a rejection</span></button>`);
+    items.push(`<button onclick="markGhost(${u}, this)">👻 Ghost job<span>Never a real opening — evergreen or reposted forever</span></button>`);
   }
   items.push(`<button class="danger" onclick="deleteJob(${u}, ${label})">🗑 Delete<span>Remove this job and its contacts</span></button>`);
   return `<details class="rowmenu" ${ROWMENU_OPEN.has(j.url) ? 'open' : ''} ontoggle="onRowMenuToggle(this, ${u})">

@@ -35,6 +35,8 @@ function switchSpace(id) {
 //: The templates the + button offers, from /api/status. The server owns this list so the
 //: picker cannot describe a template differently from what the manifest actually builds.
 let SPACE_TEMPLATES = [];
+//: See renderSpaceNav.
+let SPACE_LIST = [];
 
 function renderSpaceNav(spaces, current, note) {
   const nav = document.getElementById('spaceNav');
@@ -45,6 +47,9 @@ function renderSpaceNav(spaces, current, note) {
   }
   if (!nav) return;
   const list = spaces || [];
+  //: The Space list the nav last rendered, so `renameSpace` can show the current name in its
+  //: prompt without re-fetching. Outside the DOM for the same reason PANEL_OPEN is.
+  SPACE_LIST = list;
   // Shown from ONE Space up, because the + lives here. The first version hid the whole strip
   // below two Spaces on the grounds that a lone tab is furniture — true of the tab, false of
   // the button beside it, and hiding both meant a fresh install had exactly one Space and
@@ -52,13 +57,32 @@ function renderSpaceNav(spaces, current, note) {
   // this one could not be found because it was inside something that hid itself.
   nav.hidden = list.length < 1;
   if (nav.hidden) { nav.innerHTML = ''; return; }
+  // Double-click renames. `repo.rename` has existed since SPACE-2 and was reachable from
+  // nothing at all — no endpoint, no button (§Lessons 31: a function nobody can invoke is not a
+  // feature). The NAME changes; the id never does, because it is hashed into every targets
+  // `contact_id` and `Space.with_()` refuses to change it.
   const tabs = list.length > 1 ? list.map(s => {
     const on = s.id === current;
     return `<button class="space-tab${on ? ' on' : ''}" ${on ? 'aria-current="page"' : ''}`
-         + ` onclick="switchSpace('${esc(s.id)}')">${esc(s.name)}</button>`;
-  }).join('') : `<span class="space-tab on solo">${esc((list[0] || {}).name || '')}</span>`;
+         + ` onclick="switchSpace('${esc(s.id)}')" ondblclick="renameSpace('${esc(s.id)}')"`
+         + ` title="Double-click to rename">${esc(s.name)}</button>`;
+  }).join('') : `<span class="space-tab on solo" ondblclick="renameSpace('${esc((list[0] || {}).id || '')}')"`
+    + ` title="Double-click to rename">${esc((list[0] || {}).name || '')}</span>`;
   nav.innerHTML = tabs
     + `<button class="space-add" onclick="toggleNewSpace()" title="New Space">＋</button>`;
+}
+
+//: Rename the Space on screen. A prompt() rather than an inline editor: the nav is rebuilt on
+//: every refresh from the server's list, and a tab is one word — the inline machinery the table
+//: rows use would cost more than it saves here.
+async function renameSpace(id) {
+  if (!id) return;
+  const list = (SPACE_LIST || []).find(s => s.id === id) || {};
+  const name = prompt('Rename this Space', list.name || '');
+  if (name === null) return;                       // cancelled
+  const r = await post('/api/space/rename', {space: id, name: name.trim()});
+  if (!r || r.ok === false) { alert((r && r.message) || 'Could not rename that.'); return; }
+  refresh();
 }
 
 // ---- Creating a Space (the + button) ----
@@ -2129,6 +2153,10 @@ function renderProgress(progress, stats) {
 function isEditingJobs() {
   const el = document.activeElement;
   if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') && el.closest('#jobs')) return true;
+  // EDIT-1. An open inline editor holds the refresh even before it takes focus. `startEdit`
+  // re-renders and THEN focuses, so for one tick `activeElement` is still the old node — and a
+  // refresh landing in that window would replace the input the operator just opened.
+  if (EDITING) return true;
   return hasSelectionInJobs();
 }
 
@@ -2649,6 +2677,107 @@ function renderJobsTable(allJobs, editing) {
   document.querySelectorAll('details.rowmenu[open]').forEach(positionRowMenu);
 }
 
+// ── Edit in place (EDIT-1) ──────────────────────────────────────────────────
+//
+// Double-click any of these to edit it. Global across templates on purpose: a row is a `jobs`
+// row whatever the Space's shape, so a job-search card and a company card from a sheet get the
+// same editor.
+//
+// The list is the SERVER's whitelist, not a second copy of it. `url` is absent from both and
+// that is the point — it is the anchor, `contact_id` hashes it, and editing it would orphan
+// every contact and ladder on the row without raising anything.
+const EDITABLE = ['title', 'company', 'location', 'salary'];
+
+//: Which cell is open right now, as `{url, field}`. Outside the DOM like PANEL_OPEN, because
+//: the 2.5s refresh replaces #jobs wholesale and anything stored in a node is destroyed.
+//:
+//: An OBJECT, never a joined string that gets split back apart on commit. A url may contain a
+//: space, so a split on one would hand the server a truncated anchor plus a "field" that was
+//: really the tail of a path — and `set_fields` refuses an unknown field, so the operator's
+//: edit would vanish citing a field they never touched.
+let EDITING = null;
+function editingIs(url, field) {
+  return !!EDITING && EDITING.url === url && EDITING.field === field;
+}
+
+//: A span you can double-click, or the input once you have. Rendered by `jobRows`, so it comes
+//: back correctly after every refresh.
+function editable(j, field, value, cls) {
+  // Refuses a field the server would refuse. Two lists that can drift is how a control ends up
+  // offering an edit that always fails — better to render nothing than a box that cannot save.
+  if (!EDITABLE.includes(field)) return esc(String(value == null ? '' : value));
+  const v = String(value == null ? '' : value);
+  if (editingIs(j.url, field)) {
+    // The url and the field ride as SEPARATE attributes. The input is a real <input>, so the
+    // existing focus guard holds the refresh while it is open.
+    return `<input class="cell-edit ${cls}" data-edit="1"
+      data-url="${esc(j.url)}" data-field="${esc(field)}" value="${esc(v)}"
+      onkeydown="onEditKey(event)" onblur="commitEdit(this)">`;
+  }
+  const empty = v.trim() === '';
+  // Same encoding the row menu uses for a url in a handler. A raw url inside an attribute
+  // breaks on the first quote or backslash in it.
+  const u = `decodeURIComponent('${encodeURIComponent(j.url)}')`;
+  return `<div class="${cls} editable${empty ? ' is-empty' : ''}" ondblclick="startEdit(${u}, '${field}')"
+    title="Double-click to edit">${empty ? esc(PLACEHOLDER[field] || 'Add') : esc(v)}</div>`;
+}
+
+//: What an empty field offers instead of nothing. A blank cell is not double-clickable in any
+//: way the operator can see — §Lessons 43, where the control existed and was imperceptible.
+const PLACEHOLDER = { title: 'Untitled — double-click', company: 'Add company',
+                      location: 'Add location', salary: 'Add salary' };
+
+//: An editable row in the Job tab's facts table. That table is where `location` and `salary`
+//: get edited at all: they are otherwise only rendered as tag CHIPS, and both are empty on
+//: every row in this database — so there is no chip to double-click, and the two tag types
+//: have never appeared once. `row()` also hides a fact with no value, which would make an empty
+//: field unreachable by construction.
+function erow(j, label, field, value) {
+  return `<div class="jd-row"><span class="jd-k">${esc(label)}</span>` +
+         `<span class="jd-v">${editable(j, field, value, 'jd-edit')}</span></div>`;
+}
+
+function startEdit(url, field) {
+  EDITING = {url, field};
+  rerenderJobs();
+  // Only one editor is ever open, so the freshly rendered input is the only `[data-edit]` on
+  // the page — no selector has to be built out of the url, which is what the joined key needed.
+  const el = document.querySelector('[data-edit]');
+  if (el) { el.focus(); el.select(); }
+}
+
+function onEditKey(e) {
+  if (e.key === 'Enter') { e.preventDefault(); e.target.blur(); }        // blur commits
+  else if (e.key === 'Escape') { EDITING = null; rerenderJobs(); }       // and discards
+}
+
+async function commitEdit(el) {
+  const url = el.getAttribute('data-url') || '';
+  const field = el.getAttribute('data-field') || '';
+  const value = el.value;
+  EDITING = null;
+  if (!url || !field) { rerenderJobs(); return; }
+  // Write it into LAST_JOBS before the request. `rerenderJobs()` renders from that, so without
+  // this the cell snaps back to its old value for up to 2.5s and the edit reads as rejected —
+  // §Lessons 21, and the same fix the 💡 flag needed.
+  const job = (LAST_JOBS || []).find(x => x.url === url);
+  const before = job ? job[field] : undefined;
+  if (job) job[field] = value;
+  rerenderJobs();
+  const r = await post('/api/job/edit', {url, [field]: value});
+  if (!r || r.ok === false) {
+    if (job && before !== undefined) job[field] = before;   // put it back; nothing was stored
+    rerenderJobs();
+    alert((r && r.message) || 'Could not save that.');
+    return;
+  }
+  // Adopt what the SERVER stored rather than what was typed: it caps the length, and a silently
+  // truncated value that the screen still shows in full is a disagreement the operator cannot
+  // see (§Lessons 90's shape — a bound that does not say it is a bound).
+  if (job && r.values && r.values[field] !== undefined) job[field] = r.values[field];
+  rerenderJobs();
+}
+
 //: One job's two rows — the row itself and its `job-foot`. Extracted from `renderJobsTable`
 //: unchanged so the grouping above has something to interleave headers with; `inGroup` only
 //: adds the indent rail.
@@ -2657,7 +2786,7 @@ function jobRows(j, inGroup) {
   return `
     <tr class="${j.interview_at ? 'row-won' : ''}${co}">
       <td class="status-cell"><div class="status-head">${badge(j.status)}${j.interview_at ? ` <span class="won-chip" title="Scheduled ${esc(fmtDate(j.interview_at))}">${wonLabel(j).icon} ${esc(wonLabel(j).label.toLowerCase())}</span>` : ''}</div>${isClosed(j) && j.rejected_at ? `<div class="rejected-on">${esc(closedLabel(j.status))} ${fmtDate(j.rejected_at)}</div>` : (j.applied_at ? `<div class="applied-on">Applied ${fmtDate(j.applied_at)}</div>` : '')}</td>
-      <td class="job-cell"><div class="job-title">${esc(j.title)}</div>${inGroup ? '' : `<div class="job-co">${esc(j.company)}</div>`}${matchedVia(j)}</td>
+      <td class="job-cell">${editable(j, 'title', j.title, 'job-title')}${inGroup ? '' : editable(j, 'company', j.company, 'job-co')}${matchedVia(j)}</td>
       <td class="desc"><div class="desc-text">${esc(j.description)}</div></td>
       <td class="tags-cell">${jobTags(j).map(t =>
         `<button class="tag-chip${TAG_FILTER.has(t.k) ? ' on' : ''}" onclick="event.stopPropagation();toggleTag(${tagArg(t.k)})" title="Filter by ${esc(t.value)}">${esc(t.label)}</button>`
@@ -3139,10 +3268,10 @@ function jobDetail(j) {
   return `<div class="jd">
     ${links}
     <div class="jd-facts">
-      ${row('Title', esc(j.title))}
-      ${row('Company', esc(j.company || j.contact_company))}
-      ${row('Location', esc(j.location))}
-      ${row('Salary', esc(j.salary))}
+      ${erow(j, 'Title', 'title', j.title)}
+      ${erow(j, 'Company', 'company', j.company || j.contact_company)}
+      ${erow(j, 'Location', 'location', j.location)}
+      ${erow(j, 'Salary', 'salary', j.salary)}
       ${row('Fit', score)}
       ${row('Status', esc(j.status) + (j.applied_at ? ` · applied ${esc(fmtDate(j.applied_at))}` : ''))}
       ${row('Attempts', j.apply_attempts ? String(j.apply_attempts) : '')}

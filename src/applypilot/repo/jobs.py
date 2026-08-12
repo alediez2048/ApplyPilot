@@ -604,6 +604,78 @@ def set_context(url: str, context: str | None = None, ask: str | None = None,
     return {"context": (row["job_context"] or ""), "ask": (row["job_ask"] or "")} if row else {}
 
 
+#: The fields the operator may edit on a row, and the LENGTH each is capped at.
+#:
+#: A whitelist rather than "everything not on a blocklist", because the dangerous columns are
+#: dangerous in ways that are silent:
+#:
+#:   url            the ANCHOR. `store.contact_id()` hashes it, so changing it orphans every
+#:                  contact, ladder and message on the row and nothing raises.
+#:   space_id       moving a row between Spaces is a different feature with its own questions.
+#:   fit_score      the model's judgement. Editable, it stops being a signal and starts being
+#:                  a note — and `queue_for_*` and the score filter both read it as a signal.
+#:   applied_at     the state machine. `apply_status`, `rejected_at` and `interview_at` are
+#:   apply_status   driven by the row menu, which also writes the events that explain them.
+#:
+#: `company` IS editable, and that is the subtle one. On a targets card the anchor was BUILT from
+#: the name (`target:<space>:<slug>`), so this changes what the row is CALLED and deliberately
+#: not what it is keyed on. The two can disagree afterwards, and that is the correct trade: the
+#: alternative is re-keying, which is the orphaning failure above.
+EDITABLE_FIELDS = {
+    "title": 200,
+    "company": 120,
+    "location": 120,
+    "salary": 80,
+    "full_description": 20000,
+}
+
+
+def set_fields(url: str, fields: dict, conn: sqlite3.Connection | None = None) -> dict:
+    """Edit the descriptive fields on a row. Returns {field: stored value} for what changed.
+
+    `None` means "this caller did not show that field"; `""` means the operator CLEARED it. Those
+    are different intents and conflating them is §Lessons 75, which shipped as a one-directional
+    guard whose untested half dropped the operator's typed paragraph.
+
+    An unknown key RAISES rather than being ignored. A silently dropped field is an edit the
+    operator watched succeed and which never happened — the worst outcome available here, and
+    the reason this is a whitelist with a loud edge rather than a filter.
+    """
+    unknown = sorted(set(fields) - set(EDITABLE_FIELDS))
+    if unknown:
+        raise ValueError(
+            f"not editable: {', '.join(unknown)}. Editable fields are "
+            f"{', '.join(sorted(EDITABLE_FIELDS))}.")
+
+    sets, args, wrote = [], [], {}
+    for name, cap in EDITABLE_FIELDS.items():
+        value = fields.get(name)
+        if value is None:
+            continue
+        text = str(value).strip()[:cap]
+        sets.append(f"{name} = ?")
+        args.append(text)
+        wrote[name] = text
+    if not sets:
+        return {}
+
+    c = _c(conn)
+    if not c.execute("SELECT 1 FROM jobs WHERE url = ?", (url,)).fetchone():
+        raise ValueError(f"no such row: {url!r}")
+    # A description arriving here is TYPED, so the row is no longer owed a scrape and must not
+    # keep rendering as one that failed (§Lessons 44). `COALESCE` keeps an original scrape time
+    # when there was one: the page really was visited, and overwriting it would claim the typing
+    # was a fetch.
+    if "full_description" in wrote:
+        sets.append("detail_error = NULL")
+        sets.append("detail_scraped_at = COALESCE(detail_scraped_at, ?)")
+        args.append(_now())
+    args.append(url)
+    c.execute(f"UPDATE jobs SET {', '.join(sets)} WHERE url = ?", args)
+    c.commit()
+    return wrote
+
+
 def mark_interview(url: str, conn: sqlite3.Connection | None = None) -> str:
     """Record that an interview is scheduled. Returns the timestamp.
 

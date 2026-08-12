@@ -739,6 +739,17 @@
   /* Distinguishable from Cancelled at a glance — the two sit next to each other in the
      filter strip and a grey pill beside a grey pill is one pill (§Lessons 43: the won row
      was greyed 2.7% against white and the click 'did nothing'). */
+  /* EDIT-1. A double-clickable field has to LOOK like one before it is hovered, or nobody
+     discovers it — §Lessons 43, eight occurrences, every one reported as "it does nothing".
+     A dotted underline on hover is the lightest thing that reads as editable without turning
+     the table into a form. */
+  .editable { cursor: text; border-radius: 3px; }
+  .editable:hover { background: #f3f4f6; box-shadow: inset 0 -1px 0 #cbd5e1; }
+  .editable.is-empty { color: #9aa1ab; font-style: italic; font-weight: 400; }
+  .cell-edit { font: inherit; color: inherit; width: 100%; box-sizing: border-box;
+               padding: 1px 4px; border: 1px solid #7aa7ff; border-radius: 3px;
+               background: #fff; outline: none; }
+  .jd-edit { min-width: 60px; display: inline-block; }
   .st-ghost { background:#f1ecfb; color:#6d5296; border-color:#ddd2f0; }
   /* Application filter pills. */
   .job-filters { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:14px; }

@@ -2489,6 +2489,59 @@ def _attach_posting(data: dict) -> dict:
             "message": "Posting attached to this company."}
 
 
+def _edit_job(data: dict) -> dict:
+    """Edit the descriptive fields on a row (EDIT-1). Global across templates.
+
+    The row is a `jobs` row whatever the Space's shape, so a job-search card and a company card
+    from a sheet get the same editor. Only keys the browser actually sent are written; the repo
+    treats an absent key as "not shown" and an empty string as "cleared".
+    """
+    init_db()
+    conn = get_connection()
+    url = str((data or {}).get("url") or "").strip()
+    if not url:
+        return {"ok": False, "message": "url required"}
+    fields = {k: v for k, v in (data or {}).items() if k in _jobs.EDITABLE_FIELDS}
+    if not fields:
+        return {"ok": False, "message": "nothing to save"}
+    try:
+        wrote = _jobs.set_fields(url, fields, conn)
+    except ValueError as e:
+        return {"ok": False, "message": str(e)}
+    if not wrote:
+        return {"ok": False, "message": "nothing to save"}
+    from applypilot.database import log_event
+    log_event(url, "system", "ok", "Edited: " + ", ".join(sorted(wrote)), conn)
+    return {"ok": True, "changed": sorted(wrote), "values": wrote,
+            "message": "Saved."}
+
+
+def _rename_space(data: dict) -> dict:
+    """Rename the Space on screen. `repo.rename` has existed since SPACE-2 and was reachable
+    from nothing at all — no endpoint, no button (§Lessons 31).
+
+    The NAME changes; the id never does. It is hashed into every targets `contact_id`, which is
+    why `Space.with_()` refuses it and why this does not take one.
+    """
+    init_db()
+    conn = get_connection()
+    # EXACT, not `_resolve_space`. That helper falls back to the first Space for an unknown id
+    # and says so, which is right for a READ — an empty table for a `?space=` typo is
+    # indistinguishable from a Space with nothing in it — and right for filing a new row, which
+    # has to land somewhere reachable. It is wrong here: this modifies an object the operator
+    # NAMED, so a stale tab or a typo would quietly retitle Job Search instead. §Lessons 70's
+    # shape, with a read-side helper on a write path.
+    requested = str((data or {}).get("space") or "").strip()
+    if not requested or _spaces.get_space(requested, conn) is None:
+        return {"ok": False, "message": f"No Space called “{requested}”."}
+    space_id = requested
+    name = str((data or {}).get("name") or "").strip()[:60]
+    if not name:
+        return {"ok": False, "message": "A Space needs a name."}
+    _spaces.rename(space_id, name, conn)
+    return {"ok": True, "id": space_id, "name": name, "message": f"Renamed to “{name}”."}
+
+
 def _create_space(data: dict) -> dict:
     """Create a Space from a template (the + button).
 
@@ -3826,6 +3879,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/attach-posting":
                 _json_response(self, _attach_posting(data))
+                return
+            if path == "/api/job/edit":
+                _json_response(self, _edit_job(data))
+                return
+            if path == "/api/space/rename":
+                _json_response(self, _rename_space(data))
                 return
             if path == "/api/prepare":
                 min_score = int(data.get("min_score") or 1)

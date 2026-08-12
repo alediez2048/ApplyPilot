@@ -485,8 +485,8 @@ corrupt reply detection. `dm_status` only ever recorded what WE sent. So both di
 - **One tabbed panel**: People · Follow-ups · Materials · Activity. `PANEL_OPEN` / `TAB_OPEN`
   survive the 2.5s refresh.
 - **Contacts collapse to one line** with channel pills (`✉ sent · 🔗 connected · ↻ due`).
-  Opening one shows channels as tabs: **✉ Email · 🔗 LinkedIn · 💬 Text · 📅 Invite**. **All are
-  always offered, and an empty one is where its identifier gets ENTERED** (2026-08-12) — the rule Text
+  Opening one shows channels as tabs: **✉ Email · 🔗 LinkedIn · 💬 Text**. **All three are always
+  offered, and an empty one is where its identifier gets ENTERED** (2026-08-12) — the rule Text
   had always followed alone, which made the other two §Lessons 49. An empty tab is marked `＋`
   and dashed, so which identifiers are missing is legible from the strip without opening all
   three; opening one renders the INPUT, never a sentence about the absence (§Lessons 41). With no
@@ -506,37 +506,6 @@ corrupt reply detection. `dm_status` only ever recorded what WE sent. So both di
   LinkedIn handle becomes a URL (it is what you have in your hand after copying the address bar);
   anything with a dot, a slash or a space is left exactly as typed, because a sheet legitimately
   carries a company page or a search link and rewriting one invents a profile.
-
-**📅 Invite — a real calendar invitation, on the EMAIL address** (2026-08-12, `domain/invite.py`).
-An `.ics` with `METHOD:REQUEST`, sent as a mail attachment, so it costs **no new OAuth scope**:
-creating the event through Google would need `calendar.events`, a new consent screen, and one
-more thing on a token the apply agent is deliberately kept away from. Every client already
-renders `text/calendar; method=REQUEST` as RSVP buttons. Same reasoning as pasting a spreadsheet
-instead of integrating Sheets.
-**No draft step, unlike every other channel** — the content of an invitation IS its time, so
-there is nothing for a model to write and nothing to review a day later.
-**Stated rather than discovered: it does not land on the SENDER's calendar.** We send an
-invitation, we do not create an event, so `organiser_link()` returns an "add it to your own
-calendar" URL and the pane shows it after sending. Without that the meeting is in their calendar
-and nowhere in yours.
-**Re-sending MOVES the meeting.** The UID is stable per contact and `SEQUENCE` counts prior
-invites out of `interactions` — same UID, higher sequence is how iCalendar says "this replaces
-what I sent you". Left at 0 the recipient's client may ignore the change, which looks exactly
-like a successful re-send. Costs no new column.
-Guards: past times, a year typo (`> 365 days`), an implausible duration, a naive datetime and an
-address with no `@` are all refused. The **browser** supplies the timezone — assuming the
-server's holds until the dashboard is opened from a laptop elsewhere, at which point every invite
-is hours out and nothing fails. The daily send limit applies; **the per-company cap deliberately
-does not** — that cap counts cold outreach, and an invitation is aimed at one person who has
-usually already replied.
-An invite WE sent is `interactions.INVITED`, **weight 0 and not engagement** — §Lessons 35 again:
-proposing a time is our act, and only a detected cal.com `BOOKED` is theirs. A contact who has
-not replied gets an advisory, never a refusal (§Lessons 69). Two format rules carry the whole
-file and both fail QUIETLY: lines fold at **75 octets** (not characters — an accent is two
-bytes), and TEXT escapes `\`, `;`, `,` and newlines, so "Acme, Inc." truncates at the comma
-without one. The sender's name comes from `preferred_name` over the first given name — caught by
-generating one against the live profile, which produced *"Intro call: Jorge and Dana Okafor"* for
-somebody whose every email is signed Alejandro.
 - `⋯` row menu holds destructive actions (rejected, delete). It is anchored `right:0` and
   flips up near the bottom: `.table-wrap` clips with `overflow:hidden` to round the table's
   corners, so an absolutely-positioned menu is CUT, never scrolled to (it rendered as "✕ Ma",
@@ -2217,7 +2186,7 @@ company `"Jobs"` — the same substring bug class, inside the function written t
     HEADER row included.
     The measurement that mattered came before any of it: 106 cards, **zero contacts**. The import
     had never run. "Find contacts is not working" was Apollo being asked for a company called
-    `Tracy Stdic\tRidgeline\t…` and truthfully saying no such company exists.
+    `Tracy Stdic\tZapier\t…` and truthfully saying no such company exists.
     And the operator's data was still there — one row per junk card's `company` column.
     Reconstructed, parsed clean (45 companies, 105 people, 0 rejects), imported properly, junk
     deleted. **Check whether the bad rows still CONTAIN the input before asking anyone to redo
@@ -2315,21 +2284,6 @@ company `"Jobs"` — the same substring bug class, inside the function written t
     back — §Lessons 85's `_infer_company("not-a-url") == "Uploaded"`, where a test held a bug in
     place more firmly than the code did. It is rewritten around the new decision rather than
     deleted, and it now asserts the pane contains an INPUT, not that the sentence is gone.
-
-100. **The invitation carried a name the recipient had never seen.** `default_summary` took the
-    first word of `profile.full_name` — "Jorge Alejandro Diez" — and wrote *"Intro call: Jorge and
-    Dana Okafor"* into a calendar entry, for somebody whose every previous email is signed
-    Alejandro. `preferred_name` was sitting in the same dict, unread.
-    Nothing would ever have failed. A calendar entry is read weeks later with no context around
-    it, so the cost is the recipient not placing the meeting — invisible from this side, and
-    invisible to every test, because a test asserting "the title contains the sender's name" is
-    true of the wrong name too. It was found by GENERATING one against the live profile and
-    reading it, which is the same move that answered the CTX question in twenty minutes after
-    inspection had left it open for weeks.
-    The related one worth keeping: **`text/calendar` fails quietly in three separate ways** —
-    `METHOD:PUBLISH` renders with no RSVP buttons, an unfolded line over 75 OCTETS is accepted by
-    Gmail and rejected by stricter parsers, and an unescaped comma in "Acme, Inc." is a value
-    separator that truncates the property. All three arrive, all three look sent.
 
 Shipped in one session, in this order: **CRM-3a → CRM-1 → CRM-2 → CRM-3b → CRM-4a.**
 Tickets in `docs/tickets/CRM-*.md`; two of them had instructions that were factually wrong

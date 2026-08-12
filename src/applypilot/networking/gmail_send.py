@@ -302,28 +302,10 @@ def attach_pdfs(msg: EmailMessage, attachments: list[tuple[str, str]] | None) ->
                            subtype="pdf", filename=filename)
 
 
-def attach_ics(msg: EmailMessage, ics: str | None) -> None:
-    """Attach a calendar invitation as `text/calendar; method=REQUEST`.
-
-    The `method` PARAMETER is what makes a mail client render RSVP buttons instead of a file to
-    download — the same bytes without it are an attachment nobody opens. Sent as `invite.ics`
-    because clients that do not understand the part still show something recognisable.
-
-    `add_attachment` with maintype/subtype base64-encodes the payload, which is correct here:
-    the format mandates CRLF line endings, and quoted-printable or 8bit transports rewrite line
-    endings in ways that corrupt folded lines.
-    """
-    if not (ics or "").strip():
-        return
-    msg.add_attachment(ics.encode("utf-8"), maintype="text", subtype="calendar",
-                       filename="invite.ics", params={"method": "REQUEST",
-                                                      "charset": "UTF-8"})
-
-
 def _smtp_send(to_addr: str, subject: str, body: str, message_id: str,
                attachments: list[tuple[str, str]] | None = None,
                in_reply_to: str | None = None, cc: list[str] | None = None,
-               references: str | None = None, ics: str | None = None) -> None:
+               references: str | None = None) -> None:
     """Send one email over SMTP_SSL. `body` is sent verbatim.
 
     `send_message` derives the envelope from To/Cc, so a Cc'd person really is delivered to.
@@ -347,7 +329,6 @@ def _smtp_send(to_addr: str, subject: str, body: str, message_id: str,
         from applypilot.networking.gmail_oauth import _body_to_html
         msg.add_alternative(f"<div>{_body_to_html(body)}</div><br>{sig}", subtype="html")
     attach_pdfs(msg, attachments)
-    attach_ics(msg, ics)
 
     with smtplib.SMTP_SSL(_SMTP_HOST, _SMTP_PORT, timeout=30) as smtp:
         smtp.login(addr, pw)
@@ -568,142 +549,6 @@ def send_reply(contact_id: str, body: str, subject: str = "", cc: list[str] | No
     also = f" (cc {', '.join(cc_list)})" if cc_list else ""
     return {"ok": True, "message": f"replied to {to_addr}{also}",
             "to": to_addr, "cc": cc_list}
-
-
-#: An invitation WE sent. Beside `CONNECTED` and `SENT` in `domain/interactions.py`, weight 0:
-#: proposing a time is our own action, and counting it as engagement is the bug that made three
-#: jobs read "3/3 engaged" before anyone had done anything (§Lessons 35). Them ACCEPTING is a
-#: different event and arrives, if at all, as a detected booking.
-INVITED_KIND = "invited"
-
-
-def _profile_name() -> str:
-    """The sender's name as the RECIPIENT knows it, for the ORGANIZER line.
-
-    `preferred_name` wins over the first given name — see `invite.sender_name`, which exists
-    because the live profile is "Jorge Alejandro Diez" / "Alejandro" and the naive version put a
-    name into a calendar entry that no recipient had ever seen.
-
-    Falls back to "" rather than raising: a missing profile must not stop an invitation, and
-    `build_ics` uses the address instead.
-    """
-    try:
-        from applypilot.config import load_profile
-        from applypilot.domain.invite import sender_name
-        p = load_profile().get("personal", {})
-        return sender_name(p.get("full_name") or "", p.get("preferred_name") or "")
-    except Exception:  # noqa: BLE001
-        return ""
-
-
-def send_invite(contact_id: str, start, minutes: int, summary: str = "", body: str = "",
-                location: str = "", dry_run: bool = False, conn=None) -> dict:
-    """Send a calendar invitation to one contact. Operator-initiated, never automatic.
-
-    Modelled on `send_reply` rather than on `send_outreach`, and the difference is which guards
-    apply. The DAILY LIMIT applies — it protects the mailbox's real quota, and this consumes it.
-    The per-company cap does NOT: that exists because a company should see one sender making one
-    approach, and it is counted over cold outreach. An invitation is a deliberate act aimed at a
-    specific person, usually one who has already answered, and blocking it because seven of their
-    colleagues got a cold email would refuse the one message the whole ladder exists to produce.
-
-    Threaded into the conversation when there is one. An invite that arrives as a fresh thread,
-    detached from the exchange where the time was agreed, reads as machine-sent.
-
-    **SEQUENCE comes from how many invites this contact has already had.** Same UID with a higher
-    sequence is how iCalendar says "this replaces the one I sent you", so re-sending after a
-    change MOVES the meeting in their calendar instead of leaving two. Counting the prior ones
-    from `interactions` costs no new column.
-    """
-    from applypilot.domain import invite as inv
-    from applypilot.networking import interactions_store as ix
-    from applypilot.networking import messages as msg_store
-
-    contact = store.get_contact(contact_id, conn)
-    if not contact:
-        return {"ok": False, "message": "contact not found"}
-    to_addr = (contact.get("email") or "").strip()
-    if not to_addr:
-        return {"ok": False, "message": "no email address for this contact — add one first"}
-
-    from_addr = _from_address() or ""
-    from_name = os.environ.get("OUTREACH_FROM_NAME", "") or _profile_name()
-    if not from_addr:
-        try:
-            from applypilot.networking import gmail_oauth
-            from_addr = gmail_oauth.connected_email()
-        except Exception:  # noqa: BLE001 — resolved below into a real refusal
-            from_addr = ""
-    if not from_addr:
-        return {"ok": False, "message": "no sending address — connect Gmail first"}
-
-    who = contact.get("full_name") or to_addr
-    summary = (summary or "").strip() or inv.default_summary(from_name, who)
-    prior = [r for r in ix.for_contact(contact_id, conn) if r.get("kind") == INVITED_KIND]
-    try:
-        ics = inv.build_ics(
-            uid=inv.uid_for(contact_id, from_addr), start=start, minutes=minutes,
-            summary=summary, organiser_name=from_name, organiser_email=from_addr,
-            attendee_name=who, attendee_email=to_addr,
-            description=(body or "").strip(), location=(location or "").strip(),
-            sequence=len(prior))
-    except inv.InviteError as e:
-        return {"ok": False, "message": str(e)}
-
-    if _DAILY_LIMIT > 0 and store.sent_today() >= _DAILY_LIMIT:
-        return {"ok": False, "message": f"daily send limit reached ({_DAILY_LIMIT})"}
-    if dry_run:
-        return {"ok": True, "message": f"dry-run: would invite {to_addr}", "ics": ics}
-
-    # In-thread when a conversation exists. `thread_for_contact` is already loaded elsewhere on
-    # this path; a missing thread simply means a standalone message, not a failure.
-    thread_id = contact.get("thread_id") or ""
-    in_reply_to = contact.get("rfc_message_id") or ""
-    try:
-        thread = msg_store.thread_for_contact(contact_id, conn)
-        from applypilot.domain import conversations as cv
-        target = cv.reply_target(thread, _our_addresses())
-        if target:
-            thread_id = target["thread_id"] or thread_id
-            in_reply_to = target["in_reply_to"] or in_reply_to
-    except Exception:  # noqa: BLE001 — threading is a nicety; never block the send on it
-        log.debug("Could not resolve a thread for the invite", exc_info=True)
-
-    text = (body or "").strip() or f"Sending an invite for {summary}. Let me know if another time is better."
-    mode = transport()
-    try:
-        if mode == "oauth":
-            from applypilot.networking import gmail_oauth
-            sent = gmail_oauth.send(to_addr, summary, text, from_addr, from_name,
-                                    thread_id=thread_id or None,
-                                    in_reply_to=in_reply_to or None, ics=ics)
-        else:
-            addr, _ = _creds()
-            mid = make_msgid(domain=(addr.split("@")[-1] if "@" in addr else None))
-            _smtp_send(to_addr, summary, text, mid, in_reply_to=in_reply_to or None, ics=ics)
-            sent = {"id": mid, "rfc_message_id": mid, "thread_id": thread_id}
-    except Exception as e:  # noqa: BLE001
-        log.warning("Invite to %s failed: %s", to_addr, e)
-        return {"ok": False, "message": f"invite failed: {e}"}
-
-    when_txt = start.isoformat()
-    # Our own action, so `source='manual'` and a kind that carries NO engagement weight — the
-    # same rule that keeps a LinkedIn invite out of the engagement count (§Lessons 35). Us
-    # proposing a time is not them agreeing to one; a detected cal.com booking still is.
-    try:
-        ix.record(contact_id, INVITED_KIND, at=when_txt,
-                  detail=f"{summary} ({minutes} min)", source="manual",
-                  job_url=contact.get("job_url", ""), conn=conn)
-        store.log_contact_event(contact_id, "info",
-                                f"Sent a calendar invite to {who}: {summary}, {when_txt}.", conn)
-    except Exception:  # noqa: BLE001 — logging must never break a send
-        log.debug("Could not record the invite", exc_info=True)
-
-    return {"ok": True, "message": f"invite sent to {to_addr}", "to": to_addr,
-            "sent_id": sent.get("id", ""),
-            "organiser_link": inv.organiser_link(
-                start=start, minutes=minutes, summary=summary,
-                attendee_email=to_addr, description=text, location=location)}
 
 
 def backfill_thread_ids(limit: int = 200) -> dict:

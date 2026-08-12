@@ -101,22 +101,6 @@ def for_job(job_url: str, conn: sqlite3.Connection | None = None) -> dict:
     return out
 
 
-def for_contact(contact_id: str, conn: sqlite3.Connection | None = None) -> list[dict]:
-    """Rows for ONE contact, newest first.
-
-    Deliberately not on the `/api/status` path — `for_job` exists because rendering every job
-    under a 2.5s refresh cannot afford a query per contact. This is for a single deliberate
-    action, where one narrow read is the right shape.
-    """
-    if conn is None:
-        conn = get_connection()
-    init_interactions(conn)
-    return [{"kind": r[0], "at": r[1], "detail": r[2], "source": r[3]}
-            for r in conn.execute(
-                "SELECT kind, at, detail, source FROM interactions "
-                "WHERE contact_id = ? ORDER BY at DESC", (contact_id,)).fetchall()]
-
-
 def delete_for_contact(contact_id: str, conn: sqlite3.Connection | None = None) -> int:
     """Same reasoning as `touches` and `messages`: contact ids are a hash of (job, identity),
     so a re-discovered person reproduces the id and would inherit a stranger's history."""

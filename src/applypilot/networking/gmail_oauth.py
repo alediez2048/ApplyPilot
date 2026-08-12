@@ -278,8 +278,7 @@ def connected_email() -> str:
 def send(to_addr: str, subject: str, body: str, from_addr: str,
          from_name: str = "", attachments: list[tuple[str, str]] | None = None,
          thread_id: str | None = None, in_reply_to: str | None = None,
-         cc: list[str] | None = None, references: str | None = None,
-         ics: str | None = None) -> dict:
+         cc: list[str] | None = None, references: str | None = None) -> dict:
     """Send via the Gmail API. Raises on failure.
 
     Returns {"id", "thread_id", "rfc_message_id"} — the caller persists the last two so a
@@ -319,9 +318,8 @@ def send(to_addr: str, subject: str, body: str, from_addr: str,
     sig = signature_html(from_addr)
     if sig:
         msg.add_alternative(f"<div>{_body_to_html(body)}</div><br>{sig}", subtype="html")
-    from applypilot.networking.gmail_send import attach_ics, attach_pdfs
+    from applypilot.networking.gmail_send import attach_pdfs
     attach_pdfs(msg, attachments)
-    attach_ics(msg, ics)
 
     raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
     payload: dict = {"raw": raw}

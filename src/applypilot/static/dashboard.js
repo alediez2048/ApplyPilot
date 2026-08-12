@@ -1252,97 +1252,6 @@ async function regenSms(cid, btn) {
   refresh();
 }
 
-// ── 📅 Invite ───────────────────────────────────────────────────────────────
-//
-// A real calendar invitation: an `.ics` with METHOD:REQUEST, sent as a mail attachment, which
-// is why it needs only the email address and no new Google permission. Gmail, Outlook and Apple
-// Mail all turn that into RSVP buttons.
-//
-// There is no draft step, unlike every other channel here. The content of an invitation IS its
-// time — there is nothing for a model to write and nothing to review a day later, so a queue
-// would be ceremony around a two-field form.
-
-//: When we last invited this person, read off the timeline that is already on the wire. No new
-//: column and no new query: a stored copy of a fact that is already derivable is the thing that
-//: drifts from it (§Lessons 21).
-function lastInvite(c) {
-  return ((c.interactions || []).filter(r => r.kind === 'invited')
-    .sort((a, b) => String(b.at).localeCompare(String(a.at)))[0]) || null;
-}
-
-//: Tomorrow, so the picker never opens on a time that has already gone today.
-function defaultInviteDate() {
-  const d = new Date(Date.now() + 86400000);
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-}
-
-function inviteChannel(c) {
-  const prev = lastInvite(c);
-  const replied = hasConversation(c) || (c.interactions || []).some(r => r.kind === 'replied');
-  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
-  return `<div class="draft invite" data-cid="${esc(c.id)}" data-to="${esc(c.email)}">
-      <div class="d-label">Calendar invite
-        <span class="sms-to">to ${esc(c.email)} · ${esc(tz)}</span>
-      </div>
-      ${prev ? `<div class="inv-prev">Already invited for ${esc(fmtDate(prev.at))}${
-        prev.detail ? ` — ${esc(prev.detail)}` : ''}. Sending another <b>moves that meeting</b>
-        in their calendar rather than adding a second one.</div>` : ''}
-      ${replied ? '' : `<div class="sms-locked">${esc(c.full_name)} has not replied yet. An invite
-        for a time nobody agreed to is a strong move — it lands on their calendar, not in their
-        reading pile. Sending your scheduling link and letting them pick is the softer version.</div>`}
-      <div class="inv-grid">
-        <label>Date<input type="date" class="inv-date" value="${defaultInviteDate()}"
-          min="${defaultInviteDate()}" /></label>
-        <label>Start<input type="time" class="inv-time" value="10:00" step="900" /></label>
-        <label>Length<select class="inv-mins">
-          <option value="15">15 min</option>
-          <option value="30" selected>30 min</option>
-          <option value="45">45 min</option>
-          <option value="60">1 hour</option>
-        </select></label>
-      </div>
-      <input class="inv-summary" placeholder="Title — what they will see in their calendar" />
-      <textarea class="inv-body" rows="2"
-        placeholder="Optional note, included in the email and the event description"></textarea>
-      <div class="dbtns">
-        <button class="primary" onclick="sendInvite(this)">📅 Send invite</button>
-      </div>
-      <div class="inv-msg"></div>
-      <div class="sms-hint">This sends an invitation, it does not create the event on
-        <b>your</b> calendar — a link to add it there appears once it has gone.</div>
-    </div>` + contactNotes(c);
-}
-
-//: The one outward-facing action in this panel that cannot be undone by a second click, so it
-//: NAMES the recipient and the time in the confirm. "Are you sure?" is not a question anybody
-//: can answer; "Invite dana@ridgeline.test to 19 Aug at 10:00 for 30 minutes?" is.
-async function sendInvite(btn) {
-  const d = btn.closest('.invite');
-  const msg = d.querySelector('.inv-msg');
-  const date = fieldVal(d, '.inv-date'), time = fieldVal(d, '.inv-time');
-  const minutes = parseInt(fieldVal(d, '.inv-mins'), 10) || 30;
-  if (!date || !time) { msg.textContent = 'Pick a date and a time first.'; return; }
-  const to = d.getAttribute('data-to') || '';
-  if (!confirm(`Invite ${to} to ${date} at ${time} for ${minutes} minutes?\n\n` +
-      `This sends them a calendar invitation immediately.`)) return;
-  btn.disabled = true;
-  const was = btn.textContent;
-  btn.textContent = 'Sending…';
-  const r = await post('/api/contact/invite', {
-    contact_id: d.getAttribute('data-cid'), date, time, minutes,
-    tz: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
-    summary: fieldVal(d, '.inv-summary'), body: fieldVal(d, '.inv-body')});
-  btn.disabled = false;
-  btn.textContent = was;
-  if (!r.ok) { msg.textContent = r.message || 'Could not send that invite.'; return; }
-  // The organiser link is the whole reason this is not fire-and-forget: we sent an invitation
-  // rather than creating an event, so without this the meeting is in their calendar and nowhere
-  // in yours. Rendered as a real link and NOT auto-opened — a popup on send gets blocked.
-  msg.innerHTML = `<span class="inv-ok">Sent ✓</span> ` + (r.organiser_link
-    ? `<a href="${esc(r.organiser_link)}" target="_blank" rel="noopener">Add it to your own calendar ↗</a>`
-    : '');
-}
-
 //: The channel has no identifier — so this pane IS the box that gives it one.
 //:
 //: Modelled on the SMS composer's empty state, and on what that one cost: it shipped as the
@@ -2106,11 +2015,7 @@ function contactPanel(c) {
   // render, never whether the tab exists. Text is in it for the marker alone: its own pane
   // already handles an absent number, but a strip where two empty channels are flagged and the
   // third is not reads as the third being fine.
-  // 📅 Invite rides on the EMAIL address — an .ics goes out as a mail attachment, so having a
-  // profile or a number buys nothing here. It is a channel tab rather than a row action because
-  // it is a thing you do TO one person, which is what the strip already is.
-  const usable = {email: !!c.email, linkedin: !!c.linkedin_url, phone: !!c.phone,
-                  invite: !!c.email};
+  const usable = {email: !!c.email, linkedin: !!c.linkedin_url, phone: !!c.phone};
   const stored = CHANNEL_TAB.get(c.id);
   // Still OPENS on a channel that works, or every contact lands on a form instead of their
   // conversation. The stored choice is honoured even when empty — clicking a ＋ tab has to stay
@@ -2122,7 +2027,6 @@ function contactPanel(c) {
   if (ch === 'email')    body = c.email ? emailChannel(c) : addIdentifier(c, 'email');
   if (ch === 'linkedin') body = c.linkedin_url ? linkedinChannel(c) : addIdentifier(c, 'linkedin');
   if (ch === 'phone')    body = smsChannel(c);
-  if (ch === 'invite')   body = c.email ? inviteChannel(c) : addIdentifier(c, 'email');
   return `<div class="pbody" onclick="event.stopPropagation()">
       <div class="cmeta">
         ${c.email ? `✉ <a href="mailto:${esc(c.email)}">${esc(c.email)}</a> ${emailBadge(c.email_status)}` : '✉ —'}
@@ -2135,7 +2039,7 @@ function contactPanel(c) {
         ${c.verify_note ? `<div class="verify-note ${esc(c.confidence)}">${c.confidence === 'high' ? '✓' : '?'} ${esc(c.verify_note)}</div>` : ''}
         ${syncGmailBtn(c)}
       </div>
-      <div class="chan">${tab('email','✉ Email')}${tab('linkedin','🔗 LinkedIn')}${tab('phone','💬 Text' + (c.sms_sent_at ? ' ✓' : ''))}${tab('invite','📅 Invite' + (lastInvite(c) ? ' ✓' : ''))}</div>
+      <div class="chan">${tab('email','✉ Email')}${tab('linkedin','🔗 LinkedIn')}${tab('phone','💬 Text' + (c.sms_sent_at ? ' ✓' : ''))}</div>
       ${body}
       ${engagementLog(c)}
       <div class="crow-del"><button class="link-danger" onclick="deleteContact('${esc(c.id)}', decodeURIComponent('${encodeURIComponent(c.full_name || '')}'), ${!!c.emailed})">🗑 Not at this company — remove</button></div>

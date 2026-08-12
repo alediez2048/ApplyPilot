@@ -775,9 +775,12 @@ def test_typing_in_a_contact_field_does_not_freeze_the_rest_of_the_page(tmp_path
     # refetching /api/status. The guard travelled with it, which creates a new way to break
     # this: calling renderJobsTable(jobs) with no second argument leaves `editing` undefined,
     # the guard never fires, and typing gets eaten again — silently, with no error anywhere.
-    assert "renderJobsTable(allJobs, editing)" in body, (
+    assert "renderJobsTable(allJobs, editing" in body, (
         "refresh() no longer passes `editing` to the table renderer, so the guard cannot fire "
         "and the jobs table is rewritten while a field inside it has focus")
+    # The third argument is `force`, and refresh() must NEVER pass it — that is what would let
+    # the timer overwrite an open editor (tests/test_edit_fields.py drives both directions).
+    assert "renderJobsTable(allJobs, editing, true" not in body
 
     for marker in ("updateNeedsYouBadge", "renderMetrics", "applyLog", "renderProgress"):
         assert body.index(marker) < body.index("renderJobsTable"), (
@@ -788,7 +791,10 @@ def test_typing_in_a_contact_field_does_not_freeze_the_rest_of_the_page(tmp_path
     # The guard is re-evaluated AT the write rather than trusting the argument: `refresh()`
     # samples `editing` before `await fetch(...)`, so by the time the write runs that flag is
     # ~100ms stale and a click into a draft inside that window used to land the write anyway.
-    guard = table.index("if (editing || isEditingJobs()) return;")
+    # `!force &&` was added by EDIT-1: a deliberate render that OPENS an editor must not be
+    # vetoed by the guard that exists to stop the TIMER closing one. Both directions are
+    # executed in tests/test_edit_fields.py.
+    guard = table.index("if (!force && (editing || isEditingJobs())) return;")
     assert table.index("el.innerHTML = html") > guard, (
         "the jobs table is rewritten even while a field inside it has focus")
     # Behaviour, not spelling: this file greps (§Lessons 48), and the executable version —
@@ -796,8 +802,14 @@ def test_typing_in_a_contact_field_does_not_freeze_the_rest_of_the_page(tmp_path
     # is in tests/test_jobs_table_stability.py.
     # …and the local re-render path must respect the same guard, or typing in a contact note
     # while the search box has a value would still wipe the field.
-    assert "renderJobsTable(LAST_JOBS || [], isEditingJobs())" in src, (
-        "rerenderJobs() bypasses the edit guard")
+    # The local re-render path must still consult the guard. It takes a `force` flag now
+    # (EDIT-1) so a deliberate render can OPEN an editor, and passing force unconditionally is
+    # the mutation that makes the editor disposable — killed in tests/test_edit_fields.py by
+    # driving `rerenderJobs()` with changed data while one is open.
+    rr = src[src.index("function rerenderJobs("):]
+    rr = rr[:rr.index("\n}")]
+    assert "isEditingJobs()" in rr, "rerenderJobs() bypasses the edit guard"
+    assert "force" in rr
 
 
 @pytest.mark.skipif(not shutil.which("node"), reason="node not available")

@@ -357,3 +357,143 @@ def test_the_space_tab_offers_a_rename():
     js = _js()
     assert "renameSpace" in js
     assert 'ondblclick="renameSpace(' in js
+
+
+# ── the render that OPENS an editor must not be vetoed by the edit guard ────
+
+_TABLE_HARNESS = """
+globalThis.WROTE = [];
+const el2 = () => ({ tagName:'DIV', innerHTML:'', textContent:'', hidden:false, value:'', style:{},
+  closest:()=>null, querySelector:()=>null, querySelectorAll:()=>[], setAttribute(){},
+  getAttribute:()=>null, addEventListener(){}, appendChild(){}, focus(){}, select(){},
+  classList:{add(){},remove(){},toggle(){},contains:()=>false}, dataset:{} });
+const jobsNode = { tagName:'DIV', _h:'', style:{}, dataset:{}, closest(){return this;},
+  querySelector:()=>null, querySelectorAll:()=>[], setAttribute(){}, getAttribute:()=>null,
+  addEventListener(){}, appendChild(){}, focus(){}, select(){},
+  classList:{add(){},remove(){},toggle(){},contains:()=>false},
+  get innerHTML(){ return this._h; },
+  set innerHTML(v){ this._h = v; globalThis.WROTE.push(v); } };
+globalThis.document = { getElementById: id => id === 'jobs' ? jobsNode : el2(),
+  querySelector: () => null, querySelectorAll: () => [],
+  addEventListener(){}, body: el2(), hasFocus: () => false, activeElement: null };
+globalThis.CSS = { escape: s => s };
+globalThis.alert = () => {};
+"""
+
+_JOB_ROW = """{ url:'http://j/1', title:'Enginer', company:'Acme', description:'d',
+  status:'imported', site:'GH', strategy:'dashboard_upload', contacts:[], followups:{},
+  shape:'pipeline/jobs' }"""
+
+
+def _table(body: str, tmp_path) -> dict:
+    script = tmp_path / "table.mjs"
+    script.write_text(
+        BROWSER_GLOBALS + _TABLE_HARNESS + """
+const SRC = """ + json.dumps(_js()) + """;
+const F = (new Function(SRC + `; return {
+  startEdit, editDesc, renderJobsTable, isEditingJobs, rerenderJobs, jobDetail,
+  setJobs: v => { LAST_JOBS = v; },
+  openPanel: u => { PANEL_OPEN.add(u); TAB_OPEN.set(u, 'job'); },
+  writes: () => globalThis.WROTE, reset: () => { globalThis.WROTE = []; }
+};`))();
+await new Promise(r => setImmediate(r));
+F.reset();
+""" + body, encoding="utf-8")
+    proc = subprocess.run(["node", str(script)], capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr[:2000]
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+def test_double_clicking_actually_puts_an_input_on_the_page(tmp_path):
+    """Reported as "I click on job name and nothing happens", and nothing did.
+
+    The handler fired and `EDITING` was set correctly — but `isEditingJobs()` returns true
+    BECAUSE `EDITING` is set, and `renderJobsTable` bails on that guard, so the <input> was never
+    written. The guard exists to stop the 2.5s TIMER destroying an open editor; applied to the
+    deliberate render that OPENS one it does the exact opposite.
+
+    Every other test in this file called `editable()` or `commitEdit()` directly and passed
+    throughout — §Lessons 48: none of them drove the render, so none of them could see it.
+    """
+    out = _table("""
+const j = %s;
+F.setJobs([j]);
+F.renderJobsTable([j], false);
+const opening = globalThis.WROTE.length;
+F.startEdit('http://j/1', 'title');
+const last = globalThis.WROTE[globalThis.WROTE.length - 1] || '';
+console.log(JSON.stringify({
+  wroteOnOpen: globalThis.WROTE.length > opening,
+  hasInput: /class="cell-edit/.test(last),
+  guardStillTrue: F.isEditingJobs(),
+}));
+""" % _JOB_ROW, tmp_path)
+    assert out["wroteOnOpen"] is True, "startEdit re-rendered nothing — the editor never appears"
+    assert out["hasInput"] is True
+    # The guard must still be ON afterwards, or the next tick eats the input it just opened.
+    assert out["guardStillTrue"] is True
+
+
+def test_the_timer_still_cannot_destroy_an_open_editor(tmp_path):
+    """Guard the guard. Forcing every render would make the editor openable and then instantly
+    disposable — the bug this whole guard exists for."""
+    out = _table("""
+const j = %s;
+F.setJobs([j]);
+F.renderJobsTable([j], false);
+F.startEdit('http://j/1', 'title');
+const after = globalThis.WROTE.length;
+// Every path that is NOT a deliberate open. `rerenderJobs()` with no argument is what the flag
+// toggle, the conversation expander and the tag filter all call — mutating it to force
+// unconditionally has to fail here, or "forced always" passes and the editor is disposable.
+// The payload CHANGES, which is the only case that can actually destroy the editor: with
+// identical data the skip-if-unchanged guard makes every render a no-op and hides the bug.
+const fresh = JSON.parse(JSON.stringify(j)); fresh.title = 'Something the poller brought';
+F.setJobs([fresh]);
+F.rerenderJobs();                        // what a flag toggle or the poller reaches
+F.renderJobsTable([fresh], F.isEditingJobs());
+F.renderJobsTable([fresh], false);       // even with a STALE "not editing" flag
+console.log(JSON.stringify({ writesFromTimer: globalThis.WROTE.length - after }));
+""" % _JOB_ROW, tmp_path)
+    assert out["writesFromTimer"] == 0, "the refresh overwrote an open editor"
+
+
+def test_an_existing_description_can_be_put_into_edit_mode(tmp_path):
+    """The paste box renders only when the description is EMPTY, so a job that scraped fine had
+    no way to correct one — the other half of "I cannot edit the description"."""
+    out = _table("""
+const j = %s;
+F.setJobs([j]);
+F.openPanel('http://j/1');
+const closed = F.jobDetail(j);
+F.editDesc('http://j/1', true);
+const open = F.jobDetail(j);
+console.log(JSON.stringify({
+  rendered: open !== closed,
+  hasTextarea: /jd-paste-box/.test(open),
+  hasSave: /saveJobDescription/.test(open),
+  guard: F.isEditingJobs(),
+}));
+""" % _JOB_ROW, tmp_path)
+    assert out["rendered"] is True and out["hasTextarea"] is True and out["hasSave"] is True
+    assert out["guard"] is True, "an open description editor does not hold the refresh"
+
+
+def test_a_description_that_exists_still_offers_the_edit_button(tmp_path):
+    out = _table("""
+const j = %s;
+F.setJobs([j]);
+F.openPanel('http://j/1');
+const h = F.jobDetail(j);
+// A real, VISIBLE button. Matching `editDesc(` alone passed against a `hidden` one — the
+// §Lessons 88 shape, where the markup is present and the control is not.
+const m = h.match(/<button[^>]*editDesc\\([^>]*>/);
+console.log(JSON.stringify({
+  offered: !!m,
+  visible: !!m && !/\\bhidden\\b/.test(m[0]),
+  isButton: !!m && /class="linklike"/.test(m[0]),
+}));
+""" % _JOB_ROW, tmp_path)
+    assert out["offered"] is True
+    assert out["visible"] is True, "the edit control is present in the markup and hidden"
+    assert out["isButton"] is True

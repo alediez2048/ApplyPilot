@@ -2156,7 +2156,7 @@ function isEditingJobs() {
   // EDIT-1. An open inline editor holds the refresh even before it takes focus. `startEdit`
   // re-renders and THEN focuses, so for one tick `activeElement` is still the old node — and a
   // refresh landing in that window would replace the input the operator just opened.
-  if (EDITING) return true;
+  if (EDITING || DESC_EDIT.size) return true;
   return hasSelectionInJobs();
 }
 
@@ -2611,7 +2611,9 @@ function toggleCoGroup(key) {
   rerenderJobs();
 }
 
-function renderJobsTable(allJobs, editing) {
+//: `force` means the CALLER changed what should be on screen (an editor opened, a description
+//: went into edit mode) and the edit guards must not veto showing it.
+function renderJobsTable(allJobs, editing, force) {
   renderJobFilters(allJobs);
   renderActiveTags();
   // Bucket → band → tags → search, narrowing at each step. The bucket counts above deliberately
@@ -2645,7 +2647,7 @@ function renderJobsTable(allJobs, editing) {
   // that window and the guard says "not editing", the write lands, and the focus, selection and
   // scroll position all go. §Lessons 26's shape — the cheap check was in the right place for a
   // synchronous function and this one stopped being synchronous.
-  if (editing || isEditingJobs()) return;
+  if (!force && (editing || isEditingJobs())) return;
   // Grouped, but only where grouping says something. A header over one row is furniture, and a
   // collapsed group still has to be re-openable — so the header renders whatever the state is
   // and only the MEMBER rows come and go.
@@ -2687,6 +2689,14 @@ function renderJobsTable(allJobs, editing) {
 // that is the point — it is the anchor, `contact_id` hashes it, and editing it would orphan
 // every contact and ladder on the row without raising anything.
 const EDITABLE = ['title', 'company', 'location', 'salary'];
+
+//: Rows whose description is being edited. Outside the DOM like PANEL_OPEN, for the same
+//: reason: the 2.5s refresh replaces #jobs wholesale.
+const DESC_EDIT = new Set();
+function editDesc(url, on) {
+  if (on) DESC_EDIT.add(url); else DESC_EDIT.delete(url);
+  rerenderJobs(true);
+}
 
 //: Which cell is open right now, as `{url, field}`. Outside the DOM like PANEL_OPEN, because
 //: the 2.5s refresh replaces #jobs wholesale and anything stored in a node is destroyed.
@@ -2739,7 +2749,7 @@ function erow(j, label, field, value) {
 
 function startEdit(url, field) {
   EDITING = {url, field};
-  rerenderJobs();
+  rerenderJobs(true);
   // Only one editor is ever open, so the freshly rendered input is the only `[data-edit]` on
   // the page — no selector has to be built out of the url, which is what the joined key needed.
   const el = document.querySelector('[data-edit]');
@@ -2748,7 +2758,7 @@ function startEdit(url, field) {
 
 function onEditKey(e) {
   if (e.key === 'Enter') { e.preventDefault(); e.target.blur(); }        // blur commits
-  else if (e.key === 'Escape') { EDITING = null; rerenderJobs(); }       // and discards
+  else if (e.key === 'Escape') { EDITING = null; rerenderJobs(true); }   // and discards
 }
 
 async function commitEdit(el) {
@@ -2756,18 +2766,18 @@ async function commitEdit(el) {
   const field = el.getAttribute('data-field') || '';
   const value = el.value;
   EDITING = null;
-  if (!url || !field) { rerenderJobs(); return; }
+  if (!url || !field) { rerenderJobs(true); return; }
   // Write it into LAST_JOBS before the request. `rerenderJobs()` renders from that, so without
   // this the cell snaps back to its old value for up to 2.5s and the edit reads as rejected —
   // §Lessons 21, and the same fix the 💡 flag needed.
   const job = (LAST_JOBS || []).find(x => x.url === url);
   const before = job ? job[field] : undefined;
   if (job) job[field] = value;
-  rerenderJobs();
+  rerenderJobs(true);
   const r = await post('/api/job/edit', {url, [field]: value});
   if (!r || r.ok === false) {
     if (job && before !== undefined) job[field] = before;   // put it back; nothing was stored
-    rerenderJobs();
+    rerenderJobs(true);
     alert((r && r.message) || 'Could not save that.');
     return;
   }
@@ -2775,7 +2785,7 @@ async function commitEdit(el) {
   // truncated value that the screen still shows in full is a disagreement the operator cannot
   // see (§Lessons 90's shape — a bound that does not say it is a bound).
   if (job && r.values && r.values[field] !== undefined) job[field] = r.values[field];
-  rerenderJobs();
+  rerenderJobs(true);
 }
 
 //: One job's two rows — the row itself and its `job-foot`. Extracted from `renderJobsTable`
@@ -2800,7 +2810,16 @@ function jobRows(j, inGroup) {
 
 // Re-filter without hitting the network. LAST_JOBS is the payload the most recent refresh
 // already fetched.
-function rerenderJobs() { renderJobsTable(LAST_JOBS || [], isEditingJobs()); }
+//: `force` distinguishes a DELIBERATE re-render from the 2.5s timer's.
+//:
+//: The edit guard exists to stop the timer destroying an open editor. Applied to a deliberate
+//: render it does the opposite: `startEdit` sets EDITING, calls this, and `isEditingJobs()` is
+//: now true BECAUSE of that — so the table bailed and the <input> was never written. The
+//: feature was reported as "I click and nothing happens", and nothing was: the double-click
+//: handler fired, the state changed, and the render that would have shown it refused to run.
+function rerenderJobs(force) {
+  renderJobsTable(LAST_JOBS || [], force ? false : isEditingJobs(), !!force);
+}
 
 // The aggregator counts the WHOLE set, never the filtered view. A search that hides a job
 // does not mean its follow-up stopped being due — a counter that drops as you type is
@@ -3259,11 +3278,32 @@ function jobDetail(j) {
            ${link(j.url, 'Open the posting', '')}
          </div>
        </div>`
+    : DESC_EDIT.has(j.url)
+    // Editing an EXISTING description. The paste box above renders only when there is none, so
+    // a job that scraped fine could never be corrected — which is half of what "I cannot edit
+    // the description" meant. A textarea rather than the inline single-line editor because
+    // these run 4-10KB.
+    ? `<div class="jd-paste">
+         <textarea class="jd-paste-box" rows="12">${esc(full || excerpt)}</textarea>
+         <div class="dbtns">
+           <button class="primary" onclick="saveJobDescription(${
+             `decodeURIComponent('${encodeURIComponent(j.url)}')`}, this)">Save description</button>
+           <button class="ghost" onclick="editDesc(${
+             `decodeURIComponent('${encodeURIComponent(j.url)}')`}, false)">Cancel</button>
+         </div>
+         <div class="hint">${excerpt.length >= 900 && !full
+             ? 'This is the 900-character excerpt the table carries. Click “Show the full description” first to edit the whole thing.'
+             : 'Saving replaces the stored description.'}</div>
+       </div>`
     : `<div class="jd-desc">${esc(open && full ? full : excerpt)}${
         !open && excerpt.length >= 900 ? '…' : ''}</div>
+       <div class="dbtns">
        ${excerpt.length >= 900 ? `<button class="linklike" onclick="toggleJobDesc(${
          `decodeURIComponent('${encodeURIComponent(j.url)}')`}, this)">${
-         open ? 'Show less' : 'Show the full description'}</button>` : ''}`;
+         open ? 'Show less' : 'Show the full description'}</button>` : ''}
+       <button class="linklike" onclick="editDesc(${
+         `decodeURIComponent('${encodeURIComponent(j.url)}')`}, true)">✎ Edit description</button>
+       </div>`;
 
   return `<div class="jd">
     ${links}

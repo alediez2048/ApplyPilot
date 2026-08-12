@@ -214,7 +214,12 @@ def test_typing_does_not_refetch_the_status_endpoint():
         assert "refresh()" not in body, (
             f"{fn} calls refresh(), which refetches /api/status on every keystroke or click")
         assert "rerenderJobs()" in body, f"{fn} does not re-render locally"
-    assert "function rerenderJobs() { renderJobsTable(LAST_JOBS || [], isEditingJobs()); }" in src
+    # Behaviour, not spelling: it renders from LAST_JOBS and consults the edit guard. It grew a
+    # `force` parameter (EDIT-1) so a deliberate render can open an editor the guard would
+    # otherwise veto — asserted properly in tests/test_edit_fields.py, which executes it.
+    body = src[src.index("function rerenderJobs("):]
+    body = body[:body.index("\n}")]
+    assert "LAST_JOBS" in body and "isEditingJobs()" in body and "renderJobsTable" in body
 
 
 def test_the_search_box_is_static_markup():

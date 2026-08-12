@@ -3242,6 +3242,55 @@ def _save_contact_details(data: dict) -> dict:
     return {"ok": True, "message": "saved"}
 
 
+def _parse_local(date_s: str, time_s: str, tz_name: str):
+    """`2026-08-19`, `10:00`, `America/Chicago` -> an aware datetime. Raises ValueError.
+
+    The BROWSER supplies the zone (`Intl.DateTimeFormat().resolvedOptions().timeZone`) rather
+    than the server assuming its own. They are usually the same machine here and the assumption
+    would hold — right up until the dashboard is reached from a laptop in another zone, at which
+    point every invitation is silently off by hours and nothing fails.
+    """
+    from datetime import datetime
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+    try:
+        naive = datetime.strptime(f"{(date_s or '').strip()} {(time_s or '').strip()}",
+                                  "%Y-%m-%d %H:%M")
+    except ValueError:
+        raise ValueError("pick a date and a time") from None
+    try:
+        tz = ZoneInfo((tz_name or "UTC").strip() or "UTC")
+    except (ZoneInfoNotFoundError, ValueError):
+        raise ValueError(f"unknown timezone {tz_name!r}") from None
+    return naive.replace(tzinfo=tz)
+
+
+def _send_invite(data: dict) -> dict:
+    """Send a calendar invitation to one contact. Always operator-initiated.
+
+    There is no draft step and no queue: unlike an email, the content of an invitation IS its
+    time, so there is nothing for a model to write and nothing to review later. The browser
+    confirms before this is reached.
+    """
+    init_db()
+    conn = get_connection()
+    cid = str(data.get("contact_id") or "")
+    if not cid:
+        return {"ok": False, "message": "contact_id required"}
+    try:
+        start = _parse_local(str(data.get("date") or ""), str(data.get("time") or ""),
+                             str(data.get("tz") or ""))
+        minutes = int(data.get("minutes") or 0)
+    except (ValueError, TypeError) as e:
+        return {"ok": False, "message": str(e) or "that time could not be read"}
+
+    from applypilot.networking.gmail_send import send_invite
+    return send_invite(cid, start, minutes,
+                       summary=str(data.get("summary") or ""),
+                       body=str(data.get("body") or ""),
+                       location=str(data.get("location") or ""),
+                       dry_run=bool(data.get("dry_run")), conn=conn)
+
+
 _SEQUENCE_VERBS = {"stop": "stopped", "replied": "replied", "reopen": ""}
 
 
@@ -3846,6 +3895,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/contact/details":
                 _json_response(self, _save_contact_details(data))
+                return
+            if path == "/api/contact/invite":
+                _json_response(self, _send_invite(data))
                 return
             if path == "/api/contact/flag":
                 _json_response(self, _flag_contact(data))

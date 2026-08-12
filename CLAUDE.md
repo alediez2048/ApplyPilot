@@ -12,9 +12,9 @@ campaign happens to be a job search** — see `docs/crm-prd.md` for where that g
 - **Packaging:** Hatchling, `src/` layout, single package `applypilot`
 - **Entry point:** `applypilot = "applypilot.cli:app"` (Typer CLI)
 - **License:** AGPL-3.0-only · **Version:** 0.4.0 (`pyproject.toml`)
-- **Tests:** 2247 passing (`tests/`, 112 files) · ruff clean (line-length 120, py311) · ESLint clean
+- **Tests:** 2331 passing (`tests/`, 115 files) · ruff clean (line-length 120, py311) · ESLint clean
 - **Schema version:** 4 (`applypilot migrate --status`) · **Settings:** 48 declared in `settings.py`
-- **Branch:** everything current lives on `context`, **61 commits ahead of `main`**, pushed to `origin/context`, working tree CLEAN as of 2026-08-12 (§Dev workflow). `main` has
+- **Branch:** everything current lives on `context`, **70 commits ahead of `main`**, pushed to `origin/context`, working tree CLEAN as of 2026-08-12 (§Dev workflow). `main` has
   none of it. Check `git log --oneline -1` before believing anything here (§Dev workflow).
 
 ## Quick orientation
@@ -242,19 +242,27 @@ because 45 of them are company cards that were never applied to), contacts **352
 (156 emailed, **12 replied**), touches 233, messages 393, connections 899.
 **Four Spaces**, and the row count is no longer mostly job-search:
 
-| Space | template | shape | rows | contacts |
+| Space | template | shape | rows | contacts (by job) |
 |---|---|---|---|---|
-| `job-search` | jobs | pipeline/jobs | 33 | 237 |
+| `job-search` | jobs | pipeline/jobs | 34 | 250 |
 | `gauntlet` | jobs | pipeline/jobs | 2 | 10 |
-| `partnerships` | outreach | pipeline/targets | **0** | 0 |
-| `sheet-search` ("Lead Sheet") | **sheet** | pipeline/targets | **45** | **105** |
+| `partnerships` | outreach | pipeline/targets | **3** | 0 |
+| `sheet-search` ("Lead Sheet") | **sheet** | pipeline/targets | 45 | 105 |
 
-`partnerships` has held zero rows since SPACE-3 shipped, which is why SHEET-1 was also the
-falsifier the PRD asked for — the targets shape had never once run (§Spaces, §The sheet Space).
+**`partnerships` is no longer empty** (3 rows, 2026-08-12). It held zero from SPACE-3 until now,
+which is why SHEET-1 doubled as the falsifier the PRD asked for — the targets shape had never
+once run (§Spaces, §The sheet Space).
+
+**`contacts.space_id` disagrees with the job's on 14 rows, and nothing reports it** (measured
+2026-08-12): 10 on gauntlet, 3 on partnerships, 1 on sheet-search, every one of them filed
+`job-search` — the column DEFAULT. §Lessons 70 at a third write path, and the read side hides it
+exactly as before, because every panel scopes by the JOB rather than by this column. What does
+read it is CRM-2's `all_contacts_for_metrics(space_id=…)`, so per-Space reply rates are wrong by
+those 14. Not yet fixed; a backfill from `jobs.space_id` is the whole repair.
 **Schema version 3**, and SHEET-1 needed no migration.
 
-`contacts.source` is now the honest split: apollo **207**, **import 105**, connection 28,
-manual 6, hunter 5, introduction 1. That column is what CRM-2's `by_layer()` divides by, and it
+`contacts.source` is now the honest split: apollo 206, **import 105**, connection 28,
+**manual 10**, hunter 5, introduction 1. Manual went 6 → 10 the day the ＋ tabs shipped. That column is what CRM-2's `by_layer()` divides by, and it
 is the reason an imported contact is never filed as `apollo`.
 
 Contacts nearly tripled on 2026-08-04 — 66 → 185 — because employer resolution was broken in
@@ -2286,7 +2294,7 @@ company `"Jobs"` — the same substring bug class, inside the function written t
     place more firmly than the code did. It is rewritten around the new decision rather than
     deleted, and it now asserts the pane contains an INPUT, not that the sentence is gone.
 
-99. **A test that supplies the value it is checking cannot see the value that ships.**
+100. **A test that supplies the value it is checking cannot see the value that ships.**
     `prompt_block(rows, limit=2)` is what the test called, so raising the DEFAULT from 2 to 999
     left it green — and every draft would then have carried every meeting ever stored with that
     person. The parameter worked perfectly; the shipped behaviour was unguarded. Assert the
@@ -2301,6 +2309,23 @@ company `"Jobs"` — the same substring bug class, inside the function written t
     And a mutation that hit the WRONG function reported as a survivor: the line
     `if (!r.ok) { msg.textContent = ...; return; }` exists in two handlers, so `replace(old, new, 1)`
     mutated the first one. A mutation harness must assert its target is UNIQUE, not merely present.
+
+101. **A `display` on a table CELL silently un-does `colspan`, and no markup test can see it.**
+    `tr.co-solo > td { display:flex }` replaces the cell's `display:table-cell` and drops it out
+    of the table formatting context, so `colspan="4"` stops applying and the cell collapses to the
+    width of the first column. The new employer band rendered "Ey / 6 / people / · 5 / emailed",
+    one word per line and ~130px tall, on every single-role row. Reported as *"it is breaking the
+    cards"*.
+    The rule looks correct in isolation and the MARKUP was correct — which is why 28 passing tests
+    in that file saw nothing. §Lessons 62's family, where `hidden` lost to an author `display` and
+    the Node test asserted the property, true and useless. The multi-role band had it right the
+    whole time: its flex lives on `.co-toggle` INSIDE the td.
+    The guard had to move to the CSS itself — **no selector whose last element is a `td` may set
+    `display:flex/grid/block`** — and it is verified against the exact rule that shipped.
+    **This was the second layout bug in one session that only a rendered page revealed** (the
+    first: the description clamp). Run the browser after a CSS change; the suite cannot.
+    Its fix then broke the probe: `co-solo` is a SUBSTRING of the new `co-solo-inner`, so every
+    solo band counted as two — §Lessons 1, in a test helper rather than in a company name.
 
 Shipped in one session, in this order: **CRM-3a → CRM-1 → CRM-2 → CRM-3b → CRM-4a.**
 Tickets in `docs/tickets/CRM-*.md`; two of them had instructions that were factually wrong
@@ -2658,6 +2683,18 @@ Three were the same failure: a value one layer computes that the other cannot se
 SHEET-2 which are not in the ticket because both came out of running it. See §The sheet Space.
 It doubled as SPACE-6's falsifier and needed no schema change.
 
+**`docs/tickets/GRAN-1-meeting-transcripts.md`** (2026-08-12) — **phases 1 and 2 BUILT**, phase 3
+blocked on a subscription. Paste a meeting transcript onto anyone; its SUMMARY then reaches all
+six drafters. Three measurements decided it and all three came before any code: Granola is not
+installed on this machine, its public API is **Business/Enterprise only** (so the paste is not a
+shortcut, it is the only route that exists), and transcripts are diarized by **audio source**
+rather than by speaker — so attribution to a named contact is the operator's CHOICE and can never
+be inferred. Storage is one row per MEETING plus a join (migration 004), because a call has
+several attendees and `messages.snippet` caps at 200/2000 against a 20–50 KB transcript.
+**Only the summary reaches a prompt**, and the prompt is forbidden from quoting the call or
+naming a recording (§Lessons 83, higher stakes than the deck beacon). **Unproven against a live
+model** — every test asserts the prompt *says* so, which §Lessons 42 is precisely the gap.
+
 **`docs/tickets/HIST-1-the-archive-lens.md`** (2026-08-11) — **designed, NOT built**, and pinned
 by the operator. Asked for as a Space for old applications; narrowed by their own follow-up
 question ("do you need my entire email history, or can you crawl it when I ask?") into a lens
@@ -2675,7 +2712,28 @@ rendered for nobody. Fixed by moving the `Google hiring AI Sales Specialist` row
 as its company and §Lessons 84's board-sentence as its title, so it would have sat beside the
 other Google job under a different name.
 
-A `tr.co-head` band renders above any employer with 2+ rows and **only** then, collapsible, state
+**EVERY employer gets the band now** (2026-08-12), not only the ones with two roles. The 2+
+threshold was right about the STATS — "1 role" over one row is furniture — and wrong about the
+NAME: with a single role the company appeared only as a small grey subtitle under the job title,
+so you read the employer in the top-left of a grouped block and hunted for it on every other row.
+Reported as *"when jobs are individual the name of the company is nowhere to be seen"*.
+
+A solo band is deliberately a DIFFERENT control: no caret (collapsing one row is the furniture
+the threshold was right about), no roles count, and **the name is double-click editable** —
+banding a row hides the company subtitle that used to be its editor, and moving a name without
+its editor leaves the only fix three clicks away in the Job tab (§Lessons 97). A multi-role band
+is unchanged and is NOT editable: which of its rows an edit would write to has no answer.
+A band needs a NAME, not a count — rows whose employer never resolved keep the subtitle, which is
+the only place they can be given one.
+
+**Its first version broke every card, and no test could see it** (§Lessons 100). `tr.co-solo > td
+{ display:flex }` replaces the cell's `display:table-cell`, which drops it out of table layout —
+`colspan="4"` stops applying and the cell collapses to the first column's width, so the band
+rendered one word per line and ~130px tall. The flex belongs on a wrapper INSIDE the td, which is
+what `.co-toggle` had always done. The guard is now a CSS rule rather than a markup assertion: no
+selector ending in a `td` may set `display:flex/grid/block`.
+
+A `tr.co-head` band renders above any employer, collapsible when it has 2+ rows, state
 outside the DOM like `PANEL_OPEN`. **Every number on it is deduplicated across the roles** — two
 rows each reporting "16 contacts" for the same sixteen humans reads as thirty-two — plus
 `⚠ N on both`, which no other surface can show. Order came free: a `Map` over the already-sorted
@@ -2764,7 +2822,7 @@ What is actually open now, ordered by leverage:
    `("id", "shape")` only, so a Space with 133 sent emails is repointable today with no error.
 
 10. **`context` is 61 commits ahead of `main`, pushed, and the working tree is CLEAN**
-    (2026-08-12, `281761f`). The 2026-08-11/12 run added the sheet Space (SHEET-1/1b/2), the
+    (2026-08-12, `4988cc0`). The 2026-08-11/12 run added the sheet Space (SHEET-1/1b/2), the
     ghost state, edit-in-place (EDIT-1), the LinkedIn ladder removal, the jobs-table render
     fixes and the HIST-1 spec — fifteen commits, each with its own tests and mutations.
     Merging to `main` is still deliberately deferred, and checking out `main` gets you a build
@@ -2907,7 +2965,7 @@ change still needs the `pip install` above — but that copy gives the file a ne
   and the restart ran anyway, because both were in one chained command (§Lessons 63). Use
   `pgrep -fl "applypilot apply"`; recover an orphaned lock with
   `release_stale_locks(max_age_minutes=0)` and ONLY after pgrep comes back empty.
-- **On branch `context`** (2026-08-12, `281761f`), **61 commits ahead of `main`**, pushed to
+- **On branch `context`** (2026-08-12, `4988cc0`), **70 commits ahead of `main`**, pushed to
   `origin/context`, nothing uncommitted. `main` last pushed at **`e1f0be6`**. Tags:
   `stable-arch2/3/5/6` · `stable-e2e-20260730` · `stable-crm-20260731`.
 - **A frontend-only edit needs the `pip install` but NOT a dashboard restart** — the copy gives

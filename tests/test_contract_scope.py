@@ -22,6 +22,30 @@ import pytest
 
 from applypilot.apply import prompt
 
+#: A profile with the shape `build_prompt` needs. The floor is stated here on purpose: $200,000
+#: is $96/hr, and the posting under test pays $80/hr — that gap is what the salary rule exists to
+#: stop refusing.
+PROFILE = {
+    "personal": {"full_name": "Dana Okafor", "preferred_name": "Dana", "city": "Austin",
+                 "email": "dana@example.test", "phone": "+1 555 010 0000",
+                 "current_job_title": "Product Manager"},
+    "compensation": {"salary_expectation": "200000", "salary_range_min": "180000",
+                     "salary_range_max": "220000", "salary_currency": "USD"},
+    "experience": {"years_of_experience_total": "10", "target_role": "Product Manager"},
+    "work_authorization": {"legally_authorized_to_work": "Yes",
+                           "require_sponsorship": "No", "work_permit_type": "Citizen"},
+    "availability": {"notice_period": "Immediately", "start_date": "ASAP"},
+    "eeo_voluntary": {}, "linkedin": {}, "resume_facts": {}, "skills_boundary": [],
+}
+
+
+@pytest.fixture
+def profile(monkeypatch):
+    monkeypatch.setattr("applypilot.config.load_profile", lambda: PROFILE)
+    monkeypatch.setattr("applypilot.config.load_search_config", lambda: {})
+    return PROFILE
+
+
 def _job(tmp_path):
     """A posting shaped like the one that prompted this: hourly, with a rate stated."""
     pdf = tmp_path / "resume.pdf"
@@ -114,26 +138,24 @@ def test_a_stated_rate_is_accepted_rather_than_negotiated():
 # ── safety is untouched ─────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("rule", SAFETY)
-def test_no_safety_rule_moves_with_the_flag(rule, monkeypatch, tmp_path):
+def test_no_safety_rule_moves_with_the_flag(rule, monkeypatch, tmp_path, profile):
     """Whatever scope does, the agent still runs `bypassPermissions` on attacker-controlled
     careers pages. These lines are why that is survivable."""
-    from applypilot.config import load_profile
     job = _job(tmp_path)
     for flag in ("0", "1"):
         monkeypatch.setenv("APPLY_ALLOW_CONTRACT", flag)
-        text = prompt.build_prompt(job, "RESUME", load_profile(), {}, "COVER")
+        text = prompt.build_prompt(job, "RESUME", PROFILE, {}, "COVER")
         assert rule in text, f"safety rule vanished with APPLY_ALLOW_CONTRACT={flag}: {rule}"
 
 
-def test_the_whole_prompt_changes_only_where_it_should(monkeypatch, tmp_path):
+def test_the_whole_prompt_changes_only_where_it_should(monkeypatch, tmp_path, profile):
     """A frozen-artifact style check: flipping the flag must move the scope block and the salary
     tail, and nothing else. Anything wider means the flag reaches further than its name says."""
-    from applypilot.config import load_profile
     job = _job(tmp_path)
     monkeypatch.setenv("APPLY_ALLOW_CONTRACT", "0")
-    off = prompt.build_prompt(job, "RESUME", load_profile(), {}, "COVER")
+    off = prompt.build_prompt(job, "RESUME", PROFILE, {}, "COVER")
     monkeypatch.setenv("APPLY_ALLOW_CONTRACT", "1")
-    on = prompt.build_prompt(job, "RESUME", load_profile(), {}, "COVER")
+    on = prompt.build_prompt(job, "RESUME", PROFILE, {}, "COVER")
 
     only_off = set(off.splitlines()) - set(on.splitlines())
     only_on = set(on.splitlines()) - set(off.splitlines())
@@ -149,13 +171,11 @@ def test_the_whole_prompt_changes_only_where_it_should(monkeypatch, tmp_path):
 
 # ── the salary floor, which would refuse it one step later ──────────────────
 
-def test_a_fixed_contract_rate_is_not_measured_against_the_salaried_floor():
+def test_a_fixed_contract_rate_is_not_measured_against_the_salaried_floor(profile):
     """Widening scope alone buys NOTHING without this, and the numbers are why: the floor is
     $200,000, which is $96/hr, so an $80/hr posting is "below floor" and the agent refuses one
     step later. §Lessons 49 — a rule relaxed at one of the two places that enforce it.
     """
-    from applypilot.config import load_profile
-    profile = load_profile()
     on = prompt._build_salary_section(profile, allow_contract=True)
     off = prompt._build_salary_section(profile, allow_contract=False)
     assert "employer's terms" in on
@@ -164,7 +184,6 @@ def test_a_fixed_contract_rate_is_not_measured_against_the_salaried_floor():
     assert "FLOOR" in on and "FLOOR" in off
 
 
-def test_the_salary_section_defaults_to_the_old_behaviour():
+def test_the_salary_section_defaults_to_the_old_behaviour(profile):
     """Called with one argument anywhere else in the codebase, it must not silently widen."""
-    from applypilot.config import load_profile
-    assert "employer's terms" not in prompt._build_salary_section(load_profile())
+    assert "employer's terms" not in prompt._build_salary_section(profile)

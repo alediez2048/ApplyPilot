@@ -256,7 +256,7 @@ def test_the_member_row_is_unchanged_apart_from_the_rail(tmp_path):
         assert control in body, f"{control} left the row"
 
 
-@pytest.mark.parametrize("needle", ["groupByEmployer(shown)", "coHeadRow(g)", "jobRows(j, grouped)"])
+@pytest.mark.parametrize("needle", ["groupByEmployer(shown)", "coHeadRow(g)", "jobRows(j, banded)"])
 def test_the_render_path_uses_the_grouping(needle):
     js = (wd._STATIC_DIR / "dashboard.js").read_text(encoding="utf-8")
     assert needle in js
@@ -291,9 +291,12 @@ F.renderJobsTable(""" + json.dumps(jobs) + """, false);
 const html = node('jobs').innerHTML;
 console.log(JSON.stringify({
   bands: (html.match(/class="co-head/g) || []).length,
+  solo: (html.match(/co-solo/g) || []).length,
+  carets: (html.match(/co-caret/g) || []).length,
   members: (html.match(/co-member/g) || []).length,
-  names: (html.match(/class="co-name">([^<]*)</g) || []),
+  names: (html.match(/class="co-name[^"]*"[^>]*>([^<]*)</g) || []),
   hasStrip: html.includes('step-strip'),
+  html,
 }));
 """, encoding="utf-8")
     proc = subprocess.run(["node", str(script)], capture_output=True, text=True, timeout=60)
@@ -301,23 +304,72 @@ console.log(JSON.stringify({
     return json.loads(proc.stdout.strip().splitlines()[-1])
 
 
-def test_a_band_renders_for_the_employer_with_two_roles(tmp_path):
+def test_every_employer_gets_a_band(tmp_path):
+    """This asserted the OPPOSITE — that a band needs 2+ roles — and the threshold was the bug.
+
+    With one role the company appeared only as a small grey subtitle under the job title, so
+    scanning the board you read the employer in the top-left of a grouped block and hunted for it
+    everywhere else. Reported as "when jobs are individual the name of the company is nowhere to
+    be seen". The STATS over one row really were furniture, which is what the old comment was
+    right about; the NAME is the thing that has to be in the same place on every row.
+    """
     out = _render([_job("u1", "Google"), _job("u2", "Google"), _job("u3", "Stripe")], tmp_path)
-    assert out["bands"] == 1
-    assert "Google" in " ".join(out["names"])
+    assert out["bands"] == 2, "expected a band for Google AND one for Stripe"
+    assert out["solo"] == 1, "Stripe's single role did not get a band"
+    joined = " ".join(out["names"])
+    assert "Google" in joined and "Stripe" in joined
 
 
-def test_no_band_renders_when_every_employer_has_one_role(tmp_path):
-    """The mutation the rest of this file missed. A band over a single row is furniture, and with
-    32 rows and 31 employers it would be 31 pieces of it."""
+def test_a_solo_band_is_not_a_collapsible_group(tmp_path):
+    """No caret over one row: collapsing a single row IS the furniture the old threshold avoided,
+    and a control that hides the only thing under it is worse than none."""
     out = _render([_job("u1", "Google"), _job("u2", "Stripe"), _job("u3", "Okta")], tmp_path)
-    assert out["bands"] == 0
-    assert out["members"] == 0, "a lone row was given the group rail"
+    assert out["bands"] == 3 and out["solo"] == 3
+    assert out["carets"] == 0, "a lone row was given a collapse toggle"
 
 
-def test_only_the_grouped_rows_get_the_rail(tmp_path):
+def test_a_multi_role_band_keeps_its_caret(tmp_path):
+    """Both directions, or "no caret" is satisfied by removing the toggle everywhere."""
+    out = _render([_job("u1", "Google"), _job("u2", "Google")], tmp_path)
+    assert out["solo"] == 0
+    assert out["carets"] == 1, "the collapsible group lost its toggle"
+
+
+def test_the_solo_bands_name_is_still_editable(tmp_path):
+    """Banding a row HIDES the company subtitle under its title, which was that row's editor.
+
+    Moving the name without moving its editor leaves the only way to fix a wrong employer three
+    clicks away in the Job tab — §Lessons 97, reported as "I still can't edit descriptions" when
+    exactly that happened to the description. A multi-role band is deliberately NOT editable:
+    which of its rows an edit would write to has no answer.
+    """
+    out = _render([_job("u1", "Stripe")], tmp_path)
+    band = out["html"][out["html"].index("co-solo"):]
+    band = band[:band.index("</tr>")]
+    assert "startEdit" in band, "the solo band's company name cannot be edited"
+    assert "'company'" in band, "the band's editor is wired to the wrong field"
+
+    grouped = _render([_job("u1", "Google"), _job("u2", "Google")], tmp_path)["html"]
+    head = grouped[grouped.index("co-head"):]
+    head = head[:head.index("</tr>")]
+    assert "startEdit" not in head, "a multi-role band offered an edit with no unambiguous target"
+
+
+def test_a_row_with_no_employer_gets_no_band(tmp_path):
+    """A band needs a NAME, not a count. Rows whose employer never resolved (§Lessons 85's
+    "Uploaded", now "") would otherwise each print an empty header, and the subtitle they keep
+    instead is the only place a name can be typed in."""
+    out = _render([_job("u1", ""), _job("u2", "")], tmp_path)
+    assert out["bands"] == 0, "an empty employer name was banded"
+
+
+def test_every_banded_row_gets_the_rail(tmp_path):
+    """The rail marks a row that belongs to the band above it, so it follows banding rather than
+    group size — otherwise a solo band floats over a row that is not visibly under it."""
     out = _render([_job("u1", "Google"), _job("u2", "Google"), _job("u3", "Stripe")], tmp_path)
-    assert out["members"] == 4, "expected the rail on both Google rows and their two feet"
+    assert out["members"] == 6, "expected the rail on all three rows and their three feet"
+    assert _render([_job("u1", "")], tmp_path)["members"] == 0, \
+        "an unbanded row was given the rail"
 
 
 def test_a_collapsed_band_keeps_its_header(tmp_path):

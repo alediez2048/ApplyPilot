@@ -2731,7 +2731,21 @@ function employerStats(jobs) {
   };
 }
 
+//: EVERY employer gets the band, not only the ones with two roles.
+//:
+//: It used to render at 2+ and the comment called a header over one row "furniture", which was
+//: true of the STATS and false of the NAME: with one role the company appeared only as a small
+//: grey subtitle under the job title, so scanning the board you read "Google" in the top-left of
+//: one group and hunted for the employer on every other row. Consistent placement is worth more
+//: than the line it costs.
+//:
+//: A single-role band is deliberately NOT the same control. There is no caret — collapsing one
+//: row really is furniture — and the name is double-click editable, because banding the row
+//: hides the subtitle that used to be its editor (§Lessons 97: a control three clicks away in
+//: the Job tab is the same as absent). A multi-role band stays exactly as it was; which of the
+//: two rows an edit there would write to has no answer.
 function coHeadRow(g) {
+  if (g.jobs.length === 1) return coSoloRow(g);
   const s = employerStats(g.jobs);
   const open = !CO_COLLAPSED.has(g.key);
   const bits = [`${s.roles} roles`];
@@ -2754,6 +2768,26 @@ function coHeadRow(g) {
           <span class="co-stats">${bits.map(esc).join(' · ')}</span>
           ${dupe}
         </button>
+      </td>
+    </tr>`;
+}
+
+//: One role: the employer's name where every other employer's name is, and the stats that are
+//: about the COMPANY rather than the posting. `roles` is dropped — "1 role" above one row is the
+//: furniture the old 2+ threshold was right about.
+function coSoloRow(g) {
+  const j = g.jobs[0];
+  const s = employerStats(g.jobs);
+  const bits = [];
+  if (s.people) bits.push(`${s.people} ${s.people === 1 ? 'person' : 'people'}`);
+  if (s.emailed) bits.push(`${s.emailed} emailed`);
+  if (s.replied) bits.push(`${s.replied} replied`);
+  if (s.due) bits.push(`${s.due} follow-up${s.due === 1 ? '' : 's'} due`);
+  return `
+    <tr class="co-head co-solo">
+      <td colspan="4">
+        ${editable(j, 'company', j.company, 'co-name')}
+        <span class="co-stats">${bits.map(esc).join(' · ')}</span>
       </td>
     </tr>`;
 }
@@ -2804,10 +2838,15 @@ function renderJobsTable(allJobs, editing, force) {
   // collapsed group still has to be re-openable — so the header renders whatever the state is
   // and only the MEMBER rows come and go.
   const html = groupByEmployer(shown).map(g => {
-    const grouped = g.jobs.length > 1;
-    const head = grouped ? coHeadRow(g) : '';
-    if (grouped && CO_COLLAPSED.has(g.key)) return head;
-    return head + g.jobs.map(j => jobRows(j, grouped)).join('');
+    // A band needs a NAME, not a count. Rows whose employer never resolved (§Lessons 85's
+    // "Uploaded", now "") each land in their own `__solo__` group with an empty name — banding
+    // those would print an empty header over every one of them, so they keep the company
+    // subtitle on the row instead, which is also the only place they can be given a name.
+    const banded = !!(g.name || '').trim();
+    const head = banded ? coHeadRow(g) : '';
+    // Only a multi-role band collapses; a solo band has no caret, so it can never be in the set.
+    if (banded && g.jobs.length > 1 && CO_COLLAPSED.has(g.key)) return head;
+    return head + g.jobs.map(j => jobRows(j, banded)).join('');
   }).join('');
   // Nothing changed -> do not touch the DOM. This is the fix for "it keeps taking me back up
   // when I scroll" and for text being uncopyable, and both were the same cause: `innerHTML =`

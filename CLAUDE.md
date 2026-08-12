@@ -671,6 +671,42 @@ The `sheet` template is `shape=targets · voice=premise · terminal=interview ·
 — a job search organised by company, so success is still an interview and there is no posting to
 tailor against.
 
+### The import says what the sheet does not carry (SHEET-3, 2026-08-12)
+
+**Rows imported and rows you can act on are different numbers, and only the first was shown.**
+The first real sheet imported 45 companies and 105 people with **zero rejected rows** — and 85 of
+those people had no email address, **none** had a LinkedIn URL, 55 were a first name alone, and
+**30 of the 45 companies had nobody reachable at all**. The message read *"Imported 45 companies,
+105 people."* That is §Lessons 15 in a new place: a result that cannot be acted on, rendering
+exactly like one that can. It went unnoticed for a fortnight, and the operator found it by
+noticing that no contact anywhere had a LinkedIn URL.
+
+`sheet.coverage()` is pure, runs over the PARSE, and reports per field. Three decisions:
+
+- **A MISSING COLUMN and an EMPTY one are separate findings.** Different fixes — add a heading,
+  or fill cells in — and a single percentage cannot say which you are looking at. `First Name`
+  with no `Last Name` column is the operator's real sheet and is a header fix; both columns with
+  55 blanks is a data fix.
+- **Every field says what the gap COSTS.** "linkedin: 0 of 105" is a statistic; *"no LinkedIn
+  invite, and no profile to read before writing"* is what decides whether to go back to the sheet.
+- **A name is not a name.** Every person that survives `parse` HAS one — a nameless row is a
+  rejection — so counting non-empty names reports **100%** on exactly the sheet this exists to
+  catch. `full_name` requires both halves.
+
+Company fields (`About`, `Website`) are counted over COMPANIES, not rows: one blurb filled on one
+of a company's rows is a sheet filled in correctly, and reporting it out of 105 sends the operator
+to repeat a paragraph down a column — the thing first-non-empty-wins removed.
+
+**Nothing needs redoing, and the panel says so.** Re-importing a grown sheet updates in place
+(SHEET-1b), so the fix is always *add the columns, fill them, paste it all again* — a list of four
+gaps without that sentence reads as a demand to start over.
+
+**`/api/sheet-columns` serves the recognised headers from `_FIELDS`**, fetched on first open
+rather than shipped in `/api/status` (which re-sends every 2.5s with six statements of headroom).
+A hand-written list of what the importer reads is a second source of truth, and nobody can tell
+which of the two is lying — nothing else says that `What they do`, `Summary` and `Overview` all
+land in `About`.
+
 ### Contacts you SUPPLY, not discover
 
 Three decisions, cheap now and expensive later:
@@ -2200,6 +2236,23 @@ company `"Jobs"` — the same substring bug class, inside the function written t
     and the operator saying *I still can't* is the measurement however much markup exists two
     screens away.
 
+98. **A clean import of an unusable sheet, and the success message was accurate.** 45 companies,
+    105 people, **zero rejected rows** — and 85 of those people had no address, 0 had a LinkedIn
+    URL, 55 were a first name alone, and 30 of the 45 cards had nobody reachable. Only two columns
+    are required, so a sheet of bare names is a valid sheet; "Imported 45 companies, 105 people."
+    was true and complete about the thing it measured, and measured the wrong thing. §Lessons 15
+    at one remove: not a zero result rendering as silence, but a **partial** result rendering as a
+    success, which is harder to see because there is something to look at.
+    The operator found it a fortnight later, from the absence of LinkedIn URLs — and their
+    diagnosis ("we need a good spreadsheet") was right and understated by a factor of four.
+    Two things fell out of writing the check. **`full_name` is the field that cannot be counted
+    the obvious way**: every person who survives `parse` has a name, because a nameless row is a
+    rejection, so `bool(name)` reports 100% on precisely the sheet being tested for. And **my own
+    test of the "only an absent column is tagged" rule could not fail** — it sliced
+    `html[i-200:i+60]` around a label, `i-200` went negative on the FIRST row, Python read it as
+    an offset from the end, and the window came back empty. It survived a mutation that tagged
+    every row (§Lessons 71, and the second time this month that a window-slice assertion was the
+    vacuous one). Split on the row boundary; do not slice a guess around a match.
 
 Shipped in one session, in this order: **CRM-3a → CRM-1 → CRM-2 → CRM-3b → CRM-4a.**
 Tickets in `docs/tickets/CRM-*.md`; two of them had instructions that were factually wrong

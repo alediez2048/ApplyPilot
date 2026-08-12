@@ -125,10 +125,18 @@ Northwind	Alex Roy	Head of Talent	alex@northwind.test"></textarea>
       </div>
       <p id="sheetStatus" class="hint" style="margin-top:10px; font-weight:600"></p>
       <div id="sheetRejects" class="hint" hidden></div>
+      <!-- What the sheet SUPPLIES, as against how many rows it imported. Only two columns are
+           required, so a sheet of bare names imports perfectly and can then reach nobody — 85
+           of the first 105 people had no address and none had a LinkedIn URL, under the message
+           "Imported 45 companies, 105 people." -->
+      <div id="sheetCoverage" hidden></div>
       <div class="hint">One row per PERSON, with their company repeated. Columns are matched by
         their heading, not their order, so any export works — <b>Company</b> and a name are the
         only two required. <b>First Name</b> / <b>Last Name</b> are joined. Re-pasting a longer
-        sheet later adds the new rows and leaves everything else alone.</div>
+        sheet later adds the new rows and leaves everything else alone.
+        <button class="linklike" onclick="toggleSheetColumns(this)">Which columns are read?</button>
+      </div>
+      <div id="sheetColumns" class="hint" hidden></div>
     </section>
   </div>
 

@@ -255,7 +255,67 @@ async function importSheet(btn) {
       (x.text ? ` <span class="muted">${esc(String(x.text).slice(0, 70))}</span>` : '')
     ).join('<br>') + (bad.length > 25 ? `<br><span class="muted">…and ${bad.length - 25} more</span>` : '');
   }
+  renderSheetCoverage(r.coverage || []);
   refresh();
+}
+
+//: What the sheet SUPPLIES, under what it imported.
+//:
+//: Rows imported and rows you can act on are different numbers, and only the first was ever
+//: shown. The first real sheet imported 45 companies and 105 people with no errors at all — and
+//: 85 of those people had no address, none had a LinkedIn URL, and 30 of the 45 companies had
+//: nobody reachable. Every one of those is a clean success by the old message.
+//:
+//: A MISSING COLUMN AND AN EMPTY ONE ARE SEPARATE FINDINGS and are labelled separately: one is
+//: fixed by adding a heading, the other by filling cells in. Collapsed into a percentage, the
+//: half that tells you what to go and do is the half that is lost.
+function renderSheetCoverage(rows) {
+  const box = document.getElementById('sheetCoverage');
+  if (!box) return;
+  if (!rows.length) { box.hidden = true; box.innerHTML = ''; return; }
+  const gaps = rows.filter(c => !c.ok);
+  box.hidden = false;
+  if (!gaps.length) {
+    box.innerHTML = '<div class="cov-ok">Every column this sheet needs is filled in.</div>';
+    return;
+  }
+  // Worst first. A field nobody supplied outranks one with a handful of blanks, because it is
+  // the one that is a decision about the sheet rather than an oversight in it.
+  gaps.sort((a, b) => (a.have / a.total) - (b.have / b.total));
+  box.innerHTML = `<div class="cov"><b>What this sheet does not carry</b>${gaps.map(c => {
+    const unit = c.unit === 'people' ? 'people' : 'companies';
+    const miss = c.total - c.have;
+    return `<div class="cov-row${c.have === 0 ? ' cov-none' : ''}">
+      <span class="cov-n">${esc(String(miss))} of ${esc(String(c.total))}</span>
+      <span class="cov-l">${esc(unit)} have no <b>${esc(c.label)}</b>${
+        c.column ? '' : ' <span class="cov-tag">no such column</span>'}</span>
+      <span class="cov-why">${esc(c.cost)}</span></div>`;
+  }).join('')}<div class="hint" style="margin-top:8px">Nothing here needs redoing — add the
+    columns to your sheet, fill them in, and paste the whole thing again. Matching people are
+    updated in place and their drafts, replies and follow-ups are kept.</div></div>`;
+}
+
+//: The header spellings this parser accepts, served from `_FIELDS` so the two cannot disagree.
+//: Fetched on first open rather than shipped in /api/status, which re-sends every 2.5 seconds.
+let SHEET_COLUMNS = null;
+async function toggleSheetColumns(btn) {
+  const box = document.getElementById('sheetColumns');
+  if (!box.hidden) { box.hidden = true; btn.textContent = 'Which columns are read?'; return; }
+  if (!SHEET_COLUMNS) {
+    const r = await post('/api/sheet-columns', {});
+    if (!r || r.ok === false) return;
+    SHEET_COLUMNS = r.columns || [];
+  }
+  btn.textContent = 'Hide the column list';
+  box.hidden = false;
+  box.innerHTML = `<div class="cov"><b>Any of these headings work</b>
+    ${SHEET_COLUMNS.map(c => `<div class="cov-row">
+      <span class="cov-n">${esc(c.field)}${c.required ? ' <span class="cov-tag">needed</span>' : ''}</span>
+      <span class="cov-l" style="grid-column: 2 / span 2">${esc(c.spellings.join(', '))}</span>
+    </div>`).join('')}
+    <div class="hint" style="margin-top:8px">Case and punctuation are ignored, so
+      <b>LinkedIn URL</b>, <b>linkedin_url</b> and <b>LINKEDIN</b> are the same column. Anything
+      not on this list is ignored rather than rejected, so extra columns are safe to leave in.</div></div>`;
 }
 
 async function saveOffer(btn) {

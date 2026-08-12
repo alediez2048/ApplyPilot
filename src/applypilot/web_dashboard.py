@@ -3911,6 +3911,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if path == "/api/import-sheet":
                 _json_response(self, _import_sheet(data))
                 return
+            # Static for the life of the process and needed BEFORE an import, so it is fetched
+            # once when the operator opens the list rather than riding /api/status — that
+            # payload is re-sent every 2.5 seconds and has six statements of headroom.
+            if path == "/api/sheet-columns":
+                from applypilot.domain import sheet as _sheet
+                _json_response(self, {"ok": True, "columns": _sheet.recognised_columns()})
+                return
             if path == "/api/attach-posting":
                 _json_response(self, _attach_posting(data))
                 return

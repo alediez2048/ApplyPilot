@@ -162,6 +162,27 @@
   button:disabled { opacity:.55; cursor:not-allowed; box-shadow:none; }
   .row { display:flex; gap:9px; align-items:center; flex-wrap:wrap; }
   .hint { color:var(--muted); font-size:13px; margin-top:10px; }
+
+  /* Sheet coverage — what a paste supplies, as against how many rows it imported.
+     A three-column grid so the COUNT, the field and the consequence line up down the list;
+     scanning "0 of 105 / 20 of 105" in a column is what makes the worst gap findable at all. */
+  .cov { margin-top:10px; padding:12px 14px; border:1px solid var(--line);
+         border-radius:8px; background:var(--surface2); font-size:13px; }
+  .cov-row { display:grid; grid-template-columns:auto minmax(0,1fr) minmax(0,1.1fr);
+             gap:4px 12px; align-items:baseline; padding:5px 0;
+             border-top:1px solid var(--line); }
+  .cov > b + .cov-row { border-top:none; }
+  .cov-n { font-weight:700; font-variant-numeric:tabular-nums; white-space:nowrap; }
+  .cov-l { color:var(--soft); }
+  .cov-why { color:var(--muted); font-size:12px; }
+  /* Nobody at all has it. That is a decision about the sheet rather than a gap in it, so it
+     gets the one visual accent here — the amber the status strip already uses for late work. */
+  .cov-none .cov-n { color:var(--yellow); }
+  .cov-tag { font-size:11px; font-weight:600; padding:1px 6px; border-radius:999px;
+             background:var(--yellow-soft); color:var(--yellow); white-space:nowrap; }
+  .cov-ok { margin-top:10px; padding:10px 14px; border-radius:8px;
+            background:var(--green-soft); color:var(--green); font-weight:600; font-size:13px; }
+  @media (max-width:700px) { .cov-row { grid-template-columns:1fr; } }
   button.linklike { background:none; border:none; color:var(--accent); padding:0; min-height:0; font-size:13px; font-weight:600; cursor:pointer; }
   button.linklike:hover { background:none; box-shadow:none; text-decoration:underline; }
   .people-details > summary { list-style:none; cursor:pointer; padding:3px 4px; user-select:none; display:inline-flex; align-items:center; gap:6px; border-radius:6px; font-size:12px; color:var(--muted); }

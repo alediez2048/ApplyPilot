@@ -264,3 +264,90 @@ def parse(text: str) -> dict:
 
     return {"companies": list(companies.values()), "people": people,
             "rejected": rejected, "dropped": dropped, "headers": sorted(hm)}
+
+
+#: What each field is FOR, in the order the gap costs something.
+#:
+#: The sentence is the point. "linkedin: 0 of 105" is a statistic; "no LinkedIn invite can be
+#: sent, and there is no profile to read before writing" is the consequence, and the consequence
+#: is what tells the operator whether to go back to the sheet.
+#:
+#: `unit` is which list the count runs over — a blurb about the company is one cell per COMPANY,
+#: and reporting it out of 105 rows would understate a sheet that fills it correctly once.
+_COVERAGE: tuple[tuple[str, str, str, str, str], ...] = (
+    ("email", "people", "email", "Email",
+     "cannot be emailed, and email is the only channel that sends"),
+    ("linkedin_url", "people", "linkedin", "LinkedIn URL",
+     "no LinkedIn invite, and no profile to read before writing"),
+    ("full_name", "people", "", "Full name",
+     "a first name alone cannot be matched to a real person"),
+    ("title", "people", "title", "Title",
+     "the draft cannot say what they do"),
+    ("about", "companies", "about", "About",
+     "the draft has nothing to say about what the company does"),
+    ("domain", "companies", "domain", "Website",
+     "no domain to confirm the company against"),
+)
+
+
+def _has(entry: dict, field: str) -> bool:
+    """Is this field actually supplied? `full_name` needs BOTH halves, not merely a value.
+
+    Every person that survives `parse` has a name — it is a rejection reason — so counting
+    non-empty names reports 100% on a sheet of bare first names, which is the exact sheet this
+    check exists to catch.
+    """
+    value = str(entry.get(field) or "").strip()
+    if field == "full_name":
+        return len(value.split()) >= 2
+    return bool(value)
+
+
+def coverage(parsed: dict) -> list[dict]:
+    """Per field: was the COLUMN there, and how many rows filled it.
+
+    Those are different findings with different fixes, and merging them into one percentage
+    loses the half that matters. A column nobody added is a change to the sheet's SHAPE — go and
+    add it. A column that is present and empty is a change to its CONTENTS — go and fill it in.
+    "0 of 105 have a LinkedIn URL" does not say which one you are looking at.
+
+    Runs over the PARSE, not over what was stored, so it describes the paste in front of the
+    operator rather than the accumulated state of a card — a re-import that adds one column to
+    an existing sheet is answered honestly by "this paste supplies it", and the earlier import
+    is not re-litigated.
+    """
+    people = parsed.get("people") or []
+    companies = parsed.get("companies") or []
+    headers = set(parsed.get("headers") or [])
+    out = []
+    for field, unit, header, label, cost in _COVERAGE:
+        rows = people if unit == "people" else companies
+        if not rows:
+            continue
+        have = sum(1 for r in rows if _has(r, field))
+        # A name has no single column: it arrives as `name`, or as `first` + `last`. Only the
+        # split case can be MISSING a column while still producing names, and saying so is the
+        # actionable half — a sheet with First Name and no Last Name is a header fix, while one
+        # with both and 55 blanks is a data fix.
+        if field == "full_name":
+            present = "name" in headers or ("first" in headers and "last" in headers)
+        else:
+            present = header in headers
+        out.append({
+            "field": field, "unit": unit, "label": label, "cost": cost,
+            "have": have, "total": len(rows), "column": present,
+            "ok": have == len(rows),
+        })
+    return out
+
+
+def recognised_columns() -> list[dict]:
+    """Every header spelling this parser accepts, for showing in the import box.
+
+    Generated from `_FIELDS` rather than written out beside it. A hand-maintained list of what
+    the importer reads is a second source of truth that goes stale the first time a spelling is
+    added, and the operator has no way to tell which of the two is lying.
+    """
+    required = {"company", "name", "first", "last"}
+    return [{"field": f, "spellings": list(s), "required": f in required}
+            for f, s in _FIELDS.items()]

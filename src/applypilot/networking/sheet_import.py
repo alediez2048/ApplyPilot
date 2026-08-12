@@ -171,6 +171,12 @@ def import_sheet(space_id: str, text: str, conn=None) -> dict:
         "people_skipped": people_skipped,
         "rejected": parsed["rejected"],
         "dropped": parsed["dropped"],
+        # What the sheet SUPPLIES, beside what it imported. A row count is a claim about the
+        # paste succeeding; this is a claim about whether the result can be acted on, and the
+        # two came apart badly on the first real sheet — 45 companies and 105 people imported
+        # cleanly, of whom 85 had no address to write to and 0 had a LinkedIn URL. The import
+        # said "Imported 45 companies, 105 people." and nothing else for weeks (§Lessons 15).
+        "coverage": _sheet.coverage(parsed),
         "message": summarize(cards_added, cards_existing, people_added, people_updated,
                              parsed["rejected"], parsed["dropped"]),
     }

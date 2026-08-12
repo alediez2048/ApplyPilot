@@ -12,9 +12,9 @@ campaign happens to be a job search** — see `docs/crm-prd.md` for where that g
 - **Packaging:** Hatchling, `src/` layout, single package `applypilot`
 - **Entry point:** `applypilot = "applypilot.cli:app"` (Typer CLI)
 - **License:** AGPL-3.0-only · **Version:** 0.4.0 (`pyproject.toml`)
-- **Tests:** 2038 passing (`tests/`, 103 files) · ruff clean (line-length 120, py311) · ESLint clean
+- **Tests:** 2247 passing (`tests/`, 112 files) · ruff clean (line-length 120, py311) · ESLint clean
 - **Schema version:** 3 (`applypilot migrate --status`) · **Settings:** 48 declared in `settings.py`
-- **Branch:** everything current lives on `context`, **46 commits ahead of `main`**, pushed to `origin/context`, working tree CLEAN as of 2026-08-11 (§Dev workflow). `main` has
+- **Branch:** everything current lives on `context`, **61 commits ahead of `main`**, pushed to `origin/context`, working tree CLEAN as of 2026-08-12 (§Dev workflow). `main` has
   none of it. Check `git log --oneline -1` before believing anything here (§Dev workflow).
 
 ## Quick orientation
@@ -58,7 +58,7 @@ stops the moment a job hands over — see §Lessons 8, which cost two filled app
 | `database.py` | SQLite layer. Owns `jobs` + `job_events`. Thread-local WAL, additive column pass, then numbered migrations. `get_connection()` returns a subclass carrying a per-connection schema memo — see §Lessons 11. |
 | `llm.py` | Multi-provider client (round-robin + failover: OpenAI/Gemini/Anthropic/local). |
 | `view.py` | Static HTML results export. |
-| `web_dashboard.py` | **The operator dashboard.** 3,568 lines, **zero SQL** — data access goes through `repo/` and `store.py` (ARCH-4). |
+| `web_dashboard.py` | **The operator dashboard.** 4,095 lines, **zero SQL** — data access goes through `repo/` and `store.py` (ARCH-4). |
 | `repo/jobs.py` | Every `jobs` query as a named function. Owns `QUEUE_SQL` (provenance — how a row arrived) and `_in_spaces` / `_one_space` (membership — which panel it is in). Those two never do each other's job (SPACE-1a D2). |
 | `repo/spaces.py` | The `spaces` / `identities` registries. `jobs_shaped_ids()` and `document_making_ids()` gate the pipeline stages and RAISE on an empty registry rather than returning `[]`. |
 | `scoring/resume_sections.py` | Parses the BASE résumé into its own sections. The base résumé is the template; tailoring rewrites content inside it. |
@@ -137,8 +137,9 @@ harness no longer has to import a web server to test scheduling.
 | `authrealm.py` | **What one sign-in covers.** URL → the ATS tenant an account belongs to. `host_is_tenant` is load-bearing: every employer on `wd1.myworkdaysite.com` shares that host, so a cookie there proves nothing about any one of them. |
 | `linkedin_thread.py` | Reading an open LinkedIn thread: who a display name is (word-level, never substring) and de-colliding the one-time-per-GROUP timestamps that would otherwise destroy messages. |
 | `lastinteraction.py` | When something last happened on a job **and who did it**, from six sources that were never joined. Direction is the point — "you emailed them 6 days ago" and "they replied 6 days ago" are the same age and opposite situations. |
-| `space.py` | **What a Space IS** — a frozen manifest, shaped after `followup.Channel`. `shape` + `tailor_docs` gate the pipeline queues; `tone`/`offer` reach the prompts; `schedules`/`channels` drive the ladders; `offer_deck` and `can_autosend` gate the deck link and the send path. Everything but the five COLUMNS rides in a `config` JSON blob, so a new field is never a schema change. |
-| `target.py` | A company you STATE, not an employer recovered from a URL. `anchor(space, name)` → `target:<space>:<slug>`, hashed into every contact key. `parse_input()` returns rejects rather than dropping them. |
+| `space.py` | **What a Space IS** — a frozen manifest, shaped after `followup.Channel`. `shape` + `tailor_docs` gate the pipeline queues; `tone`/`offer` reach the prompts; `schedules`/`channels` drive the ladders; `offer_deck` and `can_autosend` gate the deck link and the send path; **`voice` decides which system prompt writes the email** (SHEET-1). Everything but the five COLUMNS rides in a `config` JSON blob, so a new field is never a schema change. |
+| `target.py` | A company you STATE, not an employer recovered from a URL. `anchor(space, name)` → `target:<space>:<slug>`, hashed into every contact key. `parse_input()` returns rejects rather than dropping them. A line containing a TAB is refused — it is a spreadsheet row in the wrong box, and accepting one made 106 cards each named after a whole row. A URL **path** is never a company name either (§Lessons 92). |
+| `sheet.py` | **A pasted spreadsheet → companies and the people at them** (SHEET-1). One PERSON per row with their company repeated; grouping them under the company IS the bundling. Columns are matched by HEADER, never position — every export orders them differently and a positional parser files job titles as names. `First`/`Last` are joined. Rejects come back per ROW with the sheet's own line number. Google Sheets puts TSV on the clipboard, so **pasting is the entire integration**: no OAuth, no API key, nothing to revoke — and a pasted LINK is refused with the reason, because reading a sheet from its URL needs credentials. |
 | `temperature.py` | How an application is DOING, not how far it has travelled. Bands answer **is anything still in motion**, from an interview backwards. **Only a PERSON can reach `warm`**, and finishing the plan moves a job DOWN. §Lessons 54, 55. |
 | `joblink.py` | URL normalisation, for SEEING THROUGH rather than sending. `derive.unwrap_job_urls` calls `clean_link` before any employer rule reads a hostname — without it an ad redirect makes every rule describe the distributor (§Lessons 79). Strips attribution params, unwraps redirects, **never rewrites paths**. |
 | `jobref.py` | How to NAME a job in a message: `{title, req}`. The title is the hard half — 11 of 33 live rows carry one that must never be quoted (§Lessons 84). `""` is a real answer and the caller must handle it. |
@@ -175,7 +176,7 @@ works" has to name one that is actually unknown.** It is WhatsApp now.
 | `verify.py` | **Self-check**: does this person actually work there? Runs before contacts reach you. |
 | `rank.py` | Pick 3–5 (peers + a recruiter). |
 | `connections.py` | LinkedIn `Connections.csv` import + `companies_match()` (word-aware, strict/lenient). |
-| `outreach.py` / `prompt.py` | Drafts: cold email + LinkedIn note + **email follow-ups** + **LinkedIn follow-ups** + **texts** (`draft_sms`), each written for its touch position. |
+| `outreach.py` / `prompt.py` | Drafts: cold email + LinkedIn note + **email follow-ups** + **texts** (`draft_sms`), each written for its touch position. THREE system prompts, chosen by `Space.voice`: `_SYSTEM` (job seeker), `_PITCH_SYSTEM` (proposing work), `_PREMISE_SYSTEM` (the campaign paragraph IS the message). LinkedIn follow-up drafting still exists and is unreachable — that channel has no ladder since 2026-08-11. |
 | `gmail_send.py` / `gmail_oauth.py` | Send via OAuth (preferred) or SMTP. Threading, signature, attachments, safeguards. |
 | `linkedin_dm.py` / `dm_prompt.py` | Dormant CLI-only compose helpers (auto-send abandoned — §Lessons). |
 | `linkedin_agent.py` | Opt-in read-only LinkedIn augmentation. Never sends. |
@@ -233,17 +234,27 @@ re-reading a thread you have already logged is a no-op rather than a duplicate.
 | `identities` | `repo/spaces.py` | One row per SENDER (mailbox, from-name, deck, limits). Created by 003, **read by nothing yet** — ID-1. |
 | `schema_migrations` | `migrations/` | Version, status, `claimed_at` lease. See §Lessons on the 300s lease. |
 
-Live counts (2026-08-11, a snapshot — these move within minutes of real use, so treat them as
-orders of magnitude and re-measure before reasoning from one): jobs **33** (30 applied,
-**1 interview scheduled**, 1 rejected), contacts **243**
-(141 emailed, **9 replied** — the newest is Staci at Stanford, 2026-08-11), touches **205 of
-which 176 are SENT** (the bulk follow-up control's first real use), messages 284, connections
-899, **5 recorded deck opens** — one is stamped ninety seconds BEFORE the email that carried the
-link (the operator previewing their own `/intro/<name>`, §Lessons 83) and one belongs to a
-contact with no `submitted_at` at all, which the *opened since we last wrote* anchor correctly
-scores as nothing.
-Three Spaces: `job-search` (31 jobs), `partnerships` (targets), `gauntlet` (2 jobs — and it held
-**zero** until the import path started carrying the Space, §Lessons 70). **Schema version 3**.
+Live counts (2026-08-12, a snapshot — these move within minutes of real use, so treat them as
+orders of magnitude and re-measure before reasoning from one): jobs **80** (29 applied,
+2 rejected, **1 ghost**, 1 needs_human, 1 failed — and **46 with no apply_status at all**,
+because 45 of them are company cards that were never applied to), contacts **352**
+(156 emailed, **12 replied**), touches 233, messages 393, connections 899.
+**Four Spaces**, and the row count is no longer mostly job-search:
+
+| Space | template | shape | rows | contacts |
+|---|---|---|---|---|
+| `job-search` | jobs | pipeline/jobs | 33 | 237 |
+| `gauntlet` | jobs | pipeline/jobs | 2 | 10 |
+| `partnerships` | outreach | pipeline/targets | **0** | 0 |
+| `sheet-search` ("Lead Sheet") | **sheet** | pipeline/targets | **45** | **105** |
+
+`partnerships` has held zero rows since SPACE-3 shipped, which is why SHEET-1 was also the
+falsifier the PRD asked for — the targets shape had never once run (§Spaces, §The sheet Space).
+**Schema version 3**, and SHEET-1 needed no migration.
+
+`contacts.source` is now the honest split: apollo **207**, **import 105**, connection 28,
+manual 6, hunter 5, introduction 1. That column is what CRM-2's `by_layer()` divides by, and it
+is the reason an imported contact is never filed as `apollo`.
 
 Contacts nearly tripled on 2026-08-04 — 66 → 185 — because employer resolution was broken in
 three separate ways and every one of them returned zero people rather than an error. See
@@ -346,19 +357,38 @@ one does not, or one stale row cancels the other fifty-six. Email only — Linke
 copy-paste by design, and `stop`/`replied`/`reopen` are refused because bulk-stopping every
 sequence is a different feature. Capped at 100 per click.
 
-**Two ways out that are not an interview** (2026-08-10). `✕ Mark rejected` is an OUTCOME —
-somebody read it and said no. `⊘ Job removed / cancelled` is the posting ceasing to exist: a req
-pulled, a hiring freeze, a role filled internally. Filing the second under the first makes the
-rejection rate describe decisions nobody made. Same terminal behaviour (row sinks, sequences
-leave the 🔔 counter and the bulk list, no temperature reading, one shared `↩ Restore`) and a
-separate `apply_status`, badge and filter pill.
+**THREE ways out that are not an interview** (2026-08-10, third added 2026-08-12).
+`✕ Mark rejected` is an OUTCOME — somebody read it and said no. `⊘ Job removed / cancelled` is
+the posting ceasing to exist: a req pulled, a freeze, a role filled internally.
+**`👻 Ghost job`** is a listing that was never a real opening — an evergreen requisition, a role
+reposted every few weeks, a board kept stocked to look like growth.
+
+Ghost is its own state rather than a flavour of cancelled, and that difference is the only thing
+it can teach: **cancelled means something real STOPPED, ghost means it never started.** One is
+luck, the other is a SOURCE worth avoiding. Neither counts as a rejection. Same terminal
+behaviour for all three (row sinks, sequences leave the 🔔 counter and the bulk list, no
+temperature reading, one shared `↩ Restore`) and a separate `apply_status`, badge and filter pill
+each.
 
 They share `rejected_at`, which means **when this left the pipeline** — the ORDER BY that sinks
 closed rows and the temperature guard that refuses to rate them both read it and neither cares
-why. `apply_status` carries the reason. The risk was not the state: `status === 'rejected'` was
-checked in EIGHT places to mean "closed", so both sides now go through one `isClosed()`
-predicate. Sweeping for the string caught a live miss — the SQL ORDER BY named only `'rejected'`,
-so a cancelled job would have sorted above jobs still being prepared.
+why. `apply_status` carries the reason.
+
+**The risk was never the state, it is the hand-written lists that fall behind it.** Both misses
+so far were exactly that, and the second was live for the whole life of `cancelled`:
+
+- the SQL ORDER BY named only `'rejected'`, so a cancelled job sorted above jobs still being
+  prepared. Found by sweeping for the string.
+- **`_status_payload` named only `'rejected'` too**, so a cancelled job that had been applied to
+  came over the wire as `applied`, and one that had not came over as `imported` — no ⊘ badge,
+  absent from its own filter, and `isClosed()` false, which left it in the 🔔 counter still
+  being offered follow-ups. One such row was live ("Zello uploaded job") until 2026-08-12.
+  `test_cancelled_job.py` has fifteen tests and caught none of it: they check the repo or grep
+  the JS, and the one that EXECUTES the frontend feeds `{status:'cancelled'}` by hand — a value
+  the server never emitted (§Lessons 93).
+
+Both are generated from `CLOSED_STATUSES` now, both sides go through one `isClosed()` predicate,
+and a test asserts the payload no longer names a status directly.
 
 **🎯 Interview scheduled is the success metric** (2026-08-03), on the row next to Re-apply. Every
 other number counts EFFORT; this is the only outcome, and the funnel now ends at it. It is also
@@ -432,7 +462,7 @@ level down and was reported as unchanged.
 **LinkedIn messages are logged by hand** (UX-2). `messages` is keyed on Gmail's own message id
 and carries `thread_id` / `rfc_message_id` / `from_addr` — a DM has none, and faking them would
 corrupt reply detection. `dm_status` only ever recorded what WE sent. So both directions go in
-`interactions`, and an inbound one **stops the LinkedIn ladder only** and reaches the 🔔 counter
+`interactions`, and an inbound one reaches the 🔔 counter
 **without writing `replied_at`** — that field means a DETECTED email reply and is what
 `metrics.by_variant` divides by.
 
@@ -471,8 +501,44 @@ corrupt reply detection. `dm_status` only ever recorded what WE sent. So both di
   and no JS read it, so a search that ran, spent credits and kept nobody looked exactly like a
   button that never fired.
 
-The 2.5s refresh replaces `#jobs` wholesale, so `refresh()` **skips while any input in that
-subtree has focus** — otherwise it eats what you're typing.
+**Edit any field in place** (EDIT-1, 2026-08-12). Double-click a job title, a company, or the
+description CELL in the table; Location and Salary are on the Job tab, which is where they get
+edited at all — they render only as tag CHIPS, and both were empty on all 81 rows, so two of the
+five tag types had never appeared once. **Double-click a Space tab to rename it** — `repo.rename`
+had existed since SPACE-2 reachable from no endpoint and no button (§Lessons 31).
+
+**Tags are not edited directly**, and that is deliberate: they are DERIVED, and a tag that can
+drift from its job is the invariant this whole table rests on. Editing the FIELDS keeps it true.
+Free-form stored labels remain a separate, later feature.
+
+`EDITABLE_FIELDS` is a whitelist and every exclusion is chosen for how SILENTLY it would fail —
+`url` is the anchor `contact_id` hashes, `fit_score` is the model's judgement that the score
+filter reads as a signal, `applied_at`/`apply_status` are the state machine the row menu drives
+and logs. An unknown key **raises**: a silently dropped field is an edit the operator watched
+succeed and which never happened. `None` means "this caller did not show that field" and `""`
+means they cleared it (§Lessons 75).
+
+**The 2.5s refresh replaces `#jobs` wholesale**, so it is guarded three ways, and the third is
+what makes the first two safe to have:
+
+- it **skips while any input in that subtree has focus**, or it eats what you are typing;
+- it **skips while a SELECTION is live** — a range dragged across a description is not an input,
+  so the focus check never saw it, and the rebuild collapsed the selection every 2.5s. That is
+  what "I can't copy the text" was;
+- it **does not write at all when the generated HTML is unchanged.** Measured: two `/api/status`
+  bodies three seconds apart were IDENTICAL across **1.65 MB** except two `due_in_h` countdowns
+  that change hourly, so the steady state was rebuilding a byte-identical tree ~1,440 times an
+  hour — resetting every textarea's `scrollTop` to 0 each time. That is what "it keeps taking me
+  back up when I scroll" was.
+
+A string compare of what is about to be written is the whole guard: no diffing library, no keyed
+nodes, and it cannot go stale because it IS the output.
+
+**A deliberate render is not a refresh**, and conflating them broke the editor on arrival:
+`startEdit` sets `EDITING`, calls `rerenderJobs()`, and `isEditingJobs()` returns true BECAUSE
+`EDITING` is set — so the table bailed and the `<input>` was never written. `rerenderJobs(force)`
+threads past the guard, and the `force` has to reach the check INSIDE `renderJobsTable`, not just
+the argument passed to it (§Lessons 94).
 
 `/api/status` costs **74 SQL statements against a budget of 80** (was 313 before ARCH-4
 measured it — 199 of those were `CREATE TABLE IF NOT EXISTS` re-run every request). This file
@@ -499,8 +565,9 @@ here that touches the network needs the same treatment.
 column. `docs/spaces-prd.md` is the plan; `docs/tickets/SPACE-1a-*.md` is the authority where
 they disagree, because three of the PRD's claims did not survive contact with the code.
 
-**Two shapes.** `pipeline/jobs` (rows are postings) and `pipeline/targets` (rows are companies
-you pitch). Three templates, two of which share the targets shape — that is the central claim,
+**Two shapes, FOUR templates.** `pipeline/jobs` (rows are postings) and `pipeline/targets` (rows
+are companies). Three of the four templates share the targets shape — `outreach`, `business` and
+now `sheet` — which is the central claim,
 and `test_adding_a_space_needs_no_schema_change` is where it gets falsified: it defines a Space
 named `lighthouse-tenders`, drives it end to end, and asserts no migration ran. A second test
 asserts that name appears nowhere in the codebase, because the channel version of this test
@@ -514,18 +581,19 @@ originally named SMS and silently broke when SMS shipped.
 | `company_cap` is NOT on the manifest | Same mistake §Headline 4 corrected for the daily limit: the cap exists because a company sees one sender, and **the recipient does not know what a Space is**. |
 | `job_url` → `anchor` was NOT renamed | 169 refs in 18 source files, 140 in tests, and it leaves `messages.job_url` disagreeing with it. Pure hygiene, and the only step that can destroy data. SPACE-1b, deferred. |
 
-**The manifest reaches everything, and the guarantee is a golden file.** A targets Space gets
-its OWN system prompt (`_PITCH_SYSTEM`), not the job-seeker one with caveats appended —
-§Lessons 40. Follow-ups too (`_PITCH_FOLLOWUP_SYSTEM`), which the first pass forgot, so touch 1
+**The manifest reaches everything, and the guarantee is a golden file.** A Space gets its OWN
+system prompt — not another one with caveats appended (§Lessons 40). There are THREE now, chosen
+by `voice` rather than by shape since SHEET-1: `_SYSTEM`, `_PITCH_SYSTEM` and `_PREMISE_SYSTEM`
+(§The sheet Space). Follow-ups too (`_PITCH_FOLLOWUP_SYSTEM`), which the first pass forgot, so touch 1
 read correctly and touch 2 claimed an application that does not exist.
 `tests/golden/jobs_outreach_prompt.txt` pins the jobs prompt byte-for-byte. **Its first version
 was vacuous**: it compared `space=None` against a default manifest and passed under a mutation
 that leaked a field into BOTH paths. Two things moving together is not a regression test.
 
-**Creating a Space is a `＋` on the nav strip.** Two templates offered, not three — `business`
-differs from `outreach` by `identity_id` alone, that field FREEZES after the first send, and
-ID-1 has not shipped, so a business Space made today would send from the personal mailbox
-forever. The refusal says so. The nav shows from ONE Space up, because the `＋` lives in it and
+**Creating a Space is a `＋` on the nav strip.** THREE templates offered (`jobs`, `outreach`,
+`sheet`), not four — `business` differs from `outreach` by `identity_id` alone, that field
+FREEZES after the first send, and ID-1 has not shipped, so a business Space made today would
+send from the personal mailbox forever. The refusal says so. The nav shows from ONE Space up, because the `＋` lives in it and
 hiding the strip below two hid the only way to make a second.
 
 **A Space is only as separate as its WRITE PATHS**, and two of them were not (2026-08-06/07).
@@ -551,6 +619,111 @@ Copy debt: the bucket filters still say "In progress / Applied / Rejected" and t
 placeholder names salary, both wrong words in a targets Space. The four discovery scrapers also
 leave `space_id` to the default — defensible, they run from a CLI with no Space on screen, and
 discovery has produced zero rows to date.
+
+---
+
+## The sheet Space — a lead list as cards (SHEET-1/1b/2, 2026-08-11/12)
+
+`docs/tickets/SHEET-1-the-spreadsheet-space.md`. Asked for as *"creating cards without
+necessarily the cards having a job to apply to — the main unit for this template is the company,
+the employees, and the outreach"*.
+
+**Most of it already existed and had never run.** `pipeline/targets` was already a
+company-as-the-row card with no posting, and `partnerships` held **zero** of them. So this
+doubled as SPACE-6, the falsifier the PRD asked for — and it needed **no schema change**.
+
+**A row is a PERSON, a card is a COMPANY.** One paste, one card per distinct company slug, the
+people hanging off it:
+
+    Company               First Name  Last Name  Position          Email
+    Ridgeline Logistics   Dana        Okafor     VP Engineering    dana@…
+    Ridgeline Logistics   Sam         Iyer       Staff Engineer
+    Northwind Analytics   Alex        Roy        Head of Talent    alex@…
+        ->  2 cards, 3 contacts
+
+Live: **45 cards, 105 people** from one paste. Only `Company` and a name are required.
+
+### `Space.voice` — what a ROW is and what the EMAIL is are two decisions
+
+They used to be one. `draft_email` branched on `shape`, so a company-shaped Space was **forced**
+into `_PITCH_SYSTEM` and "a card per company, in the job search's own words" could not be
+expressed at all. `voice` splits them:
+
+| voice | prompt | what the email IS |
+|---|---|---|
+| `jobseeker` | `_SYSTEM` | writing to someone at a company you applied to |
+| `pitch` | `_PITCH_SYSTEM` | proposing a specific piece of work |
+| **`premise`** | **`_PREMISE_SYSTEM`** | **the campaign's own paragraph IS the message** |
+
+`voice_or_default()` returns exactly what the shape branch used to hardcode, so **no existing
+Space moved** — `tests/golden/jobs_outreach_prompt.txt` staying byte-identical is the proof
+rather than the claim. An unknown voice RAISES at construction: it would fall through to the
+shape default and send the wrong KIND of email silently.
+
+The third prompt was necessary rather than a flag, and `_premise_block`'s own text is why. It
+says *"It is background, not the subject. A message that is only the premise is about the
+sender"* and *"say it in your own words, or leave it out"* — correct for a jobs Space, where the
+POSTING is the subject, and the exact opposite of what is needed with no posting at all.
+Appending "…but here it IS the subject" is §Lessons 40: the heading wins. `_premise_led_block`
+replaces it and the original is untouched for the two shapes that still want it as background.
+
+The `sheet` template is `shape=targets · voice=premise · terminal=interview · tailor_docs=False`
+— a job search organised by company, so success is still an interview and there is no posting to
+tailor against.
+
+### Contacts you SUPPLY, not discover
+
+Three decisions, cheap now and expensive later:
+
+- **`source='import'`**, never `apollo`. CRM-2's `by_layer()` exists to compare a warm channel
+  against a cold list, and filing a hand-built sheet as a cold find makes that unanswerable
+  forever. Live: apollo 207, **import 105**.
+- **Verification is SKIPPED, not run and passed.** `verify_contact` catches people who work
+  somewhere ELSE, which cannot happen to a name the operator typed (§Lessons 19) — and running
+  it would drop every imported person for having no Apollo record (§Lessons 14).
+- **`email_status='unverified'`** with an address, `'none'` without. `verified` is a claim about
+  the ADDRESS and a spreadsheet is not evidence.
+
+### Re-importing a GROWN sheet is the normal way to use this
+
+Which is why two bugs here were found by running it, not by reading it:
+
+**A re-import without the LinkedIn column DUPLICATED everyone.** `contact_id` hashes
+(job_url, linkedin_url, name), so the same person from a sheet missing that column hashes
+differently and lands as a second contact with their own ladder. People are matched on the card
+by **email, then name** — CO-1's keying problem surfacing somewhere new, fixed HERE rather than
+in `contact_id`, because changing that hash would re-key all 244 stored contacts.
+
+**Then a sparser sheet ERASED what an earlier one supplied.** `upsert_contact` skips `None` and
+WRITES `""`, so `p.get("linkedin_url") or ""` blanked a stored profile URL the moment the
+operator re-exported without that column. Optional fields pass `None`.
+
+### Context per company: the `About` column
+
+Recognised alongside `Description` / `What they do` / `Summary` / `Overview`. It lands on the
+**CARD**, never the contact — it feeds "WHAT THIS COMPANY DOES" in every draft for everyone
+there, and filed on a person it would reach one of them and hide from their colleagues. First
+non-empty wins, so filling one row covers the company, and a re-import without the column does
+not erase it.
+
+**Automating it was considered and rejected.** Apollo's name search returns the WRONG company
+for 4 of 5 on the live list — Steno → *Steno Diabetes Center Copenhagen*, Bissell → *BISSELL Pet
+Foundation*, Nerdy → `nerdy.com` when the contacts are at `varsitytutors.com` (§Lessons 5) — and
+only 15 of 45 cards carry an email domain to disambiguate with. A wrong summary is a claim about
+someone's employer sent to someone who works there, which is §Lessons 68's cost. The operator has
+the judgement; one cell beats an inference.
+
+`SHEET-2` also fixed the gap it exposed: **`job_context` reached the jobs prompt and nowhere
+else**, so the Space whose rows are companies had a context box on every card feeding nothing at
+all (§Lessons 49, 72). The two are kept as separate headings — what the company IS (public,
+automatable later) against what the OPERATOR knows (typed, not public).
+
+### Attaching a posting later
+
+`repo.attach_posting` fills `title` / `application_url` / `full_description` **in place**. The
+anchor never moves, and that is the whole function: `contact_id` hashes `job_url`, and on a
+target card the anchor IS the `job_url`, so swapping in a posting URL orphans every contact,
+ladder and message on it with nothing raising.
 
 ---
 
@@ -611,15 +784,44 @@ the manifest.
 
 ## Follow-up sequences
 
-**Three** independent ladders, all human-in-the-loop. Only email can auto-send.
+**TWO** independent ladders, all human-in-the-loop. Only email can auto-send.
 
-| | Email | LinkedIn | SMS / iMessage |
+| | Email | SMS / iMessage | ~~LinkedIn~~ |
 |---|---|---|---|
-| Anchor | `submitted_at` | `dm_sent_at` | `sms_sent_at` |
-| Proof it started | `sent_message_id` | `dm_status` | operator clicks `✓ I sent it` |
-| Default | `48,96,168` (2d/4d/7d) | `120,288` (5d/12d) | `72,168` (3d/7d) |
-| Send | `send_followup()`, threaded | copy → open profile → paste | copy → open Messages → paste |
-| Stop | reply / stop / complete | same | same |
+| Anchor | `submitted_at` | `sms_sent_at` | — |
+| Proof it started | `sent_message_id` | operator clicks `✓ I sent it` | — |
+| Default | `48,96,168` (2d/4d/7d) | `72,168` (3d/7d) | **no ladder** |
+| Send | `send_followup()`, threaded | copy → open Messages → paste | — |
+| Stop | reply / stop / complete | same | — |
+
+**LinkedIn has no follow-up ladder (2026-08-11).** The connection invitation is the whole
+channel: send it and you are done. `Channel.follows_up=False`, and everything else about
+LinkedIn is unchanged — it still drafts the note, still records `dm_sent_at`, still shows its
+🔗 tab and pill, and the checklist's "LinkedIn invites sent" step still counts invites.
+
+The schema had always agreed. `dm_status` holds only `sent` and `manual`, both meaning WE sent
+it, and no `accepted` state exists anywhere (§Lessons 35) — so an invite is not a delivered
+message, and a ladder anchored on `dm_sent_at` was scheduling nudges to people who may never
+have seen the first one, then counting each as work the operator had failed to do. Measured at
+the moment it was switched off:
+
+    170  contacts carried dm_sent_at, so the ladder applied to all of them
+     13  LinkedIn follow-ups had ever been sent, against 177 emails
+     30  sat drafted and unsent — written, paid for, abandoned
+     87  sequences had been STOPPED BY HAND, against 13 sends
+     32  were due right now, against 11 for email
+
+87 manual stops against 13 sends is the argument: the operator had been switching it off one
+contact at a time for weeks. At 32 of 43 it was three quarters of the 🔔 counter, and a badge
+that is mostly work you have decided not to do is one you stop reading — the failure CRM-3a
+exists to prevent. Live effect: **43 due → 5**, all email.
+
+`follows_up` is DATA on the registry, not a branch, and the filter ORDER in `channels_for` is
+load-bearing: the Space narrows first (so a manifest typo still falls back to every channel),
+then `follows_up` applies and is never undone by that fallback — reversed, a LinkedIn-only
+Space would come back with email and SMS ladders it never asked for. Nothing was deleted: the
+13 sent touches, 2 replies and 87 stopped sequences remain as history, and re-enabling is one
+word.
 
 All three anchor to the last `touches.sent_at` once a ladder is running; the column above is
 only the *first* message. **A phone number does NOT start the SMS ladder** — it is typed in by
@@ -1918,6 +2120,86 @@ company `"Jobs"` — the same substring bug class, inside the function written t
     **Indiana**. A blank location is always KEPT: dropping on a missing field shrinks every
     search on data quality rather than on the rule (§Lessons 34).
 
+92. **The eighth vendor was a spreadsheet, and it arrived through a box the operator was
+    looking at.** A Google Sheets URL pasted into the JOBS import box became
+    `title="Docs uploaded job", company="Docs"` — `docs.google.com`'s host label as the employer,
+    after Ats · Hr · Edu · Ouryahoo · Oraclecloud · Recruitics · Jobvite. Then the same link in
+    the TARGETS box became the card
+    `spreadsheets/d/1HreblDeVn3vDFlmy4fROR9OThwd5tsld2PQkmtvG8qQ/edit?gid=…`, because
+    `parse_line` stripped the host as a domain and kept the PATH as the name.
+    Neither fix is a list. **A URL path is not a company name** — a slash means we are looking at
+    a path, and falling back to the host's label is the exact mechanism that produced "Docs" one
+    layer earlier. **A company name never contains a TAB** — a line with one is a spreadsheet row
+    in the wrong box, and accepting it made **106 cards each named after a whole row**, the
+    HEADER row included.
+    The measurement that mattered came before any of it: 106 cards, **zero contacts**. The import
+    had never run. "Find contacts is not working" was Apollo being asked for a company called
+    `Tracy Stdic\tZapier\t…` and truthfully saying no such company exists.
+    And the operator's data was still there — one row per junk card's `company` column.
+    Reconstructed, parsed clean (45 companies, 105 people, 0 rejects), imported properly, junk
+    deleted. **Check whether the bad rows still CONTAIN the input before asking anyone to redo
+    the work.**
+
+93. **A guard on the write, a hand-written list on the read, and the state never reached the
+    screen.** Adding `ghost` meant sweeping for `cancelled`, and the sweep found
+    `_status_payload` still saying `if apply_status == "rejected"`. So for the entire life of
+    the `cancelled` state, a cancelled job that had been applied to came over the wire as
+    **`applied`**, and one that had not came over as **`imported`** — no badge, absent from its
+    own filter, and `isClosed()` false, so it stayed in the 🔔 counter and kept being offered
+    follow-ups. One row was live in the database.
+    `test_cancelled_job.py` has FIFTEEN tests and caught none of it. They check the repo layer or
+    grep the JS, and the single test that executes the frontend feeds `{status:'cancelled'}` by
+    hand — **a value the server never actually emitted**. That is the tell worth keeping: a
+    frontend test that supplies its own input can only prove the frontend is consistent with
+    itself. At least one assertion has to start from what the SERVER produces.
+    §Lessons 47's shape with the halves swapped: there the write was fine and the SELECT dropped
+    the column; here the write was fine and the derivation dropped the state.
+
+94. **The guard that protects an open editor vetoed the render that opens it.** `startEdit` sets
+    `EDITING`, calls `rerenderJobs()`, and `isEditingJobs()` returns true BECAUSE `EDITING` is
+    set — so `renderJobsTable` bailed and the `<input>` was never written. Reported as "I click
+    and nothing happens", and nothing did: the handler fired, the state changed, and the render
+    that would have shown it refused to run.
+    All 36 tests passed while the feature was completely broken, because every one of them called
+    `editable()` or `commitEdit()` directly and **none drove the render** (§Lessons 48). The same
+    gap let the employer-banding mutation survive a fortnight earlier: fourteen tests of the
+    grouping functions, none of which rendered a table.
+    Fixing it needed the `force` to reach the check INSIDE `renderJobsTable`, not just the
+    argument passed to it — the first attempt set the argument, and the function re-checks the
+    flag on its own line. **A guard duplicated for a good reason is still two guards.**
+
+95. **A limit doing something its author never aimed it at.** Description edits failed silently
+    on every sheet card: the endpoint refuses anything under 120 characters. That minimum exists
+    so a STUB cannot reach the résumé tailor — on a Space that makes documents an empty
+    description blocks the queue and three pasted sentences would clear the error, satisfy it and
+    produce a résumé written against them. On a Space with `tailor_docs=False` the field is a
+    company blurb, and *"Court reporting and legal transcription."* is 40 characters and exactly
+    right. §Lessons 50's shape, where `0` meant "unlimited" in two settings and "send nothing" in
+    a third.
+    The guard now lives in ONE function both the paste path and the inline editor call. Two
+    copies is how one path enforces a rule and the other quietly does not (§Lessons 49) — and
+    here the inline editor was the one that would have skipped it.
+
+96. **"Everything disappeared" was a column that had never been filled.** All 45 cards on the
+    Lead Sheet showed an empty description and the operator reasonably read that as data loss.
+    Checked against two backups BEFORE touching anything: the pre-recovery snapshot has 0 of 106
+    rows with a description, and the source sheet has no About column at all. Nothing was lost.
+    The defect was real anyway, one level up: **an empty cell rendering as nothing is
+    indistinguishable from a cell whose contents vanished**, and it offers no target to
+    double-click either. It says "No description — double-click to add one" now.
+    The rule: when a report is "X disappeared", verify against a backup before believing it OR
+    dismissing it. Both mistakes are available, and the second is the expensive one.
+
+97. **The control was three clicks from the thing it edits, and that is the same as absent.**
+    §Lessons 43/88/89's family, now at ten occurrences. The ✎ Edit description button shipped
+    inside the Job tab — open the row, switch tabs, scroll — while the description the operator
+    is looking at is the table CELL, sitting next to a job name that double-clicks fine. It was a
+    plain `<div>`. Reported as "I still can't edit any descriptions across any space", which was
+    true of everywhere they would think to try.
+    The test for placement is not "can it be reached". It is **"is it on the thing it acts on"**,
+    and the operator saying *I still can't* is the measurement however much markup exists two
+    screens away.
+
 
 Shipped in one session, in this order: **CRM-3a → CRM-1 → CRM-2 → CRM-3b → CRM-4a.**
 Tickets in `docs/tickets/CRM-*.md`; two of them had instructions that were factually wrong
@@ -2183,12 +2465,37 @@ way to ask whether the personalised ones did better — so every improvement to 
 unfalsifiable. `draft_variant` (2026-08-03) starts fixing it, but nothing is readable until
 enough tagged sends accumulate; `MIN_MEANINGFUL_N` is 10.
 
-**Open, and the one thing CTX-1..3 did NOT prove:** every test asserts the prompt *tells* the
-model to treat operator text as facts rather than phrasing. That is not the same as it obeying.
-§Lessons 42 was invisible to inspection — a quoted phrasing appeared in 5 of 5 drafts and only
-generation against real data showed it. **The Peak6 row is the shape that settles it**: 8
-contacts at one company, nothing sent, `job_context` still empty. Generate all 8 with context
-and count shared sentences before this runs on a 30-job Space.
+**MEASURED 2026-08-12, and the answer was not what was predicted.** Every CTX test asserts the
+prompt *tells* the model to treat operator text as facts rather than phrasing, which is not the
+same as it obeying — so all 13 drafts were generated against the live model for the Superbuilders
+card, the worst case available: 13 people, no titles, no emails, no About.
+
+**The BODIES held.** Median pairwise 6-gram similarity **2%** (max 19%), exactly ONE repeated
+sentence across 13 and it is the cal.com URL, **0** em dashes, GauntletAI in **13/13** (the
+`must_mention` retry works). The 41 shared phrases are the two URLs plus *"enterprise platforms
+at Verizon and T-Mobile"*, which is a FACT appearing in 6 of 13. §Lessons 42 did NOT reproduce.
+
+**The SUBJECT LINES did not.** `ai` in 13/13, `austin` in 12/13, `engineering` in 10/13, max
+pairwise word overlap **89%**:
+
+    ai engineering in austin, growth and sales focus
+    exploring ai engineering opportunities in austin
+    building ai for sales and growth in austin
+    ai engineering for sales automation, austin
+
+The system prompt's *"several people at the same company get these"* rule is aimed at the BODY;
+the subject spec says only "lowercase-ish, specific, no quick question". And the subject is the
+most visible surface there is — you do not have to open anything to see thirteen versions of one
+sentence. **This is the next prompt fix and it is cheap.**
+
+Two more from the same run, both prompt-compliance rather than repetition: **5 of 13 blow the
+120-word cap** (up to 151, while the prompt says to be SHORTER when nothing is known about the
+company), and **11 of 13 carry both a deck link and a calendar link** — two links in a cold first
+email reads as a funnel.
+
+The general lesson is the one worth keeping: **generating against real data answered in twenty
+minutes a question that inspection had left open for weeks, and it answered it in the opposite
+direction to the prediction.** Do it before the next prompt change, not after.
 
 **Open, and reported twice:** the status BAND is still four words describing your own effort
 (`new → active → cooling → cold`) plus two describing theirs (`warm`, `won`), presented as one
@@ -2245,6 +2552,19 @@ the upgrade path §11 of the Spaces PRD points at. Do the graph when a real ques
 
 `docs/tickets/UX-README.md` — six dashboard defects reported 2026-08-04, **all six shipped**.
 Three were the same failure: a value one layer computes that the other cannot see.
+
+**`docs/tickets/SHEET-1-the-spreadsheet-space.md`** (2026-08-11) — **BUILT**, plus SHEET-1b and
+SHEET-2 which are not in the ticket because both came out of running it. See §The sheet Space.
+It doubled as SPACE-6's falsifier and needed no schema change.
+
+**`docs/tickets/HIST-1-the-archive-lens.md`** (2026-08-11) — **designed, NOT built**, and pinned
+by the operator. Asked for as a Space for old applications; narrowed by their own follow-up
+question ("do you need my entire email history, or can you crawl it when I ask?") into a lens
+over Gmail that stores nothing until a person is promoted. Measured first, and the measurement
+is the ticket: a company-name crawl of Google returns 400+ threads and **8 humans, 7 of whom are
+already contacts** — while the real history is employer-agnostic (400+ threads, 135 domains,
+2017–2026) and every employer narrows to an **11-second crawl or less**. `gmail.readonly` is
+already granted, so `q=` search works; ~2–3 days.
 
 **`docs/tickets/CO-1-one-employer-many-roles.md`** (2026-08-11) — **the band is BUILT**; the
 contact-keying half is not. Asked for as "bundle the cards for two jobs at one company", and the
@@ -2319,7 +2639,7 @@ What is actually open now, ordered by leverage:
    `test_sql_lives_only_in_the_data_layer` names the remainder in an allowlist, so the list can
    only shrink and no NEW module can join it. Deliberately deferred; see ARCH-4's ticket.
 
-5. **`web_dashboard.py` is 3,568 lines**, all Python, zero SQL. ~430 lines are pipeline
+5. **`web_dashboard.py` is 4,095 lines** (and `dashboard.js` is 4,154), all Python, zero SQL. ~430 lines are pipeline
    orchestration (`run_dashboard_prepare/apply/fill_one/restart/continue`) that are not HTTP
    concerns. Extracting them is the natural companion to debt item 1.
 
@@ -2342,16 +2662,15 @@ What is actually open now, ordered by leverage:
    the documented `identity_id` freeze **does not exist** — `domain/space.py:240` freezes
    `("id", "shape")` only, so a Space with 133 sent emails is repointable today with no error.
 
-10. **`context` is 46 commits ahead of `main`, pushed, and the working tree is CLEAN**
-    (2026-08-11, `4fdf95f`). The twelve features that had been live on this machine and in no
-    commit anywhere went out in three: employer resolution + the cover-letter addressee
-    (§Lessons 85, 86), outreach `must_mention` + the deck-open intent (§Lessons 87), and the
-    dashboard set — employer bundling, readable failures, the 💡 flag, the Gmail link, bulk
-    follow-ups, the attachment toggle and the cancelled state (§Lessons 88, 89).
+10. **`context` is 61 commits ahead of `main`, pushed, and the working tree is CLEAN**
+    (2026-08-12, `281761f`). The 2026-08-11/12 run added the sheet Space (SHEET-1/1b/2), the
+    ghost state, edit-in-place (EDIT-1), the LinkedIn ladder removal, the jobs-table render
+    fixes and the HIST-1 spec — fifteen commits, each with its own tests and mutations.
     Merging to `main` is still deliberately deferred, and checking out `main` gets you a build
-    without Spaces, the deck fix, the Oracle fix, any of the UX work or any outreach context.
+    without Spaces, the sheet import, the deck fix, the Oracle fix, any of the UX work or any
+    outreach context.
     **The `~/.applypilot/` database is not in git either** — latest backup
-    `applypilot-20260811-pre-co1-move.db`, taken with the sqlite backup API because the WAL
+    `applypilot-20260811-pre-sheet-recover.db`, taken with the sqlite backup API because the WAL
     routinely holds more than the main file (4.1 MB against 1.8 MB once).
 
 6. ~~**No per-company outreach cap.**~~ **CLOSED 2026-08-03** (`OUTREACH_COMPANY_CAP`, default
@@ -2487,7 +2806,7 @@ change still needs the `pip install` above — but that copy gives the file a ne
   and the restart ran anyway, because both were in one chained command (§Lessons 63). Use
   `pgrep -fl "applypilot apply"`; recover an orphaned lock with
   `release_stale_locks(max_age_minutes=0)` and ONLY after pgrep comes back empty.
-- **On branch `context`** (2026-08-11, `4fdf95f`), **46 commits ahead of `main`**, pushed to
+- **On branch `context`** (2026-08-12, `281761f`), **61 commits ahead of `main`**, pushed to
   `origin/context`, nothing uncommitted. `main` last pushed at **`e1f0be6`**. Tags:
   `stable-arch2/3/5/6` · `stable-e2e-20260730` · `stable-crm-20260731`.
 - **A frontend-only edit needs the `pip install` but NOT a dashboard restart** — the copy gives

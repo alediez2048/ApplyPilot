@@ -391,3 +391,83 @@ def test_the_same_rows_import_correctly_through_the_sheet_box(db):
                      "WHERE job_url='target:sheets:zapier'").fetchone()
     assert got["full_name"] == "Tracy Stdic"
     assert got["title"] == "Global Head of Talent"
+
+
+# ── SHEET-2: context per company ────────────────────────────────────────────
+
+ABOUT = "\n".join([
+    TSV(["Company", "Name", "Email", "About"]),
+    TSV(["Ridgeline Logistics", "Dana Okafor", "dana@ridge.test",
+         "Freight brokerage, 300 people, Austin HQ. Moving off spreadsheets."]),
+    TSV(["Ridgeline Logistics", "Sam Iyer", "", ""]),
+    TSV(["Northwind", "Alex Roy", "", "Analytics for hospital procurement."]),
+])
+
+
+def test_an_about_column_lands_on_the_CARD_not_the_person(db):
+    """It feeds "WHAT THIS COMPANY DOES" in every draft for everyone there. Filed on a contact it
+    would reach one person and be invisible to their colleagues."""
+    out = sheet_import.import_sheet("sheets", ABOUT, db)
+    assert out["ok"] is True
+    r = db.execute("SELECT full_description FROM jobs "
+                   "WHERE url='target:sheets:ridgeline-logistics'").fetchone()
+    assert "Freight brokerage" in r["full_description"]
+    # and NOT on the people
+    notes = {x["notes"] for x in db.execute(
+        "SELECT notes FROM contacts WHERE job_url='target:sheets:ridgeline-logistics'")}
+    assert not any((n or "").strip() for n in notes)
+
+
+def test_one_filled_cell_covers_the_whole_company(db):
+    """The operator should not have to repeat the blurb down every row of a company. First
+    non-empty wins, so filling it once is enough — and Sam's blank row must not erase it."""
+    sheet_import.import_sheet("sheets", ABOUT, db)
+    r = db.execute("SELECT full_description FROM jobs "
+                   "WHERE url='target:sheets:ridgeline-logistics'").fetchone()
+    assert "Freight brokerage" in r["full_description"]
+
+
+def test_a_re_import_without_the_about_column_does_not_erase_it(db):
+    """Same rule as the contact fields, and the same bug that erased a LinkedIn URL before it
+    was caught: an empty cell means "this sheet does not say", never "clear it"."""
+    sheet_import.import_sheet("sheets", ABOUT, db)
+    sheet_import.import_sheet("sheets", SHEET, db)          # no About column at all
+    r = db.execute("SELECT full_description FROM jobs "
+                   "WHERE url='target:sheets:ridgeline-logistics'").fetchone()
+    assert "Freight brokerage" in r["full_description"]
+
+
+def test_a_later_sheet_can_UPDATE_the_blurb(db):
+    """Not erasing is not the same as never changing. A corrected sheet has to win."""
+    sheet_import.import_sheet("sheets", ABOUT, db)
+    revised = "\n".join([
+        TSV(["Company", "Name", "About"]),
+        TSV(["Ridgeline Logistics", "Dana Okafor", "Freight brokerage. Now 500 people."]),
+    ])
+    sheet_import.import_sheet("sheets", revised, db)
+    r = db.execute("SELECT full_description FROM jobs "
+                   "WHERE url='target:sheets:ridgeline-logistics'").fetchone()
+    assert "500 people" in r["full_description"]
+
+
+def test_setting_a_blurb_does_not_claim_a_page_was_scraped(db):
+    """`attach_posting` stamps the scrape columns because a posting really arrived. A hand-typed
+    sentence must stay distinguishable from a fetched description."""
+    from applypilot.repo import jobs as _jobs
+    sheet_import.import_sheet("sheets", SHEET, db)
+    before = db.execute("SELECT detail_scraped_at FROM jobs "
+                        "WHERE url='target:sheets:northwind'").fetchone()["detail_scraped_at"]
+    _jobs.set_about("target:sheets:northwind", "Analytics for hospital procurement.", db)
+    after = db.execute("SELECT detail_scraped_at, full_description FROM jobs "
+                       "WHERE url='target:sheets:northwind'").fetchone()
+    assert after["detail_scraped_at"] == before
+    assert "hospital procurement" in after["full_description"]
+
+
+def test_an_empty_blurb_is_a_no_op(db):
+    from applypilot.repo import jobs as _jobs
+    sheet_import.import_sheet("sheets", ABOUT, db)
+    assert _jobs.set_about("target:sheets:ridgeline-logistics", "   ", db) is False
+    r = db.execute("SELECT full_description FROM jobs "
+                   "WHERE url='target:sheets:ridgeline-logistics'").fetchone()
+    assert "Freight brokerage" in r["full_description"]

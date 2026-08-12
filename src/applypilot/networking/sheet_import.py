@@ -99,6 +99,10 @@ def import_sheet(space_id: str, text: str, conn=None) -> dict:
                                        "text": c["name"]})
             continue
         anchors[c["slug"]] = out["url"]
+        # The About column, onto the CARD. It feeds "WHAT THIS COMPANY DOES" in every draft for
+        # every person here, which is why it belongs on the company rather than on a contact.
+        if c.get("about"):
+            _jobs.set_about(out["url"], c["about"], conn)
         (cards_added if out["added"] else cards_existing).append(out["name"])
         if out["added"]:
             log_event(out["url"], "system", "ok",

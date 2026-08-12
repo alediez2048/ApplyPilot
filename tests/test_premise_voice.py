@@ -223,3 +223,34 @@ def test_the_premise_box_is_labelled_by_the_VOICE_not_the_shape():
     # Same shape, premise voice -> the jobs wording, because that is what the field now means.
     assert sp.offer_copy(sp.TARGETS_SHAPE, "premise") == sp.offer_copy(sp.JOBS_SHAPE)
     assert "premise" in sp.offer_copy(sp.TARGETS_SHAPE, "premise")["title"].lower()
+
+
+def test_the_operators_per_row_context_reaches_this_prompt_too():
+    """CTX-2's `job_context` was wired into the jobs prompt and nowhere else, so a Space whose
+    rows are companies had an operator-typed context box feeding nothing — §Lessons 49 and 72,
+    which is the exact shape of `offer` being declared, documented for one case, and read on one
+    of two shapes."""
+    job = {"job_context": "Their CTO spoke at AITX about routing costs."}
+    p = flat(outreach._premise_user_prompt(
+        ["Alejandro"], CONTACT, "Ridgeline", "", "", "", "", "", "", [],
+        space=SPACE, known_block=outreach._known_block(job)))
+    assert "AITX about routing costs" in p
+    assert "WHAT THE SENDER KNOWS ABOUT THIS COMPANY" in p
+
+
+def test_the_two_company_blocks_are_distinct():
+    """What the company IS (the About column, public, could be automated later) and what the
+    OPERATOR knows (typed, not public) are different facts and must not collapse into one
+    heading — the model treats a heading as the thing's identity."""
+    job = {"job_context": "Their CTO spoke at AITX."}
+    p = flat(outreach._premise_user_prompt(
+        ["Alejandro"], CONTACT, "Ridgeline", "Freight brokerage, 300 people.", "",
+        "", "", "", "", [], space=SPACE, known_block=outreach._known_block(job)))
+    assert "WHAT THIS COMPANY DOES" in p and "Freight brokerage" in p
+    assert "WHAT THE SENDER KNOWS ABOUT THIS COMPANY" in p and "AITX" in p
+
+
+def test_no_context_adds_no_heading():
+    p = flat(outreach._premise_user_prompt(
+        ["Alejandro"], CONTACT, "Ridgeline", "", "", "", "", "", "", [], space=SPACE))
+    assert "WHAT THE SENDER KNOWS" not in p

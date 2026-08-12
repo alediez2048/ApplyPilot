@@ -287,6 +287,31 @@ def add_target(space_id: str, name: str, domain: str = "",
     return {"url": url, "name": name, "added": True}
 
 
+def set_about(url: str, text: str, conn: sqlite3.Connection | None = None) -> bool:
+    """What a company DOES, on its card. Returns whether anything changed.
+
+    Separate from `attach_posting` on purpose, even though both end up in `full_description`:
+    that one means a job posting arrived and stamps the scrape columns to say the row is no
+    longer owed a fetch. This is a blurb the operator supplied about the employer, and claiming
+    a page was scraped for it would make a hand-typed sentence indistinguishable from a real
+    description later.
+
+    An empty `text` is a NO-OP, never a clear. A sheet re-imported without the About column must
+    not wipe what an earlier one supplied — the same rule the contact fields follow, and the bug
+    that erased a LinkedIn URL before it was caught.
+    """
+    body = (text or "").strip()
+    if not body:
+        return False
+    c = _c(conn)
+    row = c.execute("SELECT full_description FROM jobs WHERE url = ?", (url,)).fetchone()
+    if not row or (row["full_description"] or "").strip() == body:
+        return False
+    c.execute("UPDATE jobs SET full_description = ? WHERE url = ?", (body, url))
+    c.commit()
+    return True
+
+
 def attach_posting(url: str, *, title: str = "", application_url: str = "",
                    description: str = "", conn: sqlite3.Connection | None = None) -> dict:
     """Give an existing card a job posting, IN PLACE (SHEET-1 C4).

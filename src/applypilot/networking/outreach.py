@@ -464,7 +464,8 @@ def _premise_led_block(space) -> str:
 
 
 def _premise_user_prompt(sender_bits, contact, company, about_them, noticed,
-                         sched_block, deck_block, style_block, tone_block, previous, space=None):
+                         sched_block, deck_block, style_block, tone_block, previous, space=None,
+                         known_block=""):
     """The premise-led prompt (SHEET-1).
 
     Structurally close to `_pitch_user_prompt` because the available FACTS are the same — a
@@ -492,6 +493,11 @@ def _premise_user_prompt(sender_bits, contact, company, about_them, noticed,
            "title and NOTHING ELSE about them. Do not invent a product, a market, a funding "
            "round, a recent announcement or a problem they have. Write the opening from their "
            "TITLE instead, and keep it shorter because you have less to say.\n\n")
+        # CTX-2's per-row field, which this prompt was not passing at all — it reached the jobs
+        # prompt and nowhere else, so a Space whose rows are companies had an operator-typed
+        # context box feeding nothing (§Lessons 49, 72). Distinct from the block above: that one
+        # is what the company IS, this is what the OPERATOR knows and the public record does not.
+        + (known_block or "")
         + (f"WHAT THE SENDER NOTICED ABOUT THIS PERSON (verbatim, from looking at their "
            f"profile):\n{noticed}\n"
            "ENGAGE WITH THE SUBSTANCE, NEVER ANNOUNCE THE NOTICING. Any sentence whose job is "
@@ -1053,7 +1059,8 @@ def draft_email(profile: dict, job: dict, contact: dict, style: str = "", warm: 
         user = _premise_user_prompt(sender_bits, contact, company,
                                     job.get("full_description"), noticed,
                                     sched_block, deck_block, style_block,
-                                    tone_block, previous, space=space)
+                                    tone_block, previous, space=space,
+                                    known_block=_known_block(job))
         system = _PREMISE_SYSTEM
     elif voice == "pitch":
         # `full_description` is what the operator pasted about the company, and the offer comes

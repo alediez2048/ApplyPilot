@@ -53,6 +53,12 @@ _FIELDS: dict[str, tuple[str, ...]] = {
     "linkedin": ("linkedin", "linkedinurl", "linkedinprofile", "li", "profile", "profileurl"),
     "domain": ("domain", "website", "url", "companywebsite", "site", "companydomain"),
     "notes": ("notes", "note", "comment", "comments", "context"),
+    # SHEET-2. What the COMPANY does, one cell, repeated on that company's rows or filled on
+    # just one of them. Deliberately separate from `notes`, which is per PERSON: a blurb about
+    # the employer belongs on the card and reaches every draft for it, and filing it on a
+    # contact would send it to one person and hide it from their colleagues.
+    "about": ("about", "description", "companydescription", "whattheydo", "summary",
+              "companysummary", "overview", "bio", "blurb"),
 }
 
 _NORM = re.compile(r"[^a-z0-9]+")
@@ -233,11 +239,16 @@ def parse(text: str) -> dict:
         seen_name.add(key_n)
 
         domain = _domain(_cell(row, hm.get("domain")))
+        about = _cell(row, hm.get("about"))
         entry = companies.setdefault(cslug, {"slug": cslug, "name": company.strip(),
-                                             "domain": domain, "people": 0})
-        # First non-empty domain wins; a later blank must not erase one an earlier row supplied.
+                                             "domain": domain, "about": about, "people": 0})
+        # First non-empty wins for both; a later blank must not erase what an earlier row
+        # supplied. That is what lets the operator fill the blurb on ONE of a company's rows
+        # rather than repeating it down the column.
         if domain and not entry["domain"]:
             entry["domain"] = domain
+        if about and not entry["about"]:
+            entry["about"] = about
         entry["people"] += 1
 
         people.append({

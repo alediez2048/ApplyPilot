@@ -1222,6 +1222,33 @@ def _unmark_rejected(url: str) -> dict:
     return {"ok": True, "message": "Restored from rejected pile"}
 
 
+#: Minimum length for a description, and the ONE place that rule lives.
+#:
+#: It exists so a stub cannot reach the résumé tailor: on a Space that makes documents an empty
+#: description blocks the queue, and three pasted sentences would clear the error, satisfy it,
+#: and produce a résumé written against them.
+#:
+#: It does NOT apply to a Space that makes no documents. There the field is a company blurb —
+#: "Court reporting and legal transcription." is 40 characters and exactly right.
+#:
+#: Shared by the paste endpoint and the inline editor. Two copies is how one path ends up
+#: enforcing it and the other quietly not (§Lessons 49), and the inline editor is the one that
+#: would have bypassed it.
+_DESCRIPTION_MIN = 120
+
+
+def _description_too_short(row: dict, text: str, conn) -> str:
+    """The refusal message, or "" when the text is acceptable here."""
+    try:
+        space = _spaces.load((row or {}).get("space_id") or "", conn)
+    except Exception:  # noqa: BLE001 — a missing registry must not block an edit
+        space = None
+    tailors = space.tailor_docs if space is not None else True
+    if tailors and len(text.strip()) < _DESCRIPTION_MIN:
+        return "that looks too short to be a job description"
+    return ""
+
+
 def _save_job_description(url: str, description: str) -> dict:
     """Let the operator paste a description the scraper could not read.
 
@@ -1240,23 +1267,9 @@ def _save_job_description(url: str, description: str) -> dict:
     row = _jobs.get(url, conn)
     if not row:
         return {"ok": False, "message": "job not found"}
-    # The minimum applies only where a stub would DO something: on a Space that tailors, an
-    # empty description blocks the queue and three pasted sentences would clear the error,
-    # satisfy it, and produce a résumé written against them.
-    #
-    # It does not apply to a Space that makes no documents. There the field is a company blurb
-    # — "Court reporting and legal transcription." is 40 characters and exactly right — and the
-    # guard was refusing every edit on a sheet card, which is how "I cannot change the
-    # description" was reported. §Lessons 50's shape: a limit doing something its author never
-    # aimed it at.
-    space = None
-    try:
-        space = _spaces.load(row.get("space_id") or "", conn)
-    except Exception:  # noqa: BLE001 — a missing registry must not block an edit
-        space = None
-    tailors = space.tailor_docs if space is not None else True
-    if tailors and len(text) < 120:
-        return {"ok": False, "message": "that looks too short to be a job description"}
+    too_short = _description_too_short(row, text, conn)
+    if too_short:
+        return {"ok": False, "message": too_short}
     _jobs.set_description(url, text, conn)
     log_event(url, "enrich", "ok", f"Description pasted by hand ({len(text):,} chars).", conn)
     return {"ok": True, "message": f"Saved {len(text):,} characters — run Prepare now"}
@@ -2518,6 +2531,13 @@ def _edit_job(data: dict) -> dict:
     fields = {k: v for k, v in (data or {}).items() if k in _jobs.EDITABLE_FIELDS}
     if not fields:
         return {"ok": False, "message": "nothing to save"}
+    if "full_description" in fields:
+        row = _jobs.get(url, conn)
+        if not row:
+            return {"ok": False, "message": "job not found"}
+        too_short = _description_too_short(row, str(fields["full_description"]), conn)
+        if too_short:
+            return {"ok": False, "message": too_short}
     try:
         wrote = _jobs.set_fields(url, fields, conn)
     except ValueError as e:

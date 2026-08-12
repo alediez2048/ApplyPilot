@@ -392,7 +392,9 @@ def _table(body: str, tmp_path) -> dict:
 const SRC = """ + json.dumps(_js()) + """;
 const F = (new Function(SRC + `; return {
   startEdit, editDesc, renderJobsTable, isEditingJobs, rerenderJobs, jobDetail,
-  saveJobDescription,
+  saveJobDescription, descCell, commitEdit,
+  getJobsList: () => LAST_JOBS,
+  setRerender: fn => { rerenderJobs = fn; },
   setJobs: v => { LAST_JOBS = v; },
   openPanel: u => { PANEL_OPEN.add(u); TAB_OPEN.set(u, 'job'); },
   writes: () => globalThis.WROTE, reset: () => { globalThis.WROTE = []; }
@@ -596,3 +598,110 @@ await F.editDesc('http://j/1', true);
 console.log(JSON.stringify({ fetched: asked }));
 """ % _JOB_ROW, tmp_path)
     assert out["fetched"] is None
+
+
+# ── the description cell in the TABLE ───────────────────────────────────────
+
+def test_the_table_description_cell_is_double_clickable(tmp_path):
+    """The ✎ button in the Job tab shipped first and was reported as "I still cannot edit any
+    descriptions": it is three clicks away, while the description the operator is looking at is
+    the table cell next to a job name that double-clicks fine. §Lessons 89."""
+    out = _table("""
+const j = %s;
+F.setJobs([j]);
+F.renderJobsTable([j], false);
+const html = globalThis.WROTE[0] || '';
+const cell = (html.match(/<td class="desc">([\\s\\S]*?)<\\/td>/) || [])[1] || '';
+console.log(JSON.stringify({
+  dbl: /ondblclick="editDesc\\(/.test(cell),
+  editable: /class="desc-text editable/.test(cell),
+}));
+""" % _JOB_ROW, tmp_path)
+    assert out == {"dbl": True, "editable": True}
+
+
+def test_an_empty_description_says_it_can_be_added(tmp_path):
+    """45 of the operator's 45 sheet cards have no description — a blank cell offers no target
+    at all, which is exactly how "all the descriptions disappeared" reads."""
+    out = _table("""
+const j = JSON.parse(JSON.stringify(%s)); j.description = '';
+F.setJobs([j]);
+F.renderJobsTable([j], false);
+const cell = ((globalThis.WROTE[0] || '').match(/<td class="desc">([\\s\\S]*?)<\\/td>/) || [])[1] || '';
+console.log(JSON.stringify({ prompts: /double-click to add/.test(cell), marked: /is-empty/.test(cell) }));
+""" % _JOB_ROW, tmp_path)
+    assert out == {"prompts": True, "marked": True}
+
+
+def test_double_clicking_the_cell_puts_a_textarea_in_it(tmp_path):
+    out = _table("""
+const j = %s;
+F.setJobs([j]);
+F.renderJobsTable([j], false);
+const before = globalThis.WROTE.length;
+await F.editDesc('http://j/1', true);
+const cell = ((globalThis.WROTE[globalThis.WROTE.length-1] || '').match(/<td class="desc">([\\s\\S]*?)<\\/td>/) || [])[1] || '';
+console.log(JSON.stringify({
+  rendered: globalThis.WROTE.length > before,
+  textarea: /class="desc-edit"/.test(cell),
+  field: /data-field="full_description"/.test(cell),
+}));
+""" % _JOB_ROW, tmp_path)
+    assert out == {"rendered": True, "textarea": True, "field": True}
+
+
+def test_committing_a_description_leaves_edit_mode(tmp_path):
+    """DESC_EDIT holds the refresh. Left set, the table freezes — the same failure the Job-tab
+    save had, and the cell editor commits through `commitEdit`, not `saveJobDescription`."""
+    out = _table("""
+const j = %s;
+F.setJobs([j]);
+await F.editDesc('http://j/1', true);
+const during = F.isEditingJobs();
+globalThis.fetch = async () => ({ ok:true,
+  json: async () => ({ ok:true, changed:['full_description'], values:{ full_description:'New text.' } }) });
+await F.commitEdit({ getAttribute: k => k === 'data-url' ? 'http://j/1'
+                     : k === 'data-field' ? 'full_description' : '', value: 'New text.' });
+console.log(JSON.stringify({ during, after: F.isEditingJobs(), desc: F.getJobsList()[0].description }));
+""" % _JOB_ROW, tmp_path)
+    assert out["during"] is True
+    assert out["after"] is False, "the table is frozen — DESC_EDIT survived the commit"
+    assert out["desc"] == "New text."
+
+
+def test_the_row_keeps_an_EXCERPT_not_the_full_text(tmp_path):
+    """The payload's `description` is a 900-char excerpt of `full_description`. Writing the full
+    text into that key makes the row's cell disagree with every other reader until the next
+    refresh."""
+    out = _table("""
+const j = %s;
+F.setJobs([j]);
+await F.editDesc('http://j/1', true);
+const long = 'z'.repeat(4000);
+// Capture what the OPTIMISTIC render sees, not just the end state. The server read-back
+// re-slices, so asserting only on the final value passed against a mutation that wrote the
+// full 4000 characters into the row before the request even went out — the cell would render
+// 4000 characters for the whole round trip.
+const seen = [];
+F.setRerender(() => seen.push((F.getJobsList()[0].description || '').length));
+globalThis.fetch = async () => ({ ok:true,
+  json: async () => ({ ok:true, changed:['full_description'], values:{ full_description: long } }) });
+await F.commitEdit({ getAttribute: k => k === 'data-url' ? 'http://j/1'
+                     : k === 'data-field' ? 'full_description' : '', value: long });
+console.log(JSON.stringify({ len: F.getJobsList()[0].description.length, seen }));
+""" % _JOB_ROW, tmp_path)
+    assert out["len"] == 900
+    assert out["seen"], "no render happened"
+    assert max(out["seen"]) == 900, (
+        f"the row held the full text before the server answered: {out['seen']}")
+
+
+def test_the_inline_editor_honours_the_same_length_guard(db):
+    """Two copies of a rule is how one path enforces it and the other quietly does not
+    (§Lessons 49). The inline editor is the one that would have bypassed it, letting three
+    sentences reach the résumé tailor."""
+    assert wd._edit_job({"url": "http://j/1", "full_description": "Too short."})["ok"] is False
+    _spaces.create_space("sheets", "Sheets", "sheet", conn=db)
+    sheet_import.import_sheet("sheets", "Company\tName\nSteno\tDan", db)
+    out = wd._edit_job({"url": "target:sheets:steno", "full_description": "Short blurb."})
+    assert out["ok"] is True

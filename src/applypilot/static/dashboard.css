@@ -746,6 +746,12 @@
   .editable { cursor: text; border-radius: 3px; }
   .editable:hover { background: #f3f4f6; box-shadow: inset 0 -1px 0 #cbd5e1; }
   .editable.is-empty { color: #9aa1ab; font-style: italic; font-weight: 400; }
+  /* The description editor in the table cell. Tall enough to see a paragraph, and it must not
+     stretch the row beyond what the six-line clamp already allows (§Lessons 76: the desc cell
+     WAS the row height, at 130px per row). */
+  .desc-edit { font: inherit; color: inherit; width: 100%; box-sizing: border-box; min-height: 92px;
+               max-height: 240px; padding: 4px 6px; border: 1px solid #7aa7ff; border-radius: 4px;
+               background: #fff; outline: none; resize: vertical; }
   .cell-edit { font: inherit; color: inherit; width: 100%; box-sizing: border-box;
                padding: 1px 4px; border: 1px solid #7aa7ff; border-radius: 3px;
                background: #fff; outline: none; }

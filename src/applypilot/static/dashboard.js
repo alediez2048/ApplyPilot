@@ -2778,17 +2778,24 @@ async function commitEdit(el) {
   const field = el.getAttribute('data-field') || '';
   const value = el.value;
   EDITING = null;
+  // The description editor is a textarea keyed in DESC_EDIT rather than EDITING, and that Set
+  // holds the refresh — leaving a url in it freezes the table.
+  if (field === 'full_description') { DESC_EDIT.delete(url); JOB_DESC.set(url, value); }
   if (!url || !field) { rerenderJobs(true); return; }
   // Write it into LAST_JOBS before the request. `rerenderJobs()` renders from that, so without
   // this the cell snaps back to its old value for up to 2.5s and the edit reads as rejected —
   // §Lessons 21, and the same fix the 💡 flag needed.
   const job = (LAST_JOBS || []).find(x => x.url === url);
-  const before = job ? job[field] : undefined;
-  if (job) job[field] = value;
+  // The payload calls it `description` and carries a 900-char EXCERPT of `full_description`.
+  // Writing the full text into that key would make the row's cell disagree with every other
+  // reader of it until the next refresh.
+  const key = field === 'full_description' ? 'description' : field;
+  const before = job ? job[key] : undefined;
+  if (job) job[key] = field === 'full_description' ? value.slice(0, 900) : value;
   rerenderJobs(true);
   const r = await post('/api/job/edit', {url, [field]: value});
   if (!r || r.ok === false) {
-    if (job && before !== undefined) job[field] = before;   // put it back; nothing was stored
+    if (job && before !== undefined) job[key] = before;    // put it back; nothing was stored
     rerenderJobs(true);
     alert((r && r.message) || 'Could not save that.');
     return;
@@ -2796,8 +2803,39 @@ async function commitEdit(el) {
   // Adopt what the SERVER stored rather than what was typed: it caps the length, and a silently
   // truncated value that the screen still shows in full is a disagreement the operator cannot
   // see (§Lessons 90's shape — a bound that does not say it is a bound).
-  if (job && r.values && r.values[field] !== undefined) job[field] = r.values[field];
+  if (job && r.values && r.values[field] !== undefined)
+    job[key] = field === 'full_description' ? r.values[field].slice(0, 900) : r.values[field];
   rerenderJobs(true);
+}
+
+//: The description cell, double-clickable like the title beside it.
+//:
+//: The ✎ button in the Job tab shipped first and was reported as "I still cannot edit any
+//: descriptions" — it is three clicks away (open the row, switch to Job, scroll), while the
+//: description the operator is looking at is right here in the table next to a job name that
+//: double-clicks fine. §Lessons 89, for the third time this week.
+//:
+//: A textarea rather than the single-line editor: these run 4-10KB on a real posting.
+function descCell(j) {
+  if (DESC_EDIT.has(j.url)) {
+    const full = JOB_DESC.get(j.url);
+    return `<textarea class="desc-edit" data-edit="1"
+      data-url="${esc(j.url)}" data-field="full_description"
+      onkeydown="onDescKey(event)" onblur="commitEdit(this)"
+      >${esc(full || j.description || '')}</textarea>`;
+  }
+  const empty = !String(j.description || '').trim();
+  return `<div class="desc-text editable${empty ? ' is-empty' : ''}"
+    ondblclick="editDesc(${`decodeURIComponent('${encodeURIComponent(j.url)}')`}, true)"
+    title="Double-click to edit">${empty ? 'No description — double-click to add one'
+      : esc(j.description)}</div>`;
+}
+
+//: Enter inserts a NEWLINE here, unlike the single-line fields — a description has paragraphs.
+//: Escape discards, and Cmd/Ctrl+Enter commits without reaching for the mouse.
+function onDescKey(e) {
+  if (e.key === 'Escape') { DESC_EDIT.delete(e.target.getAttribute('data-url')); rerenderJobs(true); }
+  else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); e.target.blur(); }
 }
 
 //: One job's two rows — the row itself and its `job-foot`. Extracted from `renderJobsTable`
@@ -2809,7 +2847,7 @@ function jobRows(j, inGroup) {
     <tr class="${j.interview_at ? 'row-won' : ''}${co}">
       <td class="status-cell"><div class="status-head">${badge(j.status)}${j.interview_at ? ` <span class="won-chip" title="Scheduled ${esc(fmtDate(j.interview_at))}">${wonLabel(j).icon} ${esc(wonLabel(j).label.toLowerCase())}</span>` : ''}</div>${isClosed(j) && j.rejected_at ? `<div class="rejected-on">${esc(closedLabel(j.status))} ${fmtDate(j.rejected_at)}</div>` : (j.applied_at ? `<div class="applied-on">Applied ${fmtDate(j.applied_at)}</div>` : '')}</td>
       <td class="job-cell">${editable(j, 'title', j.title, 'job-title')}${inGroup ? '' : editable(j, 'company', j.company, 'job-co')}${matchedVia(j)}</td>
-      <td class="desc"><div class="desc-text">${esc(j.description)}</div></td>
+      <td class="desc">${descCell(j)}</td>
       <td class="tags-cell">${jobTags(j).map(t =>
         `<button class="tag-chip${TAG_FILTER.has(t.k) ? ' on' : ''}" onclick="event.stopPropagation();toggleTag(${tagArg(t.k)})" title="Filter by ${esc(t.value)}">${esc(t.label)}</button>`
       ).join('') || '<span class="tags-none">—</span>'}</td>

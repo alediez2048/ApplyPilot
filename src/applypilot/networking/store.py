@@ -992,17 +992,22 @@ def contact_for_delete(contact_id: str, conn: sqlite3.Connection | None = None) 
     return dict(zip(row.keys(), row)) if row else None
 
 
-def contact_name_and_phone(contact_id: str,
+def contact_details_before(contact_id: str,
                            conn: sqlite3.Connection | None = None) -> dict | None:
-    """Pre-save snapshot, so only a phone that ACTUALLY changed gets logged.
+    """Pre-save snapshot of the operator-editable identifiers, so only a REAL change is logged.
 
     Re-saving a note would otherwise spam the activity timeline with phone events.
+
+    `sent_message_id` rides along because it is what separates ADDING an address from CHANGING
+    one that has already carried a message — those are the same edit to the column and very
+    different acts, and only the second needs to be confirmed and recorded.
     """
     if conn is None:
         conn = get_connection()
     init_contacts(conn)
-    row = conn.execute("SELECT full_name, phone FROM contacts WHERE id = ?",
-                       (contact_id,)).fetchone()
+    row = conn.execute(
+        "SELECT full_name, phone, email, linkedin_url, email_status, sent_message_id "
+        "FROM contacts WHERE id = ?", (contact_id,)).fetchone()
     return dict(zip(row.keys(), row)) if row else None
 
 

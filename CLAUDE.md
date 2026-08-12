@@ -485,11 +485,27 @@ corrupt reply detection. `dm_status` only ever recorded what WE sent. So both di
 - **One tabbed panel**: People · Follow-ups · Materials · Activity. `PANEL_OPEN` / `TAB_OPEN`
   survive the 2.5s refresh.
 - **Contacts collapse to one line** with channel pills (`✉ sent · 🔗 connected · ↻ due`).
-  Opening one shows channels as tabs: **✉ Email · 🔗 LinkedIn · 💬 Text**. Email and LinkedIn
-  hide when there is nothing behind them; **Text is always offered**, which looks inconsistent
-  and is not — that tab is where a phone number gets entered, so hiding it without one hides the
-  only way to add one. With no number the composer renders **disabled** rather than being
-  described in prose (§Lessons 41).
+  Opening one shows channels as tabs: **✉ Email · 🔗 LinkedIn · 💬 Text**. **All three are always
+  offered, and an empty one is where its identifier gets ENTERED** (2026-08-12) — the rule Text
+  had always followed alone, which made the other two §Lessons 49. An empty tab is marked `＋`
+  and dashed, so which identifiers are missing is legible from the strip without opening all
+  three; opening one renders the INPUT, never a sentence about the absence (§Lessons 41). With no
+  number the SMS composer still renders **disabled**, unchanged.
+  Email and LinkedIn used to hide when empty, to kill a pane reading *"No LinkedIn profile."*
+  That treated the sentence as the cost when the sentence WAS the cost: it removed the dead end
+  and the only place the missing profile could ever be supplied. 85 of the first 105 imported
+  people had no address and none had a LinkedIn URL, and nothing in the app could add one.
+  `/api/contact/details` takes `email` and `linkedin_url` beside `phone`/`notes`/`noticed`.
+  A field the caller did not SEND is left alone and one sent empty is a clear, so the pane can
+  render one box without wiping the other two (§Lessons 75). A typed address is `unverified` —
+  never `verified`, which is a claim about the ADDRESS — and the status only moves when the
+  address actually CHANGED, or saving the notes box beside it would silently un-verify one
+  Apollo had confirmed. A malformed address is **refused with the reason**, not dropped.
+  `domain/contactfield.py` does the cleaning and **the sheet parser imports the same functions**:
+  two paths writing one field is how one enforces a rule and the other quietly does not. A bare
+  LinkedIn handle becomes a URL (it is what you have in your hand after copying the address bar);
+  anything with a dot, a slash or a space is left exactly as typed, because a sheet legitimately
+  carries a company page or a search link and rewriting one invents a profile.
 - `⋯` row menu holds destructive actions (rejected, delete). It is anchored `right:0` and
   flips up near the bottom: `.table-wrap` clips with `overflow:hidden` to round the table's
   corners, so an absolutely-positioned menu is CUT, never scrolled to (it rendered as "✕ Ma",
@@ -2253,6 +2269,21 @@ company `"Jobs"` — the same substring bug class, inside the function written t
     an offset from the end, and the window came back empty. It survived a mutation that tagged
     every row (§Lessons 71, and the second time this month that a window-slice assertion was the
     vacuous one). Split on the row boundary; do not slice a guess around a match.
+
+99. **The fix for a dead end removed the dead end and the only way out of it.** An empty LinkedIn
+    tab rendered *"No LinkedIn profile."*, so the tab was hidden — correct about the bug, wrong
+    about the cost. The sentence WAS the cost (§Lessons 41), and hiding the tab took with it the
+    one place a missing profile could ever be supplied. 85 of 105 imported people had no address
+    and **none** had a LinkedIn URL; there was nowhere in the app to type one in, for weeks.
+    The Text tab had been unconditional the whole time and its comment said exactly why — *"that
+    tab is where a phone number gets entered, so hiding it without one hides the only way to add
+    one"* — which makes this §Lessons 49 with a rule that was not merely written down but
+    IMPLEMENTED at one of its three call sites, and commented at that one.
+    **The test pinned the wrong half.** `test_a_channel_tab_with_nothing_behind_it_is_not_offered`
+    asserted the hiding, so the fix broke a green test and anyone who tried would have put it
+    back — §Lessons 85's `_infer_company("not-a-url") == "Uploaded"`, where a test held a bug in
+    place more firmly than the code did. It is rewritten around the new decision rather than
+    deleted, and it now asserts the pane contains an INPUT, not that the sentence is gone.
 
 Shipped in one session, in this order: **CRM-3a → CRM-1 → CRM-2 → CRM-3b → CRM-4a.**
 Tickets in `docs/tickets/CRM-*.md`; two of them had instructions that were factually wrong

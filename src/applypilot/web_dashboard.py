@@ -3163,14 +3163,25 @@ def _flag_contact(data: dict) -> dict:
 
 
 def _save_contact_details(data: dict) -> dict:
-    """Persist the operator-entered phone / notes for one contact.
+    """Persist the operator-entered identifiers — email, LinkedIn, phone — and notes.
 
     Separate from _save_or_regen_draft on purpose: that handler stamps
     outreach_status='drafted', which would wrongly re-open an already-sent contact
     just because a phone number got typed in.
+
+    **Email and LinkedIn are here because a contact can arrive without them and there was no way
+    to add one.** A pasted sheet supplies whatever its columns hold — of the first 105 imported
+    people, 85 had no address and none had a LinkedIn URL — and every one of those was a person
+    the operator could name, could not write to, and could not fix. Apollo contacts have the same
+    gap less often and in the same way.
+
+    A field the caller did not send is left ALONE; a field sent empty is a clear. That is the
+    same `None` vs `""` distinction `repo.set_fields` rests on, and it is why the browser may
+    render one box without wiping the others (§Lessons 75).
     """
     init_db()
     conn = get_connection()
+    from applypilot.domain import contactfield as _cf
     from applypilot.networking.store import init_contacts, upsert_contact
     init_contacts(conn)
 
@@ -3180,24 +3191,54 @@ def _save_contact_details(data: dict) -> dict:
     row = _store.contact_ref(cid, conn)
     if not row:
         return {"ok": False, "message": "contact not found"}
+    before = _store.contact_details_before(cid, conn) or {}
 
     fields = {"id": cid, "job_url": row["job_url"]}
     if "phone" in data:
-        fields["phone"] = str(data.get("phone") or "").strip()[:_PHONE_MAX_LEN]
+        fields["phone"] = _cf.clean_phone(str(data.get("phone") or ""))[:_PHONE_MAX_LEN]
     if "notes" in data:
         fields["notes"] = str(data.get("notes") or "").strip()[:_NOTES_MAX_LEN]
     if "noticed" in data:
         fields["noticed"] = str(data.get("noticed") or "").strip()[:_NOTES_MAX_LEN]
+    if "linkedin_url" in data:
+        fields["linkedin_url"] = _cf.clean_linkedin(str(data.get("linkedin_url") or ""))
+    if "email" in data:
+        raw = str(data.get("email") or "")
+        problem = _cf.email_problem(raw)
+        if problem:
+            # REFUSED, not silently dropped. A cleared box the operator watched save is an edit
+            # that never happened, and they find out when a send fails days later.
+            return {"ok": False, "message": problem}
+        email = _cf.clean_email(raw)
+        fields["email"] = email
+        # `verified` is a claim about the ADDRESS and typing one is not evidence for it — the
+        # same rule that separates a Cc taken off a live thread from one typed from memory.
+        # Only moved when the address actually CHANGED, or re-saving the notes box beside it
+        # would downgrade an address Apollo had confirmed.
+        if email != (before.get("email") or ""):
+            fields["email_status"] = "unverified" if email else "none"
     if len(fields) == 2:
         return {"ok": False, "message": "nothing to save"}
-    before = _store.contact_name_and_phone(cid, conn)
     upsert_contact(fields)
-    # Only log a phone that actually changed — re-saving a note shouldn't spam the timeline.
-    new_phone = fields.get("phone")
-    if new_phone and new_phone != (before["phone"] or ""):
-        from applypilot.networking.store import log_contact_event
-        who = (before["full_name"] if before else None) or "contact"
-        log_contact_event(cid, "info", f"Added a phone number for {who}: {new_phone}.", conn)
+
+    from applypilot.networking.store import log_contact_event
+    who = (before.get("full_name") or "contact")
+    # Only what ACTUALLY changed. Re-saving a note must not spam the timeline, and the wording
+    # separates adding an identifier from replacing one — the second is the act worth being able
+    # to find again when a send goes somewhere unexpected.
+    for key, label in (("phone", "phone number"), ("email", "email address"),
+                       ("linkedin_url", "LinkedIn URL")):
+        if key not in fields:
+            continue
+        new, old = fields[key], (before.get(key) or "")
+        if new == old:
+            continue
+        if not new:
+            log_contact_event(cid, "info", f"Cleared the {label} for {who} (was {old}).", conn)
+        elif old:
+            log_contact_event(cid, "info", f"Changed the {label} for {who}: {old} → {new}.", conn)
+        else:
+            log_contact_event(cid, "info", f"Added a {label} for {who}: {new}.", conn)
     return {"ok": True, "message": "saved"}
 
 

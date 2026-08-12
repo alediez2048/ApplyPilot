@@ -560,6 +560,18 @@
     border:1px solid var(--line); color:var(--muted); cursor:pointer; user-select:none; }
   .chan span:hover { color:var(--text); }
   .chan span.on { background:var(--accent-soft); border-color:#bcd6f0; color:var(--accent); font-weight:650; }
+  /* A channel with no identifier yet. Dashed, so "there is nothing here" is legible from the
+     tab strip without opening all three — and the ＋ is a word, not only a colour. */
+  .chan span.add { border-style:dashed; color:var(--faint); }
+  .chan span.add.on { border-style:dashed; background:var(--surface2); color:var(--soft); }
+
+  /* The pane that ADDS the missing identifier. */
+  .draft.add-id .add-does { font-size:11.5px; color:var(--soft); line-height:1.5; margin:2px 0 7px; }
+  .draft.add-id .c-add { width:100%; font-size:12px; padding:6px 7px; border:1px solid #d7e2ec;
+    border-radius:5px; font-family:inherit; }
+  .draft.add-id .c-add:focus { border-color:var(--accent); box-shadow:0 0 0 2px var(--accent-soft); }
+  .draft.add-id .add-msg:not(:empty) { font-size:11px; color:var(--red); background:var(--red-soft);
+    border-radius:5px; padding:5px 8px; margin-top:6px; }
   .find-link { display:inline-flex; align-items:center; gap:6px; background:none; border:none; padding:3px 4px;
       min-height:0; font-size:12px; font-weight:600; color:var(--accent); cursor:pointer; border-radius:6px; }
   .find-link:hover:not(:disabled) { background:var(--accent-soft); box-shadow:none; }

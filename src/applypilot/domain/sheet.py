@@ -33,6 +33,7 @@ import csv
 import io
 import re
 
+from applypilot.domain import contactfield as _cf
 from applypilot.domain.target import slug
 
 #: How many data rows one paste may carry. A sheet is not a paste past this point — it wants a
@@ -112,18 +113,9 @@ def _cell(row: list[str], idx: int | None) -> str:
 _URL_JUNK = re.compile(r"^https?://(www\.)?", re.I)
 
 
-def _linkedin(value: str) -> str:
-    """Accept a full URL, a bare path, or a handle. Stored as given otherwise.
-
-    Not validated beyond looking like a profile: an operator's sheet may carry a company page or
-    a search link, and refusing the row over it loses the person's name and title too.
-    """
-    v = (value or "").strip()
-    if not v:
-        return ""
-    if v.startswith("/in/") or v.startswith("in/"):
-        return "https://www.linkedin.com/" + v.lstrip("/")
-    return v
+#: Shared with the contact card, which writes the same two fields by hand. One implementation,
+#: or the pasted address is cleaned and the typed one is not (§Lessons 49).
+_linkedin = _cf.clean_linkedin
 
 
 def _person_name(row: list[str], hm: dict[str, int]) -> str:
@@ -220,13 +212,13 @@ def parse(text: str) -> dict:
             rejected.append({"line": line, "reason": "no name", "text": text_of})
             continue
 
-        email = _cell(row, hm.get("email")).lower()
-        if email and "@" not in email:
+        raw_email = _cell(row, hm.get("email"))
+        email = _cf.clean_email(raw_email)
+        if raw_email and not email:
             # Kept as a PERSON, dropped as an address. A malformed cell is not a reason to lose
             # the name and title, and storing it would send mail nowhere.
-            rejected.append({"line": line, "reason": f"unusable email {email!r} — person kept",
+            rejected.append({"line": line, "reason": f"unusable email {raw_email.lower()!r} — person kept",
                              "text": text_of})
-            email = ""
 
         key_e = (cslug, email)
         key_n = (cslug, full_name.strip().lower())

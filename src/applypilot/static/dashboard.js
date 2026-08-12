@@ -1252,6 +1252,84 @@ async function regenSms(cid, btn) {
   refresh();
 }
 
+//: The channel has no identifier — so this pane IS the box that gives it one.
+//:
+//: Modelled on the SMS composer's empty state, and on what that one cost: it shipped as the
+//: accurate sentence "No phone number for Blake — add one below", and was reported TWICE as "I
+//: am not seeing the text UI" by someone looking straight at it. A pane that describes an
+//: absence reads as an empty tab (§Lessons 41). This one says what the channel does, shows the
+//: field, and is one click from working.
+//:
+//: The input lives on the CHANNEL rather than in one shared details box, so each identifier is
+//: entered where the thing it enables is — and there is never a second copy of the same field
+//: on screen going stale against the first (§Lessons 89).
+// `noun` is written out rather than lower-cased from a label: `'LinkedIn profile'.toLowerCase()`
+// is "linkedin profile", and a brand name in the wrong case is the tell that a machine wrote the
+// sentence — the same class of thing as the em dash.
+const ADD_COPY = {
+  email: {
+    noun: 'email address',
+    ph: 'name@company.com',
+    does: 'An address turns on the cold email, the follow-up ladder and reply detection — it is the only channel that sends by itself.',
+    how: 'Apollo ↗ has it if they are in it; otherwise the company\'s own site, a signature, or the pattern their colleagues use.',
+  },
+  linkedin: {
+    noun: 'LinkedIn profile',
+    ph: 'linkedin.com/in/their-handle — or just their-handle',
+    does: 'A profile turns on the connection invitation, and gives you something to read before writing to them.',
+    how: 'Open their profile and copy the address bar. A bare handle works too.',
+  },
+};
+function addIdentifier(c, kind) {
+  const t = ADD_COPY[kind];
+  const field = kind === 'email' ? 'email' : 'linkedin_url';
+  return `<div class="draft add-id" data-cid="${esc(c.id)}" data-field="${field}">
+      <div class="d-label">Add ${t.noun === 'email address' ? 'an' : 'a'} ${esc(t.noun)} for ${esc(c.full_name)}</div>
+      <div class="add-does">${esc(t.does)}</div>
+      <input class="c-add" placeholder="${esc(t.ph)}" onkeydown="onAddIdKey(event)" />
+      <div class="dbtns">
+        <button class="primary add-save" onclick="saveIdentifier(this)">Save</button>
+        ${kind === 'email' && c.apollo_url
+          ? `<button class="secondary" onclick="window.open('${esc(c.apollo_url)}','_blank','noopener')">Open Apollo ↗</button>` : ''}
+        ${kind === 'linkedin' && c.apollo_search_url
+          ? `<button class="secondary" onclick="window.open('${esc(c.apollo_search_url)}','_blank','noopener')">Search Apollo ↗</button>` : ''}
+      </div>
+      <div class="add-msg"></div>
+      <div class="sms-hint">${esc(t.how)}</div>
+    </div>`;
+}
+
+//: Enter saves. A one-field form where Enter does nothing is a form people retype into.
+//: A named function rather than an inline statement: `test_every_inline_handler_resolves_at_
+//: global_scope` reads `typeof <handler>` off every `on*=` attribute, and a multi-statement
+//: body is not an expression — it fails the probe rather than the page.
+function onAddIdKey(e) {
+  if (e.key !== 'Enter') return;
+  e.preventDefault();
+  const btn = e.target.closest('.add-id').querySelector('.add-save');
+  if (btn) btn.click();
+}
+
+//: One writer for both fields. The server refuses an address that cannot be one, and the
+//: refusal is SHOWN — a box that clears itself on save is an edit the operator watched succeed
+//: and which never happened (§Lessons 75).
+async function saveIdentifier(btn) {
+  const box = btn.closest('.add-id');
+  const msg = box.querySelector('.add-msg');
+  const value = (box.querySelector('.c-add').value || '').trim();
+  if (!value) { msg.textContent = 'Type it in first.'; return; }
+  btn.disabled = true;
+  const r = await post('/api/contact/details',
+    {contact_id: box.getAttribute('data-cid'), [box.getAttribute('data-field')]: value});
+  btn.disabled = false;
+  if (!r.ok) { msg.textContent = r.message || 'Could not save that.'; return; }
+  msg.textContent = '';
+  // The refresh re-renders this contact with the identifier present, so the pane becomes the
+  // real channel. Clearing the stored tab first would bounce them somewhere else at the moment
+  // it starts working.
+  refresh();
+}
+
 function contactNotes(c) {
   // Apollo will not hand a direct dial to a local tool (reveal_phone_number is
   // webhook-only), so the number is copied out of the Apollo UI by hand and kept here.
@@ -1921,19 +1999,33 @@ async function sendReply(cid, btn) {
   refresh();
 }
 function contactPanel(c) {
-  // A tab with nothing behind it is not a choice. Offering all three regardless meant clicking
-  // "LinkedIn" on an email-only contact got you "No LinkedIn profile." — and setChannel wrote
-  // that dead choice into CHANNEL_TAB, so the contact reopened on the empty tab every time.
-  const usable = {email: !!c.email, linkedin: !!c.linkedin_url, phone: true};
+  // ALL THREE TABS ARE ALWAYS OFFERED, and the reason is the same one that already made Text
+  // unconditional: the tab is where its identifier gets ENTERED, so hiding it without one hides
+  // the only way to add one.
+  //
+  // They were hidden to fix a real bug — clicking "LinkedIn" on an email-only contact got you
+  // the dead end "No LinkedIn profile.", and setChannel wrote that choice into CHANNEL_TAB so
+  // the contact reopened on the empty tab forever. That fix treated the sentence as the cost
+  // when the sentence WAS the cost: a pane describing an absence instead of offering the box
+  // that ends it (§Lessons 41). 85 of 105 imported people had no address and none had a
+  // LinkedIn URL, and there was nowhere in the app to type one in.
+  //
+  // `＋` on the tab so which identifiers are missing is legible without opening all three.
+  // Now purely "does this channel have its identifier" — it drives the ＋ and which body to
+  // render, never whether the tab exists. Text is in it for the marker alone: its own pane
+  // already handles an absent number, but a strip where two empty channels are flagged and the
+  // third is not reads as the third being fine.
+  const usable = {email: !!c.email, linkedin: !!c.linkedin_url, phone: !!c.phone};
   const stored = CHANNEL_TAB.get(c.id);
-  const ch = (stored && usable[stored]) ? stored
-           : (c.email ? 'email' : (c.linkedin_url ? 'linkedin' : 'phone'));
-  const tab = (k, label, on) => usable[k]
-    ? `<span class="${ch === k ? 'on' : ''}" onclick="event.stopPropagation();setChannel('${esc(c.id)}','${k}')">${label}${on || ''}</span>`
-    : '';
+  // Still OPENS on a channel that works, or every contact lands on a form instead of their
+  // conversation. The stored choice is honoured even when empty — clicking a ＋ tab has to stay
+  // put across the 2.5s refresh or the box vanishes mid-type.
+  const ch = stored || (c.email ? 'email' : (c.linkedin_url ? 'linkedin' : 'phone'));
+  const tab = (k, label, on) =>
+    `<span class="${ch === k ? 'on' : ''}${usable[k] ? '' : ' add'}" onclick="event.stopPropagation();setChannel('${esc(c.id)}','${k}')">${label}${on || ''}${usable[k] ? '' : ' ＋'}</span>`;
   let body = '';
-  if (ch === 'email')    body = c.email ? emailChannel(c) : `<div class="pane-empty">No email address for ${esc(c.full_name)}.</div>`;
-  if (ch === 'linkedin') body = c.linkedin_url ? linkedinChannel(c) : `<div class="pane-empty">No LinkedIn profile.</div>`;
+  if (ch === 'email')    body = c.email ? emailChannel(c) : addIdentifier(c, 'email');
+  if (ch === 'linkedin') body = c.linkedin_url ? linkedinChannel(c) : addIdentifier(c, 'linkedin');
   if (ch === 'phone')    body = smsChannel(c);
   return `<div class="pbody" onclick="event.stopPropagation()">
       <div class="cmeta">

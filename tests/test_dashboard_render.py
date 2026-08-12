@@ -698,18 +698,25 @@ console.log(JSON.stringify(out));
 
 
 @pytest.mark.skipif(not shutil.which("node"), reason="node not available")
-def test_a_channel_tab_with_nothing_behind_it_is_not_offered(tmp_path):
-    """A tab that can only say "No LinkedIn profile." is not a choice.
+def test_an_empty_channel_tab_offers_the_box_that_fills_it(tmp_path):
+    """Every channel is offered, and an empty one is where its identifier gets ENTERED.
 
-    Worse, `setChannel` wrote that dead pick into CHANNEL_TAB, so the contact reopened on the
-    empty tab every single time until the operator clicked back.
+    This test used to assert the OPPOSITE — that a tab with nothing behind it is hidden — and it
+    was right about the bug and wrong about the fix. The dead end was the pane reading "No
+    LinkedIn profile.", not the tab existing; hiding the tab removed the sentence and, with it,
+    the only place the missing profile could ever be supplied. 85 of the first 105 imported
+    people had no email address and NONE had a LinkedIn URL, and there was nowhere in the app to
+    type one in. Reported as "I'm unable to add linkedin accounts for existing contacts".
+
+    The Text tab had always been unconditional for exactly this reason and its comment said so,
+    which makes the other two §Lessons 49 — a rule implemented at one of its call sites.
     """
     email_only = _contact(id="e1", full_name="Email Only", linkedin_url="", phone="")
     li_only = _contact(id="l1", full_name="LinkedIn Only", email="", linkedin_url="https://l/in/x")
-    # A stored preference for a channel this contact does not have must NOT be honoured.
+    # Opened ON an empty tab: the pane must offer the field, never dead-end. A stored pick must
+    # also SURVIVE, or the box vanishes from under the operator on the 2.5s refresh.
     stuck = _contact(id="s1", full_name="Stuck", linkedin_url="", phone="")
     stuck["_pick"] = "linkedin"
-    # Opened ON the Text tab with no number: the pane must offer the field, not dead-end.
     no_phone = _contact(id="p1", full_name="No Number", linkedin_url="", phone="")
     no_phone["_pick"] = "phone"
 
@@ -724,28 +731,36 @@ def test_a_channel_tab_with_nothing_behind_it_is_not_offered(tmp_path):
     assert proc.returncode == 0, f"node failed:\n{proc.stderr[:2000]}"
     out = json.loads(proc.stdout.strip().splitlines()[-1])
 
-    assert "🔗 LinkedIn" not in out["email_only"], "offered a LinkedIn tab with no profile behind it"
-    assert "✉ Email" in out["email_only"]
-    assert "✉ Email" not in out["li_only"], "offered an Email tab with no address behind it"
-    # The Text tab is ALWAYS offered, unlike the other two, and deliberately so: it is where a
-    # phone number gets entered, so hiding it when there is no number hides the only way to add
-    # one. It opens on a prompt with the fix attached rather than a dead "No phone number."
-    assert "💬 Text" in out["email_only"], "the text/notes tab is always available"
-    # With no number the composer must still RENDER, disabled. The first version returned a
-    # one-line "add a number below" and the notes block — accurate, and reported twice as
-    # "I'm not seeing the text UI" by someone looking straight at it. A sentence describing a
-    # control you cannot see does not tell you the control exists.
+    # All three, always. The `add` class is what says which are empty from the strip itself.
+    for key in ("email_only", "li_only"):
+        for label in ("✉ Email", "🔗 LinkedIn", "💬 Text"):
+            assert label in out[key], f"{label} was not offered on {key}"
+    assert "add" in out["email_only"], "an empty channel tab is not marked as empty"
+    # Text is marked too. Its own pane already handles an absent number, but a strip flagging
+    # two empty channels and not the third reads as the third being fine.
+    assert out["email_only"].count("add") >= 2, "the empty Text tab is not marked"
+
+    # Opening one must produce the INPUT, not a sentence about the absence. That distinction is
+    # the whole point: "No phone number for Blake — add one below" was accurate and was reported
+    # twice as "I'm not seeing the text UI" by someone looking straight at it (§Lessons 41).
+    assert "c-add" in out["stuck"], \
+        "the LinkedIn tab with no profile does not render a field to add one"
+    assert "saveIdentifier" in out["stuck"], "the add field has no way to save"
+    assert "No LinkedIn profile" not in out["stuck"], "still dead-ends on a sentence"
+    # Guard the guard: the input must be for THIS field, or both tabs write the same column.
+    assert 'data-field="linkedin_url"' in out["stuck"]
+
+    # An email-only contact's LinkedIn tab and a LinkedIn-only contact's email tab are the two
+    # real shapes on the board, and they must offer opposite fields.
+    assert "data-field=" not in out["email_only"], "email_only opened on a channel it HAS"
+
+    # Text keeps its own behaviour: the composer renders disabled, with the number field.
     assert "d-sms" in out["no_phone"], \
         "the composer must render even with no number — describing it is not showing it"
     assert "disabled" in out["no_phone"], "the composer must be disabled without a number"
     assert "c-phone" in out["no_phone"], \
         "it must ALSO render the field to add one — otherwise the only way in is hidden"
-    # And it must NOT offer a live sms: link with nothing to dial.
     assert 'href="sms:"' not in out["no_phone"], "offered an empty sms: link"
-
-    assert "No LinkedIn profile" not in out["stuck"], (
-        "a stored preference for a channel this contact does not have was honoured, so the "
-        "panel reopened on a dead tab")
 
 
 @pytest.mark.skipif(not shutil.which("node"), reason="node not available")

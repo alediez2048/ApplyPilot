@@ -184,6 +184,10 @@ SETTINGS: tuple[Setting, ...] = (
             "Seconds the apply agent gets per application before it is given up on."),
     Setting("TAILOR_AGGRESSIVE", "apply", "bool", False,
             "Mirror the job description closely and skip the fabrication judge."),
+    Setting("APPLY_ALLOW_CONTRACT", "apply", "bool", False,
+            "Let the apply agent complete CONTRACT and hourly postings, not only salaried "
+            "roles. Marketplace signup, profile builders and assessment platforms are still "
+            "refused, and no safety rule changes."),
     Setting("CHROME_PATH", "apply", "path", "", "Chrome binary for the apply agent."),
     Setting("NODE_BIN", "apply", "path", "", "Node binary for the résumé renderer."),
     Setting("AGENT_BROWSER_BIN", "apply", "path", "", "agent-browser binary."),

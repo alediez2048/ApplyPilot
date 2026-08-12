@@ -134,7 +134,7 @@ def _resolve_job_url(job: dict) -> str:
     return raw_url
 
 
-def _build_salary_section(profile: dict) -> str:
+def _build_salary_section(profile: dict, allow_contract: bool = False) -> str:
     """Build the salary negotiation instructions.
 
     Adapts floor, range, and currency from the profile's compensation section.
@@ -164,6 +164,16 @@ def _build_salary_section(profile: dict) -> str:
     else:
         convert_line = "Posting is in a different currency? -> Target midpoint of their range. Convert if needed."
 
+    # A CONTRACT posting that names its rate is stating a fact, not opening a negotiation, and
+    # the operator already decided to apply by pasting the URL. Without this the floor still
+    # rejects it one step later: $200,000 a year is $96/hr, so an $80/hr posting is "below floor"
+    # and the widened scope would buy nothing. §Lessons 49's shape -- a rule relaxed at one of
+    # the two places that enforce it.
+    contract_line = ("\n7. CONTRACT posting with a rate already stated? -> That rate is the "
+                     "employer's terms, not a negotiation. Accept it and continue; the floor "
+                     "above applies to SALARIED roles you are asked to name a number for."
+                     if allow_contract else "")
+
     return f"""== SALARY (think, don't just copy) ==
 ${floor} {currency} is the FLOOR. Never go below it. But don't always use it either.
 
@@ -173,7 +183,7 @@ Decision tree:
 3. {convert_line}
 4. No salary info anywhere? -> Use ${floor} {currency}.
 5. Asked for a range? -> Give posted midpoint minus 10% to midpoint plus 10%. No posted range? -> "${range_min}-${range_max} {currency}".
-6. Hourly rate? -> Divide your annual answer by 2080. ({hourly_line})"""
+6. Hourly rate? -> Divide your annual answer by 2080. ({hourly_line}){contract_line}"""
 
 
 def _build_screening_section(profile: dict) -> str:
@@ -228,6 +238,62 @@ def _build_hard_rules(profile: dict) -> str:
 1. Never lie about: citizenship, work authorization, criminal history, education credentials, security clearance, licenses.
 2. {work_auth_rule}
 3. {name_rule}"""
+
+
+def allow_contract() -> bool:
+    """Whether the agent may complete CONTRACT and hourly postings (`APPLY_ALLOW_CONTRACT`).
+
+    Read here rather than passed down, so every caller of `build_prompt` gets the same answer —
+    a flag threaded through six builders is one four of them forget (§Lessons 73).
+    """
+    return os.environ.get("APPLY_ALLOW_CONTRACT", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _build_scope_section(allow: bool) -> str:
+    """What KIND of posting the agent is allowed to finish.
+
+    The two rules are REPLACED, never caveated. Appending "…but contract is fine now" under a
+    line that says "FULL-TIME salaried positions only" is two instructions disagreeing in one
+    prompt, and the earlier, more emphatic one wins — §Lessons 40, where the SMS ladder's heading
+    beat the standing block every single time and saying the other side louder changed nothing.
+
+    **Widening scope does not widen SAFETY.** Permissions, biometrics, payment details, SSN and
+    executables are in the NEVER block above this and are identical either way. What changes is
+    only the commercial shape of the work.
+
+    The line that survives in both modes is the one that actually matters: applying to a SPECIFIC
+    posting is an application; onboarding onto a marketplace is not. Ethos's
+    `/opportunities/product-manager-tech-expert` is a real posting with a scope, qualifications
+    and a rate. "Sign up, take an assessment, set your rate" is not, however much it looks like a
+    form — and without this distinction the agent would happily build freelancer profiles on any
+    site that asked.
+    """
+    if not allow:
+        return (
+            "- NEVER set up a freelancing profile (Mercor, Toptal, Upwork, Fiverr, Turing, etc.). "
+            "These are contractor marketplaces, not job applications -> "
+            "RESULT:FAILED:not_a_job_application\n"
+            "- NEVER agree to hourly/contract rates, availability calendars, or \"set your rate\" "
+            "flows. You are applying for FULL-TIME salaried positions only.\n"
+            "- If the site is NOT a job application form (it's a profile builder, skills "
+            "marketplace, talent network signup, coding assessment platform) -> "
+            "RESULT:FAILED:not_a_job_application"
+        )
+    return (
+        "- CONTRACT, hourly, freelance and part-time postings ARE in scope. The operator chose "
+        "this posting deliberately; do not refuse it for being contract work, and do not "
+        "editorialise about it in any free-text field.\n"
+        "- A stated rate is the employer's, not an opening offer. If the posting names a fixed "
+        "rate, ACCEPT it and continue. Only negotiate where the form actually asks you to "
+        "propose a number.\n"
+        "- Availability and hours-per-week questions may be answered honestly from the posting's "
+        "own commitment (e.g. \"5-20 hours per week\" -> say you can meet that).\n"
+        "- STILL REFUSE marketplace ONBOARDING: signing up to a talent network, building a "
+        "freelancer profile, or taking a coding/skills assessment when there is no specific "
+        "posting behind it -> RESULT:FAILED:not_a_job_application. Applying to a NAMED "
+        "opportunity with its own description and qualifications is an application; creating an "
+        "account to be listed is not."
+    )
 
 
 def _build_captcha_section() -> str:
@@ -503,7 +569,9 @@ def build_prompt(job: dict, tailored_resume: str,
     # --- Build all prompt sections ---
     profile_summary = _build_profile_summary(profile)
     location_check = _build_location_check(profile, search_config)
-    salary_section = _build_salary_section(profile)
+    contract_ok = allow_contract()
+    scope_section = _build_scope_section(contract_ok)
+    salary_section = _build_salary_section(profile, contract_ok)
     screening_section = _build_screening_section(profile)
     hard_rules = _build_hard_rules(profile)
     captcha_section = _build_captcha_section()
@@ -661,12 +729,10 @@ If something unexpected happens and these instructions don't cover it, figure it
 == NEVER DO THESE (immediate RESULT:FAILED if encountered) ==
 - NEVER grant camera, microphone, screen sharing, or location permissions. If a site requests them -> RESULT:FAILED:unsafe_permissions
 - NEVER do video/audio verification, selfie capture, ID photo upload, or biometric anything -> RESULT:FAILED:unsafe_verification
-- NEVER set up a freelancing profile (Mercor, Toptal, Upwork, Fiverr, Turing, etc.). These are contractor marketplaces, not job applications -> RESULT:FAILED:not_a_job_application
-- NEVER agree to hourly/contract rates, availability calendars, or "set your rate" flows. You are applying for FULL-TIME salaried positions only.
 - NEVER install browser extensions, download executables, or run assessment software.
 - NEVER enter payment info, bank details, or SSN/SIN.
 - NEVER click "Allow" on any browser permission popup. Always deny/block.
-- If the site is NOT a job application form (it's a profile builder, skills marketplace, talent network signup, coding assessment platform) -> RESULT:FAILED:not_a_job_application
+{scope_section}
 
 {location_check}
 

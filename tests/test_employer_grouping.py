@@ -19,6 +19,7 @@ satisfies every assertion about markup.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 
 import pytest
@@ -291,7 +292,7 @@ F.renderJobsTable(""" + json.dumps(jobs) + """, false);
 const html = node('jobs').innerHTML;
 console.log(JSON.stringify({
   bands: (html.match(/class="co-head/g) || []).length,
-  solo: (html.match(/co-solo/g) || []).length,
+  solo: (html.match(/class="co-head co-solo"/g) || []).length,
   carets: (html.match(/co-caret/g) || []).length,
   members: (html.match(/co-member/g) || []).length,
   names: (html.match(/class="co-name[^"]*"[^>]*>([^<]*)</g) || []),
@@ -333,6 +334,42 @@ def test_a_multi_role_band_keeps_its_caret(tmp_path):
     out = _render([_job("u1", "Google"), _job("u2", "Google")], tmp_path)
     assert out["solo"] == 0
     assert out["carets"] == 1, "the collapsible group lost its toggle"
+
+
+def test_no_rule_turns_a_table_cell_into_a_flex_container():
+    """A `td` with `display:flex` leaves the table formatting context, so `colspan` stops
+    applying and the cell collapses to its first column's width.
+
+    That is exactly what shipped: `tr.co-solo > td { display:flex }` made the solo band render
+    "Ey" then "6 / people / · 5 / emailed" stacked one word per line, in a cell about 150px wide.
+    Reported as "it is breaking the cards", and no test could see it — every test here reads
+    MARKUP, and this is a layout consequence of a rule that is correct-looking in isolation.
+    §Lessons 62's family: `hidden` lost to an author `display` for the same reason, and the Node
+    test that asserted the property was true and useless.
+
+    The multi-role band had it right all along — its flex lives on `.co-toggle` INSIDE the td.
+    """
+    css = (wd._STATIC_DIR / "dashboard.css").read_text(encoding="utf-8")
+    # Selectors whose LAST element is a td (`… td {`, `… > td {`, `td.foo {`).
+    for block in re.finditer(r"([^{}]+)\{([^{}]*)\}", css):
+        selector, body = block.group(1).strip(), block.group(2)
+        if not re.search(r"(^|[\s>+~])td[.\w-]*\s*$", selector):
+            continue
+        display = re.search(r"(?<![-\w])display\s*:\s*([\w-]+)", body)
+        if display and display.group(1) in {"flex", "grid", "block", "inline-flex", "inline-grid"}:
+            raise AssertionError(
+                f"`{selector}` sets display:{display.group(1)} on a table CELL. That drops it out "
+                "of table layout, so colspan stops applying and the cell collapses. Put the "
+                "layout on a wrapper inside the td, as `.co-toggle` does.")
+
+
+def test_the_solo_band_puts_its_layout_on_a_wrapper_not_the_cell(tmp_path):
+    """The structural half of the rule above, asserted on what actually renders."""
+    html = _render([_job("u1", "Stripe")], tmp_path)["html"]
+    band = html[html.index("co-solo"):]
+    band = band[:band.index("</tr>")]
+    assert "co-solo-inner" in band, "the solo band lost its layout wrapper"
+    assert band.index("<td") < band.index("co-solo-inner"), "the wrapper is outside the cell"
 
 
 def test_the_solo_bands_name_is_still_editable(tmp_path):

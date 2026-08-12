@@ -2889,8 +2889,10 @@ function coSoloRow(g) {
   return `
     <tr class="co-head co-solo">
       <td colspan="4">
-        ${editable(j, 'company', j.company, 'co-name')}
-        <span class="co-stats">${bits.map(esc).join(' · ')}</span>
+        <div class="co-solo-inner">
+          ${editable(j, 'company', j.company, 'co-name')}
+          <span class="co-stats">${bits.map(esc).join(' · ')}</span>
+        </div>
       </td>
     </tr>`;
 }

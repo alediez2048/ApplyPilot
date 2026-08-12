@@ -251,7 +251,7 @@
      width plus the flex gap is added as an indent so the two kinds of band start their name at
      the SAME x — the whole point of banding every employer is that the eye finds the name in one
      place, and a 20px stagger between them undoes it. */
-  tr.co-solo > td {
+  .co-solo-inner {
     display:flex; align-items:baseline; gap:10px; padding:7px 12px 7px 32px;
   }
   .co-name { font-weight:700; font-size:13px; letter-spacing:.01em; }

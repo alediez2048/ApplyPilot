@@ -2693,8 +2693,20 @@ const EDITABLE = ['title', 'company', 'location', 'salary'];
 //: Rows whose description is being edited. Outside the DOM like PANEL_OPEN, for the same
 //: reason: the 2.5s refresh replaces #jobs wholesale.
 const DESC_EDIT = new Set();
-function editDesc(url, on) {
-  if (on) DESC_EDIT.add(url); else DESC_EDIT.delete(url);
+async function editDesc(url, on) {
+  if (!on) { DESC_EDIT.delete(url); rerenderJobs(true); return; }
+  // NEVER open on the excerpt. The row carries 900 characters and a real posting runs 4-10KB,
+  // so seeding the textarea with what is on screen would silently truncate the description the
+  // moment it was saved — a destructive edit that looks like a successful one.
+  const job = (LAST_JOBS || []).find(x => x.url === url);
+  const truncated = ((job && job.description) || '').length >= 900;
+  if (truncated && !JOB_DESC.has(url)) {
+    const r = await post('/api/job-description', {url});
+    if (!r || r.ok === false) { alert((r && r.message) || 'Could not load the description.'); return; }
+    JOB_DESC.set(url, r.description || '');
+  }
+  DESC_EDIT.add(url);
+  JOB_DESC_OPEN.add(url);
   rerenderJobs(true);
 }
 
@@ -3236,6 +3248,14 @@ async function saveJobDescription(url, btn) {
     return;
   }
   btn.textContent = 'Saved ✓';
+  // Leave edit mode. `DESC_EDIT.size` holds the refresh, so a url left in it after a successful
+  // save freezes the whole table permanently — the editor would stay open showing the old text
+  // and nothing would ever update again.
+  DESC_EDIT.delete(url);
+  // Both caches carry the old text; the excerpt on the row comes back with the next payload.
+  JOB_DESC.set(url, text);
+  const job = (LAST_JOBS || []).find(x => x.url === url);
+  if (job) job.description = text.slice(0, 900);
   refresh();
 }
 function jobDetail(j) {
@@ -3291,9 +3311,7 @@ function jobDetail(j) {
            <button class="ghost" onclick="editDesc(${
              `decodeURIComponent('${encodeURIComponent(j.url)}')`}, false)">Cancel</button>
          </div>
-         <div class="hint">${excerpt.length >= 900 && !full
-             ? 'This is the 900-character excerpt the table carries. Click “Show the full description” first to edit the whole thing.'
-             : 'Saving replaces the stored description.'}</div>
+         <div class="hint">Saving replaces the stored description.</div>
        </div>`
     : `<div class="jd-desc">${esc(open && full ? full : excerpt)}${
         !open && excerpt.length >= 900 ? '…' : ''}</div>

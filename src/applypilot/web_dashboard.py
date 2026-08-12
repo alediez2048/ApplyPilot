@@ -1235,14 +1235,28 @@ def _save_job_description(url: str, description: str) -> dict:
     text = (description or "").strip()
     if not url:
         return {"ok": False, "message": "url required"}
-    if len(text) < 120:
-        # A stub is worse than nothing: it would clear the error, satisfy the tailor queue, and
-        # produce a résumé written against three sentences.
-        return {"ok": False, "message": "that looks too short to be a job description"}
     init_db()
     conn = get_connection()
-    if not _jobs.exists(url, conn):
+    row = _jobs.get(url, conn)
+    if not row:
         return {"ok": False, "message": "job not found"}
+    # The minimum applies only where a stub would DO something: on a Space that tailors, an
+    # empty description blocks the queue and three pasted sentences would clear the error,
+    # satisfy it, and produce a résumé written against them.
+    #
+    # It does not apply to a Space that makes no documents. There the field is a company blurb
+    # — "Court reporting and legal transcription." is 40 characters and exactly right — and the
+    # guard was refusing every edit on a sheet card, which is how "I cannot change the
+    # description" was reported. §Lessons 50's shape: a limit doing something its author never
+    # aimed it at.
+    space = None
+    try:
+        space = _spaces.load(row.get("space_id") or "", conn)
+    except Exception:  # noqa: BLE001 — a missing registry must not block an edit
+        space = None
+    tailors = space.tailor_docs if space is not None else True
+    if tailors and len(text) < 120:
+        return {"ok": False, "message": "that looks too short to be a job description"}
     _jobs.set_description(url, text, conn)
     log_event(url, "enrich", "ok", f"Description pasted by hand ({len(text):,} chars).", conn)
     return {"ok": True, "message": f"Saved {len(text):,} characters — run Prepare now"}

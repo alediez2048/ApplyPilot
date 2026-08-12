@@ -392,6 +392,7 @@ def _table(body: str, tmp_path) -> dict:
 const SRC = """ + json.dumps(_js()) + """;
 const F = (new Function(SRC + `; return {
   startEdit, editDesc, renderJobsTable, isEditingJobs, rerenderJobs, jobDetail,
+  saveJobDescription,
   setJobs: v => { LAST_JOBS = v; },
   openPanel: u => { PANEL_OPEN.add(u); TAB_OPEN.set(u, 'job'); },
   writes: () => globalThis.WROTE, reset: () => { globalThis.WROTE = []; }
@@ -497,3 +498,101 @@ console.log(JSON.stringify({
     assert out["offered"] is True
     assert out["visible"] is True, "the edit control is present in the markup and hidden"
     assert out["isButton"] is True
+
+
+# ── the description save ────────────────────────────────────────────────────
+
+def test_a_short_blurb_saves_on_a_space_that_makes_no_documents(db):
+    """The 120-character minimum was refusing every description edit on a sheet card.
+
+    It exists to stop a STUB on a Space that tailors: an empty description blocks the queue, and
+    three pasted sentences would clear the error, satisfy it, and produce a résumé written
+    against them. On a Space with `tailor_docs=False` the field is a company blurb — "Court
+    reporting and legal transcription." is 40 characters and exactly right — and the guard was
+    doing something its author never aimed it at (§Lessons 50's shape).
+    """
+    _spaces.create_space("sheets", "Sheets", "sheet", conn=db)
+    sheet_import.import_sheet("sheets", "Company\tName\nSteno\tDan", db)
+    out = wd._save_job_description("target:sheets:steno",
+                                   "Court reporting and legal transcription.")
+    assert out["ok"] is True
+    assert _row(db, "target:sheets:steno")["full_description"] == \
+        "Court reporting and legal transcription."
+
+
+def test_a_stub_is_still_refused_where_it_would_feed_the_tailor(db):
+    """Guard the guard. Dropping the minimum entirely also makes the test above pass, and would
+    let three sentences reach the résumé generator on a real job."""
+    out = wd._save_job_description("http://j/1", "Too short.")
+    assert out["ok"] is False
+    assert "too short" in out["message"]
+    assert not (_row(db)["full_description"] or "")
+
+
+def test_a_full_description_still_saves_on_a_jobs_space(db):
+    out = wd._save_job_description("http://j/1", "x" * 200)
+    assert out["ok"] is True
+
+
+def test_an_unknown_row_is_refused(db):
+    assert wd._save_job_description("http://nope", "x" * 200)["ok"] is False
+
+
+def test_saving_leaves_edit_mode_or_the_table_freezes(tmp_path):
+    """`DESC_EDIT.size` holds the refresh. A url left in it after a successful save freezes the
+    whole table permanently: the editor stays open showing the old text and nothing updates
+    again — which is what "I cannot change the description" would have become after the first
+    successful save."""
+    out = _table("""
+const j = %s;
+F.setJobs([j]);
+F.openPanel('http://j/1');
+await F.editDesc('http://j/1', true);
+const during = F.isEditingJobs();
+globalThis.fetch = async () => ({ ok:true, json: async () => ({ ok:true, message:'Saved' }) });
+const btn = { disabled:false, textContent:'',
+  closest: () => ({ querySelector: () => ({ value: 'A new description.' }) }) };
+await F.saveJobDescription('http://j/1', btn);
+console.log(JSON.stringify({ during, after: F.isEditingJobs() }));
+""" % _JOB_ROW, tmp_path)
+    assert out["during"] is True, "an open description editor must hold the refresh"
+    assert out["after"] is False, "the table is frozen after saving — DESC_EDIT was never cleared"
+
+
+def test_the_editor_never_opens_on_the_900_char_excerpt(tmp_path):
+    """The row carries 900 characters and a real posting runs 4-10KB. Seeding the textarea with
+    what is on screen would silently truncate the description on save — a destructive edit that
+    looks like a successful one. The full text is fetched first."""
+    out = _table("""
+const j = JSON.parse(JSON.stringify(%s));
+j.description = 'x'.repeat(900);
+F.setJobs([j]);
+F.openPanel('http://j/1');
+let asked = null;
+globalThis.fetch = async (p, o) => { asked = p; return { ok:true,
+  json: async () => ({ ok:true, description: 'y'.repeat(4000) }) }; };
+await F.editDesc('http://j/1', true);
+const html = F.jobDetail(j);
+// The DESCRIPTION textarea specifically. Matching the first <textarea> on the page found the
+// context box's empty one, which renders above it — an assertion that passed for the wrong
+// reason in both directions.
+const box = (html.match(/<textarea class="jd-paste-box"[^>]*>([^<]*)</) || [])[1] || '';
+console.log(JSON.stringify({ fetched: asked, len: box.length, isFull: box.startsWith('yyy') }));
+""" % _JOB_ROW, tmp_path)
+    assert out["fetched"] == "/api/job-description", "it opened without loading the full text"
+    assert out["len"] == 4000 and out["isFull"] is True
+
+
+def test_a_short_description_opens_without_a_fetch(tmp_path):
+    """Guard the guard: fetching unconditionally would work but costs a round trip on every
+    edit of a blurb that is already complete on the wire."""
+    out = _table("""
+const j = %s;
+F.setJobs([j]);
+F.openPanel('http://j/1');
+let asked = null;
+globalThis.fetch = async (p) => { asked = p; return { ok:true, json: async () => ({ ok:true }) }; };
+await F.editDesc('http://j/1', true);
+console.log(JSON.stringify({ fetched: asked }));
+""" % _JOB_ROW, tmp_path)
+    assert out["fetched"] is None

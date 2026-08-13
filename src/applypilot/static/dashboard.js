@@ -1723,28 +1723,96 @@ function conversationView(c) {
   // stored, on the wire, and unreachable. Reported as "I'm not getting the entire interaction",
   // which is what it looked like. It is a button now, and the expanded state survives the 2.5s
   // refresh like every other open thing on this page.
-  const full = CONV_EXPANDED.has(c.id);
-  const shown = (msgs.length > 6 && !full)
-    ? [msgs[0], {_gap: msgs.length - 3}, ...msgs.slice(-2)]
-    : msgs;
-  let seenCc = [];
-  const rows = shown.map(m => {
-    if (m._gap)
-      return `<div class="cm-gap"><button class="linklike" onclick="expandConv('${esc(c.id)}')"
-        >· show ${m._gap} earlier message${m._gap === 1 ? '' : 's'} ·</button></div>`;
-    const html = convMessage(c, m, seenCc);
-    seenCc = (m.cc_addrs || []).map(x => addrOf(x));
-    return html;
+  // GROUPED BY THREAD, because these are not one conversation.
+  //
+  // `thread_for_contact` returns every message stored for a person, merged and sorted by date —
+  // so one contact with seven Gmail threads (a calendar invite, an intro, two separate deal
+  // conversations) rendered as a single continuous stream with Laura, Kevin, Diego and the
+  // operator interleaved. Reported as "this just looks like one long conversation which is not".
+  //
+  // Groups are ordered by their LAST message, so the live conversation sits at the bottom, next
+  // to the composer. Only that one is open by default: seven expanded threads is the wall of
+  // text this replaced.
+  const groups = groupThreads(msgs);
+  const newest = groups.length ? groups[groups.length - 1].id : '';
+  const rows = groups.map(g => {
+    const key = `${c.id}|${g.id}`;
+    const open = groups.length === 1 || g.id === newest
+      ? !CONV_SHUT.has(key)
+      : CONV_OPEN.has(key);
+    const head = `<div class="th-sep${open ? '' : ' shut'}">
+        <button class="linklike" onclick="toggleThread(${tagArg(key)})">
+          <span class="th-caret">${open ? '▾' : '▸'}</span>
+          <span class="th-subj">${esc(g.subject || '(no subject)')}</span>
+          <span class="th-meta">${g.msgs.length} message${g.msgs.length === 1 ? '' : 's'} · ${
+            esc(shortDate(msgAt(g.msgs[g.msgs.length - 1])))}</span>
+        </button>
+      </div>`;
+    if (!open) return head;
+    // The within-thread collapse is unchanged, just keyed per THREAD now — an 11-message thread
+    // still folds in the middle, and the gap is still a button (§Lessons 90).
+    const full = CONV_EXPANDED.has(key);
+    const shown = (g.msgs.length > 6 && !full)
+      ? [g.msgs[0], {_gap: g.msgs.length - 3}, ...g.msgs.slice(-2)]
+      : g.msgs;
+    let seenCc = [];   // reset per thread: a Cc carried across threads is a different thread's
+    const body = shown.map(m => {
+      if (m._gap)
+        return `<div class="cm-gap"><button class="linklike" onclick="expandConv(${tagArg(key)})"
+          >· show ${m._gap} earlier message${m._gap === 1 ? '' : 's'} ·</button></div>`;
+      const html = convMessage(c, m, seenCc);
+      seenCc = (m.cc_addrs || []).map(x => addrOf(x));
+      return html;
+    }).join('');
+    const shut = (full && g.msgs.length > 6)
+      ? `<div class="cm-gap"><button class="linklike" onclick="collapseConv(${tagArg(key)})"
+         >· collapse ·</button></div>` : '';
+    return head + body + shut;
   }).join('');
-  // Offered only once expanded, and only when there was something to expand. A permanent
-  // "collapse" on a four-message thread is a control for a state that cannot happen.
-  const shut = (full && msgs.length > 6)
-    ? `<div class="cm-gap"><button class="linklike" onclick="collapseConv('${esc(c.id)}')"
-       >· collapse ·</button></div>` : '';
   return `<div class="conv">${banner}${intro}
-    <div class="conv-msgs">${rows}${shut}</div>
+    <div class="conv-msgs">${rows}</div>
     ${replyBox(c)}
   </div>`;
+}
+
+//: Messages -> one entry per Gmail thread, oldest thread first.
+//:
+//: Keyed on `thread_id`, falling back to the SUBJECT when a row has none — pasted messages and
+//: anything synced before threading was stored carry no id, and bucketing them all under "" would
+//: rebuild the merge this exists to undo.
+//: When a message happened. The stored row calls it `sent_at`; `timeline()` renames it to `at`
+//: on the fetch path, so both reach this code and reading one of them silently loses the date.
+function msgAt(m) { return String((m && (m.sent_at || m.at)) || ''); }
+
+function groupThreads(msgs) {
+  const by = new Map();
+  for (const m of msgs || []) {
+    const id = m.thread_id || `subj:${(m.subject || '').replace(/^re:\s*/i, '').trim().toLowerCase()}`;
+    if (!by.has(id)) by.set(id, {id, subject: m.subject || '', msgs: []});
+    by.get(id).msgs.push(m);
+  }
+  const out = [...by.values()];
+  for (const g of out) {
+    g.msgs.sort((a, b) => msgAt(a).localeCompare(msgAt(b)));
+    // The SHORTEST subject in the thread: "Re: Re: Ormus <> AMSYS" is the same conversation as
+    // "Ormus <> AMSYS", and the separator should read as the latter.
+    g.subject = g.msgs.map(m => m.subject || '').filter(Boolean)
+      .sort((a, b) => a.length - b.length)[0] || '';
+  }
+  return out.sort((a, b) => msgAt(a.msgs[a.msgs.length - 1])
+    .localeCompare(msgAt(b.msgs[b.msgs.length - 1])));
+}
+
+//: Per-thread open state. Two sets rather than one, because the DEFAULT differs: the newest
+//: thread starts open (so a card still lands on the live conversation) and the rest start shut.
+//: One set would make "shut the newest" and "open an old one" the same fact.
+const CONV_OPEN = new Set();
+const CONV_SHUT = new Set();
+function toggleThread(key) {
+  if (CONV_OPEN.has(key)) { CONV_OPEN.delete(key); CONV_SHUT.add(key); }
+  else if (CONV_SHUT.has(key)) { CONV_SHUT.delete(key); CONV_OPEN.add(key); }
+  else { CONV_OPEN.add(key); CONV_SHUT.add(key); CONV_OPEN.delete(key); CONV_SHUT.add(key); }
+  rerenderJobs(true);
 }
 
 //: Which threads the operator has opened out. Outside the DOM, because `refresh()` rewrites

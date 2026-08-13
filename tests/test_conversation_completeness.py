@@ -108,7 +108,7 @@ globalThis.document = { getElementById:()=>el(), querySelector:()=>el(),
 const SRC = """ + json.dumps(src) + """;
 const F = (new Function(SRC + `; return { conversationView, CONV_EXPANDED, expandConv,
                                           collapseConv, rerenderJobs };`))();
-""" + ("F.CONV_EXPANDED.add('c1');" if expanded else "") + """
+""" + ("F.CONV_EXPANDED.add('c1|t1');" if expanded else "") + """
 const html = F.conversationView(""" + json.dumps(contact) + """);
 console.log(JSON.stringify({
   bodies: (html.match(/class="cm-body"/g) || []).length,
@@ -125,7 +125,8 @@ console.log(JSON.stringify({
 
 
 def _thread(n, snippet="hello"):
-    return [{"message_id": f"m{i}", "direction": "in" if i % 2 else "out",
+    return [{"message_id": f"m{i}", "thread_id": "t1", "subject": "Re: the role",
+             "direction": "in" if i % 2 else "out",
              "from_name": "Patrick" if i % 2 else "", "sent_at": f"2026-08-{i + 1:02d}T00:00:00+00:00",
              "cc_addrs": [], "snippet": snippet} for i in range(n)]
 
@@ -231,3 +232,134 @@ def test_the_served_value_is_the_enforced_one():
     """Executed, not grepped: `_snippet_max()` must return what the store layer actually caps at,
     so the mark cannot say "truncated" at a length nothing truncates."""
     assert wd._snippet_max() == msgs.SNIPPET_MAX
+
+
+# ── separate conversations are separate ─────────────────────────────────────
+
+def _multi(tmp_path, contact, opens=(), shuts=()):
+    src = (wd._STATIC_DIR / "dashboard.js").read_text(encoding="utf-8")
+    script = tmp_path / "multi.mjs"
+    script.write_text(
+        BROWSER_GLOBALS + """
+const el = () => ({ innerHTML:'', textContent:'', hidden:false, value:'', style:{},
+  closest:()=>el(), querySelector:()=>el(), querySelectorAll:()=>[], setAttribute(){},
+  getAttribute:()=>null, addEventListener(){}, appendChild(){}, classList:{add(){},remove(){},
+  toggle(){}}, dataset:{} });
+globalThis.document = { getElementById:()=>el(), querySelector:()=>el(),
+  querySelectorAll:()=>[], addEventListener(){}, body:el(), hasFocus:()=>false,
+  activeElement:null };
+const SRC = """ + json.dumps(src) + """;
+const F = (new Function(SRC + `; return { conversationView, groupThreads, CONV_OPEN, CONV_SHUT,
+                                          toggleThread, rerenderJobs };`))();
+""" + "".join(f"F.CONV_OPEN.add({json.dumps(k)});" for k in opens) \
+    + "".join(f"F.CONV_SHUT.add({json.dumps(k)});" for k in shuts) + """
+const C = """ + json.dumps(contact) + """;
+const html = F.conversationView(C);
+console.log(JSON.stringify({
+  seps: (html.match(/class="th-sep/g) || []).length,
+  // Decoded, because the render escapes it correctly — "Ormus &lt;&gt; AMSYS" is the right
+  // markup and the wrong thing to assert against.
+  metas: [...html.matchAll(/class="th-meta">([^<]*)</g)].map(m => m[1]),
+  subjects: [...html.matchAll(/class="th-subj">([^<]*)</g)].map(m => m[1]
+    .replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&amp;/g,'&').replace(/&#39;/g,"'")),
+  bodies: (html.match(/class="cm-body"/g) || []).length,
+  shutSeps: (html.match(/class="th-sep shut/g) || []).length,
+  groups: F.groupThreads(C.thread).map(g => ({id: g.id, n: g.msgs.length, subject: g.subject})),
+}));
+""", encoding="utf-8")
+    proc = subprocess.run(["node", str(script)], capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr[:2000]
+    return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+def _m(tid, subj, day, direction="in", mid=None):
+    at = f"2026-08-{day:02d}T00:00:00+00:00"
+    return {"message_id": mid or f"{tid}-{day}", "thread_id": tid, "subject": subj,
+            "direction": direction, "from_name": "Diego" if direction == "in" else "",
+            "sent_at": at, "cc_addrs": [], "snippet": "hello"}
+
+
+THREE = [_m("tA", "External Partner Chat", 1), _m("tA", "Re: External Partner Chat", 2),
+         _m("tB", "AMSYS OS Follow Up", 3),
+         _m("tC", "Ormus Solutions <> AMSYS AI", 4), _m("tC", "Re: Ormus Solutions <> AMSYS AI", 5)]
+
+
+def test_each_gmail_thread_gets_its_own_separator(tmp_path):
+    """One contact, seven Gmail threads, rendered as a single continuous stream — a calendar
+    invite, an introduction and two deals with the same four people interleaved by date.
+    Reported as "this just looks like one long conversation which is not"."""
+    out = _multi(tmp_path, _contact(THREE))
+    assert out["seps"] == 3, "the threads are still merged into one conversation"
+    assert len(out["groups"]) == 3
+
+
+def test_the_separator_names_the_conversation(tmp_path):
+    """The subject is the only thing that says WHICH conversation this is, and the shortest form
+    is the right one: "Re: Re: Ormus <> AMSYS" is the same thread as "Ormus <> AMSYS"."""
+    out = _multi(tmp_path, _contact(THREE))
+    assert "External Partner Chat" in out["subjects"]
+    assert all(m.strip().endswith(("Aug 1", "Aug 3", "Aug 5", "Aug 7", "Aug 9")) or "Aug" in m
+               for m in out["metas"]), f"a separator has no date: {out['metas']}"
+    assert "Ormus Solutions <> AMSYS AI" in out["subjects"]
+    assert not any(s.lower().startswith("re:") for s in out["subjects"]), \
+        "a separator is titled with a reply prefix"
+
+
+def test_only_the_newest_thread_opens_by_default(tmp_path):
+    """Seven expanded threads is the wall this replaced, and the live conversation is the one
+    you came for — so it sits at the bottom, open, next to the composer."""
+    out = _multi(tmp_path, _contact(THREE))
+    assert out["bodies"] == 2, "expected only the newest thread's messages"
+    assert out["shutSeps"] == 2
+    assert out["subjects"][-1] == "Ormus Solutions <> AMSYS AI", "newest thread is not last"
+
+
+def test_threads_are_ordered_by_their_LAST_message(tmp_path):
+    """The live conversation belongs at the bottom, beside the composer.
+
+    The fixture is deliberately out of order — built newest-thread-first — because the earlier
+    version happened to insert chronologically, so removing the sort entirely left every test
+    green. A test whose input is already sorted cannot see a sort.
+
+    Ordered by the LAST message rather than the first: a thread opened in June and answered
+    yesterday is the current one, however old it started.
+    """
+    out = _multi(tmp_path, _contact([
+        _m("tC", "Ormus Solutions <> AMSYS AI", 9),      # newest, listed first
+        _m("tA", "External Partner Chat", 1),
+        _m("tA", "Re: External Partner Chat", 7),        # started first, answered recently
+        _m("tB", "AMSYS OS Follow Up", 3),               # oldest last message
+    ]))
+    assert [g["id"] for g in out["groups"]] == ["tB", "tA", "tC"], \
+        "threads are not ordered by their most recent message"
+    assert out["subjects"][-1] == "Ormus Solutions <> AMSYS AI"
+
+
+def test_an_older_thread_opens_when_asked(tmp_path):
+    out = _multi(tmp_path, _contact(THREE), opens=["c1|tA"])
+    assert out["bodies"] == 4, "opening an older thread did not show it"
+    assert out["shutSeps"] == 1
+
+
+def test_the_newest_thread_can_be_shut(tmp_path):
+    """Both directions. One set for "opened" would make shutting the default-open thread
+    indistinguishable from never having touched it."""
+    out = _multi(tmp_path, _contact(THREE), shuts=["c1|tC"])
+    assert out["bodies"] == 0
+    assert out["shutSeps"] == 3
+
+
+def test_a_single_thread_still_renders_without_ceremony(tmp_path):
+    """The common case must not regress: one conversation, open, one separator naming it."""
+    out = _multi(tmp_path, _contact([_m("tA", "Re: the role", 1), _m("tA", "Re: the role", 2)]))
+    assert out["seps"] == 1 and out["bodies"] == 2 and out["shutSeps"] == 0
+
+
+def test_messages_with_no_thread_id_group_by_subject(tmp_path):
+    """Pasted messages and anything synced before threading was stored carry no id. Bucketing
+    them all under "" rebuilds the merge this exists to undo."""
+    msgs = [dict(_m("", "Intro call", 1), thread_id=""),
+            dict(_m("", "Re: Intro call", 2), thread_id=""),
+            dict(_m("", "Contract", 3), thread_id="")]
+    out = _multi(tmp_path, _contact(msgs))
+    assert len(out["groups"]) == 2, "no-id messages were merged into one conversation"

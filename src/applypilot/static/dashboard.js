@@ -1707,7 +1707,7 @@ function conversationView(c) {
   // whole point is that "needs a reply" is a bucket you act on.
   const banner = conv.state === 'awaiting_us'
     ? `<div class="conv-turn us"><span>⚠ Your turn — ${esc(first)} replied ${esc(agoPhrase(conv))}</span>
-         <span class="conv-acts"><button class="linklike" onclick="openReplyHere('${esc(c.id)}')">Answer now</button>${gmailLink(c, 'Open in Gmail ↗')}</span></div>`
+         <span class="conv-acts"><button class="linklike" onclick="openReplyHere('${esc(c.id)}', '${esc((c.reply_to || {}).thread_key || '')}')">Answer now</button>${gmailLink(c, 'Open in Gmail ↗')}</span></div>`
     : conv.state === 'awaiting_them'
       ? `<div class="conv-turn them"><span>Answered ${esc(agoPhrase(conv))} — waiting on ${esc(first)}.</span>
          <span class="conv-acts">${gmailLink(c, 'Open in Gmail ↗')}</span></div>`
@@ -1734,17 +1734,33 @@ function conversationView(c) {
   // to the composer. Only that one is open by default: seven expanded threads is the wall of
   // text this replaced.
   const groups = groupThreads(msgs);
-  const newest = groups.length ? groups[groups.length - 1].id : '';
+  // WHICH THREAD OPENS BY DEFAULT: the newest one you can ANSWER, falling back to the newest.
+  //
+  // It was simply the newest by date, which was right when there was one composer at the bottom
+  // of the card. With a composer inside each thread it puts the box you need behind a click:
+  // the last thing on a card is often our own unanswered email, or a calendar acceptance, so a
+  // banner reading "your turn — X replied 1d ago" would sit above a COLLAPSED reply box while
+  // an unanswerable thread was the one hanging open.
+  const answerable = groups.filter(g => (c.reply_targets || {})[g.id]);
+  const newest = (answerable.length ? answerable[answerable.length - 1]
+                                    : groups[groups.length - 1] || {}).id || '';
   const rows = groups.map(g => {
     const key = `${c.id}|${g.id}`;
     const open = groups.length === 1 || g.id === newest
       ? !CONV_SHUT.has(key)
       : CONV_OPEN.has(key);
-    const head = `<div class="th-sep${open ? '' : ' shut'}">
+    // ANSWERABLE, marked on the COLLAPSED header. The composer lives inside the thread, which is
+    // right — but only one thread is open by default, so without this a card still shows six
+    // closed rows and nothing saying any of them can be replied to. That is the shape reported
+    // as "I can only answer the latest", and shipping the composers without the marker would
+    // have reproduced it (§Lessons 43: a control nobody can find is a broken feature).
+    const canReply = !!(c.reply_targets || {})[g.id];
+    const mark = canReply ? '<span class="th-can" title="You can reply to this one">↩</span>' : '';
+    const head = `<div class="th-sep${open ? '' : ' shut'}${canReply ? ' can' : ''}">
         <button class="linklike" onclick="toggleThread(${tagArg(key)})">
           <span class="th-caret">${open ? '▾' : '▸'}</span>
           <span class="th-subj">${esc(g.subject || '(no subject)')}</span>
-          <span class="th-meta">${g.msgs.length} message${g.msgs.length === 1 ? '' : 's'} · ${
+          <span class="th-meta">${mark}${g.msgs.length} message${g.msgs.length === 1 ? '' : 's'} · ${
             esc(shortDate(msgAt(g.msgs[g.msgs.length - 1])))}</span>
         </button>
       </div>`;
@@ -1767,11 +1783,27 @@ function conversationView(c) {
     const shut = (full && g.msgs.length > 6)
       ? `<div class="cm-gap"><button class="linklike" onclick="collapseConv(${tagArg(key)})"
          >· collapse ·</button></div>` : '';
-    return head + body + shut;
+    // THE COMPOSER BELONGS TO THE THREAD, not to the contact.
+    //
+    // It used to render once, below every thread, wired to whichever conversation held the
+    // newest inbound message. On a live card that meant seven threads and one reply box pinned
+    // to the last of them: the other six could be read and not answered, and nothing said why.
+    // §Lessons 89 — a control has to be beside the thing it acts on, and "at the bottom of a
+    // list of seven" is beside none of them.
+    //
+    // Only a thread somebody has actually written on gets one. A conversation where only we
+    // have spoken is a FOLLOW-UP, which has its own ladder and stop conditions, so offering a
+    // reply box there would quietly turn one into the other.
+    const target = (c.reply_targets || {})[g.id];
+    return head + body + shut + (target ? replyBox(c, target) : '');
   }).join('');
+  // A contact with a live conversation and NO answerable thread still needs to be told why —
+  // `replyBox` renders that explanation, and with nothing to loop over it would never run.
+  const anyTarget = groups.some(g => (c.reply_targets || {})[g.id]);
+  const fallback = anyTarget ? '' : replyBox(c, c.reply_to);
   return `<div class="conv">${banner}${intro}
     <div class="conv-msgs">${rows}</div>
-    ${replyBox(c)}
+    ${fallback}
   </div>`;
 }
 
@@ -1897,14 +1929,23 @@ function convMessage(c, m, prevCc) {
 // What the operator typed, and any Cc they removed — held here rather than in the DOM because
 // the 2.5s refresh replaces #jobs wholesale. It skips while an input has FOCUS, which saves you
 // mid-sentence but not the moment you click away to read the thread above the box.
-const REPLY_DRAFT = new Map();   // contact id -> body
-const REPLY_DROP  = new Map();   // contact id -> Set of cc addresses removed
+const REPLY_DRAFT = new Map();   // rkey -> body
+const REPLY_DROP  = new Map();   // rkey -> Set of cc addresses removed
+
+//: EVERY piece of composer state is keyed by (contact, THREAD), through this one function.
+//:
+//: They were keyed by contact alone, which was correct while there was one composer. With one
+//: per conversation a contact-only key makes seven boxes share a draft: type into the deal
+//: thread, and the same words appear in the calendar-invite box — and then Send picks whichever
+//: one you clicked. One key function rather than seven inline templates, so a new piece of state
+//: cannot quietly use a different one (§Lessons 49).
+function rkey(cid, tk) { return `${cid}|${tk || ''}`; }
 
 // Replying, not following up. The distinction is real: a follow-up is a ladder step with a
-// schedule and a stop condition, a reply answers a person who wrote to us. `reply_to` is null
-// until somebody actually does, which is what keeps the two from blurring together.
-function replyBox(c) {
-  const t = c.reply_to;
+// schedule and a stop condition, a reply answers a person who wrote to us. A thread with no
+// inbound message gets NO composer, which is what keeps the two from blurring together —
+// measured live, 66 of 225 threads are replyable and the rest correctly offer nothing.
+function replyBox(c, t) {
   // `_reply_target()` swallows every exception and returns None, so a thread we KNOW has an
   // inbound message can arrive with no reply target. Returning '' here rendered a conversation
   // with no composer, no explanation and no error — while the row still said "your turn".
@@ -1915,71 +1956,68 @@ function replyBox(c) {
          this thread. Reply in Gmail, or use “📥 Check replies” to re-read it.</div></div>`
       : '';
   }
-  const dropped = REPLY_DROP.get(c.id) || new Set();
+  const tk = t.thread_key || '';
+  const k = rkey(c.id, tk);
+  const ka = `'${esc(c.id)}', '${esc(tk)}'`;
+  const dropped = REPLY_DROP.get(k) || new Set();
   const cc = (t.cc || []).filter(x => !dropped.has(x));
   // The Cc is the whole reason this exists: answering only the sender drops whoever they
   // introduced, and nothing on screen would show that it happened.
   const chips = (t.cc || []).map(x => {
     const off = dropped.has(x);
     return `<button class="cc-chip${off ? ' off' : ''}" title="${off ? 'Add back' : 'Remove from this reply'}"
-      onclick="toggleCc('${esc(c.id)}', decodeURIComponent('${encodeURIComponent(x)}'))">${esc(x)} ${off ? '＋' : '✕'}</button>`;
+      onclick="toggleCc(${ka}, decodeURIComponent('${encodeURIComponent(x)}'))">${esc(x)} ${off ? '＋' : '✕'}</button>`;
   }).join('');
-  const body = REPLY_DRAFT.get(c.id) || '';
-  // WHICH CONVERSATION THIS ANSWERS, on the composer itself. A person with several Gmail threads
-  // gets one reply box, and until it said so there was nothing on screen distinguishing "answering
-  // the deal thread" from "answering a calendar invite from three weeks ago" — the two render
-  // identically and only one of them is what the operator meant (§Lessons 29).
-  const inThread = (t.thread_subject || '').trim();
-  const many = groupThreads(c.thread || []).length > 1;
-  return `<div class="reply-box" data-reply-for="${esc(c.id)}" data-cc="${esc(JSON.stringify(cc))}" data-to="${esc(t.to)}" data-thread="${esc(t.thread_key || '')}">
+  const body = REPLY_DRAFT.get(k) || '';
+  return `<div class="reply-box" data-reply-for="${esc(c.id)}" data-cc="${esc(JSON.stringify(cc))}" data-to="${esc(t.to)}" data-thread="${esc(tk)}">
     <div class="reply-hdr">↩ Reply to <strong>${esc(t.to)}</strong>${
       cc.length ? ` · cc ${cc.length}` : (t.cc || []).length ? ' · <span class="cc-none">cc removed</span>' : ''}</div>
-    ${many && inThread ? `<div class="reply-in">on <strong>${esc(inThread)}</strong></div>` : ''}
     ${(t.cc || []).length ? `<div class="cc-row">${chips}</div>` : ''}
-    ${lastReplyCard(c)}
+    ${lastReplyCard(c, tk)}
     <div class="reply-subj">${esc(t.subject)}</div>
     <textarea class="reply-body" rows="6" placeholder="Write your reply…"
-      oninput="REPLY_DRAFT.set('${esc(c.id)}', this.value)">${esc(body)}</textarea>
+      oninput="REPLY_DRAFT.set('${esc(k)}', this.value)">${esc(body)}</textarea>
     <div class="reply-actions">
-      <button class="secondary" onclick="draftReply('${esc(c.id)}', this)">✍ Draft an answer</button>
-      <button class="primary" onclick="sendReply('${esc(c.id)}', this)">Send reply</button>
+      <button class="secondary" onclick="draftReply(${ka}, this)">✍ Draft an answer</button>
+      <button class="primary" onclick="sendReply(${ka}, this)">Send reply</button>
       <span class="reply-hint">Goes into this thread. No attachments.</span>
     </div>
-    ${replyMsg(c.id)}
+    ${replyMsg(c.id, tk)}
     <input class="r-style" placeholder="✨ Tweak the vibe, then Draft again — e.g. 'warmer', 'shorter', 'more direct'"
-      value="${esc(REPLY_STYLE.get(c.id) || '')}"
-      oninput="REPLY_STYLE.set('${esc(c.id)}', this.value)">
+      value="${esc(REPLY_STYLE.get(k) || '')}"
+      oninput="REPLY_STYLE.set('${esc(k)}', this.value)">
   </div>`;
 }
 
 // What they actually said. Stored automatically when gmail.readonly is on (CRM-4b); otherwise
 // the operator pastes it. The drafter does not care which — but SOMETHING has to be here, or
 // the "contextual" reply is a generic follow-up wearing a Re: subject line.
-const REPLY_SAID = new Map();    // contact id -> pasted text, survives the 2.5s refresh
-const REPLY_STYLE = new Map();   // contact id -> vibe directive
-const SAID_EDIT = new Set();     // contact ids whose paste box is deliberately open
-function editSaid(cid) { SAID_EDIT.add(cid); refresh(); }
-function doneSaid(cid) { SAID_EDIT.delete(cid); refresh(); }
+const REPLY_SAID = new Map();    // rkey -> pasted text, survives the 2.5s refresh
+const REPLY_STYLE = new Map();   // rkey -> vibe directive
+const SAID_EDIT = new Set();     // rkeys whose paste box is deliberately open
+function editSaid(k) { SAID_EDIT.add(k); refresh(); }
+function doneSaid(k) { SAID_EDIT.delete(k); refresh(); }
 
-function lastReplyCard(c) {
+function lastReplyCard(c, tk) {
   const r = c.last_reply;
-  const editing = SAID_EDIT.has(c.id) || !r;
+  const k = rkey(c.id, tk);
+  const editing = SAID_EDIT.has(k) || !r;
   if (!editing) {
     const tag = r.label ? `<span class="intent-chip ${esc(r.intent)}">${esc(r.label)}</span>` : '';
     const act = r.action ? `<div class="intent-act">${esc(r.action)}</div>` : '';
     return `<div class="said">
       <div class="said-hdr">${esc(r.from || 'They')} wrote ${tag}
-        <button class="linklike" onclick="editSaid('${esc(c.id)}')">✎ edit</button></div>
+        <button class="linklike" onclick="editSaid('${esc(k)}')">✎ edit</button></div>
       <div class="said-txt">“${esc(r.text)}”</div>${act}
     </div>`;
   }
-  const text = REPLY_SAID.has(c.id) ? REPLY_SAID.get(c.id) : (r ? r.text : '');
+  const text = REPLY_SAID.has(k) ? REPLY_SAID.get(k) : (r ? r.text : '');
   return `<div class="said">
     <div class="said-hdr">What they wrote
-      ${r ? `<button class="linklike" onclick="doneSaid('${esc(c.id)}')">done</button>`
+      ${r ? `<button class="linklike" onclick="doneSaid('${esc(k)}')">done</button>`
           : `<span class="said-why">paste it and the draft can actually answer it</span>`}</div>
     <textarea class="said-box" rows="4" placeholder="Paste their reply here…"
-      oninput="REPLY_SAID.set('${esc(c.id)}', this.value)">${esc(text)}</textarea>
+      oninput="REPLY_SAID.set('${esc(k)}', this.value)">${esc(text)}</textarea>
   </div>`;
 }
 
@@ -1987,33 +2025,39 @@ function lastReplyCard(c) {
 // of the page: with no reply text stored, clicking Draft returned a perfectly clear "paste what
 // they wrote first" that rendered a full screen away from the click — reported, reasonably, as
 // "the draft an answer button is not working".
-const REPLY_MSG = new Map();     // contact id -> {text, bad} — survives the 2.5s refresh
-function replyMsg(cid) {
-  const m = REPLY_MSG.get(cid);
+const REPLY_MSG = new Map();     // rkey -> {text, bad} — survives the 2.5s refresh
+function replyMsg(cid, tk) {
+  const m = REPLY_MSG.get(rkey(cid, tk));
   return m ? `<div class="reply-msg ${m.bad ? 'bad' : 'good'}">${esc(m.text)}</div>` : '';
 }
-function setReplyMsg(cid, text, bad) {
-  if (text) REPLY_MSG.set(cid, {text, bad: !!bad}); else REPLY_MSG.delete(cid);
+function setReplyMsg(cid, tk, text, bad) {
+  const k = rkey(cid, tk);
+  if (text) REPLY_MSG.set(k, {text, bad: !!bad}); else REPLY_MSG.delete(k);
 }
 
-async function draftReply(cid, btn) {
+async function draftReply(cid, tk, btn) {
+  const k = rkey(cid, tk);
   const card = btn.closest('.reply-box');
   const box = card ? card.querySelector('.said-box') : null;
-  const said = box ? box.value.trim() : (REPLY_SAID.get(cid) || '');
+  const said = box ? box.value.trim() : (REPLY_SAID.get(k) || '');
   btn.disabled = true; btn.textContent = 'Drafting…';
-  setReplyMsg(cid, 'Reading the conversation and writing an answer…', false);
+  setReplyMsg(cid, tk, 'Reading the conversation and writing an answer…', false);
   const live = card ? card.querySelector('.reply-msg') : null;
   if (live) { live.textContent = 'Reading the conversation and writing an answer…'; live.className = 'reply-msg good'; }
+  // The THREAD goes with it. `_draft_reply` reads the stored conversation to work out what it
+  // is answering, and unscoped that is every thread merged — so a draft written under one
+  // subject would answer the newest message under another.
   const r = await post('/api/contact/draft-reply',
-                       {contact_id: cid, their_reply: said, style: REPLY_STYLE.get(cid) || ''});
+                       {contact_id: cid, thread: tk || '', their_reply: said,
+                        style: REPLY_STYLE.get(k) || ''});
   if (r.ok && r.body) {
     // Into the shared store, not straight into the DOM — the 2.5s refresh replaces #jobs
     // wholesale and would wipe a value written only to the textarea.
-    REPLY_DRAFT.set(cid, r.body);
-    if (said) { REPLY_SAID.set(cid, said); SAID_EDIT.delete(cid); }
-    setReplyMsg(cid, r.message || 'Draft ready — read it before you send it.', false);
+    REPLY_DRAFT.set(k, r.body);
+    if (said) { REPLY_SAID.set(k, said); SAID_EDIT.delete(k); }
+    setReplyMsg(cid, tk, r.message || 'Draft ready — read it before you send it.', false);
   } else {
-    setReplyMsg(cid, r.message || 'Draft failed.', true);
+    setReplyMsg(cid, tk, r.message || 'Draft failed.', true);
   }
   btn.disabled = false; btn.textContent = '✍ Draft an answer';
   refresh();
@@ -2030,8 +2074,12 @@ function openReply(url, cid) {
   CHANNEL_TAB.set(cid, 'email');
   refresh();
   // The refresh replaces #jobs wholesale, so the textarea only exists after it has run.
+  // LAST, not first: composers render in thread order, oldest conversation at the top, and the
+  // row's Next action is about the person who just wrote — landing on their oldest thread is
+  // the same misdirection this whole change removes, one level up.
   setTimeout(() => {
-    const el = document.querySelector(`[data-reply-for="${cid}"] .reply-body`);
+    const boxes = document.querySelectorAll(`[data-reply-for="${cid}"] .reply-body`);
+    const el = boxes[boxes.length - 1];
     if (el) { el.focus(); el.scrollIntoView({block: 'center', behavior: 'smooth'}); }
   }, 60);
 }
@@ -2075,26 +2123,38 @@ async function syncGmail(cid, btn) {
 async function fetchReplyText(cid, btn) {
   btn.disabled = true; btn.textContent = 'Reading…';
   const r = await post('/api/contact/fetch-reply', {contact_id: cid});
-  setReplyMsg(cid, r.message || (r.ok ? 'Read.' : 'Could not read it.'), !r.ok);
+  // Reports into the composer of the thread this button sits in. It is rendered inside a
+  // `.reply-box`, so the thread is on the card rather than something to re-derive.
+  const card = btn.closest('.reply-box');
+  setReplyMsg(cid, card ? (card.dataset.thread || '') : '',
+              r.message || (r.ok ? 'Read.' : 'Could not read it.'), !r.ok);
   btn.disabled = false; btn.textContent = '⤓ Fetch from Gmail';
   refresh();
 }
 // From the banner: put the cursor in the composer. The contact is already open when the banner
 // is visible, so this is a focus, not a navigation.
-function openReplyHere(cid) {
-  const el = document.querySelector(`[data-reply-for="${cid}"] .reply-body`);
+//
+// There are now several composers for one contact, one per answerable thread. The banner says
+// "X replied N ago", which is the NEWEST inbound — so it must land on that thread's box and not
+// simply the first in the DOM, which is the OLDEST conversation.
+function openReplyHere(cid, tk) {
+  const sel = tk ? `[data-reply-for="${cid}"][data-thread="${tk}"]` : `[data-reply-for="${cid}"]`;
+  const boxes = document.querySelectorAll(`${sel} .reply-body`);
+  const el = boxes[boxes.length - 1];
   if (el) { el.focus(); el.scrollIntoView({block: 'center', behavior: 'smooth'}); }
 }
-function toggleCc(cid, address) {
-  const set = REPLY_DROP.get(cid) || new Set();
+function toggleCc(cid, tk, address) {
+  const k = rkey(cid, tk);
+  const set = REPLY_DROP.get(k) || new Set();
   if (set.has(address)) set.delete(address); else set.add(address);
-  REPLY_DROP.set(cid, set);
+  REPLY_DROP.set(k, set);
   refresh();
 }
-async function sendReply(cid, btn) {
+async function sendReply(cid, tk, btn) {
+  const k = rkey(cid, tk);
   const card = btn.closest('.reply-box');
-  const body = (REPLY_DRAFT.get(cid) || '').trim();
-  const say = (m, bad) => { setReplyMsg(cid, m, bad); refresh(); };
+  const body = (REPLY_DRAFT.get(k) || '').trim();
+  const say = (m, bad) => { setReplyMsg(cid, tk, m, bad); refresh(); };
   if (!body) { say('Write a reply before sending — or click “Draft an answer”.', true); return; }
   // The Cc travels as data, not as scraped chip text — the recipients of a real email are not
   // something to re-derive from innerText.
@@ -2102,22 +2162,28 @@ async function sendReply(cid, btn) {
   try { cc = JSON.parse(card.dataset.cc || '[]'); } catch { cc = []; }
   const who = card.dataset.to || 'them';
   const also = cc.length ? `\n\nAlso going to: ${cc.join(', ')}` : '\n\nNobody is Cc\'d.';
-  if (!confirm(`Send this reply to ${who}?${also}`)) return;
+  // NAME THE CONVERSATION in the confirm. With a composer under every thread, "Send this reply
+  // to John?" is the same sentence whichever box you clicked, and the one thing you cannot
+  // check afterwards is which conversation it went into.
+  const subj = (card.querySelector('.reply-subj') || {}).textContent || '';
+  const on = subj.trim() ? `\n\nOn: ${subj.trim()}` : '';
+  if (!confirm(`Send this reply to ${who}?${on}${also}`)) return;
   btn.disabled = true; btn.textContent = 'Sending…';
   // The thread is a SELECTOR, not a recipient — the server still derives every address from the
   // stored rows of that conversation. Sending it is what stops a reply landing on whichever
   // thread happened to hold the newest inbound message.
   const r = await post('/api/contact/reply',
     {contact_id: cid, body, cc, thread: card.dataset.thread || ''});
-  setReplyMsg(cid, r.message || (r.ok ? 'Sent.' : 'Failed.'), !r.ok);
+  setReplyMsg(cid, tk, r.message || (r.ok ? 'Sent.' : 'Failed.'), !r.ok);
   if (r.ok) {
-    // Clear ALL of it. REPLY_STYLE and REPLY_MSG were missed: the previous reply's vibe
-    // directive would pre-fill the next one, and the green "replied to …" banner would stay
-    // pinned under the composer for the rest of the session — reopening the contact an hour
-    // later still showed it, indistinguishable from a fresh confirmation.
-    REPLY_DRAFT.delete(cid); REPLY_DROP.delete(cid); REPLY_SAID.delete(cid);
-    REPLY_STYLE.delete(cid);
-    setTimeout(() => { REPLY_MSG.delete(cid); }, 6000);
+    // Clear ALL of it, and only for THIS thread. REPLY_STYLE and REPLY_MSG were missed once
+    // already: the previous reply's vibe directive pre-filled the next one, and the green
+    // "replied to …" banner stayed pinned under the composer for the rest of the session.
+    // Clearing by contact would now also wipe a draft the operator has half-written in another
+    // conversation with the same person.
+    REPLY_DRAFT.delete(k); REPLY_DROP.delete(k); REPLY_SAID.delete(k);
+    REPLY_STYLE.delete(k); SAID_EDIT.delete(k);
+    setTimeout(() => { REPLY_MSG.delete(k); }, 6000);
   }
   else { btn.disabled = false; btn.textContent = 'Send reply'; }
   refresh();

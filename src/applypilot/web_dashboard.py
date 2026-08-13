@@ -1883,6 +1883,10 @@ def _contact_payload(c: dict, company: str | None = None, ladders: dict | None =
         # extra round-trip, so the composer can open prefilled. None when nobody has written
         # to us, which is how the UI knows to offer a follow-up instead of a reply.
         "reply_to": _reply_target(thread or []),
+        # One per conversation, so every thread can be answered rather than only the newest.
+        # Seven threads with one person rendered one composer pinned to the last of them, and
+        # the other six had no way to reply at all.
+        "reply_targets": _reply_targets(thread or []),
         # Whose turn it is. `awaiting_us` means they wrote and nobody answered — the worst
         # outcome the system can produce, since it paid for the reply and then dropped it.
         "conversation": _conversation_state(thread or []),
@@ -2435,6 +2439,38 @@ def _conversation_state(thread: list) -> dict | None:
     except Exception:  # noqa: BLE001
         log.debug("Could not compute a conversation state", exc_info=True)
         return None
+
+
+def _reply_targets(thread: list) -> dict:
+    """`{thread_key: target}` for every conversation with this person that CAN be answered.
+
+    One composer per thread, and the recipients for each still derived server-side from the
+    stored rows (§Lessons 29) — the browser names a thread, never an address.
+
+    A thread with no inbound message gets no entry, and that is the honest answer rather than a
+    disabled box: replying to a conversation nobody has answered is a FOLLOW-UP, which has its
+    own ladder, schedule and stop conditions. Measured live: 225 threads across 173 contacts,
+    of which **66 are replyable** — so two thirds correctly get nothing.
+
+    Costs no query and no round-trip: pure Python over rows `_contact_payload` already holds.
+    Measured at **7ms for all 225**, which is what makes it affordable on a 2.5s refresh
+    (§Lessons 26 — the hot path is hot for everything, not only for SQL).
+    """
+    if not thread:
+        return {}
+    try:
+        from applypilot.domain import conversations as cv
+        from applypilot.networking.gmail_send import _our_addresses
+        mine = _our_addresses()
+        out = {}
+        for g in cv.group_threads(thread):
+            t = cv.reply_target(thread, mine, thread=g["key"])
+            if t:
+                out[g["key"]] = t
+        return out
+    except Exception:  # noqa: BLE001
+        log.debug("Could not compute reply targets", exc_info=True)
+        return {}
 
 
 def _reply_target(thread: list, key: str | None = None) -> dict | None:
@@ -3090,11 +3126,31 @@ def _draft_reply(data: dict) -> dict:
     if not contact:
         return {"ok": False, "message": "contact not found"}
 
+    thread = _msgs.thread_for_contact(cid, conn)
+    # SCOPE TO THE CONVERSATION THE COMPOSER SITS UNDER, and do it BEFORE the paste is stored.
+    # `thread_for_contact` returns every thread merged, so without this the draft answers
+    # whichever message is newest across all of them — on the live card, a reply written under
+    # "OpenScreen Raven Applet" would answer somebody else on a different subject. Same defect
+    # `reply_target` had, one layer over.
+    want = (data.get("thread") or "").strip()
+    if want:
+        from applypilot.domain import conversations as _cv
+        picked = next((g for g in _cv.group_threads(thread) if g["key"] == want), None)
+        if picked is None:
+            return {"ok": False,
+                    "message": "that conversation is no longer there — reopen the contact and "
+                               "draft from the thread you meant"}
+        thread = picked["msgs"]
+
     pasted = (data.get("their_reply") or "").strip()
     if pasted:
-        _msgs.set_reply_text(cid, pasted, conn)
+        # Onto the last inbound message OF THIS THREAD. Storing it first, unscoped, would attach
+        # what they said in one conversation to a message in another — and that text then feeds
+        # every later drafter and the reply timeline.
+        target_id = next((m.get("message_id") for m in reversed(thread)
+                          if (m.get("direction") or "") == "in" and m.get("message_id")), None)
+        _msgs.set_reply_text(cid, pasted, conn, message_id=target_id)
 
-    thread = _msgs.thread_for_contact(cid, conn)
     said = pasted or next((m.get("snippet") or "" for m in reversed(thread)
                            if m.get("direction") == "in" and (m.get("snippet") or "").strip()), "")
     if not said.strip():

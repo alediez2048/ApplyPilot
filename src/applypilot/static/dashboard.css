@@ -595,19 +595,6 @@
   .chan span.add { border-style:dashed; color:var(--faint); }
   .chan span.add.on { border-style:dashed; background:var(--surface2); color:var(--soft); }
 
-  /* Thread separator. These are DIFFERENT conversations with one person — a calendar invite,
-     an introduction, two deals — and merged into one stream they read as a single exchange that
-     keeps changing subject. The subject line is the only thing that says which is which. */
-  .th-sep { margin:10px 0 4px; border-top:1px solid var(--line); padding-top:8px; }
-  .th-sep:first-child { border-top:none; margin-top:0; padding-top:0; }
-  .th-sep button { display:flex; align-items:baseline; gap:8px; width:100%; text-align:left;
-    font-weight:600; color:var(--soft); }
-  .th-caret { color:var(--muted); font-size:10px; width:9px; }
-  .th-subj { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .th-meta { margin-left:auto; font-weight:400; font-size:11px; color:var(--muted);
-    white-space:nowrap; font-variant-numeric:tabular-nums; }
-  .th-sep.shut button { color:var(--muted); font-weight:500; }
-
   .intro-more { display:block; margin:2px 0 8px; }
 
   /* Thread separator. These are DIFFERENT conversations with one person — a calendar invite,
@@ -622,6 +609,13 @@
   .th-meta { margin-left:auto; font-weight:400; font-size:11px; color:var(--muted);
     white-space:nowrap; font-variant-numeric:tabular-nums; }
   .th-sep.shut button { color:var(--muted); font-weight:500; }
+  /* A conversation you can ANSWER. The composer lives inside the thread, which is right — but
+     only one thread is open by default, so without a marker on the collapsed header a card
+     still reads as "six threads and no way to reply", which is what was reported. In the meta
+     line beside the count, so it is a property of the thread rather than a button; expanding
+     it is what reveals the composer. */
+  .th-can { color:#1a73e8; font-weight:700; margin-right:6px; }
+  .th-sep.shut.can button { color:var(--soft); }
 
   /* 📝 Meeting transcripts. A row per call: when, what, the summary, how long. */
   .tr-row { display:grid; grid-template-columns:auto minmax(0,1fr) minmax(0,2fr) auto auto auto;

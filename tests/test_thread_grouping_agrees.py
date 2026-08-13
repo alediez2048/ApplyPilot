@@ -141,7 +141,9 @@ def _run_js(tmp_path, tail):
     return json.loads(proc.stdout.strip().splitlines()[-1])
 
 
-#: A contact with TWO conversations and a reply target on the older one.
+#: A contact with THREE conversations: two answerable, one where only we have written.
+#: The newest answerable one is from somebody else entirely, which is why a single composer
+#: pinned to the newest thread was the bug.
 CONTACT = {
     "id": "c1", "full_name": "Victoria", "email": "v@writer.test",
     "thread": [
@@ -151,55 +153,156 @@ CONTACT = {
          "direction": "in", "from_addr": "v@writer.test"},
         {"thread_id": "inv", "subject": "Invoice", "sent_at": "2026-08-05T10:00",
          "direction": "in", "from_addr": "accounts@writer.test"},
+        # Nobody has answered this one. It must get NO composer: replying to a thread with no
+        # inbound message is a FOLLOW-UP, with its own ladder, schedule and stop conditions.
+        {"thread_id": "solo", "subject": "Intro deck", "sent_at": "2026-08-06T10:00",
+         "direction": "out", "from_addr": "me@work.test"},
     ],
-    "reply_to": {"to": "Victoria <v@writer.test>", "to_addr": "v@writer.test", "cc": [],
+    "reply_to": {"to": "Accounts <accounts@writer.test>", "to_addr": "accounts@writer.test",
+                 "cc": [], "subject": "Re: Invoice", "thread_key": "inv",
+                 "thread_subject": "Invoice"},
+    "reply_targets": {
+        "deal": {"to": "Victoria <v@writer.test>", "to_addr": "v@writer.test", "cc": [],
                  "subject": "Re: Ormus <> AMSYS", "thread_key": "deal",
                  "thread_subject": "Ormus <> AMSYS"},
+        "inv": {"to": "Accounts <accounts@writer.test>", "to_addr": "accounts@writer.test",
+                "cc": [], "subject": "Re: Invoice", "thread_key": "inv",
+                "thread_subject": "Invoice"},
+    },
     "conversation": {"state": "awaiting_us", "who": "Victoria"},
 }
 
+#: Pull each composer out as DATA rather than slicing the page around a match.
+#:
+#: Two earlier versions of these assertions did `html.split(marker)[1].split('reply-box')[0]`,
+#: which runs straight past the composer into the NEXT thread's messages — so "this box does not
+#: mention the other person" was true of a window containing both of them. §Lessons 98: do not
+#: slice a guess around a match.
+_EXTRACT = r"""
+const html = F.conversationView(C);
+const boxes = html.split('<div class="reply-box"').slice(1).map(p => {
+  // Cut at the REPLY BODY's own closing tag. `lastReplyCard` renders a `said-box` textarea
+  // first, so stopping at the first `</textarea>` cuts the segment before the draft even
+  // starts -- and every body then reads as empty, which looks exactly like a real bug.
+  const at = p.indexOf('class="reply-body"');
+  const end = at > -1 ? p.indexOf('</textarea>', at) : p.indexOf('</textarea>');
+  const seg = p.slice(0, end > -1 ? end : p.length);
+  const th = /data-thread="([^"]*)"/.exec(seg);
+  const hd = /class="reply-hdr">([\s\S]*?)<\/div>/.exec(seg);
+  const bd = /class="reply-body"[^>]*>([\s\S]*)$/.exec(seg);
+  return {thread: th ? th[1] : null, hdr: hd ? hd[1] : '', body: bd ? bd[1] : ''};
+});
+console.log(JSON.stringify({boxes, marks: (html.match(/th-can/g) || []).length}));
+"""
 
-def test_the_composer_carries_the_thread_key(js, tmp_path):
-    """`sendReply` reads `card.dataset.thread`. If `replyBox` does not write it, the browser
-    posts nothing, the server falls back to the newest inbound across every thread, and the
-    misaddressing is back with every Python test still green."""
-    out = _run_js(tmp_path, f"const C = {json.dumps(CONTACT)};\n"
-                  "const F = (new Function(SRC + '; return { replyBox };'))();\n"
-                  "const html = F.replyBox(C);\n"
-                  "console.log(JSON.stringify({html}));\n")
-    assert 'data-thread="deal"' in out["html"], \
-        "the composer does not carry the thread it is pointed at"
+
+def _composers(tmp_path, open_all=True, draft=None):
+    """Every composer on the card. `open_all` expands each thread, which is what a click does —
+    composers live INSIDE a thread, so a collapsed one correctly has none."""
+    expand = ("F.groupThreads(C.thread).forEach(g => F.CONV_OPEN.add(`${C.id}|${g.id}`));\n"
+              if open_all else "")
+    setd = f"F.REPLY_DRAFT.set(F.rkey('c1', '{draft}'), 'ONLY THIS ONE');\n" if draft else ""
+    return _run_js(tmp_path, f"const C = {json.dumps(CONTACT)};\n"
+                   "const F = (new Function(SRC + '; return { conversationView, groupThreads,"
+                   " CONV_OPEN, REPLY_DRAFT, rkey };'))();\n" + expand + setd + _EXTRACT)
 
 
-def test_the_composer_names_the_conversation_when_there_is_more_than_one(js, tmp_path):
-    """One reply box, several threads. Without this there is nothing on screen distinguishing
-    'answering the deal' from 'answering an invoice' (§Lessons 29)."""
-    one = dict(CONTACT, thread=CONTACT["thread"][:2])
-    out = _run_js(tmp_path, f"const C = {json.dumps(CONTACT)}; const O = {json.dumps(one)};\n"
-                  "const F = (new Function(SRC + '; return { replyBox };'))();\n"
-                  "console.log(JSON.stringify({many: F.replyBox(C), one: F.replyBox(O)}));\n")
-    assert "reply-in" in out["many"] and "Ormus &lt;&gt; AMSYS" in out["many"]
-    # Silent in the ordinary case: with one conversation there is nothing to disambiguate.
-    assert "reply-in" not in out["one"]
+def test_every_answerable_thread_gets_its_own_composer(js, tmp_path):
+    """The report: seven threads, one reply box, six conversations that could be read and not
+    answered. Expanded, every answerable thread must now have one of its own."""
+    boxes = _composers(tmp_path)["boxes"]
+    assert {b["thread"] for b in boxes} == {"deal", "inv"}, \
+        f"expected a composer per answerable thread, got {[b['thread'] for b in boxes]}"
 
 
-def test_send_reply_posts_the_thread(js, tmp_path):
+def test_a_thread_nobody_answered_gets_NO_composer(js, tmp_path):
+    """Replying to a conversation with no inbound message is a FOLLOW-UP — its own ladder, its
+    own schedule, its own stop conditions. A reply box there blurs the two.
+
+    Counts as well as names: falling back to the default target renders a THIRD box that is
+    labelled with another thread's key, so `"solo" not in threads` stays true while the extra
+    composer is right there. A set of names cannot see a duplicate."""
+    boxes = _composers(tmp_path)["boxes"]
+    assert len(boxes) == 2, f"an unanswerable thread was given a composer: {boxes}"
+    assert "solo" not in {b["thread"] for b in boxes}
+
+
+def test_a_COLLAPSED_answerable_thread_says_so(js, tmp_path):
+    """Only one thread is open by default, so without a marker the card still reads as "several
+    closed rows and no way to reply" — the exact report this answers. Shipping the composers
+    without this would have reproduced it (§Lessons 43)."""
+    out = _composers(tmp_path, open_all=False)
+    assert len(out["boxes"]) == 1, "only the open thread should hold a composer"
+    assert out["marks"] == 2, \
+        f"a collapsed thread you can answer gives no sign of it (marks={out['marks']})"
+
+
+def test_the_mark_is_not_on_every_thread(js, tmp_path):
+    """A marker that appears on all three means nothing. Three threads, two answerable."""
+    assert len(cv.group_threads(CONTACT["thread"])) == 3
+    assert _composers(tmp_path, open_all=False)["marks"] == 2
+
+
+def test_each_composer_addresses_ITS_OWN_thread(js, tmp_path):
+    """The dangerous half. Two boxes that both said "Reply to Victoria" would look right and
+    send one of them to the wrong person (§Lessons 29)."""
+    boxes = {b["thread"]: b["hdr"] for b in _composers(tmp_path)["boxes"]}
+    assert "v@writer.test" in boxes["deal"] and "accounts@writer.test" not in boxes["deal"]
+    assert "accounts@writer.test" in boxes["inv"] and "v@writer.test" not in boxes["inv"]
+
+
+def test_the_composers_do_not_share_a_draft(js, tmp_path):
+    """Every piece of composer state was keyed by contact alone. With one box per thread that
+    makes them all the same box: type into the deal and the invoice fills in too."""
+    boxes = {b["thread"]: b["body"] for b in _composers(tmp_path, draft="deal")["boxes"]}
+    assert "ONLY THIS ONE" in boxes["deal"], "the draft did not reach the thread it was for"
+    assert "ONLY THIS ONE" not in boxes["inv"], "one draft leaked into every other box"
+
+
+def test_send_reply_posts_the_thread_it_was_clicked_in(js, tmp_path):
     """The end of the wire. A key rendered into the DOM and never posted is the same as absent."""
     out = _run_js(tmp_path, """
-const F = (new Function(SRC + '; return { sendReply, REPLY_DRAFT };'))();
+const F = (new Function(SRC + '; return { sendReply, REPLY_DRAFT, rkey };'))();
 let posted = null;
 // `sendReply` also calls `refresh()`, which fetches with ONE argument. Recording only the call
-// that carries a body keeps this probe about the POST rather than about the refresh beside it.
+// that carries a body keeps this probe about the POST rather than the refresh beside it.
 globalThis.fetch = async (url, opts) => {
   if (opts && opts.body) posted = {url, body: JSON.parse(opts.body)};
   return { json: async () => ({ok: true, message: 'Sent.'}) };
 };
-F.REPLY_DRAFT.set('c1', 'hello');
+F.REPLY_DRAFT.set(F.rkey('c1', 'deal'), 'hello');
 const btn = { disabled:false, textContent:'',
-  closest: () => ({ dataset: { cc: '[]', to: 'v@writer.test', thread: 'deal' } }) };
-await F.sendReply('c1', btn);
+  closest: () => ({ dataset: { cc: '[]', to: 'v@writer.test', thread: 'deal' },
+                    querySelector: () => ({ textContent: 'Re: Ormus <> AMSYS' }) }) };
+await F.sendReply('c1', 'deal', btn);
 console.log(JSON.stringify({posted}));
 """)
     assert out["posted"], "sendReply never reached the network"
     assert out["posted"]["body"].get("thread") == "deal", \
         "the browser did not tell the server which conversation it was answering"
+
+
+def test_draft_reply_carries_the_thread_too(js, tmp_path):
+    """`_draft_reply` reads the stored conversation to know what it is answering. Unscoped that
+    is every thread merged, so a draft written under one subject answers another."""
+    out = _run_js(tmp_path, """
+const F = (new Function(SRC + '; return { draftReply };'))();
+let posted = null;
+globalThis.fetch = async (url, opts) => {
+  if (opts && opts.body) posted = {url, body: JSON.parse(opts.body)};
+  return { json: async () => ({ok: true, body: 'drafted'}) };
+};
+const btn = { disabled:false, textContent:'', closest: () => ({ querySelector: () => null }) };
+await F.draftReply('c1', 'deal', btn);
+console.log(JSON.stringify({posted}));
+""")
+    assert out["posted"]["body"].get("thread") == "deal"
+
+
+def test_the_thread_that_OPENS_is_one_you_can_answer(js, tmp_path):
+    """The newest thread on a card is often our own unanswered email or a calendar acceptance.
+    Opening that one puts the composer the operator was sent to behind a click, under a banner
+    reading "your turn". The default is the newest ANSWERABLE thread instead."""
+    out = _composers(tmp_path, open_all=False)
+    assert [b["thread"] for b in out["boxes"]] == ["inv"], \
+        f"the card opened on a thread with no composer: {out['boxes']}"

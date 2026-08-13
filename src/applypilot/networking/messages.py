@@ -205,7 +205,8 @@ def threads_for_job(job_url: str, conn: sqlite3.Connection | None = None) -> dic
     return out
 
 
-def set_reply_text(contact_id: str, text: str, conn: sqlite3.Connection | None = None) -> bool:
+def set_reply_text(contact_id: str, text: str, conn: sqlite3.Connection | None = None,
+                   message_id: str | None = None) -> bool:
     """Record what they said, pasted by the operator, onto the newest INBOUND message.
 
     A deliberately separate entry point from `upsert_messages`, not a parameter on it. The two
@@ -215,13 +216,25 @@ def set_reply_text(contact_id: str, text: str, conn: sqlite3.Connection | None =
 
     Attaches to the last inbound message so the sequence stays a sequence: the reply text lands
     ON the reply, not in a field beside the conversation.
+
+    **`message_id` names WHICH message**, and a caller with more than one conversation open must
+    pass it. Without it this takes the newest inbound across every thread the contact has — so
+    text pasted under one conversation lands on a message in another, which is the merged-thread
+    assumption `reply_target` and `_draft_reply` both had (§Lessons 49, a third call site). The
+    unscoped default is kept for the CLI and for a contact with a single thread, where it is the
+    same answer.
     """
     if conn is None:
         conn = get_connection()
     init_messages(conn)
-    row = conn.execute(
-        "SELECT message_id FROM messages WHERE contact_id = ? AND direction = 'in' "
-        "ORDER BY sent_at DESC LIMIT 1", (contact_id,)).fetchone()
+    if message_id:
+        row = conn.execute(
+            "SELECT message_id FROM messages WHERE contact_id = ? AND message_id = ?",
+            (contact_id, message_id)).fetchone()
+    else:
+        row = conn.execute(
+            "SELECT message_id FROM messages WHERE contact_id = ? AND direction = 'in' "
+            "ORDER BY sent_at DESC LIMIT 1", (contact_id,)).fetchone()
     if not row:
         return False
     # Decoded here too. This path does its own UPDATE rather than going through

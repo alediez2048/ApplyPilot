@@ -970,7 +970,11 @@ let POLL_EVERY_S = 300;
 // `wantEmail` / `wantLi` select ONE channel — the contact panel shows them as tabs now, so
 // rendering both at once is what made every contact card ~200px tall. Omit both to get the
 // old stacked behaviour.
-function draftBlock(c, wantEmail, wantLi) {
+// `historyShown` means the conversation is already rendered ABOVE this block, so a sent email
+// must not be repeated here as a disabled compose box. The actions stay — Copy email, the sent
+// tag, the follow-up button — because those are the only parts of a sent draft still worth
+// having, and dropping the whole block would take them with it.
+function draftBlock(c, wantEmail, wantLi, historyShown) {
   const only = (wantEmail === undefined && wantLi === undefined);
   const hasEmail = !!c.email && (only || !!wantEmail);
   const hasLi = !!c.linkedin_url && (only || !!wantLi);
@@ -999,15 +1003,18 @@ function draftBlock(c, wantEmail, wantLi) {
         onclick="toggleAttachDocs(this)"
         title="Attach the tailored résumé + cover letter to the FIRST email of every outreach thread. This is a global setting, not per contact. Follow-ups never attach.">
         📎 ${ATTACH_DOCS ? 'Docs ON' : 'Docs OFF'} · all emails</button>`;
+    // The sent copy is the history above; repeating it as a disabled form is the thing that
+    // read as "here is what to send".
+    const echo = sent && historyShown;
     emailHtml = `
-      <div class="d-label">Email</div>
+      ${echo ? '' : `<div class="d-label">Email</div>
       <input class="d-subj" value="${subj}" placeholder="Subject…" ${sent?'disabled':''} />
-      <textarea class="d-body" rows="4" ${sent?'disabled':''} placeholder="${has ? '' : 'No draft yet — click Regenerate'}">${body}</textarea>
-      ${sent?'':`<input class="d-style" placeholder="✨ Tweak the vibe, then Regenerate — e.g. 'more casual', 'add a joke'">`}
+      <textarea class="d-body" rows="4" ${sent?'disabled':''} placeholder="${has ? '' : 'No draft yet — click Regenerate'}">${body}</textarea>`}
+      ${(sent || echo)?'':`<input class="d-style" placeholder="✨ Tweak the vibe, then Regenerate — e.g. 'more casual', 'add a joke'">`}
       <div class="dbtns">
         ${sent?'':`<button onclick="saveDraft('${esc(c.id)}', this)">Save</button>
         <button class="secondary" onclick="regenDraft('${esc(c.id)}', this)">Regenerate</button>`}
-        <button onclick="copyDraft(this)">Copy email</button>
+        ${echo ? '' : `<button onclick="copyDraft(this)">Copy email</button>`}
         ${attachBtn}
         ${sendBtn}
         ${followupButton(c)}
@@ -2269,11 +2276,26 @@ function hasConversation(c) {
   return ((c.thread || []).some(m => m.direction === 'in'));
 }
 function emailChannel(c) {
-  if (hasConversation(c)) return conversationView(c);
-  // A due follow-up is the more urgent thing to write, so it takes the channel.
+  // WHAT HAS ALREADY HAPPENED COMES FIRST — every time, not only once they reply.
+  //
+  // `hasConversation` asks whether an INBOUND message exists, so a person we had emailed and
+  // who had not answered opened on a compose box with their draft in it. Measured: **126 of 141
+  // emailed contacts** rendered that way. On a brand-new card for somebody already contacted,
+  // the dominant thing on screen was an editable draft, which reads as "here is what to send"
+  // rather than "here is what you sent" — and that is how the same person gets written to
+  // twice.
+  //
+  // §Lessons 31 recorded exactly this for the REPLIED case and the fix was applied only there:
+  // "a contact who has REPLIED gets a conversation, not a form". The rule was always about
+  // whether an email had gone out, not about whether one came back (§Lessons 49, half a rule).
+  const history = (c.thread || []).length ? conversationView(c) : '';
+  // With an inbound message the composers already live inside the history, per thread.
+  if (hasConversation(c)) return history;
+  // A due follow-up is the more urgent thing to WRITE, but it no longer replaces the record of
+  // what was already said — it sits under it.
   if (c.followup_state === 'due' || (c.followup_message || '').trim())
-    return followupCard(c, {touch: (c.followup_count || 0) + 1}, c.followup_total);
-  return draftBlock(c, true);
+    return history + followupCard(c, {touch: (c.followup_count || 0) + 1}, c.followup_total);
+  return history + draftBlock(c, true, false, !!history);
 }
 function linkedinChannel(c) {
   return linkedinThread(c) + draftBlock(c, false, true) + noticedBox(c);

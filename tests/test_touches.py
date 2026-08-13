@@ -282,7 +282,17 @@ def test_a_migrated_database_has_no_ladder_columns_left(db):
     # not in `contact_id`: flagging somebody must not re-key them and detach the touches this
     # test exists to protect.
     assert "flagged_at" in cols
-    assert len(cols) == 42, f"unexpected contacts columns: {sorted(cols)}"
+    # CO-2. WHICH APPLICATION the outreach columns above belong to — not a ladder column, which
+    # is what this test exists to keep out: it says nothing about how many touches have gone or
+    # when the next is due, and `touches` still owns all of that.
+    #
+    # It is here because moving somebody to a live role must not destroy the record of the
+    # outreach that already happened. Clearing `submitted_at` and `sent_message_id` would read
+    # correctly on the new card AND drop those sends out of the CRM-2 funnel while their replies
+    # stayed in it, and disarm the cross-job cooldown (§Lessons 86). Empty on every row that has
+    # never been moved, so the column DEFAULT is the whole backfill.
+    assert "outreach_job_url" in cols
+    assert len(cols) == 43, f"unexpected contacts columns: {sorted(cols)}"
 
 
 def test_backfill_moves_state_and_verifies_clean(db):

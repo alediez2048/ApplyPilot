@@ -1785,7 +1785,9 @@ def _contact_payload(c: dict, company: str | None = None, ladders: dict | None =
                      conn_matches: dict | None = None, thread: list | None = None) -> dict:
     from applypilot.domain.followup import EMPTY_LADDER
     from applypilot.domain.followup import exhausted as _exhausted
+    from applypilot.domain.followup import outreach_is_for_this_job
     from applypilot.networking import connections
+    _outreach_here = outreach_is_for_this_job(c)
     # Prebuilt by the caller in one query when rendering a whole job; falls back to a
     # single lookup so this stays usable on its own.
     conn_rec = (conn_matches or {}).get(c.get("full_name") or "") if conn_matches is not None \
@@ -1817,10 +1819,18 @@ def _contact_payload(c: dict, company: str | None = None, ladders: dict | None =
         # Ground-truth "an email actually went out": Gmail returned a message id. This survives a
         # later draft edit/regenerate (which resets outreach_status to 'drafted') — so the UI and
         # send-gate rely on THIS, not just outreach_status, to know a contact was already emailed.
-        "emailed": bool((c.get("sent_message_id") or "").strip())
-                   or c.get("outreach_status") == "submitted",
+        #
+        # Scoped to the application the outreach was FOR (CO-2). A contact moved from a
+        # cancelled role keeps every one of those fields — they are the record of a real send
+        # and clearing them would drop it out of the funnel — but on the new card they describe
+        # a different role, so this reads False and the row correctly offers a first contact.
+        # `outreach_is_for_this_job` is shared with the ladder, or the two decide differently
+        # about the same person and only one of them is on screen.
+        "emailed": _outreach_here and (bool((c.get("sent_message_id") or "").strip())
+                                       or c.get("outreach_status") == "submitted"),
+        "outreach_from_job": "" if _outreach_here else (c.get("outreach_job_url") or ""),
         # Checklist + follow-up inputs.
-        "submitted_at": c.get("submitted_at") or "",
+        "submitted_at": (c.get("submitted_at") or "") if _outreach_here else "",
         "followed_up_at": email_l["last_sent_at"],
         "followup_count": email_l["count"],
         "followup_status": _legacy_followup_status(email_l),

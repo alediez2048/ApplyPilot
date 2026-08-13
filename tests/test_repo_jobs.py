@@ -195,6 +195,13 @@ def test_sql_lives_only_in_the_data_layer():
         "networking/messages.py",                            # the CRM-4 conversation store
         "networking/interactions_store.py",                  # the `interactions` table's own repository
         "networking/transcripts.py",                         # the `transcripts` table's own repository
+        # CO-2. Data layer by nature rather than unmigrated scope: moving one person between
+        # roles is ONE transaction across contacts + messages + touches + sequences +
+        # interactions + transcript_contacts, so it cannot live inside any single table's
+        # repository — and a second door onto `contacts` is the "two abstractions over one
+        # table" failure ARCH-4's own ticket warns about, which is why there is still no
+        # `repo/contacts.py`.
+        "networking/migrate.py",
         "migrations/m004_transcripts.py",                    # a migration IS DDL
         "networking/connections.py", "networking/backfill_touches.py",
         # --- not yet migrated (remaining ARCH-4 scope) ---

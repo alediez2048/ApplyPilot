@@ -36,6 +36,18 @@ _CONTACT_COLUMNS: dict[str, str] = {
     "linkedin_message": "TEXT",   # short LinkedIn connection note (<= 300 chars)
     "outreach_status": "TEXT DEFAULT 'none'",  # none|drafted|sending|submitted|failed
     "outreach_channel": "TEXT",
+    # WHICH APPLICATION the outreach state above belongs to (CO-2). Empty means "this contact's
+    # own job_url", so every row that has never been moved behaves exactly as before — the
+    # column DEFAULT is the backfill, and there is no UPDATE to miss a row written while it ran.
+    #
+    # It exists because moving somebody to a live role must not destroy the record of the
+    # outreach that already happened. Clearing `submitted_at` and `sent_message_id` would read
+    # correctly on the new card and would also drop those sends out of the CRM-2 funnel, and
+    # disarm the cross-job cooldown that is currently the only guard against emailing one person
+    # about a second role (§Lessons 86: a guard a legitimate write can switch off is the wrong
+    # guard). So nothing is cleared; the outreach is STAMPED with the job it was for, and every
+    # reader that asks "has this person been contacted about THIS role" consults the stamp.
+    "outreach_job_url": "TEXT",
     "submitted_at": "TEXT",
     "sent_message_id": "TEXT",
     "send_error": "TEXT",

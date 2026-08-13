@@ -165,6 +165,22 @@ def channel_schedule(channel: Channel, space=None) -> list[int]:
     return list(got) if got else list(channel.default_schedule)
 
 
+def outreach_is_for_this_job(contact: dict) -> bool:
+    """Does the outreach state stored on this contact belong to the role they are on NOW?
+
+    False only for somebody moved between applications (CO-2). `outreach_job_url` is empty on
+    every contact that has never been moved, which is all 352 of them today, so this answers
+    True everywhere until the migrate button is used.
+
+    ONE predicate, because two readers ask this question and a disagreement between them is
+    invisible: the ladder decides whether a follow-up is owed, and the dashboard decides whether
+    to show a compose box. Half a rule is how the same person gets written to twice
+    (§Lessons 49).
+    """
+    stamped = (contact.get("outreach_job_url") or "").strip()
+    return not stamped or stamped == (contact.get("job_url") or "").strip()
+
+
 def normalize_for_ladder(contact: dict) -> dict:
     """Fill the DERIVED fields the ladder reads, so a raw DB row works as well as a UI payload.
 
@@ -174,10 +190,24 @@ def normalize_for_ladder(contact: dict) -> dict:
     did exactly that: the dashboard showed 3 due while tick found none.
 
     Idempotent, so a payload that already carries the field is untouched.
+
+    It also blanks the ANCHORS of the laddered channels for a contact whose outreach belongs to
+    a different application (CO-2). Without that, a person moved to a live role reads as "we
+    emailed them ten days ago, a follow-up is overdue" the instant they arrive — and the
+    follow-up would be a nudge about a role that no longer exists. Nothing on the row is
+    written; this is the ladder's VIEW of it.
     """
     if "emailed" in contact:
         return contact
-    return {**contact, "emailed": bool((contact.get("sent_message_id") or "").strip())}
+    ours = outreach_is_for_this_job(contact)
+    out = {**contact, "emailed": ours and bool((contact.get("sent_message_id") or "").strip())}
+    if not ours:
+        # Every channel that runs a ladder, by its own declared anchor — not a hand-written
+        # list, which is the thing that silently ignored SMS the moment it shipped.
+        for channel in CHANNELS:
+            if channel.follows_up:
+                out[channel.start_field] = ""
+    return out
 
 
 def _is_ready(contact: dict, channel: Channel) -> bool:

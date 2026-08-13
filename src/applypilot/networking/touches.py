@@ -48,6 +48,21 @@ _TOUCH_COLUMNS: dict[str, str] = {
     "error": "TEXT",
     "created_at": "TEXT",
     "updated_at": "TEXT",
+    # Which APPLICATION this touch was part of (CO-2). Empty means "whatever job the contact is
+    # on now", so all 233 existing rows are unchanged and no backfill is needed.
+    #
+    # A touch is keyed on the contact and follows them blindly, which is what makes moving
+    # somebody between roles the one operation here that can silently destroy a ladder: three
+    # sent touches carried onto a new role make `count >= len(schedule)` immediately, so the
+    # channel reads `finished` and never follows up again. Stamping the job lets the two
+    # questions be asked separately, which they always were:
+    #
+    #   `sent_touches()`  — what have we ever said to this person?      ALL of them.
+    #   `ladder_states()` — how far through THIS role's plan are we?    only this job's.
+    #
+    # The disagreement is deliberate. A follow-up drafter wants everything (so it does not
+    # repeat itself); the scheduler wants only the plan it is executing.
+    "job_url": "TEXT",
 }
 
 _SEQUENCE_COLUMNS: dict[str, str] = {
@@ -162,12 +177,30 @@ def ladder_states(contact_ids: list[str],
         conn = get_connection()
     if not contact_ids:
         return {}
+    init_touches(conn)
+    # The scoping JOIN below reads `contacts`, which this module has never needed before. Both
+    # are memoised by `schema_ready`, so on the refresh path they cost nothing after the first
+    # call — but a test that drives touches against a bare database would otherwise fail on a
+    # missing table rather than on anything it is testing.
+    from applypilot.networking.store import init_contacts
+    init_contacts(conn)
     out: dict[tuple[str, str], dict] = {}
     marks = ",".join("?" for _ in contact_ids)
 
+    # Only the touches belonging to the job the contact is on NOW (CO-2). An empty
+    # `t.job_url` is every touch written before that column existed and every one written
+    # since by the ordinary send path — it means "this contact's own job", so the filter is a
+    # no-op until somebody is actually moved.
+    #
+    # A LEFT JOIN, so a touch whose contact row has gone still comes back rather than
+    # vanishing: an orphaned ladder is a bug to see, not one to hide (see the reasoning on
+    # `store.delete_contact`). Still ONE statement — this runs on the 2.5s refresh path.
     for row in conn.execute(
-        f"SELECT contact_id, channel, seq, sent_at, status, subject, body, error "
-        f"FROM touches WHERE contact_id IN ({marks}) ORDER BY contact_id, channel, seq",
+        f"SELECT t.contact_id, t.channel, t.seq, t.sent_at, t.status, t.subject, t.body, "
+        f"t.error FROM touches t LEFT JOIN contacts c ON c.id = t.contact_id "
+        f"WHERE t.contact_id IN ({marks}) "
+        f"AND COALESCE(t.job_url, '') IN ('', COALESCE(c.job_url, '')) "
+        f"ORDER BY t.contact_id, t.channel, t.seq",
         contact_ids,
     ):
         key = (row["contact_id"], row["channel"])

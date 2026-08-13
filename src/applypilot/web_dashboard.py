@@ -22,6 +22,7 @@ import sys
 import threading
 import time
 import webbrowser
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from hashlib import sha1
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -609,9 +610,17 @@ def run_dashboard_apply(limit: int = 10, dry_run: bool = False, copilot: bool = 
     max_attempts = config.DEFAULTS["max_apply_attempts"]
     rows = _jobs.queue_for_apply(limit, max_attempts, conn)
 
-    # Refuse to start at all while a co-pilot review is already open. The queue below is
-    # blind to it (`queue_for_apply` filters on the JOB, not on whether a browser is being
-    # used), so without this a fresh apply silently closes the form you were mid-review on.
+    # How many browsers may be open at once, and which slots are already holding a review.
+    # This used to be "refuse to start while ANY review is open", which was right when every
+    # apply landed on port 9222: a second launch cleared the port and destroyed the first
+    # filled form (§Lessons 8). With a port and profile per worker the constraint is per SLOT,
+    # so N applications fill in parallel and each waits for the human independently.
+    n_workers = 1 if (dry_run or not copilot) else apply_workers()
+    busy = _busy_worker_ids(n_workers) if (copilot and not dry_run) else set()
+
+    # Refuse to start only when EVERY slot is holding a live review. The queue below is blind to
+    # it (`queue_for_apply` filters on the JOB, not on whether a browser is being used), so
+    # without this a fresh apply silently closes a form you were mid-review on.
     stale_note = ""
     if copilot and not dry_run:
         awaiting = _jobs.awaiting_human(conn)
@@ -622,7 +631,7 @@ def run_dashboard_apply(limit: int = 10, dry_run: bool = False, copilot: bool = 
         # longer existed, one of them from the previous day. Liveness — not a timeout — is the
         # discriminator, because it IS the question the guard cares about: would starting an
         # apply close a window someone needs?
-        if awaiting and not _review_browser_alive():
+        if awaiting and not busy:
             names = ", ".join((r["title"] or "?")[:28] for r in awaiting[:3])
             stale_note = (f"Ignored {len(awaiting)} abandoned review(s) ({names}) — the browser "
                           f"is gone, so nothing was waiting. Re-apply to fill them again.")
@@ -632,63 +641,127 @@ def run_dashboard_apply(limit: int = 10, dry_run: bool = False, copilot: bool = 
                           "Review browser is gone (dashboard restarted) — this application was "
                           "never submitted. Re-apply to fill it again.", conn)
             awaiting = []
-        if awaiting:
+        # Only a FULL house blocks. One open review no longer stops the other two slots, which
+        # is the entire point — but the last free slot still refuses to take a browser somebody
+        # is standing in front of.
+        if awaiting and len(busy) >= n_workers:
             names = ", ".join((r["title"] or "?")[:28] for r in awaiting[:3])
-            msg = (f"{len(awaiting)} application(s) are filled and waiting for you ({names}). "
-                   f"Starting another would close the browser you need. Submit or dismiss "
-                   f"them first.")
+            msg = (f"All {n_workers} slots are filled and waiting for you ({names}). "
+                   f"Starting another would close a browser you need. Submit or dismiss "
+                   f"one first.")
             print(f"BLOCKED: {msg}", flush=True)
             return {"queued": 0, "applied": 0, "failed": 0, "needs_review": len(awaiting),
                     "held_back": len(rows), "blocked": msg}
 
-    print(f"Dashboard URL apply queue: {len(rows)} job(s)", flush=True)
+    free = [w for w in range(n_workers) if w not in busy]
+    print(f"Dashboard URL apply queue: {len(rows)} job(s), {len(free)} of {n_workers} "
+          f"slot(s) free", flush=True)
     applied = 0
     failed = 0
     needs_review = 0
-    for index, row in enumerate(rows, 1):
-        print(f"\n=== Applying {index}/{len(rows)}: {row['site']} / {row['title']} ===", flush=True)
+    done = 0
+
+    def _one(row: dict, slot: int) -> tuple[dict, int, str]:
+        """Fill ONE application in worker slot `slot`. Runs in its own process and browser."""
+        print(f"\n=== [slot {slot}] Applying: {row['site']} / {row['title']} ===", flush=True)
         print(row["url"], flush=True)
-        args = [sys.executable, "-m", "applypilot.cli", "apply", "--url", row["url"], "--min-score", "1"]
+        args = [sys.executable, "-m", "applypilot.cli", "apply", "--url", row["url"],
+                "--min-score", "1", "--worker-id", str(slot)]
         if dry_run:
             args.append("--dry-run")
         elif copilot:
             args.append("--copilot")
-        completed = subprocess.run(args, check=False)
+        completed = subprocess.run(args, check=False, capture_output=True, text=True)
+        # The child's own output is interleaved by slot rather than dropped: with several
+        # running at once, unlabelled stdout from three processes is unreadable, and the apply
+        # log is where a failure code gets diagnosed.
+        for line in (completed.stdout or "").splitlines():
+            print(f"[slot {slot}] {line}", flush=True)
+        return row, completed.returncode, (completed.stderr or "")[-2000:]
+
+    # A SLOT STOPS PULLING WHEN IT IS HOLDING A BROWSER — that, and only that, is the rule.
+    #
+    # Co-pilot ends by handing a filled form to a human. A slot that has handed over owns a live
+    # Chrome, and giving it a second job destroys the first: 2026-07-29, a Zello application
+    # filled in 78s and the next queued job started 428ms later on the same port and closed it
+    # (§Lessons 8). The old fix was to run one job at a time and stop at the first handover.
+    #
+    # The real constraint was never "one job at a time", it was "one job per BROWSER" — and the
+    # sequential path only ever had one browser because it always used worker 0. Each slot now
+    # has its own port and profile, so N forms can be filled and wait independently.
+    #
+    # A job that fully APPLIED or FAILED holds nothing, so its slot goes back for another. That
+    # is what keeps the non-copilot path able to work through a long queue rather than doing
+    # `n_workers` jobs and stopping.
+    from queue import Empty, Queue
+    pending: Queue = Queue()
+    for row in rows:
+        pending.put(row)
+    results: list[tuple[dict, int, str]] = []
+    results_lock = threading.Lock()
+
+    def _slot_worker(slot: int) -> None:
+        # ITS OWN CONNECTION. `get_connection()` is thread-local by design (each thread gets and
+        # caches its own), and the outer `conn` belongs to the request thread — using it here
+        # raises "SQLite objects created in a thread can only be used in that same thread" and
+        # every application fails with a database error rather than a form.
+        wconn = get_connection()
+        while True:
+            try:
+                row = pending.get_nowait()
+            except Empty:
+                return
+            try:
+                outcome = _one(row, slot)
+            except Exception as e:  # noqa: BLE001
+                # One slot blowing up must not take the other applications with it.
+                print(f"=== [slot {slot}] failed to run: {e} ===", flush=True)
+                with results_lock:
+                    results.append((row, -1, str(e)))
+                continue
+            with results_lock:
+                results.append(outcome)
+            status = _jobs.apply_state(row["url"], wconn)
+            holding = (copilot and not dry_run and status
+                       and status["apply_status"] in ("ready_to_submit", "needs_human"))
+            if holding:
+                print(f"=== [slot {slot}] {row['site']} is filled and waiting for you. This "
+                      f"slot takes no more work until you submit or dismiss it. ===", flush=True)
+                return
+
+    if free and rows:
+        with ThreadPoolExecutor(max_workers=len(free)) as pool:
+            for fut in as_completed([pool.submit(_slot_worker, s) for s in free]):
+                fut.result()
+
+    for row, code, err in results:
         status = _jobs.apply_state(row["url"], conn)
         if status and status["applied_at"]:
             applied += 1
         elif status and status["apply_status"] == "ready_to_submit":
-            needs_review += 1  # co-pilot handoff: filled + waiting for the human to submit
+            needs_review += 1   # filled + waiting for the human to submit
         else:
             failed += 1
-        print(f"=== Finished {index}/{len(rows)} with exit code {completed.returncode} ===", flush=True)
+            if err.strip():
+                print(f"[{row['site']}] {err.strip()[-400:]}", flush=True)
+        done += 1
+        print(f"=== Finished {done}/{len(results)} ({row['site']}) exit {code} ===", flush=True)
 
-        # STOP the batch the moment a job needs the human. Co-pilot mode ends by asking you
-        # to review and submit in an open browser — and starting the next apply KILLS that
-        # browser, because launch clears whatever holds the CDP port.
-        #
-        # 2026-07-29: a Zello application was filled correctly in 78s and handed over for
-        # review; the next queued job (Deloitte) started 428ms later and destroyed the
-        # browser. The row still read `ready_to_submit`, so the status claimed a form was
-        # waiting that no longer existed. Batching N jobs in co-pilot mode leaves every one
-        # of them un-reviewable except the last.
-        #
-        # Real fix is sequencing, not a bigger warning: one pending review at a time.
-        pending = status and status["apply_status"] in ("ready_to_submit", "needs_human")
-        if copilot and not dry_run and pending and index < len(rows):
-            remaining = len(rows) - index
-            print(f"=== PAUSED: {row['site']} is filled and waiting for your review. "
-                  f"{remaining} job(s) left in the queue — they will NOT start until you "
-                  f"submit or dismiss this one, because starting one would close the browser "
-                  f"you need. ===", flush=True)
-            log_event(row["url"], "apply", "info",
-                      f"Queue paused here: {remaining} job(s) held back so this review "
-                      f"stays open. Submit or dismiss, then run apply again.", conn)
-            break
+    # Anything still queued was held back because every slot ended up holding a form. Saying so
+    # is not optional: stopping silently would leave the operator assuming the rest had run.
+    held_back = pending.qsize()
+    if held_back:
+        note = (f"{held_back} job(s) held back — every slot is holding a filled application. "
+                f"Submit or dismiss one, then run apply again.")
+        print(f"=== {note} ===", flush=True)
+        for row, _c, _e in results:
+            st = _jobs.apply_state(row["url"], conn)
+            if st and st["apply_status"] in ("ready_to_submit", "needs_human"):
+                log_event(row["url"], "apply", "info", note, conn)
 
     result = {"queued": len(rows), "applied": applied, "failed": failed,
-              "needs_review": needs_review,
-              "held_back": max(0, len(rows) - index) if rows else 0}
+              "needs_review": needs_review, "workers": n_workers,
+              "held_back": held_back}
     if stale_note:
         result["stale_reviews_note"] = stale_note
     print(f"Dashboard URL apply complete: {result}", flush=True)
@@ -981,19 +1054,45 @@ def _pause_apply() -> dict:
                                    f"It stops at the agent's next step."}
 
 
-def _review_browser_alive(max_workers: int = 4) -> bool:
-    """Is a co-pilot review browser actually still open on any worker's CDP port?
+def apply_workers() -> int:
+    """How many applications the dashboard fills at once. Clamped to something a human can review.
+
+    Each worker is a separate Chrome window on its own CDP port and profile, so each finished
+    form waits independently. This is a count of BROWSERS OPEN AT ONCE, not of submissions —
+    the agent still stops before submit on every one of them.
+    """
+    try:
+        n = int(os.environ.get("APPLY_WORKERS", "3") or 3)
+    except ValueError:
+        n = 3
+    # Upper bound is deliberate and is about the human, not the machine. Past a handful, filled
+    # forms get closed or forgotten before anyone reaches them, which is the failure §Lessons 8
+    # cost two applications to learn — in a different shape.
+    return max(1, min(n, 6))
+
+
+def _busy_worker_ids(max_workers: int | None = None) -> set[int]:
+    """Worker slots whose review browser is STILL OPEN, and so must not be started over.
 
     `apply_status` says a form is waiting; only this says the window still exists. Probed
     rather than remembered: `chrome._keep_alive_ports` is per-process state and is empty in
     every new process, which is precisely why a restart turned pending reviews into fossils.
 
-    Any live port blocks — the port is not recorded per job, so a live browser could belong to
-    any pending row and closing the wrong one is the failure being prevented.
+    Per SLOT rather than a single boolean, which is the whole change. One live browser used to
+    block every apply, because the sequential path put every job on port 9222 and a second
+    launch destroyed the first one's form. With a port per worker the honest question is not
+    "is anything open" but "which slots are free", and the answer is what lets three
+    applications be filled while a fourth review is still sitting there.
     """
     from applypilot.apply.chrome import BASE_CDP_PORT, chrome_alive_on_port
-    return any(chrome_alive_on_port(BASE_CDP_PORT + w, timeout=0.5)
-               for w in range(max(1, max_workers)))
+    n = apply_workers() if max_workers is None else max(1, max_workers)
+    return {w for w in range(n) if chrome_alive_on_port(BASE_CDP_PORT + w, timeout=0.5)}
+
+
+def _review_browser_alive(max_workers: int | None = None) -> bool:
+    """Is any co-pilot review browser still open? Kept as the one-line question several callers
+    ask; the per-slot answer is `_busy_worker_ids`."""
+    return bool(_busy_worker_ids(max_workers))
 
 
 def run_dashboard_fill_one(url: str) -> dict:

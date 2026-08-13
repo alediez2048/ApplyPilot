@@ -171,6 +171,24 @@ def setup_worker_profile(worker_id: int) -> Path:
         "MEIPreload", "SSLErrorAssistant", "recovery", "Temp",
         "SingletonLock", "SingletonSocket", "SingletonCookie",
     }
+    # ...and Chrome's own ON-DEVICE ML WEIGHTS, which are the majority of the profile and are
+    # useless for filling a form. Measured on worker-0: 7.6 GB total, of which
+    #
+    #     OptGuideOnDeviceModel            4.0 GB   (Gemini Nano)
+    #     SODALanguagePacks                194 MB   (offline speech recognition)
+    #     OptGuideOnDeviceClassifierModel  120 MB
+    #     optimization_guide_model_store    83 MB
+    #
+    # That is 4.4 GB copied per worker so the agent can type into text boxes. It made a second
+    # browser worker cost 7.6 GB of disk instead of 3.2, which is the difference between three
+    # parallel applications being cheap and being a decision. Chrome re-downloads these on its
+    # own if it ever wants them, and nothing here asks it to.
+    skip |= {
+        "OptGuideOnDeviceModel", "OptGuideOnDeviceClassifierModel",
+        "optimization_guide_model_store", "SODALanguagePacks", "SODA Language Packs",
+        "OnDeviceHeadSuggestModel", "component_crx_cache", "Subresource Filter",
+        "TrustTokenKeyCommitments", "OriginTrials", "PKIMetadata",
+    }
     # ...and never the credential stores. This copy is what put 682 saved passwords, 2 credit
     # cards and 831 autofill entries into the browser the apply agent drives with
     # `bypassPermissions` on attacker-controlled careers pages. Cookies are a separate file and

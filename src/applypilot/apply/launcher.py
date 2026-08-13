@@ -986,7 +986,8 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
 def main(limit: int = 1, target_url: str | None = None,
          min_score: int = 7, headless: bool = False, model: str = "sonnet",
          dry_run: bool = False, copilot: bool = False, resume: bool = False,
-         continuous: bool = False, poll_interval: int = 60, workers: int = 1) -> None:
+         continuous: bool = False, poll_interval: int = 60, workers: int = 1,
+         worker_id: int = 0) -> None:
     """Launch the apply pipeline.
 
     Args:
@@ -1017,8 +1018,13 @@ def main(limit: int = 1, target_url: str | None = None,
         effective_limit = limit
         mode_label = f"{limit} jobs"
 
-    # Initialize dashboard for all workers
-    for i in range(workers):
+    # WHICH worker this process is, when it is the only one. The dashboard now runs several
+    # single-worker applies side by side, and each must land on its OWN CDP port and profile —
+    # two processes both taking worker 0 is §Lessons 8's incident exactly: launching the second
+    # clears whatever holds port 9222 and destroys the first one's filled form. Ignored when
+    # `workers > 1`, because that path allocates ids 0..workers-1 itself.
+    ids = [worker_id] if workers == 1 else list(range(workers))
+    for i in ids:
         init_worker(i)
 
     worker_label = f"{workers} worker{'s' if workers > 1 else ''}"
@@ -1064,9 +1070,9 @@ def main(limit: int = 1, target_url: str | None = None,
             refresh_thread.start()
 
             if workers == 1:
-                # Single worker — run directly in main thread
+                # Single worker — run directly in main thread, on the id we were given.
                 total_applied, total_failed = worker_loop(
-                    worker_id=0,
+                    worker_id=worker_id,
                     limit=effective_limit,
                     target_url=target_url,
                     min_score=min_score,

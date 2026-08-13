@@ -182,6 +182,11 @@ SETTINGS: tuple[Setting, ...] = (
             "Release an in-progress apply lock after this long (an interrupted run)."),
     Setting("APPLY_AGENT_TIMEOUT", "apply", "int", 900,
             "Seconds the apply agent gets per application before it is given up on."),
+    Setting("APPLY_WORKERS", "apply", "int", 3,
+            "How many applications the dashboard fills at once. Each worker gets its own "
+            "Chrome window, CDP port and profile, so each finished form waits for you "
+            "independently — the agent still never submits. Raising this raises how many "
+            "filled forms sit open at the same time, not how much gets sent."),
     Setting("TAILOR_AGGRESSIVE", "apply", "bool", False,
             "Mirror the job description closely and skip the fabrication judge."),
     Setting("MY_ADDRESSES", "outreach", "str", "",

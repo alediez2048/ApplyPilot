@@ -152,6 +152,7 @@ def run(
 def apply(
     limit: Optional[int] = typer.Option(None, "--limit", "-l", help="Max applications to submit."),
     workers: int = typer.Option(1, "--workers", "-w", help="Number of parallel browser workers."),
+    worker_id: int = typer.Option(0, "--worker-id", help="Which worker slot this run occupies (its CDP port and Chrome profile). Only meaningful with --workers 1: it is how several single-job applies run side by side without closing each other's browser."),
     min_score: int = typer.Option(7, "--min-score", help="Minimum fit score for job selection."),
     model: str = typer.Option("sonnet", "--model", "-m", help="Claude model for the browser apply agent (default sonnet — form-filling is the hardest, highest-stakes task; pass 'haiku' for a cheap test run)."),
     continuous: bool = typer.Option(False, "--continuous", "-c", help="Run forever, polling for new jobs."),
@@ -266,6 +267,7 @@ def apply(
         resume=resume,
         continuous=continuous,
         workers=workers,
+        worker_id=worker_id,
     )
 
 

@@ -2456,8 +2456,9 @@ def _reply_targets(thread: list) -> dict:
 
     A thread with no inbound message gets no entry, and that is the honest answer rather than a
     disabled box: replying to a conversation nobody has answered is a FOLLOW-UP, which has its
-    own ladder, schedule and stop conditions. Measured live: 225 threads across 173 contacts,
-    of which **66 are replyable** — so two thirds correctly get nothing.
+    own ladder, schedule and stop conditions. Measured 2026-08-13: 238 threads across 183
+    contacts, of which **72 are replyable** — so two thirds correctly get nothing. A snapshot;
+    it moves with real use.
 
     Costs no query and no round-trip: pure Python over rows `_contact_payload` already holds.
     Measured at **7ms for all 225**, which is what makes it affordable on a 2.5s refresh

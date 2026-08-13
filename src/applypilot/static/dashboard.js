@@ -1955,7 +1955,7 @@ function rkey(cid, tk) { return `${cid}|${tk || ''}`; }
 // Replying, not following up. The distinction is real: a follow-up is a ladder step with a
 // schedule and a stop condition, a reply answers a person who wrote to us. A thread with no
 // inbound message gets NO composer, which is what keeps the two from blurring together —
-// measured live, 66 of 225 threads are replyable and the rest correctly offer nothing.
+// measured 2026-08-13, 72 of 238 threads are replyable and the rest correctly offer nothing.
 function replyBox(c, t) {
   // `_reply_target()` swallows every exception and returns None, so a thread we KNOW has an
   // inbound message can arrive with no reply target. Returning '' here rendered a conversation

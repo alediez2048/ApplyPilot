@@ -12,9 +12,9 @@ campaign happens to be a job search** — see `docs/crm-prd.md` for where that g
 - **Packaging:** Hatchling, `src/` layout, single package `applypilot`
 - **Entry point:** `applypilot = "applypilot.cli:app"` (Typer CLI)
 - **License:** AGPL-3.0-only · **Version:** 0.4.0 (`pyproject.toml`)
-- **Tests:** 2450 passing (`tests/`, 122 files) · ruff clean (line-length 120, py311) · ESLint clean
-- **Schema version:** 4 (`applypilot migrate --status`) · **Settings:** 51 declared in `settings.py`
-- **Branch:** everything current lives on `context`, **80 commits ahead of `main`**, pushed to `origin/context`, working tree CLEAN as of 2026-08-13 (§Dev workflow). `main` has
+- **Tests:** 2511 passing (`tests/`, 128 files) · ruff clean (line-length 120, py311) · ESLint clean
+- **Schema version:** 4 (`applypilot migrate --status`) · **Settings:** 52 declared in `settings.py`
+- **Branch:** everything current lives on `context`, **90 commits ahead of `main`**, pushed to `origin/context`, working tree CLEAN as of 2026-08-13 (§Dev workflow). `main` has
   none of it. Check `git log --oneline -1` before believing anything here (§Dev workflow).
 
 ## Quick orientation
@@ -342,6 +342,18 @@ GROUPING was the actual explanation — four bands count our own sending, two ar
 did — and a per-pill tip has nowhere to put it, so dropping the prefix would keep the vocabulary
 and throw away the point.
 
+**THE COUNTER IS GLOBAL, THE TAB IS PER JOB** (2026-08-13). Reported as the follow-ups feature
+not working end to end: the counter said follow-ups were pending, the tab had none to draft or
+send. **Both numbers were right.** Measured on `job-search`: **19 due across 6 jobs, and 24 jobs
+showing an EMPTY Follow-ups tab** — so four times out of five, opening the tab the badge sent you
+looking for lands on one with nothing in it, saying *"Nothing due right now"*, which is true of
+that job and useless beside a counter reporting the Space.
+Verified end to end before changing anything, because *not working* and *working and pointing
+nowhere* need different fixes: the panel matches the contacts on every job in every Space, the
+tab renders its cards, the click path opens the right job with 5 cards and 7 buttons on screen,
+and the console is clean. Nothing was broken. The empty tab now names the count, the number of
+other applications and the first one, and is silent when there is genuinely nothing anywhere.
+
 **Bulk email follow-ups — on the JOB's Follow-ups tab** (2026-08-10). Fifty-seven were due and
 none had a draft, so clicking through them one at a time was the alternative.
 
@@ -420,6 +432,32 @@ action that does not exist, and it pushed the only actionable thing off screen. 
 is the single branch — timeline first, composer anchored under it, the sent outreach as one entry
 in that timeline. §Lessons 31.
 
+**...and so does a contact who has merely been EMAILED** (2026-08-13). The rule above was applied
+to `replied` and never to `emailed`, because `hasConversation()` asks whether an INBOUND message
+exists — so anyone written to who had not answered still got the compose box. Measured: **126 of
+141 emailed contacts.** Reported after writing to somebody at SpaceX already contacted: opening
+the card showed a subject and a body, which reads as *here is what to send* rather than *here is
+what you sent*, and that is how the same person gets written to twice. The rule was always about
+whether an email had GONE OUT (§Lessons 49, half a rule, for three weeks).
+History renders whenever any message is held, ABOVE the action. A due follow-up still takes the
+action slot — it is the more urgent thing to write — but no longer replaces the record. A sent
+draft is not repeated below as a disabled compose box; its ACTIONS survive, because the
+follow-up button and the sent tag are the only parts of a sent draft still worth having.
+
+**ONE PERSON, TWO CARDS: the second borrows the conversation** (2026-08-13). `contact_id` hashes
+`(job_url, linkedin_url, name)`, so the same human found for a second role is a second row with
+an empty history — and `messages` is keyed on `contact_id`. Opening that card offered a fresh
+cold email to somebody nine messages into a conversation with three replies.
+`messages.threads_by_shared_address()` is ONE query for the whole page (hoisted above the job
+loop, restricted to addresses that genuinely appear twice), and `_thread_for` hands a card its
+own messages or, failing that, the same person's from elsewhere — marked with the job it belongs
+to. Live: **5 cards**, and **zero** addresses with history on BOTH rows, which is what makes
+this a display fix rather than a merge.
+Rendered read-only under a banner naming the other application, and with **no composer** — not
+tidiness: `send_reply` resolves recipients from the row's OWN messages, of which there are none,
+so a reply box would render, look entirely normal and refuse on click (§Lessons 88 aimed at the
+least reversible action in the app). **CO-2 is the real repair** — see §Where the work goes next.
+
 **ONE SEPARATOR PER GMAIL THREAD** (2026-08-12). `thread_for_contact` returns every message
 stored for a person, merged and sorted by date — the name says thread and it returns all of them.
 One live contact had **18 messages across 7 threads** (a calendar invite, an introduction, two
@@ -452,6 +490,25 @@ repeated `Re:`/`Fwd:`, so a forwarded message split off in the browser and joine
 on the server, with nothing rendering wrong (§Lessons 49, deciding recipients).
 Two smaller ones went with it: a named thread no longer falls back to `contacts.thread_id`, and
 the SMTP path files a sent reply under the thread it answered rather than re-merging it.
+
+**A COMPOSER ON EVERY THREAD, not only the newest** (2026-08-13). Reported as *"I'm only able
+to answer the latest thread"*: seven conversations, one reply box pinned to the last of them, six
+that could be read and not answered. The composer now lives INSIDE each thread, beside the
+messages it answers (§Lessons 89), and only on threads somebody has actually written on — live,
+**72 of 238 threads are replyable** and the rest correctly offer nothing, because replying to a
+conversation only we have spoken in is a FOLLOW-UP with its own ladder.
+Composers only render in an EXPANDED thread, and one thread opens by default — so answerable
+threads carry a **↩** on the collapsed header, without which the card would still read as "six
+closed rows and no way to reply" and be reported unchanged.
+The thread that opens by default is the newest ANSWERABLE one, not the newest by date: the last
+thing on a card is often our own unanswered email or a calendar acceptance, which put the box
+the operator was sent to behind a click under a banner reading "your turn".
+All composer state is keyed by `(contact, thread)` through one `rkey()` — contact-only keys made
+seven boxes share a draft, a vibe directive and a status line.
+**`_draft_reply` and `set_reply_text` had the SAME merged-thread assumption** and were fixed with
+it: a draft written under one subject answered the newest message across every thread, and a
+paste landed on a message in another conversation, where it then fed every later drafter
+(§Lessons 49, third and fourth call sites of one rule).
 
 **A long thread collapses in the middle and the gap is a BUTTON** (2026-08-11, §Lessons 90). Over
 six messages it renders first + last two — the panel is rewritten every 2.5s and an unbounded list
@@ -2440,6 +2497,41 @@ company `"Jobs"` — the same substring bug class, inside the function written t
     so deleting the sort entirely left it green. **A test whose input is already sorted cannot
     see a sort.**
 
+104. **Both numbers were right, and neither pointed at the other.** Reported as the follow-ups
+    feature not working end to end: the counter said follow-ups were pending, the tab had none.
+    Measured before touching anything — the panel matches the contacts on every job in every
+    Space, the tab renders its cards, the click path opens the right job with 5 cards and 7
+    buttons on screen, the console is clean. **Nothing was broken.** The counter is GLOBAL and
+    the tab is PER JOB: 19 due across 6 jobs, and **24 jobs showing an empty Follow-ups tab**, so
+    four times out of five you land on one that correctly says "Nothing due right now".
+    The lesson is the order of work: *not working* and *working and pointing nowhere* have
+    different fixes, and starting to repair the first would have been repairing something that
+    was already correct. Verify the reported thing END TO END before believing the report's
+    diagnosis — the operator is reliable about the EXPERIENCE and is not obliged to be right
+    about the cause.
+
+105. **A theme override for ONE element in an app with no themes.** The borrowed-contact banner
+    rendered as a near-black bar with dark text on it, illegible. It hardcoded a cream background
+    plus a `@media (prefers-color-scheme: dark)` rule — and this stylesheet has NO dark theme;
+    that block was **the only one in the file**. On a machine whose OS is dark (confirmed live)
+    it fired alone: the background went dark, the text did not move, everything around it stayed
+    light. Two rules fell out. **Build from the palette's tokens** — `--yellow-soft` adapts with
+    the app or with nothing, and either way agrees with its neighbours. And **a background and a
+    foreground are one decision**: setting one without the other is the whole of how it became
+    unreadable.
+
+106. **One unplaced child in a grid whose siblings are all pinned.** The rebuilt meeting row put
+    the buttons on `grid-row:1` and the meta line on `grid-row:2` and left the TITLE to
+    auto-placement — which put it on row THREE, rendering the name of the meeting underneath its
+    own date and summary. The markup is byte-identical either way and every test passed; only
+    the browser showed it (§Lessons 101, again, in the same file). Name the row on every cell,
+    and a test now fails if one is left unplaced.
+    The row it replaced is worth keeping too: six columns on one line with the title in a
+    `minmax(0,1fr)` and no overflow rule, so a real meeting name wrapped into five stacked words
+    while the summary beside it was clipped to nothing. **Titles are whatever the operator
+    pasted**, so they are long by default — the one-line grid only ever worked for a short
+    fixture.
+
 Shipped in one session, in this order: **CRM-3a → CRM-1 → CRM-2 → CRM-3b → CRM-4a.**
 Tickets in `docs/tickets/CRM-*.md`; two of them had instructions that were factually wrong
 before being revised (they told you to write `followup_status`, removed by ARCH-3).
@@ -2891,6 +2983,37 @@ already contacts** — while the real history is employer-agnostic (400+ threads
 2017–2026) and every employer narrows to an **11-second crawl or less**. `gmail.readonly` is
 already granted, so `q=` search works; ~2–3 days.
 
+**`docs/tickets/CO-2-migrate-contacts-to-another-role.md`** (2026-08-13) — **SCOPED, answered,
+NOT built.** CO-1's other half, from the direction that hurts. The live Google case: *Startups
+Performance Lead* is **cancelled with 16 contacts (7 emailed)** and *AI Sales Specialist* is live
+with 1. A move carries 25 messages, 13 touches and 5 sequences — and `touches`/`sequences` have
+no `job_url` at all, so they follow `contact_id` blindly, which makes this **the only operation
+in the app that can silently destroy a ladder**.
+**The measurement that decides it: 16 of 16 stored messages and drafts name the cancelled role by
+name.** So the obvious build — rewrite the foreign keys and stop — leaves unsent drafts pitching
+a dead role on a live card, one click from sending, and ladders whose next touch follows up on a
+job that no longer exists. Every row in the right place and the feature worse than not having it.
+Decided: re-key rather than copy; unsent drafts CLEARED and sent messages never touched; ladders
+reset while touches move as history (so the new role is a genuine first contact and
+`burned_block` finally has something to read); the richer row wins a collision and two real
+conversations are refused rather than interleaved; same employer only. Operator answered:
+**a contact with no email does not move** (5 of 16, so the Google move is **11 people**, shown as
+excluded with the reason rather than hidden), messages follow the person, and **undo ships in the
+first cut**. ~2 days.
+
+**`docs/tickets/CAL-1-send-a-calendar-invite.md`** (2026-08-13) — **SCOPED, NOT built, and gated
+on a new OAuth consent.** The live token carries four Gmail scopes and nothing else; creating an
+event needs `calendar.events`, which is a new consent screen rather than a config change. A Meet
+link needs `conferenceData` on `events.insert`, which is why the previously built-and-reverted
+`.ics` approach (`3480c37`, reverted `82eb429`) cannot be revived for this — it deliberately
+avoided the scope and so could not produce a Meet link or reach the sender's own calendar.
+It answers the operator's own objection to that revert: **cal.com is for a time NOT yet agreed;
+a direct invite is for one that HAS been**, usually named by them in the thread. Two traps
+recorded: `sendUpdates=all` means GOOGLE mails it, so it bypasses `gmail_send` and the daily
+limit, company cap and cooldown never see it (§Lessons 77's shape); and cancel/reschedule must
+ship WITH send. The agent check was re-run — its allowlist is two tools and `Read`/`Bash` are
+denied, so the scope widens a STOLEN token, not the agent.
+
 **`docs/tickets/CO-1-one-employer-many-roles.md`** (2026-08-11) — **the band is BUILT**; the
 contact-keying half is not. Asked for as "bundle the cards for two jobs at one company", and the
 measurement moved it: 0 of 33 employers held a second job, so the first version would have
@@ -3008,8 +3131,8 @@ What is actually open now, ordered by leverage:
    the documented `identity_id` freeze **does not exist** — `domain/space.py:240` freezes
    `("id", "shape")` only, so a Space with 133 sent emails is repointable today with no error.
 
-10. **`context` is 80 commits ahead of `main`, pushed, and the working tree is CLEAN**
-    (2026-08-13, `1612552`). The 2026-08-11/13 run added the sheet Space (SHEET-1/1b/2), the
+10. **`context` is 90 commits ahead of `main`, pushed, and the working tree is CLEAN**
+    (2026-08-13, `2eae04d`). The 2026-08-11/13 run added the sheet Space (SHEET-1/1b/2), the
     ghost state, edit-in-place (EDIT-1), the LinkedIn ladder removal, the jobs-table render
     fixes, the HIST-1 spec, the multi-address identity fix, thread-scoped replies and parallel
     apply — each with its own tests and mutations.
@@ -3153,7 +3276,7 @@ change still needs the `pip install` above — but that copy gives the file a ne
   and the restart ran anyway, because both were in one chained command (§Lessons 63). Use
   `pgrep -fl "applypilot apply"`; recover an orphaned lock with
   `release_stale_locks(max_age_minutes=0)` and ONLY after pgrep comes back empty.
-- **On branch `context`** (2026-08-13, `1612552`), **80 commits ahead of `main`**, pushed to
+- **On branch `context`** (2026-08-13, `2eae04d`), **90 commits ahead of `main`**, pushed to
   `origin/context`, nothing uncommitted. `main` last pushed at **`e1f0be6`**. Tags:
   `stable-arch2/3/5/6` · `stable-e2e-20260730` · `stable-crm-20260731`.
 - **A frontend-only edit needs the `pip install` but NOT a dashboard restart** — the copy gives

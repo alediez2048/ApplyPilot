@@ -57,14 +57,16 @@ and offering a different company would move real humans onto a card where they d
 
 The dialog shows the three groups above, pre-ticked, with the collision called out by name:
 
-    Move 16 people from "Startups Performance Lead" to "AI Sales Specialist"
+    Move 11 people from "Startups Performance Lead" to "AI Sales Specialist"
 
     ✓ 1 in conversation        Patrick — 9 messages, he replied
     ✓ 6 emailed, no reply      their ladders will RESET (see below)
-    ✓ 9 never contacted        5 of them have no email address
+    ✓ 4 never contacted        no outreach yet
+
+    — 5 not moving             no email address, so there is nothing to continue
 
     ⚠ Patrick is on both cards. The one with the conversation is kept.
-    ⚠ 9 unsent drafts name the old role and will be cleared, not moved.
+    ⚠ 4 unsent drafts name the old role and will be cleared, not moved.
 
 ---
 
@@ -110,13 +112,22 @@ because phase 1 is one function, and it is what makes the button safe to press. 
 
 ---
 
-## Open questions for the operator
+## Answered by the operator, 2026-08-13
 
-1. **Should the 5 with no email address move at all?** They cannot be written to, and they are
-   half the "never contacted" group. Moving them keeps the list whole; leaving them behind keeps
-   the new card honest about who is reachable.
-2. **After the move, should the dead card keep anything?** As scoped it ends with zero contacts
-   and its own `job_events` history. The alternative is leaving the SENT messages attached to
-   the role they were about, which reads better on the old card and worse on the new one.
-3. **Is one target enough?** The Google case has exactly one live role. Two would need the
-   dialog to pick.
+**1. A contact with NO email address does not move.** *"The idea of migrating an existing
+contact to a new job is that we already began outreach, so we can continue the conversations."*
+That premise is the whole feature, and somebody with no address was never part of it and cannot
+be. Live, that excludes **5 of 16** — so the Google move is **11 people**, not 16. They are shown
+in the dialog as excluded with the reason, not hidden: they are still real people on the old
+card, and silently dropping five of sixteen would read as a bug.
+
+**2. Messages move with the person.** Continuity is the point. The old card keeps its
+`job_events` and its own record of having been worked; the correspondence follows the human.
+
+**3. Undo ships in the first cut.** It is what makes the button safe to press, and it is cheap
+because the move is one transaction in one function.
+
+## Still open
+
+**Is one target enough?** The Google case has exactly one live role, so the first cut may pick
+it automatically and say so. Two would need the dialog to choose.

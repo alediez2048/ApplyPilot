@@ -2409,13 +2409,13 @@ function transcriptSection(c) {
   const open = TR_OPEN.has(c.id);
   const list = rows.map(t => `
     <div class="tr-row">
-      <span class="tr-when">${esc(shortDate(t.started_at))}</span>
-      <span class="tr-title">${esc(t.title || 'Meeting')}</span>
-      <span class="tr-sum">${esc(t.summary || '')}</span>
-      <span class="tr-len">${Math.round((t.body_len || 0) / 1000)}k</span>
+      <span class="tr-title" title="${esc(t.title || 'Meeting')}">${esc(t.title || 'Meeting')}</span>
       <button class="linklike" onclick="showTranscript('${esc(t.id)}', this)">Read</button>
       <button class="link-danger tr-del"
         onclick="dropTranscript('${esc(t.id)}','${esc(c.id)}')" title="Remove from this contact">✕</button>
+      <span class="tr-meta"><span class="tr-when">${esc(shortDate(t.started_at))}</span
+        ><span class="tr-dot">·</span><span class="tr-len">${transcriptSize(t.body_len)}</span
+        ><span class="tr-dot">·</span><span class="tr-sum">${esc(t.summary || '')}</span></span>
     </div>`).join('');
   return `<div class="tr-wrap">
       <div class="cnote-body">
@@ -2466,6 +2466,17 @@ async function saveTranscript(btn) {
 
 //: The body is not on the wire — `/api/status` carries summaries and a LENGTH so the panel can
 //: say how long a call was without shipping 40 KB per contact every 2.5 seconds.
+//: How long the call was, in words a human reads. `Math.round(len/1000)+'k'` printed **0k** for
+//: every transcript under 500 characters — a number that says nothing about a real meeting and
+//: reads as an error. Under a thousand characters the honest unit is characters.
+function transcriptSize(len) {
+  const n = Number(len) || 0;
+  if (!n) return 'no text stored';
+  if (n < 1000) return `${n} chars`;
+  if (n < 10000) return `${(n / 1000).toFixed(1)}k`;
+  return `${Math.round(n / 1000)}k`;
+}
+
 async function showTranscript(id, btn) {
   btn.disabled = true;
   const r = await post('/api/contact/transcript-body', {id});

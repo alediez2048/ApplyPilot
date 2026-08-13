@@ -182,6 +182,11 @@ SETTINGS: tuple[Setting, ...] = (
             "Release an in-progress apply lock after this long (an interrupted run)."),
     Setting("APPLY_AGENT_TIMEOUT", "apply", "int", 900,
             "Seconds the apply agent gets per application before it is given up on."),
+    Setting("PREPARE_WORKERS", "apply", "int", 3,
+            "How many jobs are tailored and written at once. Measured: a tailored résumé is "
+            "~25s per attempt and up to four attempts, so this is where prepare's wall clock "
+            "goes. Purely network-bound waiting on the model — it costs no more tokens, only "
+            "less waiting."),
     Setting("APPLY_WORKERS", "apply", "int", 3,
             "How many applications the dashboard fills at once. Each worker gets its own "
             "Chrome window, CDP port and profile, so each finished form waits for you "

@@ -106,6 +106,21 @@ def live_review_browser(monkeypatch):
     monkeypatch.setattr(chrome, "chrome_alive_on_port", lambda *a, **k: True)
 
 
+@pytest.fixture()
+def no_review_browsers(monkeypatch):
+    """Every slot is free — asserted, not assumed.
+
+    `_busy_worker_ids` probes the real CDP ports, so a test that expects three free slots is
+    silently coupled to whatever is running on the machine. Found the hard way: two unrelated
+    Chrome instances from a browser-automation session were listening on 9223 and 9224, so
+    "three applies must launch" launched one and the failure looked like a bug in the pool.
+
+    Any test that asserts on how many slots are AVAILABLE has to say so.
+    """
+    from applypilot.apply import chrome
+    monkeypatch.setattr(chrome, "chrome_alive_on_port", lambda *a, **k: False)
+
+
 def test_a_batch_will_not_start_while_a_review_is_open(wd, db, monkeypatch, live_review_browser):
     """The exact loss: an open review browser is invisible to `queue_for_apply`, which
     filters on the JOB, not on whether a browser is in use."""
@@ -149,7 +164,7 @@ def _handoff_runner(db, launched, lock=None):
     return fake_run
 
 
-def test_a_slot_never_gets_a_second_job_while_it_holds_a_filled_form(wd, db, monkeypatch):
+def test_a_slot_never_gets_a_second_job_while_it_holds_a_filled_form(wd, db, monkeypatch, no_review_browsers):
     """THE property that cost two applications, restated per slot.
 
     Six eligible jobs, three slots, every one of them hands over. Exactly three applies may
@@ -172,7 +187,7 @@ def test_a_slot_never_gets_a_second_job_while_it_holds_a_filled_form(wd, db, mon
     assert res["held_back"] == 3
 
 
-def test_one_worker_still_behaves_exactly_as_it_used_to(wd, db, monkeypatch):
+def test_one_worker_still_behaves_exactly_as_it_used_to(wd, db, monkeypatch, no_review_browsers):
     """The old guarantee is still reachable, and is what APPLY_WORKERS=1 means. Without this,
     "we made it parallel" would have quietly removed the setting's safest value."""
     for i, name in enumerate(("Zello", "Deloitte", "Affirm")):
@@ -221,7 +236,7 @@ def test_a_busy_slot_is_skipped_rather_than_reused(wd, db, monkeypatch):
     assert sorted(slots) == [1, 2]
 
 
-def test_a_paused_queue_says_so_in_the_activity_log(wd, db, monkeypatch):
+def test_a_paused_queue_says_so_in_the_activity_log(wd, db, monkeypatch, no_review_browsers):
     """Silently stopping is its own bug — the operator would assume the rest had run."""
     for i, name in enumerate(("Zello", "Deloitte", "Affirm", "Visa")):
         _job(db, f"http://j/{i}", name)
@@ -236,7 +251,7 @@ def test_a_paused_queue_says_so_in_the_activity_log(wd, db, monkeypatch):
     assert any("held back" in (d or "") for d in details), details
 
 
-def test_applied_jobs_do_not_pause_the_queue(wd, db, monkeypatch):
+def test_applied_jobs_do_not_pause_the_queue(wd, db, monkeypatch, no_review_browsers):
     """Only a PENDING HUMAN blocks a slot. A job that fully applied holds no browser, so its
     slot goes back for the next one — and the run keeps going past `APPLY_WORKERS`.
 
@@ -266,7 +281,7 @@ def test_applied_jobs_do_not_pause_the_queue(wd, db, monkeypatch):
     assert res["held_back"] == 0
 
 
-def test_a_slot_freed_by_a_FAILURE_is_reused_too(wd, db, monkeypatch):
+def test_a_slot_freed_by_a_FAILURE_is_reused_too(wd, db, monkeypatch, no_review_browsers):
     """A failed apply closes its browser (only genuine dead ends do), so that slot is free.
     Treating failure as "holding a form" would stall the queue behind a job nobody can see."""
     for i in range(5):
@@ -302,7 +317,7 @@ def test_dry_run_is_not_gated(wd, db, monkeypatch, live_review_browser):
     assert launched, "a dry run was blocked even though it opens no browser"
 
 
-def test_a_LOGIN_WALL_holds_its_slot_just_like_a_filled_form(wd, db, monkeypatch):
+def test_a_LOGIN_WALL_holds_its_slot_just_like_a_filled_form(wd, db, monkeypatch, no_review_browsers):
     """`needs_human` is an open browser too — a captcha, a registration wall, a stuck field.
     The operator is meant to finish it by hand in that window.
 
@@ -335,7 +350,7 @@ def test_a_LOGIN_WALL_holds_its_slot_just_like_a_filled_form(wd, db, monkeypatch
     assert res["held_back"] == 2
 
 
-def test_a_dry_run_opens_one_browser_and_not_a_fleet(wd, db, monkeypatch):
+def test_a_dry_run_opens_one_browser_and_not_a_fleet(wd, db, monkeypatch, no_review_browsers):
     """A dry run submits nothing and hands over nothing, so it needs no parallel review slots.
     Spawning APPLY_WORKERS Chrome instances for it is pure cost — and on a machine where each
     profile is gigabytes, it is the kind of cost that gets noticed a week later."""

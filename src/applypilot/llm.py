@@ -16,6 +16,7 @@ Failover/rotation order: LLM_PROVIDER_ORDER (comma list, e.g. "gemini,openai,ant
 
 import logging
 import os
+import threading
 import time
 
 import httpx
@@ -236,6 +237,23 @@ class FailoverClient:
     def __init__(self, clients: list[LLMClient]) -> None:
         self.clients = clients
         self._rr = 0
+        # `_rr += 1` is a read-modify-write and prepare now tailors several jobs at once, so the
+        # pick-and-advance is done under a lock.
+        #
+        # **Defensive, not a fix for an observed bug, and the measurement is why that is stated
+        # rather than implied.** Before writing this I claimed the unlocked version would lose
+        # increments and collapse onto one provider; measured on CPython 3.11 with the switch
+        # interval forced to 1µs, 8 threads × 2000 increments lost **zero**. A mutation removing
+        # the lock is therefore not killable by any honest test on this interpreter — it is kept
+        # because the guarantee should not depend on which interpreter runs it, and it costs
+        # nothing on a call that is about to spend 25 seconds on the network.
+        self._rr_lock = threading.Lock()
+
+    def _next(self) -> LLMClient:
+        with self._rr_lock:
+            client = self.clients[self._rr % len(self.clients)]
+            self._rr += 1
+        return client
 
     def chat(self, messages: list[dict], temperature: float = 0.0, max_tokens: int = 4096) -> str:
         n = len(self.clients)
@@ -244,8 +262,7 @@ class FailoverClient:
         fail_streak = 0
 
         for _ in range(max_attempts):
-            client = self.clients[self._rr % n]
-            self._rr += 1
+            client = self._next()
             try:
                 return client.attempt(_no_think(client, messages), temperature, max_tokens)
             except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.RequestError, RuntimeError) as e:

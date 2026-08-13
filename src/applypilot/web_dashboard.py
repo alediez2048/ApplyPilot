@@ -414,6 +414,56 @@ def _safe_material_prefix(job: dict) -> str:
     return f"{safe_site}_{safe_title}_{digest}"
 
 
+def prepare_workers() -> int:
+    """How many jobs are tailored / written at once.
+
+    Measured 2026-08-13 on a real posting: **107s to tailor, 4.2s for the cover letter, 0.4s to
+    render the PDF**. The tailor is 95% of prepare, and it is 8 LLM calls — four rounds of
+    (generate ~25s, fabrication judge ~4s), because the judge kept rejecting. Across 56 stored
+    reports the average is ~2 attempts, so ~55s a job and up to ~115s.
+
+    That time is spent WAITING ON THE NETWORK, which is why threads are the right tool and why
+    this costs no extra tokens: the same calls, overlapped. Four jobs went from ~7.5 minutes to
+    roughly the slowest one.
+    """
+    try:
+        n = int(os.environ.get("PREPARE_WORKERS", "3") or 3)
+    except ValueError:
+        n = 3
+    # Bounded for the PROVIDER, not the machine. There are two configured here and the failover
+    # client round-robins between them; enough concurrent résumés and you are rate-limiting
+    # yourself, which `FailoverClient` answers by sleeping — turning a speed-up into a slow-down
+    # that looks like the model being slow.
+    return max(1, min(n, 8))
+
+
+def _prepare_pool(fn, jobs: list, label: str) -> list:
+    """Run `fn` over `jobs` concurrently, returning every result.
+
+    Sequential when one worker is configured or there is one job — not as an optimisation but so
+    the single-job path (the ✍ per-row button, and every test that drives one job) keeps its
+    exact current behaviour and stack trace.
+
+    A job that raises is reported and does not stop the others: one unreachable posting must not
+    cost the other three their résumés.
+    """
+    n = min(prepare_workers(), len(jobs))
+    if n <= 1:
+        return [fn(j) for j in jobs]
+    print(f"STAGE: {label} — {len(jobs)} job(s) across {n} worker(s)", flush=True)
+    out = []
+    with ThreadPoolExecutor(max_workers=n, thread_name_prefix=f"prep-{label}") as pool:
+        futures = {pool.submit(fn, j): j for j in jobs}
+        for fut in as_completed(futures):
+            try:
+                out.append(fut.result())
+            except Exception as exc:  # noqa: BLE001
+                job = futures[fut]
+                print(f"  {label} error ({job.get('site')}): {exc}", flush=True)
+                out.append((job, False, str(exc)[:200]))
+    return out
+
+
 def run_dashboard_prepare(limit: int = 0, validation_mode: str = "normal") -> dict:
     """Prepare materials only for URLs imported through the dashboard.
 
@@ -470,8 +520,17 @@ def run_dashboard_prepare(limit: int = 0, validation_mode: str = "normal") -> di
         TAILORED_DIR.mkdir(parents=True, exist_ok=True)
         print(f"STAGE: tailor dashboard URLs ({len(tailor_jobs)})", flush=True)
 
-        for index, job in enumerate(tailor_jobs, 1):
-            print(f"[{index}/{len(tailor_jobs)}] tailoring {job.get('site')} - {job.get('title')}", flush=True)
+        def _tailor_one(job: dict) -> tuple[dict, bool, str]:
+            """Tailor ONE job. Returns (job, accepted, note) — see `_prepare_pool` for why this
+            is a function rather than a loop body.
+
+            Its own DB connection: `get_connection()` is thread-local by design, and reusing the
+            request thread's handle raises "SQLite objects created in a thread can only be used
+            in that same thread" — every résumé would fail with a database error instead of a
+            document.
+            """
+            conn = get_connection()
+            print(f"[tailor] {job.get('site')} - {job.get('title')}", flush=True)
             try:
                 tailored_text, report = tailor_resume(resume_text, job, profile, validation_mode=validation_mode)
                 prefix = _safe_material_prefix(job)
@@ -511,7 +570,6 @@ def run_dashboard_prepare(limit: int = 0, validation_mode: str = "normal") -> di
                 )
                 if accepted:
                     _jobs.set_tailored(job["url"], str(txt_path), conn)
-                    tailored += 1
                     note = "" if report.get("status") in {"approved", "approved_with_judge_warning"} else f" ({report.get('status')})"
                     log_event(job["url"], "tailor", "ok", f"Tailored résumé generated{note}.", conn)
                     # Validator warnings used to land ONLY in {prefix}_REPORT.json, which
@@ -521,18 +579,48 @@ def run_dashboard_prepare(limit: int = 0, validation_mode: str = "normal") -> di
                     for w in warnings[:4]:
                         log_event(job["url"], "tailor", "info", f"Résumé note: {w}", conn)
                         print(f"  résumé note: {w}", flush=True)
+                    # THE FABRICATION JUDGE'S VERDICT, when it was overruled.
+                    #
+                    # `approved_with_judge_warning` means the judge rejected this résumé on
+                    # every attempt and we shipped the last one anyway. It was treated as
+                    # identical to `approved` at all three branches above, so the verdict
+                    # reached nothing the operator could see — and this file recorded the judge
+                    # as "unproven, has not yet caught a real fabrication".
+                    #
+                    # Both were wrong. Of 56 stored reports, 4 carry this status and every one
+                    # is a real invention: "Python, JavaScript, TypeScript" added to a résumé
+                    # that lists none of them, "PostgreSQL", "C++, TCP/IP, UDP", "REST/GraphQL
+                    # API development". THREE were submitted to real employers.
+                    #
+                    # Still accepted, deliberately — discarding a rendered résumé mid-prepare is
+                    # what left "the full app didn't go through" with no materials, and the
+                    # operator is the one who can say whether a skill is theirs. But it says so
+                    # now, loudly, before the application goes out rather than after.
+                    if report.get("status") == "approved_with_judge_warning":
+                        issues = str((report.get("judge") or {}).get("issues") or "").strip()
+                        log_event(job["url"], "tailor", "failed",
+                                  "⚠ The fabrication judge rejected this résumé and it was used "
+                                  "anyway — CHECK IT BEFORE APPLYING. " + issues[:400], conn)
+                        print(f"  ⚠ JUDGE REJECTED (used anyway): {issues[:200]}", flush=True)
                     if report.get("status") not in {"approved", "approved_with_judge_warning"}:
                         print(f"  tailor accepted with note (lenient): {report.get('status')}", flush=True)
                 else:
                     _jobs.bump_tailor_attempts(job["url"], conn)
-                    tailor_errors += 1
                     log_event(job["url"], "tailor", "failed", f"Résumé failed validation ({report.get('status')}).", conn)
                 conn.commit()
+                return job, bool(accepted), ""
             except Exception as exc:
                 _jobs.bump_tailor_attempts(job["url"], conn)
-                tailor_errors += 1
                 log_event(job["url"], "tailor", "failed", f"Error tailoring résumé: {str(exc)[:200]}", conn)
                 print(f"  tailor error: {exc}", flush=True)
+                conn.commit()
+                return job, False, str(exc)[:200]
+
+        for _job, ok, _err in _prepare_pool(_tailor_one, tailor_jobs, "tailor"):
+            if ok:
+                tailored += 1
+            else:
+                tailor_errors += 1
 
     cover_jobs = _jobs.queue_for_cover(limit, conn=conn)
 
@@ -547,8 +635,10 @@ def run_dashboard_prepare(limit: int = 0, validation_mode: str = "normal") -> di
         COVER_LETTER_DIR.mkdir(parents=True, exist_ok=True)
         print(f"STAGE: cover letters for dashboard URLs ({len(cover_jobs)})", flush=True)
 
-        for index, job in enumerate(cover_jobs, 1):
-            print(f"[{index}/{len(cover_jobs)}] cover letter {job.get('site')} - {job.get('title')}", flush=True)
+        def _cover_one(job: dict) -> tuple[dict, bool, str]:
+            """One cover letter, on this thread's own DB connection — see `_tailor_one`."""
+            conn = get_connection()
+            print(f"[cover] {job.get('site')} - {job.get('title')}", flush=True)
             try:
                 letter = generate_cover_letter(resume_text, job, profile, validation_mode=validation_mode)
                 cl_path = COVER_LETTER_DIR / f"{_safe_material_prefix(job)}_CL.txt"
@@ -559,7 +649,6 @@ def run_dashboard_prepare(limit: int = 0, validation_mode: str = "normal") -> di
                 except Exception as exc:
                     print(f"  PDF warning: {exc}", flush=True)
                 _jobs.set_cover(job["url"], str(cl_path), conn)
-                covers += 1
                 log_event(job["url"], "cover", "ok", "Cover letter generated.", conn)
                 # `generate_cover_letter` returns only the text — its report never reaches
                 # here, so a banned word or an unnamed employer was invisible even though
@@ -573,11 +662,20 @@ def run_dashboard_prepare(limit: int = 0, validation_mode: str = "normal") -> di
                         print(f"  cover letter note: {w}", flush=True)
                 except Exception:  # noqa: BLE001 - a reporting nicety must never fail prep
                     pass
+                conn.commit()
+                return job, True, ""
             except Exception as exc:
                 _jobs.bump_cover_attempts(job["url"], conn)
-                cover_errors += 1
                 log_event(job["url"], "cover", "failed", f"Error generating cover letter: {str(exc)[:200]}", conn)
                 print(f"  cover error: {exc}", flush=True)
+                conn.commit()
+                return job, False, str(exc)[:200]
+
+        for _job, ok, _err in _prepare_pool(_cover_one, cover_jobs, "cover"):
+            if ok:
+                covers += 1
+            else:
+                cover_errors += 1
 
     result = {
         "enriched": enriched,

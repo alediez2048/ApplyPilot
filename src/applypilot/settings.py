@@ -184,6 +184,11 @@ SETTINGS: tuple[Setting, ...] = (
             "Seconds the apply agent gets per application before it is given up on."),
     Setting("TAILOR_AGGRESSIVE", "apply", "bool", False,
             "Mirror the job description closely and skip the fabrication judge."),
+    Setting("MY_ADDRESSES", "outreach", "str", "",
+            "Comma-separated. Other email addresses that are YOU — a résumé address, an alias, "
+            "an old account. "
+            "Mail from these is your own, not theirs. Without them your own messages are stored "
+            "as inbound and the CRM thinks the other side replied."),
     Setting("APPLY_ALLOW_CONTRACT", "apply", "bool", False,
             "Let the apply agent complete CONTRACT and hourly postings, not only salaried "
             "roles. Marketplace signup, profile builders and assessment platforms are still "

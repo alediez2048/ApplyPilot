@@ -595,6 +595,8 @@
   .chan span.add { border-style:dashed; color:var(--faint); }
   .chan span.add.on { border-style:dashed; background:var(--surface2); color:var(--soft); }
 
+  .intro-more { display:block; margin:2px 0 8px; }
+
   /* 📝 Meeting transcripts. A row per call: when, what, the summary, how long. */
   .tr-row { display:grid; grid-template-columns:auto minmax(0,1fr) minmax(0,2fr) auto auto auto;
     gap:8px; align-items:baseline; padding:5px 0; border-top:1px solid var(--line);

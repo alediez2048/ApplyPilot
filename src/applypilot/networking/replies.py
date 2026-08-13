@@ -17,8 +17,9 @@ from datetime import datetime, timezone
 
 from applypilot.database import get_connection, log_event
 from applypilot.domain import conversations as cv, replies as domain_replies
-from applypilot.networking import gmail_oauth, gmail_read, messages as msg_store
+from applypilot.networking import gmail_read, messages as msg_store
 from applypilot.networking import store, touches
+from applypilot.networking.gmail_send import _our_addresses
 
 log = logging.getLogger(__name__)
 
@@ -125,7 +126,9 @@ def sync_all_with(contact: dict, conn=None, limit: int = 25) -> dict:
         return {"ok": False, "message": "no email address for this contact",
                 "threads": 0, "messages": 0}
 
-    me = gmail_oauth.connected_email()
+    # All of them: direction decides who owes whom a reply, so one address short
+    # files the operator's own mail as theirs.
+    me = _our_addresses()
     # Both directions, and `from:`/`to:` alone would miss a thread where they were only CC'd —
     # which is exactly the Writer case that prompted this.
     thread_ids = gmail_read.search_threads(f"from:{email} OR to:{email} OR cc:{email}",
@@ -192,14 +195,16 @@ def fetch_thread_text(contact: dict, conn=None) -> dict:
     if not msgs:
         return {"ok": False, "message": "Gmail returned nothing for this thread", "stored": 0}
 
-    me = gmail_oauth.connected_email()
+    # All of them: direction decides who owes whom a reply, so one address short
+    # files the operator's own mail as theirs.
+    me = _our_addresses()
     rows, stored = [], 0
     for m in msgs:
         # Trim the quoted original: Gmail's snippet runs through the quote header, so a short
         # reply can be a third our own email quoted back — and that would reach the drafter as
         # something they wrote.
         text = cv.strip_quoted_tail(m.get("snippet"))
-        if not text or cv.addr(m.get("from")) == cv.addr(me):
+        if not text or cv.addr(m.get("from")) in cv.me_set(me):
             continue
         rows.append({"message_id": m.get("id"), "thread_id": thread_id,
                      "contact_id": contact["id"], "job_url": contact.get("job_url"),
@@ -320,7 +325,9 @@ def poll(conn=None, force_full: bool = False) -> dict:
         if touched:
             active = touched
 
-    me = gmail_oauth.connected_email()
+    # All of them: direction decides who owes whom a reply, so one address short
+    # files the operator's own mail as theirs.
+    me = _our_addresses()
     checked = 0
     found: list[dict] = []
     bounced: list[dict] = []

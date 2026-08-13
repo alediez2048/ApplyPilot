@@ -1376,9 +1376,30 @@ function setChannel(cid, ch) { CHANNEL_TAB.set(cid, ch); CONTACT_OPEN.add(cid); 
 // is the single most valuable event in a job-search conversation, and a boolean `replied` threw
 // it away. Surfaced as an offer, never auto-created: a contact added here is one an automated
 // follow-up ladder would then email, and threads collect schedulers and ATS robots.
+//: How many handoff banners render before they collapse into one line.
+//:
+//: A busy thread introduces everybody. One real card produced ELEVEN stacked banners above the
+//: People tab, which pushed the conversation the operator had just clicked "Fetch from Gmail" to
+//: read completely off screen — reported as "this gave me this view instead of all my threads".
+//: Two is enough to notice; the rest are a list you open when you want it.
+const INTRO_SHOWN = 2;
+const INTRO_OPEN = new Set();
+function toggleIntros(url) {
+  if (INTRO_OPEN.has(url)) INTRO_OPEN.delete(url); else INTRO_OPEN.add(url);
+  rerenderJobs(true);
+}
+
 function introBanner(j) {
-  const intros = j.introductions || [];
-  if (!intros.length) return '';
+  const all = j.introductions || [];
+  if (!all.length) return '';
+  const open = INTRO_OPEN.has(j.url);
+  const intros = open ? all : all.slice(0, INTRO_SHOWN);
+  const hidden = all.length - intros.length;
+  const more = (hidden > 0 || open)
+    ? `<button class="linklike intro-more" onclick="toggleIntros(${
+        `decodeURIComponent('${encodeURIComponent(j.url)}')`})">${
+        open ? 'Show fewer' : `${hidden} more ${hidden === 1 ? 'person was' : 'people were'} added — show`}</button>`
+    : '';
   return intros.map(i => {
     const args = [i.email, i.name || '', i.introduced_by || ''].map(v => `decodeURIComponent('${encodeURIComponent(v)}')`).join(', ');
     const u = `decodeURIComponent('${encodeURIComponent(j.url)}')`;
@@ -1386,7 +1407,7 @@ function introBanner(j) {
       <span>👋 <strong>${esc(i.introduced_by || 'Someone')}</strong> added <strong>${esc(i.name || i.email)}</strong> (${esc(i.email)}) to the thread — they may be handling this now.</span>
       <button class="primary" onclick="addIntroduced(${u}, ${args}, this)">+ Add as contact</button>
     </div>`;
-  }).join('');
+  }).join('') + more;
 }
 async function addIntroduced(url, email, name, by, btn) {
   btn.disabled = true; btn.textContent = 'Adding…';

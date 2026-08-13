@@ -2043,9 +2043,12 @@ def _pending_introductions(job_threads: dict, raw_contacts: list) -> list[dict]:
     """
     try:
         from applypilot.domain import conversations as cv
-        from applypilot.networking import gmail_oauth
+        from applypilot.networking.gmail_send import _our_addresses
         emails = [c.get("email") for c in raw_contacts if c.get("email")]
-        return cv.pending_introductions(job_threads, emails, gmail_oauth.connected_email())
+        # EVERY address that is us, not just the connected one. The operator's résumé carries a
+        # different address from the sending account, so their own messages were read as
+        # introductions from a stranger — and their own address was offered as "+ Add as contact".
+        return cv.pending_introductions(job_threads, emails, _our_addresses())
     except Exception:  # noqa: BLE001
         log.debug("Pending-introduction scan failed", exc_info=True)
         return []

@@ -99,13 +99,31 @@ def is_robot(address: str) -> bool:
     return any(d in domain for d in _ROBOT_DOMAINS)
 
 
-def participants(messages: list[dict], me: str) -> list[dict]:
+def me_set(me: "str | list[str] | None") -> set[str]:
+    """Every address that is US, normalised. One or many, the same way `reply_target` takes them.
+
+    **The operator genuinely has more than one.** Sending authenticates as one account and may
+    set From to a verified alias; the résumé carries a different address again, and people reply
+    to whichever they were given. Measured on the live database when this was found: of 61
+    messages stored for one contact, **30 were the operator's own, sent from their résumé address
+    and recorded as INBOUND** — because `me` was a single string and anything not equal to it was
+    "them".
+
+    That is not a display bug. `direction` decides who owes whom a reply, whether a handoff
+    banner fires, and what `conversation_state` reports — so half of one thread was attributed to
+    the wrong person everywhere at once.
+    """
+    values = [me] if isinstance(me, str) else list(me or [])
+    return {a for a in (addr(v) for v in values) if a}
+
+
+def participants(messages: list[dict], me: "str | list[str]") -> list[dict]:
     """Everyone on the thread except us, newest display name wins.
 
     Reads From, To AND Cc — an introduction usually arrives as a Cc, which is invisible if you
     only look at senders.
     """
-    mine = addr(me)
+    mine = me_set(me)
     seen: dict[str, dict] = {}
     for msg in messages or []:
         pairs = [(msg.get("from"), "from")]
@@ -114,7 +132,7 @@ def participants(messages: list[dict], me: str) -> list[dict]:
                 pairs.append((one, field))
         for raw, field in pairs:
             a = addr(raw)
-            if not a or a == mine:
+            if not a or a in mine:
                 continue
             entry = seen.setdefault(a, {"email": a, "name": "", "first_seen": msg.get("id"),
                                         "via": field})
@@ -124,7 +142,7 @@ def participants(messages: list[dict], me: str) -> list[dict]:
     return list(seen.values())
 
 
-def introductions(messages: list[dict], me: str, known: list[str]) -> list[dict]:
+def introductions(messages: list[dict], me: "str | list[str]", known: list[str]) -> list[dict]:
     """People who appeared on the thread that we did not put there — a handoff.
 
     `known` is the address(es) we already track for this conversation. Anything else that a
@@ -135,17 +153,17 @@ def introductions(messages: list[dict], me: str, known: list[str]) -> list[dict]
     Deliberately ignores participants added by OUR OWN messages — we already know about anyone
     we chose to email.
     """
-    mine = addr(me)
+    mine = me_set(me)
     knowns = {addr(k) for k in (known or []) if k}
     out: dict[str, dict] = {}
     for msg in messages or []:
         sender = addr(msg.get("from"))
-        if not sender or sender == mine:
+        if not sender or sender in mine:
             continue  # our own message: anyone on it, we added
         for field in ("to", "cc"):
             for one in split_parts(msg.get(field)):
                 a = addr(one)
-                if not a or a == mine or a == sender or a in knowns or a in out:
+                if not a or a in mine or a == sender or a in knowns or a in out:
                     continue
                 if is_robot(a):
                     continue
@@ -157,15 +175,15 @@ def introductions(messages: list[dict], me: str, known: list[str]) -> list[dict]
     return list(out.values())
 
 
-def timeline(messages: list[dict], me: str) -> list[dict]:
+def timeline(messages: list[dict], me: "str | list[str]") -> list[dict]:
     """The conversation as the dashboard should show it, oldest first."""
-    mine = addr(me)
+    mine = me_set(me)
     rows = []
     for msg in messages or []:
         sender = addr(msg.get("from"))
         rows.append({
             "id": msg.get("id"),
-            "direction": "out" if sender == mine else "in",
+            "direction": "out" if sender in mine else "in",
             "from_addr": sender,
             "from_name": display_name(msg.get("from")),
             # RAW fragments, not bare addresses. Storing "david@writer.com" loses the display
@@ -243,7 +261,7 @@ def reply_target(messages: list[dict], me: str | list[str]) -> dict | None:
     `messages` are STORED rows (`from_addr`, `to_addrs`/`cc_addrs` as raw fragment lists), i.e.
     what `messages.thread_for_contact()` returns.
     """
-    mine = {addr(x) for x in ([me] if isinstance(me, str) else (me or [])) if addr(x)}
+    mine = me_set(me)
     # Robots are not correspondents. A bounce is an inbound message in our own thread, and
     # without this the newest "reply" is MAILER-DAEMON and the composer politely offers to
     # answer it. Offering to reply to a bounce notification is the point at which a CRM stops
@@ -390,7 +408,8 @@ def _pick_from(msg: dict) -> str:
     return address or name
 
 
-def pending_introductions(threads: dict, contact_emails: list[str], me: str) -> list[dict]:
+def pending_introductions(threads: dict, contact_emails: list[str],
+                          me: "str | list[str]") -> list[dict]:
     """People introduced on stored threads who are NOT yet contacts on this job.
 
     Works from the `messages` table rather than a live fetch, so the dashboard can show a
@@ -400,16 +419,22 @@ def pending_introductions(threads: dict, contact_emails: list[str], me: str) -> 
     as lists), which is what `messages.threads_for_job()` returns.
     """
     known = {addr(e) for e in (contact_emails or []) if e}
-    mine = addr(me)
+    mine = me_set(me)
     out: dict[str, dict] = {}
     for contact_id, msgs in (threads or {}).items():
         for msg in msgs or []:
             if msg.get("direction") != "in":
                 continue  # only the other side can introduce someone
             sender = addr(msg.get("from_addr"))
+            # ...and the STORED direction is not enough on its own. Rows written before every
+            # one of the operator's addresses was known carry `in` on their own outgoing mail —
+            # 30 of 61 on one live contact — so a message from US is never an introduction
+            # whatever the column says. This also means the banners stop without a backfill.
+            if sender in mine:
+                continue
             for one in (msg.get("cc_addrs") or []) + (msg.get("to_addrs") or []):
                 a = addr(one)
-                if not a or a == mine or a == sender or a in known or a in out:
+                if not a or a in mine or a == sender or a in known or a in out:
                     continue
                 if is_robot(a):
                     continue

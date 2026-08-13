@@ -64,7 +64,19 @@ def _addr(value: str | None) -> str:
     return raw.strip().strip("<>").lower()
 
 
-def is_inbound(message: dict, connected_email: str) -> bool:
+def _addrs(value: "str | list[str] | None") -> set[str]:
+    """Every address that is us. One or many — the operator genuinely has several.
+
+    Fifth place in the codebase that had to answer "is this message ours", and the fifth that
+    took a single string. With one address short, the operator's own mail from their résumé
+    account was counted as a REPLY: it halts the follow-up ladder, lights the counter, and moves
+    the temperature band, all on a message they sent themselves.
+    """
+    values = [value] if isinstance(value, str) else list(value or [])
+    return {a for a in (_addr(v) for v in values) if a}
+
+
+def is_inbound(message: dict, connected_email: "str | list[str]") -> bool:
     """True if this message came FROM someone else.
 
     Both signals are checked, because either alone has a hole: the SENT label is missing on
@@ -77,10 +89,10 @@ def is_inbound(message: dict, connected_email: str) -> bool:
     if SENT_LABEL in labels:
         return False
     sender = _addr(message.get("from") or (message.get("headers") or {}).get("from"))
-    me = _addr(connected_email)
+    me = _addrs(connected_email)
     if not sender:
         return False
-    return not (me and sender == me)
+    return not (me and sender in me)
 
 
 def match_contact(message: dict, contacts: list[dict]) -> dict | None:
@@ -121,7 +133,8 @@ def match_contact(message: dict, contacts: list[dict]) -> dict | None:
     return None
 
 
-def replies_in(messages: list[dict], contacts: list[dict], connected_email: str) -> list[dict]:
+def replies_in(messages: list[dict], contacts: list[dict],
+               connected_email: "str | list[str]") -> list[dict]:
     """[{contact, message}] for every inbound message that maps to a contact.
 
     One entry per CONTACT, keeping the earliest inbound — the first reply is when the
@@ -144,7 +157,8 @@ def replies_in(messages: list[dict], contacts: list[dict], connected_email: str)
     return list(out.values())
 
 
-def bounces_in(messages: list[dict], contacts: list[dict], connected_email: str) -> list[dict]:
+def bounces_in(messages: list[dict], contacts: list[dict],
+               connected_email: "str | list[str]") -> list[dict]:
     """[{contact, message}] for delivery failures — a dead address, not a reply.
 
     Reported separately rather than merely ignored: an address that bounces will bounce for

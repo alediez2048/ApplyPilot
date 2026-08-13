@@ -86,6 +86,11 @@ def _our_addresses() -> list[str]:
     setup, so it cannot be the single source.
     """
     out = [os.environ.get("OUTREACH_FROM_ADDRESS", ""), os.environ.get("GMAIL_ADDRESS", "")]
+    # Addresses the operator DECLARES as theirs. The résumé here carries a different address
+    # from the sending account, so recruiters reply to one and the app authenticates as the
+    # other — and without this, half of a real thread was stored as inbound (see
+    # `conversations.me_set`: 30 of 61 messages on one contact were the operator's own).
+    out += [a.strip() for a in os.environ.get("MY_ADDRESSES", "").split(",") if a.strip()]
     try:
         from applypilot.networking import gmail_oauth
         out.append(gmail_oauth.connected_email())

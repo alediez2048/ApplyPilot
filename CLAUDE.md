@@ -12,9 +12,9 @@ campaign happens to be a job search** — see `docs/crm-prd.md` for where that g
 - **Packaging:** Hatchling, `src/` layout, single package `applypilot`
 - **Entry point:** `applypilot = "applypilot.cli:app"` (Typer CLI)
 - **License:** AGPL-3.0-only · **Version:** 0.4.0 (`pyproject.toml`)
-- **Tests:** 2384 passing (`tests/`, 117 files) · ruff clean (line-length 120, py311) · ESLint clean
-- **Schema version:** 4 (`applypilot migrate --status`) · **Settings:** 50 declared in `settings.py`
-- **Branch:** everything current lives on `context`, **77 commits ahead of `main`**, pushed to `origin/context`, working tree CLEAN as of 2026-08-12 (§Dev workflow). `main` has
+- **Tests:** 2450 passing (`tests/`, 122 files) · ruff clean (line-length 120, py311) · ESLint clean
+- **Schema version:** 4 (`applypilot migrate --status`) · **Settings:** 51 declared in `settings.py`
+- **Branch:** everything current lives on `context`, **80 commits ahead of `main`**, pushed to `origin/context`, working tree CLEAN as of 2026-08-13 (§Dev workflow). `main` has
   none of it. Check `git log --oneline -1` before believing anything here (§Dev workflow).
 
 ## Quick orientation
@@ -36,9 +36,13 @@ Surfaces:
 - `applypilot network` — contact discovery + outreach
 - `applypilot migrate --status` · `applypilot doctor --config` — schema version, settings
 
-**Co-pilot is one-at-a-time.** It ends by handing an open browser to a human, and starting
-another apply closes that browser. The queue refuses to start while a review is pending and
-stops the moment a job hands over — see §Lessons 8, which cost two filled applications.
+**Co-pilot is one job per BROWSER** (`APPLY_WORKERS`, default 3 — 2026-08-13). It ends by handing
+an open browser to a human, and starting another apply *on that slot* closes it. Each slot has
+its own CDP port (`9222 + id`) and its own Chrome profile, so N applications fill in parallel and
+each waits for the operator independently. A slot stops pulling work while it holds a filled form
+or a login wall; a slot whose job applied or failed takes the next one. See §Parallel apply and
+§Lessons 8 — which cost two filled applications, and whose real cause was a shared PORT rather
+than a shared queue.
 
 ## Tiers (`config.py`, gated by `check_tier()`)
 
@@ -430,11 +434,24 @@ is the same conversation as `Ormus <> AMSYS`); messages with no `thread_id` grou
 subject rather than bucketing under `""`, which would rebuild the merge. `CONV_OPEN` and
 `CONV_SHUT` are two sets, not one, because the DEFAULT differs by thread.
 
-**Still open, and it is the dangerous half:** `reply_target` picks the last inbound across the
-MERGED list, so on the live card a reply to the contact is addressed to **a different person
-entirely**, on a thread the operator was not looking at. §Lessons 29 — the dangerous half of a feature is the half that
-looks identical when it is wrong. The separators make the threads visible; they do not yet bind
-the composer to one.
+**CLOSED 2026-08-13, and the misaddressing was the SMALLER half.** `reply_target` now takes a
+`thread` key and scopes everything to that one conversation. What the merge was really costing
+was the `References` header, on **all 7** contacts with more than one thread — one at **87
+message ids across 25 unrelated conversations**, which tells the recipient's mail client that a
+calendar invite and two deals are one thread. Live after: 87 → 20, 61 → 1, 18 → 1.
+
+The browser names the thread it is showing (`data-thread`, posted by `sendReply`); the server
+still derives every address from the stored rows of that thread, so this NARROWS rather than
+widens — a `to` has never been accepted from the page and still is not. A key that resolves to
+nothing **refuses**, because falling back to the merged list is the bug itself.
+
+`thread_key`/`group_threads` exist in `domain/conversations.py` AND in `dashboard.js`, because
+the browser picks and the server resolves. `tests/test_thread_grouping_agrees.py` runs both over
+one fixture — **they already disagreed**: the JS stripped one `Re:` while `_strip_re` strips
+repeated `Re:`/`Fwd:`, so a forwarded message split off in the browser and joined the main thread
+on the server, with nothing rendering wrong (§Lessons 49, deciding recipients).
+Two smaller ones went with it: a named thread no longer falls back to `contacts.thread_id`, and
+the SMTP path files a sent reply under the thread it answered rather than re-merging it.
 
 **A long thread collapses in the middle and the gap is a BUTTON** (2026-08-11, §Lessons 90). Over
 six messages it renders first + last two — the panel is rewritten every 2.5s and an unbounded list
@@ -1056,9 +1073,22 @@ carry `in` on the operator's own mail, so a message from us is never an introduc
 column says — which is what makes the banners stop without a backfill. The banners themselves
 collapse at two with a *"N more people were added"* toggle.
 
-**30 rows across 3 contacts still carry the wrong `direction`** (14, 14 and 2).
-The fix applies at SYNC time; the stored rows need a one-statement backfill that has deliberately
-not been run.
+**The 30 stored rows are REPAIRED** (2026-08-13, `doctor --directions` / `--fix-directions`).
+All 599 messages now carry the right side; the contact whose composer offered to reply to the
+operator's own address targets the real person again. A command rather than a typed-out UPDATE
+because `MY_ADDRESSES` can GROW — a fourth alias recreates this on everything synced under the
+old set.
+
+**Its own first live run is the lesson, and it inverted.** The CLI does not load `~/.applypilot/
+.env`, so `_our_addresses()` saw one address and the audit proposed flipping **42 of the
+operator's own emails TO inbound** — the exact opposite of the repair, on a tool whose whole
+job is to fix direction. Two guards now: `load_env(strict=False)` runs first, and **`out → in`
+is refused outright and explained**. The asymmetry is real rather than defensive: `in → out`
+means we recognised more of our own mail, which is monotone and safe; `out → in` means an
+address this app has SENT AS is now being read as a stranger's, and a row is only ever written
+`out` by our own send path or by `cv.timeline` under a then-correct config. So that direction is
+almost always a shrunken config, not bad data — and calling our own mail a reply would halt
+ladders and light the 🔔 counter for conversations nobody had.
 
 **Threads we did not start.** `poll()` read threads by `thread_id`, captured at send time, and
 skipped every contact without one — so anyone who wrote to us FIRST, replied from another
@@ -1360,8 +1390,19 @@ company `"Jobs"` — the same substring bug class, inside the function written t
    — **428ms**. It then happened again in reverse within the hour. The row still read
    `ready_to_submit`, claiming a form was waiting that no longer existed. Batching N jobs in
    co-pilot mode leaves every one un-reviewable except the last, and the filled form is
-   unrecoverable. **Co-pilot is inherently one-at-a-time** — it ends by asking a human to act.
-   Guarded at both ends now (refuse to start, and stop on handover).
+   unrecoverable. Guarded at both ends (refuse to start, and stop on handover).
+   **The conclusion drawn from this was too strong, and it stood for a fortnight** (corrected
+   2026-08-13). "Co-pilot is inherently one-at-a-time" was written down as a property of
+   co-pilot; it was a property of the PATH — `run_dashboard_apply` spawned every apply as
+   worker 0, so there was exactly one browser and a second launch always cleared port 9222. The
+   real invariant is **one job per BROWSER**, and the multi-worker machinery to satisfy it
+   (per-slot ports, per-slot profiles, atomic claims) already existed and was simply never used
+   from the dashboard. The safety property is unchanged and now stated per slot; what went away
+   is a throughput cap nobody had measured.
+   **The generalisable half:** an incident gives you a true observation and a proposed cause,
+   and they are not the same evidence. "Two jobs shared a port" was observed. "Co-pilot cannot
+   be parallel" was inferred, written into this file as a fact, and repeated in a test name.
+   Re-derive the constraint before treating a lesson as a ceiling.
 
 9. **Never put a worked example in the prompt using the candidate's own domain.** It gets
    parroted. Three times in one session: a bullet example became his opening T-Mobile bullet
@@ -2622,6 +2663,57 @@ clicking Apply worked through the queue: Ethos failed at 22:39:39 and Texas Spor
 claimed at **22:39:40**, one second later. Reported as *"it is applying for the Texas Sports
 Academy role, this should not be the behavior"*, and correctly. Not fixed.
 
+### Parallel apply — `APPLY_WORKERS`, default 3 (2026-08-13)
+
+Asked for as *"increase the number of applications this template can apply at a time"*. Measuring
+first moved the work twice.
+
+**The IMPORT was never the bottleneck.** The box already reads "Paste one or more job URLs" and
+`_URL_RE.findall` already returns all of them — three pasted URLs import as three jobs, and did
+before this change.
+
+**Parallel apply already existed and the dashboard never used it.** `worker_loop` takes a
+`worker_id`, each slot gets `BASE_CDP_PORT + id` and its own Chrome profile, jobs are claimed
+atomically, and `_review_browser_alive` already probed four ports. But `run_dashboard_apply`
+spawned `apply --url <one>` sequentially, **always on worker 0** — so there was one browser, and
+stopping at the first handover was the only correct thing it could do. See §Lessons 8's
+correction.
+
+The rule, restated per slot and pinned by `tests/test_copilot_queue.py`:
+
+- a slot **stops pulling** while it holds a filled form OR a login wall (`needs_human` is an open
+  browser too — a captcha or a half-finished registration the operator is standing in);
+- a slot whose job **applied or failed holds nothing**, so it takes the next one. The first
+  version capped at one job per slot and silently regressed the auto-apply path from ten
+  sequential to three; a test with seven jobs against two slots is what catches that;
+- a slot with a **live review from an earlier run is routed around**, never reused;
+- only a **full house** refuses to start.
+
+`--worker-id` on the CLI is what makes it work: N single-worker processes on N distinct slots.
+`tests/test_apply_worker_slots.py` proves the id reaches a different port, a different profile
+and `worker_loop` itself — the dashboard's own tests fake `subprocess.run`, so a flag that were
+accepted and dropped would leave every application on port 9222 with all of them green
+(§Lessons 39).
+
+**Clamped to [1, 6], and the cap is about the human.** Past a handful, filled forms get closed or
+forgotten before anyone reaches them, which is §Lessons 8's loss in a slower shape. `1` restores
+the old behaviour exactly and a test pins it. A malformed value reads as 3, never 0 or unlimited
+(§Lessons 50).
+
+**A worker profile was 7.6 GB, and 4.4 GB of it was Chrome's on-device ML.**
+`OptGuideOnDeviceModel` (Gemini Nano, 4.0 GB), `SODALanguagePacks` (offline speech, 194 MB) and
+two classifier stores, cloned per worker so an agent can type into a text box. Excluded, so a
+slot costs ~3.2 GB. **Cookies still copy** — that is the only thing the clone was ever wanted
+for, and a test pins it alongside the credential exclusions §Security posture added.
+
+**The bug the tests caught:** the worker threads were using the request thread's sqlite
+connection. `get_connection()` is thread-local by design, so every application would have failed
+with a database error rather than a form.
+
+**Still sequential, and the next thing to look at:** prepare (enrich → score → tailor → cover →
+pdf). `queue_for_apply` requires `tailored_resume_path`, so nothing can be applied to until that
+pass finishes, and it is the LLM-heavy half.
+
 **The agent never submits. The operator always does.** Every path ends at `Mark submitted ✓`.
 
 | Ending | `apply_status` | Browser | Operator's move |
@@ -2916,15 +3008,16 @@ What is actually open now, ordered by leverage:
    the documented `identity_id` freeze **does not exist** — `domain/space.py:240` freezes
    `("id", "shape")` only, so a Space with 133 sent emails is repointable today with no error.
 
-10. **`context` is 61 commits ahead of `main`, pushed, and the working tree is CLEAN**
-    (2026-08-12, `2f5467a`). The 2026-08-11/12 run added the sheet Space (SHEET-1/1b/2), the
+10. **`context` is 80 commits ahead of `main`, pushed, and the working tree is CLEAN**
+    (2026-08-13, `1612552`). The 2026-08-11/13 run added the sheet Space (SHEET-1/1b/2), the
     ghost state, edit-in-place (EDIT-1), the LinkedIn ladder removal, the jobs-table render
-    fixes and the HIST-1 spec — fifteen commits, each with its own tests and mutations.
+    fixes, the HIST-1 spec, the multi-address identity fix, thread-scoped replies and parallel
+    apply — each with its own tests and mutations.
     Merging to `main` is still deliberately deferred, and checking out `main` gets you a build
     without Spaces, the sheet import, the deck fix, the Oracle fix, any of the UX work or any
     outreach context.
     **The `~/.applypilot/` database is not in git either** — latest backup
-    `applypilot-20260811-pre-sheet-recover.db`, taken with the sqlite backup API because the WAL
+    `applypilot-20260812-pre-direction-fix.db`, taken with the sqlite backup API because the WAL
     routinely holds more than the main file (4.1 MB against 1.8 MB once).
 
 6. ~~**No per-company outreach cap.**~~ **CLOSED 2026-08-03** (`OUTREACH_COMPANY_CAP`, default
@@ -3060,7 +3153,7 @@ change still needs the `pip install` above — but that copy gives the file a ne
   and the restart ran anyway, because both were in one chained command (§Lessons 63). Use
   `pgrep -fl "applypilot apply"`; recover an orphaned lock with
   `release_stale_locks(max_age_minutes=0)` and ONLY after pgrep comes back empty.
-- **On branch `context`** (2026-08-12, `2f5467a`), **77 commits ahead of `main`**, pushed to
+- **On branch `context`** (2026-08-13, `1612552`), **80 commits ahead of `main`**, pushed to
   `origin/context`, nothing uncommitted. `main` last pushed at **`e1f0be6`**. Tags:
   `stable-arch2/3/5/6` · `stable-e2e-20260730` · `stable-crm-20260731`.
 - **A frontend-only edit needs the `pip install` but NOT a dashboard restart** — the copy gives

@@ -2240,18 +2240,22 @@ def _conversation_state(thread: list) -> dict | None:
         return None
 
 
-def _reply_target(thread: list) -> dict | None:
+def _reply_target(thread: list, key: str | None = None) -> dict | None:
     """The recipients a reply would use, for the composer. Never raises.
 
     Rendered on every 2.5s refresh, so a thread with an odd header must not be able to 500 the
     whole dashboard — the same reason `_parse_ts` exists (§Lessons 6).
+
+    `thread` here is every message stored for the contact, across every Gmail conversation. With
+    no `key` this defaults to the conversation holding the newest inbound message, which is the
+    one the composer sits under — see `cv.reply_target`.
     """
     if not thread:
         return None
     try:
         from applypilot.domain import conversations as cv
         from applypilot.networking.gmail_send import _our_addresses
-        return cv.reply_target(thread, _our_addresses())
+        return cv.reply_target(thread, _our_addresses(), thread=key)
     except Exception:  # noqa: BLE001
         log.debug("Could not compute a reply target", exc_info=True)
         return None
@@ -2939,6 +2943,12 @@ def _send_reply(data: dict) -> dict:
     stored thread, NOT by anything the browser posts. The composer shows them and lets the
     operator drop a Cc, but it cannot invent a recipient — an endpoint that accepted a `to`
     would be an open relay pointed at whatever the page happened to hold.
+
+    `thread` is the ONE thing the browser is trusted for, and it is a selector rather than a
+    recipient: which of the person's conversations the operator was looking at. The addresses are
+    still derived server-side from the stored rows of that thread, so this widens nothing — it
+    narrows. Without it the server answers the newest inbound across every thread, which on a
+    live card meant a reply to a different person on a conversation nobody had open.
     """
     from applypilot.database import log_event
     from applypilot.networking import gmail_send, store as _store
@@ -2962,7 +2972,8 @@ def _send_reply(data: dict) -> dict:
     cc = None if cc is None else [str(c) for c in cc if str(c).strip()]
 
     res = gmail_send.send_reply(cid, body, subject=(data.get("subject") or ""),
-                                cc=cc, conn=conn)
+                                cc=cc, conn=conn,
+                                thread=(data.get("thread") or "").strip() or None)
     if res.get("ok"):
         who = contact.get("full_name") or res.get("to", "")
         also = res.get("cc") or []

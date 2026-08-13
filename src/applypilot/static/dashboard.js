@@ -1784,10 +1784,34 @@ function conversationView(c) {
 //: on the fetch path, so both reach this code and reading one of them silently loses the date.
 function msgAt(m) { return String((m && (m.sent_at || m.at)) || ''); }
 
+//: 'Re: RE: Fwd: hi' -> 'hi'. Repeated prefixes accumulate on a long thread, and stripping only
+//: the first leaves 'fwd: hi' and 'hi' in two different groups.
+//: MIRRORS `domain/conversations.py:_strip_re` — see `threadKey`.
+function stripRe(subject) {
+  let s = String(subject || '').trim();
+  for (;;) {
+    const m = /^\s*(re|fwd|fw)\s*(\[\d+\])?\s*:\s*/i.exec(s);
+    if (!m) return s.trim();
+    s = s.slice(m[0].length);
+  }
+}
+
+//: Which Gmail conversation a stored row belongs to.
+//:
+//: **This rule exists twice, here and in `domain/conversations.py:thread_key`**, because the
+//: browser decides which thread the composer sits under and the server has to resolve the same
+//: name to work out who a reply reaches. `tests/test_thread_grouping_agrees.py` runs both over
+//: one fixture and fails if they disagree — two implementations of one rule is how one enforces
+//: it and the other quietly does not (§Lessons 49), and here the second one decides recipients.
+function threadKey(m) {
+  const tid = String((m && m.thread_id) || '').trim();
+  return tid || `subj:${stripRe((m && m.subject) || '').trim().toLowerCase()}`;
+}
+
 function groupThreads(msgs) {
   const by = new Map();
   for (const m of msgs || []) {
-    const id = m.thread_id || `subj:${(m.subject || '').replace(/^re:\s*/i, '').trim().toLowerCase()}`;
+    const id = threadKey(m);
     if (!by.has(id)) by.set(id, {id, subject: m.subject || '', msgs: []});
     by.get(id).msgs.push(m);
   }
@@ -1901,9 +1925,16 @@ function replyBox(c) {
       onclick="toggleCc('${esc(c.id)}', decodeURIComponent('${encodeURIComponent(x)}'))">${esc(x)} ${off ? '＋' : '✕'}</button>`;
   }).join('');
   const body = REPLY_DRAFT.get(c.id) || '';
-  return `<div class="reply-box" data-reply-for="${esc(c.id)}" data-cc="${esc(JSON.stringify(cc))}" data-to="${esc(t.to)}">
+  // WHICH CONVERSATION THIS ANSWERS, on the composer itself. A person with several Gmail threads
+  // gets one reply box, and until it said so there was nothing on screen distinguishing "answering
+  // the deal thread" from "answering a calendar invite from three weeks ago" — the two render
+  // identically and only one of them is what the operator meant (§Lessons 29).
+  const inThread = (t.thread_subject || '').trim();
+  const many = groupThreads(c.thread || []).length > 1;
+  return `<div class="reply-box" data-reply-for="${esc(c.id)}" data-cc="${esc(JSON.stringify(cc))}" data-to="${esc(t.to)}" data-thread="${esc(t.thread_key || '')}">
     <div class="reply-hdr">↩ Reply to <strong>${esc(t.to)}</strong>${
       cc.length ? ` · cc ${cc.length}` : (t.cc || []).length ? ' · <span class="cc-none">cc removed</span>' : ''}</div>
+    ${many && inThread ? `<div class="reply-in">on <strong>${esc(inThread)}</strong></div>` : ''}
     ${(t.cc || []).length ? `<div class="cc-row">${chips}</div>` : ''}
     ${lastReplyCard(c)}
     <div class="reply-subj">${esc(t.subject)}</div>
@@ -2073,7 +2104,11 @@ async function sendReply(cid, btn) {
   const also = cc.length ? `\n\nAlso going to: ${cc.join(', ')}` : '\n\nNobody is Cc\'d.';
   if (!confirm(`Send this reply to ${who}?${also}`)) return;
   btn.disabled = true; btn.textContent = 'Sending…';
-  const r = await post('/api/contact/reply', {contact_id: cid, body, cc});
+  // The thread is a SELECTOR, not a recipient — the server still derives every address from the
+  // stored rows of that conversation. Sending it is what stops a reply landing on whichever
+  // thread happened to hold the newest inbound message.
+  const r = await post('/api/contact/reply',
+    {contact_id: cid, body, cc, thread: card.dataset.thread || ''});
   setReplyMsg(cid, r.message || (r.ok ? 'Sent.' : 'Failed.'), !r.ok);
   if (r.ok) {
     // Clear ALL of it. REPLY_STYLE and REPLY_MSG were missed: the previous reply's vibe

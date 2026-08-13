@@ -864,11 +864,121 @@ def _audit_employers(apply_fix: bool = False) -> None:
                   "re-run Find contacts on any row marked [red]![/red].")
 
 
+def _audit_directions(apply_fix: bool = False) -> None:
+    """Every stored message, its `direction` against who actually sent it.
+
+    The operator has more than one address. Mail sent from the one on their RESUME, rather than
+    the account the app authenticates as, was stored as INBOUND — so the app believed a stranger
+    had written to it. Measured live: **30 rows across 3 contacts**, one of them a conversation of
+    19 messages in which 14 of the operator's own emails were filed as the other side's.
+
+    `direction` is not cosmetic. It decides who owes whom a reply, whether a follow-up ladder
+    halts on a "reply", whether the handoff banner fires, which temperature band the job reads,
+    and — through `reply_target` — who a reply is ADDRESSED to. One contact's composer offered to
+    reply to the operator's own address.
+
+    The sync path was fixed at the source (`cv.timeline` now takes every address), so this is a
+    one-off repair of rows written before that. It stays as a command rather than a typed-out
+    UPDATE because `MY_ADDRESSES` can grow: adding a fourth alias re-creates exactly this on
+    whatever was synced under the old set.
+    """
+    from applypilot.config import load_env
+    from applypilot.database import get_connection, init_db
+    from applypilot.domain import conversations as cv
+    from applypilot.networking.gmail_send import _our_addresses
+
+    # WITHOUT THIS THE AUDIT INVERTS. `_our_addresses()` reads the environment, and a bare CLI
+    # process has not loaded `~/.applypilot/.env` — so MY_ADDRESSES was invisible and the first
+    # live run proposed reclassifying 42 of the operator's own emails as INBOUND, the exact
+    # opposite of the repair. strict=False because a broken setting elsewhere must not stop a
+    # diagnostic from running.
+    load_env(strict=False)
+
+    init_db()
+    conn = get_connection()
+    mine = cv.me_set(_our_addresses())
+    if not mine:
+        console.print("[red]No addresses configured.[/red] Set GMAIL_ADDRESS, and MY_ADDRESSES "
+                      "for anything else you send from — with none, every message looks inbound.")
+        return
+    console.print("[dim]Ours: " + ", ".join(sorted(mine)) + "[/dim]")
+
+    rows = conn.execute(
+        "SELECT message_id, contact_id, from_addr, direction, subject FROM messages").fetchall()
+    wrong = []
+    for r in rows:
+        row = dict(zip(r.keys(), r))
+        want = "out" if cv.addr(row.get("from_addr")) in mine else "in"
+        if want != (row.get("direction") or ""):
+            wrong.append((row["message_id"], row["contact_id"], row.get("from_addr") or "",
+                          row.get("direction") or "", want))
+
+    if not wrong:
+        console.print(f"[green]All {len(rows)} stored messages carry the right direction.[/green]")
+        return
+
+    # THE TWO DIRECTIONS ARE NOT EQUALLY SAFE, and the first live run is why this split exists.
+    #
+    # `in -> out` means we recognised more of our own mail. That is monotone: adding an address
+    # can only ever move messages from "a stranger wrote this" to "we did", and it is the repair.
+    #
+    # `out -> in` means an address we have SENT AS is now being read as a stranger's. A row is
+    # only ever written `out` by our own send path or by `cv.timeline` under a then-correct
+    # config, so an address with outbound history IS ours — and this direction almost always
+    # means the address set SHRANK rather than that the data is wrong. Run without `.env` loaded,
+    # the audit proposed exactly this for 42 of the operator's own emails.
+    to_out = [w for w in wrong if w[4] == "out"]
+    to_in = [w for w in wrong if w[4] == "in"]
+
+    def _report(label, group):
+        counts: dict[str, int] = {}
+        for _mid, _cid, frm, _was, _want in group:
+            counts[frm] = counts.get(frm, 0) + 1
+        for frm, n in sorted(counts.items(), key=lambda kv: -kv[1]):
+            console.print(f"  {n:4}  {frm:38} {label}")
+
+    contacts = {c for _m, c, _f, _w, _t in wrong}
+    console.print(f"\n[yellow]{len(wrong)} of {len(rows)} messages are attributed to the wrong "
+                  f"side, across {len(contacts)} contact(s):[/yellow]\n")
+    if to_out:
+        _report("[red]in[/red] -> [green]out[/green]  (ours, filed as theirs)", to_out)
+    if to_in:
+        _report("[red]out[/red] -> [yellow]in[/yellow]  [dim]REFUSED, see below[/dim]", to_in)
+
+    if to_in:
+        senders = sorted({w[2] for w in to_in})
+        console.print(
+            f"\n[yellow]{len(to_in)} message(s) look like mail YOU sent from "
+            f"{', '.join(senders)}[/yellow], from an address that is not in your configuration. "
+            "Nothing will be flipped to inbound: an address this app has sent as is yours, and "
+            "calling its mail a reply would halt ladders and light the counter for conversations "
+            "nobody actually had.\n[dim]If that address IS yours, add it to MY_ADDRESSES in "
+            "~/.applypilot/.env and run this again. If it genuinely is not, fix those rows by "
+            "hand — this tool will not guess.[/dim]")
+
+    if not to_out:
+        return
+
+    if not apply_fix:
+        console.print(f"\n[dim]Re-run with --fix-directions to correct {len(to_out)} row(s). "
+                      "Nothing else is touched: replied_at, sequences and touches are left "
+                      "exactly as they are, because a ladder the operator has already stopped by "
+                      "hand is their decision and not a derived value.[/dim]")
+        return
+
+    conn.executemany("UPDATE messages SET direction = ? WHERE message_id = ? AND contact_id = ?",
+                     [(want, mid, cid) for mid, cid, _f, _w, want in to_out])
+    conn.commit()
+    console.print(f"\n[green]Corrected {len(to_out)} rows.[/green]")
+
+
 @app.command()
 def doctor(
     config: bool = typer.Option(False, "--config", help="Show every setting, its value, and its source."),
     employers: bool = typer.Option(False, "--employers", help="Audit the stored employer name on every job against what the posting says."),
     fix_employers: bool = typer.Option(False, "--fix-employers", help="With --employers: write the corrected names back to the jobs table."),
+    directions: bool = typer.Option(False, "--directions", help="Audit whether each stored message is attributed to the right side of the conversation."),
+    fix_directions: bool = typer.Option(False, "--fix-directions", help="With --directions: write the corrected directions back to the messages table."),
     write_env_example: bool = typer.Option(False, "--write-env-example", help="Regenerate .env.example from the schema."),
 ) -> None:
     """Check your setup and diagnose missing requirements."""
@@ -878,6 +988,10 @@ def doctor(
 
     if employers:
         _audit_employers(apply_fix=fix_employers)
+        return
+
+    if directions:
+        _audit_directions(apply_fix=fix_directions)
         return
 
     if write_env_example:

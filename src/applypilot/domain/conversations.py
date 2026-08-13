@@ -239,7 +239,55 @@ def _strip_re(subject: str) -> str:
         s = s[m.end():]
 
 
-def reply_target(messages: list[dict], me: str | list[str]) -> dict | None:
+def thread_key(msg: dict) -> str:
+    """Which Gmail conversation a stored row belongs to.
+
+    `thread_id` when we have one, and the NORMALISED SUBJECT when we do not — pasted messages and
+    anything synced before threading was stored carry no id, and bucketing them all under `""`
+    rebuilds the merge this exists to undo.
+
+    **The dashboard implements this same rule in `groupThreads()`**, because the browser decides
+    which thread the composer sits under and the server has to resolve the same name.
+    `test_thread_grouping_agrees.py` runs both over one fixture — two implementations of one rule
+    is how one enforces it and the other quietly does not (§Lessons 49).
+    """
+    tid = ((msg or {}).get("thread_id") or "").strip()
+    if tid:
+        return tid
+    return f"subj:{_strip_re((msg or {}).get('subject') or '').strip().lower()}"
+
+
+def group_threads(messages: list[dict]) -> list[dict]:
+    """Stored rows -> one entry per Gmail conversation, oldest thread LAST.
+
+    `thread_for_contact` returns every message stored for a person, merged and sorted by date. One
+    live contact had **18 messages across 7 threads** — a calendar invite, an introduction and two
+    deals — and reading them as one stream is what "this just looks like one long conversation
+    which is not" was.
+
+    Ordered by each thread's LAST message, so the live conversation is last: that is where the
+    composer is anchored, and it is the thread a reply almost always belongs to.
+    """
+    by: dict[str, dict] = {}
+    for m in messages or []:
+        if not isinstance(m, dict):
+            continue
+        key = thread_key(m)
+        by.setdefault(key, {"key": key, "msgs": []})["msgs"].append(m)
+    out = list(by.values())
+    for g in out:
+        g["msgs"].sort(key=lambda m: str(m.get("sent_at") or m.get("at") or ""))
+        # The SHORTEST subject in the thread: "Re: Re: Ormus <> AMSYS" is the same conversation as
+        # "Ormus <> AMSYS", and the separator should read as the latter.
+        subs = sorted((m.get("subject") or "" for m in g["msgs"] if (m.get("subject") or "")),
+                      key=len)
+        g["subject"] = subs[0] if subs else ""
+    out.sort(key=lambda g: str(g["msgs"][-1].get("sent_at") or g["msgs"][-1].get("at") or ""))
+    return out
+
+
+def reply_target(messages: list[dict], me: str | list[str],
+                 thread: str | None = None) -> dict | None:
     """Who a reply should go to, and who must stay Cc'd.
 
     **This is the whole point of CRM-4a.** Victoria answered by Cc'ing David — so a reply that
@@ -259,9 +307,38 @@ def reply_target(messages: list[dict], me: str | list[str]) -> dict | None:
     an address of ours left in the Cc means every reply copies us on our own mail.
 
     `messages` are STORED rows (`from_addr`, `to_addrs`/`cc_addrs` as raw fragment lists), i.e.
-    what `messages.thread_for_contact()` returns.
+    what `messages.thread_for_contact()` returns — which is EVERY thread with that person, merged.
+
+    **`thread` scopes this to one conversation, and everything below depends on it.** Measured on
+    the live database: all 7 contacts with more than one thread had a `References` header chaining
+    every message we hold for them — one at **87 messages across 25 unrelated threads**, which
+    tells the recipient's mail client that a calendar invite and two deals are the same
+    conversation. And on one contact the last inbound message overall sat on a thread the operator
+    was not looking at, so the composer offered to answer a different person entirely.
+
+    `thread` is a `thread_key()`, named by the browser from the group the composer sits under.
+    A key that matches nothing returns None rather than falling back to the merged list: the
+    fallback IS the bug, and a refusal the operator can see beats a silent misaddressing
+    (§Lessons 29 — the dangerous half of a feature is the half that looks identical when wrong).
+
+    With no `thread` the scope is the conversation holding the LAST INBOUND message. That keeps
+    the recipient every existing caller already got, and fixes the Cc and the References for all
+    of them — a CLI caller that knows nothing about threads still cannot splice two together.
     """
     mine = me_set(me)
+    groups = group_threads([m for m in (messages or []) if isinstance(m, dict)])
+    if thread is not None:
+        picked = next((g for g in groups if g["key"] == thread), None)
+        if picked is None:
+            return None
+        messages = picked["msgs"]
+    elif groups:
+        # The thread holding the newest inbound. `groups` is oldest-last, so scanning back finds
+        # the most recent one that anybody actually wrote to us on.
+        live = next((g for g in reversed(groups)
+                     if any((m.get("direction") or "") == "in"
+                            and not is_robot(addr(m.get("from_addr"))) for m in g["msgs"])), None)
+        messages = live["msgs"] if live else []
     # Robots are not correspondents. A bounce is an inbound message in our own thread, and
     # without this the newest "reply" is MAILER-DAEMON and the composer politely offers to
     # answer it. Offering to reply to a bounce notification is the point at which a CRM stops
@@ -288,8 +365,9 @@ def reply_target(messages: list[dict], me: str | list[str]) -> dict | None:
         seen.add(a)
         cc.append(one.strip())
 
-    # References chains the WHOLE thread, not just the message being answered — that is what
-    # keeps a mail client from splitting the conversation in two.
+    # References chains the whole of THIS thread, and nothing beyond it. `messages` is already
+    # scoped above; before it was, this line read every message stored for the contact and
+    # produced an 87-id header spanning 25 conversations on one live row.
     refs = [m["rfc_message_id"] for m in (messages or []) if (m.get("rfc_message_id") or "").strip()]
     subject = _strip_re(last.get("subject") or "")
     return {
@@ -300,6 +378,10 @@ def reply_target(messages: list[dict], me: str | list[str]) -> dict | None:
         "in_reply_to": (last.get("rfc_message_id") or "").strip(),
         "references": " ".join(refs),
         "thread_id": (last.get("thread_id") or "").strip(),
+        # Which conversation this answers, so the composer can NAME it and the send path can
+        # check that the operator was looking at the thread it is about to reply on.
+        "thread_key": thread_key(last),
+        "thread_subject": _strip_re(last.get("subject") or ""),
         "answering": last.get("from_name") or to_addr,
         "at": last.get("sent_at") or "",
     }

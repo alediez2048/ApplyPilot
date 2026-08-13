@@ -478,7 +478,7 @@ def send_followup(contact_id: str, dry_run: bool = False) -> dict:
 
 
 def send_reply(contact_id: str, body: str, subject: str = "", cc: list[str] | None = None,
-               dry_run: bool = False, conn=None) -> dict:
+               dry_run: bool = False, conn=None, thread: str | None = None) -> dict:
     """Answer a live conversation from the dashboard, in-thread, keeping the Cc.
 
     Separate from `send_followup` for a reason that is not stylistic: a follow-up is a ladder
@@ -505,9 +505,16 @@ def send_reply(contact_id: str, body: str, subject: str = "", cc: list[str] | No
     if not contact:
         return {"ok": False, "message": "contact not found"}
 
-    thread = msg_store.thread_for_contact(contact_id, conn)
-    target = cv.reply_target(thread, _our_addresses())
+    stored = msg_store.thread_for_contact(contact_id, conn)
+    # `stored` is EVERY thread with this person. `thread` names the one the operator was looking
+    # at, and a key that resolves to nothing REFUSES rather than falling back to the merged list —
+    # the fallback is precisely how a reply gets addressed to somebody on another conversation.
+    target = cv.reply_target(stored, _our_addresses(), thread=thread)
     if not target:
+        if thread:
+            return {"ok": False,
+                    "message": "that conversation has nothing to reply to — reopen the contact "
+                               "and answer from the thread you meant"}
         return {"ok": False,
                 "message": "no inbound message to reply to — use a follow-up instead"}
 
@@ -529,8 +536,14 @@ def send_reply(contact_id: str, body: str, subject: str = "", cc: list[str] | No
         if mode == "oauth":
             from applypilot.networking import gmail_oauth
             from_addr = _from_address() or gmail_oauth.connected_email()
+            # `contacts.thread_id` is the FIRST-CONTACT thread, and it is only a sane fallback
+            # when nobody named a thread. Once one is named, falling back to a different
+            # conversation is the bug this parameter exists to close — References and
+            # In-Reply-To already carry the scoped thread, so Gmail threads it correctly with
+            # no threadId at all.
+            into = target["thread_id"] or ("" if thread else (contact.get("thread_id") or ""))
             sent = gmail_oauth.send(to_addr, subject, body, from_addr, from_name,
-                                    thread_id=target["thread_id"] or contact.get("thread_id"),
+                                    thread_id=into,
                                     in_reply_to=target["in_reply_to"] or None,
                                     cc=cc_list, references=target["references"] or None)
             sent["from_addr"] = from_addr
@@ -539,8 +552,12 @@ def send_reply(contact_id: str, body: str, subject: str = "", cc: list[str] | No
             mid = make_msgid(domain=(addr.split("@")[-1] if "@" in addr else None))
             _smtp_send(to_addr, subject, body, mid, in_reply_to=target["in_reply_to"] or None,
                        cc=cc_list, references=target["references"] or None)
+            # Store it under the thread we answered, not the contact's original one. Filing our
+            # own reply under a different conversation re-merges the two in `group_threads` —
+            # the separator would show the answer under a thread it was never part of.
             sent = {"id": mid, "rfc_message_id": mid,
-                    "thread_id": contact.get("thread_id") or "", "from_addr": addr}
+                    "thread_id": target["thread_id"] or contact.get("thread_id") or "",
+                    "from_addr": addr}
     except Exception as e:  # noqa: BLE001
         log.warning("Reply to %s failed: %s", to_addr, e)
         return {"ok": False, "message": f"reply failed: {e}"}

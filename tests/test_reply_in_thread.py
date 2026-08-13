@@ -328,3 +328,184 @@ def test_a_reply_target_never_500s_the_dashboard(db):
     assert web_dashboard._reply_target([]) is None
     assert web_dashboard._reply_target([{"direction": "in"}]) is None
     assert web_dashboard._reply_target(["not a dict"]) is None
+
+
+# ── the thread a reply lands on (2026-08-12) ─────────────────────────────────────────────
+
+#: A SECOND conversation with the same person. Older than the Writer thread, and answered by
+#: somebody else — which is what makes it dangerous: both threads render the same composer.
+OTHER_THREAD = [
+    dict(_msg("out", ME, ["Victoria Shearer <victoria.shearer@writer.com>"], rfc="<x@us>",
+              subject="Invoice", at="2026-07-30T09:00:00+00:00"), thread_id="t2"),
+    dict(_msg("in", "accounts@writer.com", [ME], rfc="<y@writer>", subject="Re: Invoice",
+              name="Accounts", at="2026-07-31T09:00:00+00:00"), thread_id="t2"),
+]
+
+
+def _two_threads(db, monkeypatch):
+    """One contact, two Gmail conversations, and a fake transport that records the send."""
+    from applypilot.networking import gmail_oauth, gmail_send
+    seen = {}
+
+    def fake_send(to_addr, subject, body, from_addr, from_name="", **kw):
+        seen.update(kw, to=to_addr, subject=subject)
+        return {"id": "sent9", "thread_id": kw.get("thread_id") or "", "rfc_message_id": "<n@us>"}
+
+    monkeypatch.setattr(gmail_send, "transport", lambda: "oauth")
+    monkeypatch.setattr(gmail_send, "_our_addresses", lambda: [ME])
+    monkeypatch.setattr(gmail_oauth, "send", fake_send)
+    monkeypatch.setattr(gmail_oauth, "connected_email", lambda: ME)
+
+    cid = store.upsert_contact({"job_url": "http://j/1", "full_name": "Victoria",
+                                "email": "victoria.shearer@writer.com",
+                                "sent_message_id": "m1", "thread_id": "t1"}, db)
+    rows = [dict(m, message_id=f"m{i}", contact_id=cid, job_url="http://j/1")
+            for i, m in enumerate(WRITER_THREAD + OTHER_THREAD)]
+    msg_store.upsert_messages(rows, db)
+    return cid, seen
+
+
+def test_a_reply_goes_to_the_thread_the_operator_had_open(db, monkeypatch):
+    """The whole fix. Both conversations are stored against one contact; without a thread the
+    send answers whichever holds the newest inbound, which here is Accounts."""
+    from applypilot.networking import gmail_send
+    cid, seen = _two_threads(db, monkeypatch)
+
+    assert gmail_send.send_reply(cid, "about the role", conn=db, thread="t1")["ok"] is True
+    assert seen["to"] == "victoria.shearer@writer.com"
+    assert seen["thread_id"] == "t1"
+
+
+def test_the_references_header_does_not_span_both_conversations(db, monkeypatch):
+    """Measured on the live database, every multi-thread contact had this: one at 87 message ids
+    across 25 unrelated threads. A mail client reads that as one conversation."""
+    from applypilot.networking import gmail_send
+    cid, seen = _two_threads(db, monkeypatch)
+
+    gmail_send.send_reply(cid, "about the role", conn=db, thread="t1")
+    assert seen["references"] == "<a@us> <b@writer>"
+    assert "<y@writer>" not in seen["references"], "the invoice thread leaked into the reply"
+
+
+def test_naming_the_other_thread_reaches_the_other_person(db, monkeypatch):
+    """The negative case: without it the test above passes on a function that ignores `thread`
+    and always answers the first conversation."""
+    from applypilot.networking import gmail_send
+    cid, seen = _two_threads(db, monkeypatch)
+
+    gmail_send.send_reply(cid, "about the invoice", conn=db, thread="t2")
+    assert seen["to"] == "accounts@writer.com"
+    assert seen["references"] == "<x@us> <y@writer>"
+
+
+def test_an_unknown_thread_is_REFUSED_and_sends_nothing(db, monkeypatch):
+    """Falling back to the merged list is the bug. A stale page naming a thread that no longer
+    exists must not send to whoever happens to be newest."""
+    from applypilot.networking import gmail_send
+    cid, seen = _two_threads(db, monkeypatch)
+
+    res = gmail_send.send_reply(cid, "hello", conn=db, thread="gone")
+    assert res["ok"] is False
+    assert not seen, "a refused reply still reached the transport"
+    assert "thread" in res["message"], f"the refusal does not say what went wrong: {res}"
+
+
+def test_with_no_thread_named_the_old_behaviour_survives(db, monkeypatch):
+    """The CLI and any older caller pass nothing, and must still send — to one conversation."""
+    from applypilot.networking import gmail_send
+    cid, seen = _two_threads(db, monkeypatch)
+
+    assert gmail_send.send_reply(cid, "hi", conn=db)["ok"] is True
+    assert seen["to"] == "accounts@writer.com"      # the newest inbound
+    assert seen["references"] == "<x@us> <y@writer>"           # and only that thread
+
+
+def test_the_endpoint_passes_the_thread_through(db, monkeypatch):
+    """A parameter the handler accepts and drops is §Lessons 39 — and here it silently restores
+    the misaddressing while every unit test of the layer below still passes."""
+    from applypilot import web_dashboard
+    from applypilot.networking import gmail_send
+    cid, seen = _two_threads(db, monkeypatch)
+    monkeypatch.setattr(web_dashboard, "get_connection", lambda *a, **k: db)
+
+    assert web_dashboard._send_reply({"contact_id": cid, "body": "hi", "thread": "t1"})["ok"]
+    assert seen["to"] == "victoria.shearer@writer.com"
+    assert gmail_send is not None
+
+
+def test_the_composer_is_told_which_conversation_it_answers(db, monkeypatch):
+    """The operator has to be able to SEE which thread the box is pointed at — the two render
+    identically and only one of them is what they meant (§Lessons 29)."""
+    from applypilot import web_dashboard
+    cid, _ = _two_threads(db, monkeypatch)
+    monkeypatch.setattr(web_dashboard, "_our_addresses", lambda: [ME], raising=False)
+
+    t = web_dashboard._reply_target(msg_store.thread_for_contact(cid, db), key="t1")
+    assert t["thread_key"] == "t1"
+    assert t["thread_subject"] == "Applied AI Engineer"
+    assert t["to_addr"] == "victoria.shearer@writer.com"
+
+
+def test_a_named_thread_never_falls_back_to_the_contacts_own(db, monkeypatch):
+    """`contacts.thread_id` is the FIRST-CONTACT conversation. It is a sane default only when
+    nobody named a thread — once one is named, sending into a different one is the exact bug
+    the parameter exists to close.
+
+    The case is a thread with no Gmail `threadId` of its own: pasted messages and anything synced
+    before threading was stored have none. References and In-Reply-To still carry the right
+    conversation, so Gmail threads it correctly with no threadId at all.
+    """
+    from applypilot.networking import gmail_oauth, gmail_send
+    seen = {}
+
+    def fake_send(to_addr, subject, body, from_addr, from_name="", **kw):
+        seen.update(kw, to=to_addr)
+        return {"id": "s1", "thread_id": kw.get("thread_id") or "", "rfc_message_id": "<n@us>"}
+
+    monkeypatch.setattr(gmail_send, "transport", lambda: "oauth")
+    monkeypatch.setattr(gmail_send, "_our_addresses", lambda: [ME])
+    monkeypatch.setattr(gmail_oauth, "send", fake_send)
+    monkeypatch.setattr(gmail_oauth, "connected_email", lambda: ME)
+
+    cid = store.upsert_contact({"job_url": "http://j/9", "full_name": "Kim",
+                                "email": "kim@co.test", "thread_id": "OLD"}, db)
+    # One conversation, no thread id anywhere on it.
+    msg_store.upsert_messages([
+        dict(_msg("in", "kim@co.test", [ME], subject="Invoice", rfc="<p@co>",
+                  at="2026-08-01T09:00:00+00:00", name="Kim"),
+             message_id="p1", contact_id=cid, job_url="http://j/9", thread_id=""),
+    ], db)
+
+    key = cv.thread_key(msg_store.thread_for_contact(cid, db)[0])
+    assert gmail_send.send_reply(cid, "here you go", conn=db, thread=key)["ok"] is True
+    assert seen["to"] == "kim@co.test"
+    assert seen["thread_id"] == "", \
+        "the reply was pushed into the contact's original Gmail thread, not the one named"
+    assert seen["in_reply_to"] == "<p@co>", "the reply lost its In-Reply-To and will not thread"
+
+
+def test_with_no_thread_named_the_contacts_own_is_still_the_fallback(db, monkeypatch):
+    """The negative case. Removing the fallback altogether would break every caller that passes
+    nothing — the assertion above must not be satisfiable by deleting it."""
+    from applypilot.networking import gmail_oauth, gmail_send
+    seen = {}
+
+    def fake_send(to_addr, subject, body, from_addr, from_name="", **kw):
+        seen.update(kw, to=to_addr)
+        return {"id": "s2", "thread_id": kw.get("thread_id") or "", "rfc_message_id": "<n2@us>"}
+
+    monkeypatch.setattr(gmail_send, "transport", lambda: "oauth")
+    monkeypatch.setattr(gmail_send, "_our_addresses", lambda: [ME])
+    monkeypatch.setattr(gmail_oauth, "send", fake_send)
+    monkeypatch.setattr(gmail_oauth, "connected_email", lambda: ME)
+
+    cid = store.upsert_contact({"job_url": "http://j/8", "full_name": "Kim",
+                                "email": "kim@co.test", "thread_id": "OLD"}, db)
+    msg_store.upsert_messages([
+        dict(_msg("in", "kim@co.test", [ME], subject="Invoice", rfc="<q@co>",
+                  at="2026-08-01T09:00:00+00:00", name="Kim"),
+             message_id="q1", contact_id=cid, job_url="http://j/8", thread_id=""),
+    ], db)
+
+    assert gmail_send.send_reply(cid, "here you go", conn=db)["ok"] is True
+    assert seen["thread_id"] == "OLD"

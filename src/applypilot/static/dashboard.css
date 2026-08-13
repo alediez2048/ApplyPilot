@@ -1187,6 +1187,10 @@
   .turn-them { color:var(--faint); font-weight:400; }
   .reply-box { border-top:1px solid var(--line); padding:10px 12px; background:var(--surface); border-radius:0 0 8px 8px; }
   .reply-hdr { font-size:12px; color:var(--soft); margin-bottom:6px; }
+  /* Which conversation the reply lands on. Only rendered when the person has more than one, so
+     it is silent in the ordinary case and speaks exactly when the answer is not obvious. */
+  .reply-in { font-size:11px; color:var(--faint); margin:-2px 0 6px; }
+  .reply-in strong { color:var(--soft); font-weight:600; }
   /* CRM-4b. Quoted, indented and visually secondary — it is THEIR words, and it should never
      be mistakable for something ApplyPilot wrote. */
   .said { border-left:3px solid var(--line); padding:6px 10px; margin:0 0 8px;

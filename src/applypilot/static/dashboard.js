@@ -4045,6 +4045,21 @@ function fuWhen(h) {
   if (h < 24) return `in ${h}h`;
   return `in ${Math.round(h / 24)}d`;
 }
+// Where the rest of the Space's follow-ups actually are, for a job that has none of them.
+// Returns '' when there is nothing elsewhere — a pointer that fires on every empty tab would
+// be noise, and the ordinary case is genuinely "nothing to do".
+function elsewhereDue(j) {
+  const others = (LAST_JOBS || []).filter(o => o.url !== j.url && !isClosed(o) && !o.interview_at
+                                               && dueByChannel(o).total > 0);
+  if (!others.length) return '';
+  const n = others.reduce((a, o) => a + dueByChannel(o).total, 0);
+  const first = others[0];
+  const what = `${n} due on ${others.length} other application${others.length === 1 ? '' : 's'}`;
+  const name = esc((first.title || first.company || 'the first one').slice(0, 34));
+  return ` <span class="fu-elsewhere">${what} — <button class="linklike"`
+    + ` onclick="gotoTodo(${tagArg(first.url)}, 'followups')">go to ${name} ↗</button></span>`;
+}
+
 function followupBody(j, f) {
   const byId = {}; (j.contacts || []).forEach(c => byId[c.id] = c);
   let out = `<div class="fu-sched">Sequence: ${f.schedule.map((h,i)=>`touch ${i+1} at ${fuWhen(h).replace('in ','')}`).join(' · ')}</div>`;
@@ -4052,7 +4067,13 @@ function followupBody(j, f) {
   if (f.due.length) {
     out += f.due.map(d => followupCard(byId[d.id], d, f.total_touches)).join('');
   } else {
-    out += `<div class="fu-empty">Nothing due right now.</div>`;
+    // "Nothing due right now" is true of THIS job and useless next to a counter reporting the
+    // whole Space. Measured live: 19 follow-ups due across 6 jobs, and **24 jobs showing an
+    // empty Follow-ups tab** — so four times out of five, opening the tab the badge sent you
+    // looking for lands somewhere with nothing in it and no way to tell where the work is.
+    // Reported as the follow-ups feature not working end to end; both numbers were right and
+    // neither pointed at the other.
+    out += `<div class="fu-empty">Nothing due right now.${elsewhereDue(j)}</div>`;
   }
   const rest = [];
   f.waiting.forEach(w => rest.push(`${esc(w.full_name)} — touch ${w.touch} ${fuWhen(w.due_in_h)}`));

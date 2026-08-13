@@ -1381,3 +1381,7 @@
 @media (prefers-color-scheme: dark) {
   .borrowed { border-color:#7a5c1e; background:#2a2314; }
 }
+
+/* Where the Space's follow-ups actually are, on a job that has none. The counter is global and
+   this tab is per-job; without it, four empty tabs out of five and nothing pointing anywhere. */
+.fu-elsewhere { color:var(--soft); }

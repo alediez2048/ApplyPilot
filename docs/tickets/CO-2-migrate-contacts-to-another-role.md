@@ -1,6 +1,12 @@
 # CO-2 — Move contacts from a dead role to a live one
 
-**Size:** M · **Depends on:** nothing · **Status:** SCOPED, not built
+**Size:** M · **Depends on:** nothing · **Status:** **BUILT 2026-08-13** (phases 1–3)
+
+> **Two decisions below did not survive contact with the code. Both are corrected in
+> §What changed when it was built, at the end — read that before trusting the tables here.**
+> The short version: "ladders reset, the sequence is closed on arrival" does not work (a closed
+> sequence still reads `finished` when reopened, because the COUNT is the blocker), and clearing
+> `submitted_at` would have disarmed two things nobody was looking at.
 
 Asked for as: *"The startup lead role was canceled… I already have a full list of contacts that
 I can continue reaching out to and would like to migrate over to a brand-new job application…
@@ -131,3 +137,82 @@ because the move is one transaction in one function.
 
 **Is one target enough?** The Google case has exactly one live role, so the first cut may pick
 it automatically and say so. Two would need the dialog to choose.
+
+*Answered in the build:* preselected AND named. Showing it costs one line; moving eleven people
+on an unstated assumption about which role was meant costs the move.
+
+---
+
+## What changed when it was built (2026-08-13)
+
+Three of this ticket's decisions were wrong in a way only the code shows, and the third is the
+one worth remembering.
+
+### 1. "The sequence is closed on arrival" does not reset a ladder — it hides that it can't
+
+`ladder_states` counts touches with `status='sent'` and `touch_state` compares that count to
+`len(schedule)`. The email schedule has three entries, so three sent touches carried onto a new
+role make the channel read **`finished`** the moment they land, forever. Marking the sequence
+`stopped` changes the WORD on the card and nothing else: reopening it still reads `finished`,
+because the count is the blocker. So the six emailed-no-reply contacts — the exact group this
+feature exists for — would have arrived at the live role permanently unfollowable.
+
+They cannot be dropped either: `touches`/`sequences` have no `job_url`, so a contact re-keyed
+without them leaves an orphaned ladder (which `all_sent_touches` still counts for CRM-2, and
+which `emails_sent_to_company` silently stops counting for the per-company cap — §Lessons 77's
+shape, weakening a guard by deleting rows).
+
+**Built instead:** `touches.job_url` stamps each touch with the application it was part of, and
+the ladder counts only the current job's. Empty means "this contact's own job", so all 233 live
+rows are unchanged and there is no backfill. Two readers of one table now disagree on purpose:
+
+    sent_touches()   what have we ever said to this person?      ALL of it — the drafter
+                                                                 must not repeat itself
+    ladder_states()  how far through THIS role's plan are we?    only this job's
+
+### 2. Clearing `submitted_at` would have disarmed two things nobody was watching
+
+The decision table said `submitted_at` clears. It reads correctly on the new card and it also
+drops those sends out of the CRM-2 funnel **while their replies stay in it** (inflating the
+reply rate), and disarms `already_contacted_email`, the 30-day cross-job cooldown that CO-1
+notes is *"currently the only guard"* against emailing one person about a second role.
+
+**Built instead:** the move is NON-DESTRUCTIVE. `contacts.outreach_job_url` stamps which
+application the outreach state belongs to, and `outreach_is_for_this_job()` — ONE predicate,
+shared by the ladder and the dashboard payload — answers "has this person been contacted about
+THIS role". Nothing about a real send is destroyed. §Lessons 86: a guard that a legitimate write
+can switch off is the wrong guard. It also makes undo exact rather than approximate.
+
+Still destroyed, both recorded for undo: an unsent draft, and the emptier half of a collision.
+
+### 3. `repo/contacts.migrate()` was the wrong home
+
+`store.py` already IS the contacts repository and says so in a comment, added when the ARCH-4
+readers landed: *"two abstractions over one table is the failure mode the ticket explicitly
+warns about."* This is an OPERATION across six tables, so it is `networking/migrate.py`,
+allowlisted in the SQL-boundary test as data layer rather than as unmigrated scope.
+
+### What the live numbers said
+
+`plan()` against the real database reproduced this ticket's independently-measured figures
+exactly — 11 movable (1 replied · 6 emailed · 4 fresh), 5 excluded for no address, Patrick's
+collision at 9 messages against 0, 4 unsent drafts to clear, 0 refused.
+
+### Placement
+
+The button is at the TOP of the closed job's **People tab**, above the people it moves — not in
+the `⋯` row menu, which is for destructive actions and is where the interview button was buried
+and reported three times as doing nothing (§Lessons 43/89/97). The undo renders on the same
+card, including when the move took everyone and the tab is now empty.
+
+### Found by the tests, not by review
+
+* A mutation survived the first pass: blanking the ladder anchors is redundant for email
+  (`emailed` is already False for a moved contact) and **load-bearing for SMS**, whose readiness
+  reads neither — a moved contact with a phone would have had a text come due on arrival about
+  a role that no longer exists.
+* The move crashed on any database where `interactions` had never been created, which is every
+  database on which nobody has had a booking detected.
+* My own first handler test compared `"string"` to `"function"` (`typeof` applied twice) and was
+  deleted rather than fixed: `test_every_inline_handler_resolves_at_global_scope` already scans
+  every handler in the file and has a negative control proving it can fail.

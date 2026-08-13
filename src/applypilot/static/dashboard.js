@@ -1491,14 +1491,201 @@ function addContactForm(j) {
       </div>
     </div>`;
 }
+// ── CO-2: move contacts from a dead role to a live one ──────────────────────
+// State lives OUTSIDE the DOM, like PANEL_OPEN and CONV_EXPANDED: `#jobs` is replaced wholesale
+// every 2.5s, so anything held in the markup is destroyed mid-decision.
+const MIGRATE = new Map();          // job url -> {open, targets, dst, plan, picked, busy, err}
+let MIGRATE_UNDO = null;            // {token, moved, title} — one at a time, until the reload
+
+function migState(url) {
+  if (!MIGRATE.has(url)) MIGRATE.set(url, {open: false, targets: null, dst: '', plan: null,
+                                           picked: null, busy: false, err: ''});
+  return MIGRATE.get(url);
+}
+
+async function toggleMigrate(url) {
+  const s = migState(url);
+  s.open = !s.open;
+  if (!s.open) { refresh(); return; }
+  s.busy = true; s.err = ''; refresh();
+  const r = await post('/api/contacts/migrate-plan', {src: url});
+  s.targets = r.targets || [];
+  s.err = r.error || '';
+  // Preselected when there is exactly one — and still NAMED in the dialog. The ticket left this
+  // open ("is one target enough?"); showing it costs a line and moving eleven people on an
+  // unstated assumption costs the move.
+  if (s.targets.length === 1) { await pickMigrateTarget(url, s.targets[0].url); return; }
+  s.busy = false; refresh();
+}
+
+async function pickMigrateTarget(url, dst) {
+  const s = migState(url);
+  s.dst = dst; s.busy = true; s.err = ''; s.plan = null; refresh();
+  const r = await post('/api/contacts/migrate-plan', {src: url, dst});
+  s.targets = r.targets || s.targets;
+  s.plan = r.plan || null;
+  s.err = (r.plan && !r.plan.ok ? r.plan.error : '') || r.error || '';
+  // Everyone movable starts ticked. The excluded are not in this set and cannot be added to it
+  // from here — the server re-derives the plan and refuses them anyway.
+  s.picked = new Set(((s.plan && s.plan.movable) || []).map(p => p.id));
+  s.busy = false; refresh();
+}
+
+function toggleMigratePick(url, id) {
+  const s = migState(url);
+  if (!s.picked) return;
+  if (s.picked.has(id)) s.picked.delete(id); else s.picked.add(id);
+  refresh();
+}
+
+async function runMigrate(url, btn) {
+  const s = migState(url);
+  const ids = [...(s.picked || [])];
+  if (!ids.length) return;
+  const p = s.plan || {};
+  const names = (p.movable || []).filter(m => s.picked.has(m.id)).map(m => m.full_name || m.email);
+  // Named, not counted. Scoped to one move the confirm can list who it reaches, which is the
+  // difference between a decision and an "are you sure?" (§Lessons 29).
+  if (!confirm(`Move ${ids.length} ${ids.length === 1 ? 'person' : 'people'} to `
+      + `“${p.dst_title || 'the other application'}”?\n\n${names.join(', ')}`
+      + (p.drafts_cleared ? `\n\n${p.drafts_cleared} unsent draft`
+          + `${p.drafts_cleared > 1 ? 's' : ''} naming the old role will be cleared.` : ''))) return;
+  s.busy = true; btn.disabled = true; refresh();
+  const r = await post('/api/contacts/migrate', {src: url, dst: s.dst, ids});
+  s.busy = false;
+  if (!r.ok) { s.err = r.error || 'Could not move them.'; refresh(); return; }
+  MIGRATE.delete(url);
+  // Keyed to the SOURCE job, so the undo renders where the operator is standing rather than in
+  // a global console two screens away — the placement mistake the bulk follow-up bar made
+  // (§Lessons 89).
+  MIGRATE_UNDO = {token: r.undo, moved: r.moved, title: r.dst_title || '',
+                  backup: r.backup || '', src: url};
+  refresh();
+}
+
+async function undoMigrate(btn) {
+  if (!MIGRATE_UNDO) return;
+  btn.disabled = true; btn.textContent = 'Undoing…';
+  const r = await post('/api/contacts/migrate-undo', {token: MIGRATE_UNDO.token});
+  if (!r.ok) { btn.disabled = false; btn.textContent = '↩ Undo'; alert(r.error || 'Could not undo.'); return; }
+  MIGRATE_UNDO = null;
+  refresh();
+}
+function dismissMigrateUndo() { MIGRATE_UNDO = null; refresh(); }
+
+function migrateBar(j) {
+  // Only where the situation exists: a role that has CLOSED, with people on it. A live job's
+  // contacts are not stranded and the button would be noise on every card.
+  if (!isClosed(j) || !(j.contacts || []).length) return '';
+  const u = `decodeURIComponent('${encodeURIComponent(j.url)}')`;
+  const s = migState(j.url);
+  if (!s.open) {
+    return `<div class="mig-row"><button class="ghost mig-open" onclick="toggleMigrate(${u})"
+        title="This role is closed. Move the people you were already talking to onto a live application at the same company."
+        >→ Move contacts to another application</button></div>`;
+  }
+  if (s.busy && !s.plan) return `<div class="mig"><div class="mig-head">Working…</div></div>`;
+
+  const targets = s.targets || [];
+  let body = '';
+  if (!targets.length) {
+    // Not a failure and not silence: it says which condition is unmet, because "same employer,
+    // still open" is a rule the operator can act on.
+    body = `<div class="mig-none">No other open application at ${esc(j.contact_company || j.company || 'this employer')}.
+      Import the live posting first, then come back — contacts only move between roles at the same company.</div>`;
+  } else {
+    const pick = targets.length === 1
+      ? `<div class="mig-to">To <strong>${esc(targets[0].title || targets[0].url)}</strong></div>`
+      : `<div class="mig-to">To <select onchange="pickMigrateTarget(${u}, this.value)">
+           <option value="">Choose an application…</option>
+           ${targets.map(t => `<option value="${esc(t.url)}" ${t.url === s.dst ? 'selected' : ''}>${esc(t.title || t.url)}</option>`).join('')}
+         </select></div>`;
+    body = pick + migratePlanBody(j, s, u);
+  }
+  return `<div class="mig">
+      <div class="mig-head">Move contacts off “${esc(j.title || 'this role')}”
+        <button class="ghost mig-x" onclick="toggleMigrate(${u})" title="Close">✕</button></div>
+      ${body}
+      ${s.err ? `<div class="mig-err">${esc(s.err)}</div>` : ''}
+    </div>`;
+}
+
+const MIG_GROUPS = [
+  ['replied', 'in conversation', 'they answered — the conversation continues on the new card'],
+  ['emailed', 'emailed, no reply', 'their ladder resets, so the new role is a genuine first contact'],
+  ['fresh',   'never contacted',  'no outreach yet'],
+];
+
+function migratePlanBody(j, s, u) {
+  const p = s.plan;
+  if (!p || !p.ok) return '';
+  const picked = s.picked || new Set();
+  let out = '';
+  for (const [key, label, why] of MIG_GROUPS) {
+    const rows = p.groups[key] || [];
+    if (!rows.length) continue;
+    out += `<div class="mig-g"><div class="mig-g-h">${rows.length} ${esc(label)}
+        <span class="mig-g-why">${esc(why)}</span></div>`
+      + rows.map(r => `<label class="mig-p"><input type="checkbox" ${picked.has(r.id) ? 'checked' : ''}
+          onchange="toggleMigratePick(${u}, '${esc(r.id)}')">
+          <span class="mig-n">${esc(r.full_name || r.email)}</span>
+          <span class="mig-t">${esc(r.title || '')}</span>
+          ${r.messages ? `<span class="mig-m">${r.messages} message${r.messages > 1 ? 's' : ''}</span>` : ''}
+        </label>`).join('') + `</div>`;
+  }
+  // Excluded people are SHOWN with the reason, never hidden. Live this is 5 of 16, and silently
+  // dropping five of sixteen reads as a bug (§Lessons 98: a partial result that renders as a
+  // complete one is harder to see than a zero).
+  if ((p.excluded || []).length) {
+    out += `<div class="mig-g out"><div class="mig-g-h">${p.excluded.length} not moving</div>`
+      + p.excluded.map(r => `<div class="mig-p out"><span class="mig-n">${esc(r.full_name || r.email || '(no name)')}</span>
+          <span class="mig-t">${esc(r.why)}</span></div>`).join('') + `</div>`;
+  }
+  const warn = [];
+  for (const c of (p.collisions || [])) {
+    warn.push(`${c.full_name} is on both applications. The row with the conversation is kept`
+      + `${c.keeps === 'moved' ? '' : ' — the one already there'}.`);
+  }
+  for (const r of (p.refused || [])) warn.push(r.why);
+  if (p.drafts_cleared) {
+    warn.push(`${p.drafts_cleared} unsent draft${p.drafts_cleared > 1 ? 's' : ''} name the old `
+      + `role and will be cleared. Nothing already sent is touched.`);
+  }
+  const n = picked.size;
+  return out
+    + warn.map(w => `<div class="mig-warn">⚠ ${esc(w)}</div>`).join('')
+    + `<div class="mig-actions">
+        <button class="primary" onclick="runMigrate(${u}, this)" ${n ? '' : 'disabled'}>
+          ${n ? `Move ${n} ${n === 1 ? 'person' : 'people'}` : 'Nobody selected'}</button>
+        <span class="mig-hint">Reversible — an ↩ Undo appears after the move, and the database is
+          backed up first.</span>
+      </div>`;
+}
+
+function migrateUndoBar(j) {
+  if (!MIGRATE_UNDO || MIGRATE_UNDO.src !== j.url) return '';
+  const m = MIGRATE_UNDO;
+  return `<div class="mig-undo">✓ Moved ${m.moved} ${m.moved === 1 ? 'person' : 'people'}
+      ${m.title ? `to “${esc(m.title)}”` : ''}
+      <button class="ghost" onclick="undoMigrate(this)">↩ Undo</button>
+      <button class="ghost mig-x" onclick="dismissMigrateUndo()" title="Dismiss">✕</button>
+      ${m.backup ? `<span class="mig-hint">backup: ${esc(m.backup)}</span>` : ''}</div>`;
+}
+
 function peopleList(j) {
   const cs = j.contacts || [];
-  let intro = introBanner(j);
+  let intro = introBanner(j) + migrateUndoBar(j);
   if (!cs.length) {
+    // The undo has to render here too: moving EVERYONE lands on this branch, which is exactly
+    // the moment the operator is most likely to want the move back.
     return intro + `<div class="pane-empty">No contacts yet. ${findContactsPrompt(j)}</div>`
          + addContactForm(j);
   }
-  intro += anotherRoundPrompt(j, cs) + addContactForm(j);
+  // CO-2 sits at the TOP of the closed job's People tab, above the people it moves. The row
+  // menu was the obvious home and is the wrong one: this is not destructive, and burying a
+  // control is how the interview button was reported as doing nothing (§Lessons 43). The test
+  // for placement is not "can it be reached" but "is it on the thing it acts on" (§Lessons 97).
+  intro += migrateBar(j) + anotherRoundPrompt(j, cs) + addContactForm(j);
   // 💡 outranks the hot/cold split and is pulled OUT of both groups rather than sorted to the
   // front of its own. Every other grouping here is derived — `hot` means "you already know
   // them", which the system worked out — and this is the one the operator DECIDED, so it wins.

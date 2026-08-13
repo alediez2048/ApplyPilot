@@ -192,6 +192,9 @@ def apply(src_url: str, dst_url: str, ids: list[str],
     if not chosen:
         return {"ok": False, "error": "nothing to move"}
 
+    # Undo lives in memory and dies with the process, so a bulk re-key of eleven people gets a
+    # file on disk as well. Cheap, and the one thing that survives a restart.
+    backup = _backup()
     space_id = _dst_space(dst_url, conn)
     record = {"src": src_url, "dst": dst_url, "at": _now(), "moves": [], "deleted": []}
     try:
@@ -204,9 +207,35 @@ def apply(src_url: str, dst_url: str, ids: list[str],
 
     token = uuid4().hex[:12]
     _UNDO[token] = record
-    return {"ok": True, "error": "", "moved": len(chosen), "undo": token,
+    return {"ok": True, "error": "", "moved": len(chosen), "undo": token, "backup": backup,
             "employer": preview["employer"], "dst_title": preview["dst_title"],
             "excluded": preview["excluded"], "refused": preview["refused"]}
+
+
+def _backup() -> str:
+    """sqlite's own backup API, never `cp` — a file copy misses everything still in the -wal,
+    which on this machine has held 4.1 MB against a 1.8 MB main file. That is exactly the
+    follow-up state this operation exists to protect. Returns '' if it could not be written,
+    because failing to back up is not a reason to refuse a reversible move.
+    """
+    from pathlib import Path
+
+    from applypilot import config
+    try:
+        src = Path(config.DB_PATH)
+        dest_dir = src.parent / "backups"
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        dest = dest_dir / f"applypilot-{stamp}-pre-migrate.db"
+        con, out = sqlite3.connect(str(src)), sqlite3.connect(str(dest))
+        try:
+            con.backup(out)
+        finally:
+            out.close()
+            con.close()
+        return dest.name
+    except Exception:
+        return ""
 
 
 def _dst_space(dst_url: str, conn: sqlite3.Connection) -> str:
@@ -267,8 +296,16 @@ def _move_one(cid: str, src_url: str, dst_url: str, space_id: str,
     _move_touches(cid, new_id, src_url, conn)
     conn.execute("UPDATE sequences SET contact_id = ? WHERE contact_id = ?", (new_id, cid))
     _move_interactions(cid, new_id, dst_url, conn)
-    conn.execute("UPDATE transcript_contacts SET contact_id = ? WHERE contact_id = ?",
-                 (new_id, cid))
+    # `transcript_contacts` is created by migration 004 and `interactions` lazily on first use,
+    # so on a database where nobody has ever had a booking detected or pasted a transcript the
+    # table genuinely is not there. Missing is a normal state, not an error — `delete_contact`
+    # takes the same care for the same reason. Caught NARROWLY: swallowing every exception here
+    # would hide a real failure in the middle of a transaction.
+    try:
+        conn.execute("UPDATE transcript_contacts SET contact_id = ? WHERE contact_id = ?",
+                     (new_id, cid))
+    except sqlite3.OperationalError:
+        pass
     return step
 
 
@@ -298,8 +335,11 @@ def _move_touches(cid: str, new_id: str, src_url: str, conn: sqlite3.Connection)
 def _move_interactions(cid: str, new_id: str, dst_url: str, conn: sqlite3.Connection) -> None:
     """Same recompute, same reason: the id is `sha256(contact|kind|at)` and `record()` upserts
     on it, so a stale id turns one re-detected booking into a second row."""
-    rows = conn.execute("SELECT id, kind, COALESCE(at,'') AS at FROM interactions "
-                        "WHERE contact_id = ?", (cid,)).fetchall()
+    try:
+        rows = conn.execute("SELECT id, kind, COALESCE(at,'') AS at FROM interactions "
+                            "WHERE contact_id = ?", (cid,)).fetchall()
+    except sqlite3.OperationalError:
+        return          # nothing has ever been recorded, so the table does not exist yet
     for r in rows:
         conn.execute(
             "UPDATE interactions SET id = ?, contact_id = ?, job_url = ? WHERE id = ?",
@@ -355,8 +395,11 @@ def undo(token: str, conn: sqlite3.Connection | None = None) -> dict:
             _unmove_touches(new, old, conn)
             conn.execute("UPDATE sequences SET contact_id = ? WHERE contact_id = ?", (old, new))
             _move_interactions(new, old, src, conn)
-            conn.execute("UPDATE transcript_contacts SET contact_id = ? WHERE contact_id = ?",
-                         (old, new))
+            try:
+                conn.execute("UPDATE transcript_contacts SET contact_id = ? "
+                             "WHERE contact_id = ?", (old, new))
+            except sqlite3.OperationalError:
+                pass
             if step.get("deleted"):
                 _restore(step["deleted"], conn)
         conn.commit()

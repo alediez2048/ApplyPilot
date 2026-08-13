@@ -317,6 +317,43 @@
   .addc-hint { font-size:11.5px; color:var(--faint); flex:1 1 220px; }
   .addc-err { color:var(--red); font-weight:600; }
 
+  /* CO-2 — moving contacts off a closed role. Built from the existing tokens rather than
+     hand-picked hex, which is what made the borrowed-conversation banner unreadable: it
+     hardcoded a cream background plus the stylesheet's ONLY dark-mode rule, so on a dark OS
+     the ground moved and the text did not (§Lessons 105). Nothing here names a colour that is
+     not already in the palette, so it adapts with the app or with nothing. */
+  .mig-row { margin:2px 0 12px; }
+  .mig-open { font-size:12.5px; }
+  .mig { background:var(--surface2); border:1px solid var(--line);
+      border-left:3px solid var(--yellow); border-radius:8px; padding:12px 14px; margin:2px 0 12px; }
+  .mig-head { display:flex; align-items:center; gap:8px; font-size:12.5px; font-weight:700;
+      color:var(--soft); margin-bottom:9px; }
+  .mig-x { margin-left:auto; font-size:12px; line-height:1; padding:2px 7px; }
+  .mig-to { font-size:12.5px; color:var(--soft); margin-bottom:10px; }
+  .mig-to select { font-size:12.5px; padding:5px 8px; border:1px solid var(--line2);
+      border-radius:6px; background:var(--surface); color:var(--text); max-width:100%; }
+  .mig-none { font-size:12.5px; color:var(--muted); line-height:1.5; }
+  .mig-g { margin-bottom:9px; }
+  .mig-g-h { font-size:11.5px; font-weight:700; text-transform:uppercase; letter-spacing:.4px;
+      color:var(--soft); padding-bottom:4px; border-bottom:1px solid var(--line2); margin-bottom:5px; }
+  .mig-g-why { text-transform:none; letter-spacing:0; font-weight:500; color:var(--faint); margin-left:8px; }
+  /* A grid rather than flex, and every cell is placed: an unplaced child lands on a row of its
+     own and renders the name underneath its own title (§Lessons 106). */
+  .mig-p { display:grid; grid-template-columns:auto minmax(0,1fr) minmax(0,1.2fr) auto;
+      align-items:center; gap:8px; padding:4px 2px; font-size:12.5px; cursor:pointer; }
+  .mig-p.out { grid-template-columns:minmax(0,1fr) minmax(0,2fr); cursor:default; opacity:.72; }
+  .mig-n { font-weight:600; color:var(--text); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .mig-t { color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .mig-m { color:var(--green); font-weight:600; font-size:11.5px; white-space:nowrap; }
+  .mig-warn { font-size:12px; color:var(--yellow); background:var(--yellow-soft);
+      border-radius:6px; padding:6px 9px; margin:6px 0; line-height:1.45; }
+  .mig-err { font-size:12px; color:var(--red); font-weight:600; margin-top:8px; }
+  .mig-actions { display:flex; align-items:center; gap:9px; flex-wrap:wrap; margin-top:10px; }
+  .mig-hint { font-size:11.5px; color:var(--faint); flex:1 1 220px; }
+  .mig-undo { display:flex; align-items:center; gap:9px; flex-wrap:wrap; font-size:12.5px;
+      color:var(--green); background:var(--green-soft); border:1px solid var(--line);
+      border-radius:8px; padding:8px 12px; margin:2px 0 12px; font-weight:600; }
+
   .noticed { margin-top:10px; padding-top:10px; border-top:1px dashed var(--line2); }
   .noticed textarea { width:100%; font-size:12px; padding:5px 6px; border:1px solid #d7e2ec;
     border-radius:5px; font-family:inherit; resize:vertical; }

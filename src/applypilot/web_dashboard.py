@@ -2272,6 +2272,52 @@ def _pending_introductions(job_threads: dict, raw_contacts: list) -> list[dict]:
         return []
 
 
+def _migrate_plan(data: dict) -> dict:
+    """CO-2's preview. Read-only, and re-derived on every change of destination.
+
+    Returns the destinations too, which is why this is not on `/api/status`: `targets_for`
+    resolves an employer per job in the Space, and that belongs nowhere near a 2.5s refresh with
+    six statements of headroom (§Lessons 26 — the budget counts SQL and nothing else).
+
+    With no destination chosen it answers with the target list alone. One target is PRESELECTED
+    by the browser and still named, never silently assumed: "move eleven people" is not an
+    action to perform on an inference about which role was meant.
+    """
+    from applypilot.networking import migrate as _migrate
+    conn = get_connection()
+    src = (data.get("src") or "").strip()
+    dst = (data.get("dst") or "").strip()
+    targets = _migrate.targets_for(src, conn)
+    if not dst:
+        return {"ok": bool(targets), "targets": targets, "plan": None,
+                "error": "" if targets else
+                         "no other open application at this employer to move them to"}
+    return {"ok": True, "targets": targets, "plan": _migrate.plan(src, dst, conn), "error": ""}
+
+
+def _migrate_contacts(data: dict) -> dict:
+    """Do the move, and log it on BOTH jobs.
+
+    Two `job_events` rows rather than one: the old card is where the operator will look for
+    "where did those people go" and the new one is where they will ask "why is there a
+    conversation here I did not start".
+    """
+    from applypilot.database import log_event
+    from applypilot.networking import migrate as _migrate
+    conn = get_connection()
+    src = (data.get("src") or "").strip()
+    dst = (data.get("dst") or "").strip()
+    ids = [str(i) for i in (data.get("ids") or [])]
+    got = _migrate.apply(src, dst, ids, conn)
+    if got.get("ok"):
+        note = (f"{got['moved']} contact(s) moved to “{got.get('dst_title') or dst}”"
+                + (f" · backup {got['backup']}" if got.get("backup") else ""))
+        log_event(src, "network", "ok", note, conn)
+        log_event(dst, "network", "ok",
+                  f"{got['moved']} contact(s) moved in from another application", conn)
+    return got
+
+
 def _add_introduced_contact(data: dict) -> dict:
     """Add a contact by hand: someone introduced on a thread, or someone you were simply told
     to talk to.
@@ -4288,6 +4334,18 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/contact/add-introduced":
                 _json_response(self, _add_introduced_contact(data))
+                return
+            # CO-2. Three doors rather than one, because the preview is read-only and must be
+            # cheap to ask for repeatedly while the operator changes the destination.
+            if path == "/api/contacts/migrate-plan":
+                _json_response(self, _migrate_plan(data))
+                return
+            if path == "/api/contacts/migrate":
+                _json_response(self, _migrate_contacts(data))
+                return
+            if path == "/api/contacts/migrate-undo":
+                from applypilot.networking import migrate as _migrate
+                _json_response(self, _migrate.undo(data.get("token", ""), get_connection()))
                 return
             if path == "/api/contact/delete":
                 _json_response(self, _delete_contact(data.get("contact_id", "")))

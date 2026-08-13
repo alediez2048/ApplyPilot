@@ -12,9 +12,9 @@ campaign happens to be a job search** — see `docs/crm-prd.md` for where that g
 - **Packaging:** Hatchling, `src/` layout, single package `applypilot`
 - **Entry point:** `applypilot = "applypilot.cli:app"` (Typer CLI)
 - **License:** AGPL-3.0-only · **Version:** 0.4.0 (`pyproject.toml`)
-- **Tests:** 2331 passing (`tests/`, 115 files) · ruff clean (line-length 120, py311) · ESLint clean
-- **Schema version:** 4 (`applypilot migrate --status`) · **Settings:** 48 declared in `settings.py`
-- **Branch:** everything current lives on `context`, **70 commits ahead of `main`**, pushed to `origin/context`, working tree CLEAN as of 2026-08-12 (§Dev workflow). `main` has
+- **Tests:** 2384 passing (`tests/`, 117 files) · ruff clean (line-length 120, py311) · ESLint clean
+- **Schema version:** 4 (`applypilot migrate --status`) · **Settings:** 50 declared in `settings.py`
+- **Branch:** everything current lives on `context`, **77 commits ahead of `main`**, pushed to `origin/context`, working tree CLEAN as of 2026-08-12 (§Dev workflow). `main` has
   none of it. Check `git log --oneline -1` before believing anything here (§Dev workflow).
 
 ## Quick orientation
@@ -416,6 +416,26 @@ action that does not exist, and it pushed the only actionable thing off screen. 
 is the single branch — timeline first, composer anchored under it, the sent outreach as one entry
 in that timeline. §Lessons 31.
 
+**ONE SEPARATOR PER GMAIL THREAD** (2026-08-12). `thread_for_contact` returns every message
+stored for a person, merged and sorted by date — the name says thread and it returns all of them.
+One live contact had **18 messages across 7 threads** (a calendar invite, an introduction, two
+deals) rendered as a single continuous stream with four people interleaved, so it read as one
+exchange that kept changing subject. Reported as *"this just looks like one long conversation
+which is not"*.
+
+Grouped by `thread_id`, ordered by each thread's **LAST** message so the live conversation sits at
+the bottom beside the composer, and **only that one opens by default** — seven expanded threads is
+the wall this replaced. The subject shown is the SHORTEST in the thread (`Re: Re: Ormus <> AMSYS`
+is the same conversation as `Ormus <> AMSYS`); messages with no `thread_id` group by normalised
+subject rather than bucketing under `""`, which would rebuild the merge. `CONV_OPEN` and
+`CONV_SHUT` are two sets, not one, because the DEFAULT differs by thread.
+
+**Still open, and it is the dangerous half:** `reply_target` picks the last inbound across the
+MERGED list, so on the live card a reply to the contact is addressed to **a different person
+entirely**, on a thread the operator was not looking at. §Lessons 29 — the dangerous half of a feature is the half that
+looks identical when it is wrong. The separators make the threads visible; they do not yet bind
+the composer to one.
+
 **A long thread collapses in the middle and the gap is a BUTTON** (2026-08-11, §Lessons 90). Over
 six messages it renders first + last two — the panel is rewritten every 2.5s and an unbounded list
 pushes the composer off screen — but the gap was PLAIN TEXT for months, so five stored messages of
@@ -494,9 +514,9 @@ corrupt reply detection. `dm_status` only ever recorded what WE sent. So both di
 - **One tabbed panel**: People · Follow-ups · Materials · Activity. `PANEL_OPEN` / `TAB_OPEN`
   survive the 2.5s refresh.
 - **Contacts collapse to one line** with channel pills (`✉ sent · 🔗 connected · ↻ due`).
-  Opening one shows channels as tabs: **✉ Email · 🔗 LinkedIn · 💬 Text**. **All three are always
-  offered, and an empty one is where its identifier gets ENTERED** (2026-08-12) — the rule Text
-  had always followed alone, which made the other two §Lessons 49. An empty tab is marked `＋`
+  Opening one shows channels as tabs: **✉ Email · 🔗 LinkedIn · 💬 Text · 📝 Meetings**.
+  **All are always offered, and an empty one is where its identifier gets ENTERED**
+  (2026-08-12) — the rule Text had always followed alone, which made the others §Lessons 49. An empty tab is marked `＋`
   and dashed, so which identifiers are missing is legible from the strip without opening all
   three; opening one renders the INPUT, never a sentence about the absence (§Lessons 41). With no
   number the SMS composer still renders **disabled**, unchanged.
@@ -1014,6 +1034,31 @@ went quiet had no mechanism at all. The system chased strangers and abandoned ev
 engaged. `unanswered` counts messages since they last spoke; 2+ means the nudge is spent. NOT a
 Channel: it is a conversation state, with different copy and a different cadence. Known tension:
 at 72h the EMAIL ladder still nudges a stranger sooner, at 48h.
+
+**THE OPERATOR HAS MORE THAN ONE ADDRESS, and six places assumed one** (2026-08-12).
+`MY_ADDRESSES` (csv) feeds `_our_addresses()`, and `conversations.me_set()` is the single answer
+to "is this us".
+
+Found on live data: one contact had **61 messages synced, 50 filed `in` — and 30 of those were
+the operator's own**, sent from the address on their résumé rather than the account the app
+authenticates as. `direction` decides who owes whom a reply, whether a handoff banner fires,
+whether a ladder halts on a "reply" and what the temperature band reads, so half a thread was
+attributed to the wrong person everywhere at once. The visible symptom was **eleven stacked
+`👋 X added Y to the thread` banners**, one offering the operator their OWN address as
+"+ Add as contact" and one claiming they had introduced somebody to their own thread.
+
+`reply_target` already took `str | list[str]` **with a comment explaining exactly why**. The
+other six kept taking a bare string — §Lessons 49 where the rule was not merely written down but
+IMPLEMENTED, once. A parametrised test now fails any function that takes `me: str`.
+
+`pending_introductions` also refuses to trust the STORED direction: rows written before this
+carry `in` on the operator's own mail, so a message from us is never an introduction whatever the
+column says — which is what makes the banners stop without a backfill. The banners themselves
+collapse at two with a *"N more people were added"* toggle.
+
+**30 rows across 3 contacts still carry the wrong `direction`** (14, 14 and 2).
+The fix applies at SYNC time; the stored rows need a one-statement backfill that has deliberately
+not been run.
 
 **Threads we did not start.** `poll()` read threads by `thread_id`, captured at send time, and
 skipped every contact without one — so anyone who wrote to us FIRST, replied from another
@@ -2327,6 +2372,33 @@ company `"Jobs"` — the same substring bug class, inside the function written t
     Its fix then broke the probe: `co-solo` is a SUBSTRING of the new `co-solo-inner`, so every
     solo band counted as two — §Lessons 1, in a test helper rather than in a company name.
 
+102. **The rule was written down AND implemented — once — and six other places kept the bug.**
+    `reply_target` takes `me: str | list[str]`, with a comment saying the operator genuinely has
+    several addresses. `timeline`, `participants`, `introductions`, `pending_introductions`,
+    `is_inbound` and one inline `addr(me)` all kept taking a bare string.
+    The cost, measured live: **30 of 61 messages on one contact were the operator's own mail
+    filed as INBOUND**, because it came from the address on their résumé rather than the account
+    the app authenticates as. `direction` decides who owes whom a reply, whether a ladder halts
+    on a "reply", whether a handoff banner fires and what the temperature band reads — so half a
+    thread was attributed to the wrong person in four subsystems at once, and the app believed a
+    stranger had written to it thirty times.
+    §Lessons 49 is usually "a rule at one of its two call sites". This is the version where the
+    rule is documented, correct, and present in exactly one of seven places. The guard is a
+    parametrised test over the FUNCTION SIGNATURES, because the seventh will be added by
+    somebody who never reads this file.
+
+103. **My fixture invented a field, so the code and the test agreed and the feature was blank.**
+    The thread separator read `m.at`; the payload calls it `sent_at`. My test fixture carried
+    `at` because I had put it there — so every assertion passed while the live separators
+    rendered `2 messages ·` with **no date at all**. Only opening the browser caught it.
+    §Lessons 93 with the halves swapped: there a frontend test fed itself a status the server
+    never emitted; here it fed itself a FIELD the server never sends. The rule generalises —
+    **at least one assertion has to start from what the server actually produces**, and a fixture
+    you wrote to match your code proves only that your code matches your fixture.
+    From the same change: the ordering test inserted its threads already in chronological order,
+    so deleting the sort entirely left it green. **A test whose input is already sorted cannot
+    see a sort.**
+
 Shipped in one session, in this order: **CRM-3a → CRM-1 → CRM-2 → CRM-3b → CRM-4a.**
 Tickets in `docs/tickets/CRM-*.md`; two of them had instructions that were factually wrong
 before being revised (they told you to write `followup_status`, removed by ARCH-3).
@@ -2526,6 +2598,29 @@ passwords, 2 credit cards and 831 autofill entries** into the browser the agent 
 from the Accounts panel. **Cookies stay**, so no wall is paid twice.
 
 ## The human-in-the-loop apply model (2026-07-30)
+
+**`APPLY_ALLOW_CONTRACT` widens what the agent will finish** (2026-08-12, default OFF, **ON
+here**). An Ethos "Expert Opportunity" was refused six times with `not_a_job_application` in ~20s
+each — correctly: `Compensation: $80/hour`, `Commitment: 5-20 hours per week`, and Ethos calls
+itself an expert network, while the prompt said *"FULL-TIME salaried positions only"*.
+
+The rule is **REPLACED, never caveated** (§Lessons 40). **Widening scope does not widen SAFETY** —
+permissions, biometrics, payment details, SSN and executables are byte-identical either way, with
+a parametrised test per rule and a second that diffs the whole prompt and fails if the flag moves
+any line that is not about scope or rate. What survives in BOTH modes is the line that matters:
+applying to a NAMED opportunity with its own description is an application; creating an account
+to be listed is not.
+
+**The salary floor had to move with it or the change bought nothing** — the floor is $200,000,
+which is $96/hr, so an $80/hr posting is "below floor" and the refusal simply happens one step
+later (§Lessons 49). A contract posting that states its rate is stating the employer's terms.
+
+**The apply BUTTON is a queue runner, not a single job** — `/api/apply` calls
+`queue_for_apply(limit=10)`, which selects by STATE (prepared, unapplied, never-attempted or
+failed-under-cap) rather than by "just imported", whatever its docstring says. Pasting one URL and
+clicking Apply worked through the queue: Ethos failed at 22:39:39 and Texas Sports Academy was
+claimed at **22:39:40**, one second later. Reported as *"it is applying for the Texas Sports
+Academy role, this should not be the behavior"*, and correctly. Not fixed.
 
 **The agent never submits. The operator always does.** Every path ends at `Mark submitted ✓`.
 
@@ -2822,7 +2917,7 @@ What is actually open now, ordered by leverage:
    `("id", "shape")` only, so a Space with 133 sent emails is repointable today with no error.
 
 10. **`context` is 61 commits ahead of `main`, pushed, and the working tree is CLEAN**
-    (2026-08-12, `4988cc0`). The 2026-08-11/12 run added the sheet Space (SHEET-1/1b/2), the
+    (2026-08-12, `2f5467a`). The 2026-08-11/12 run added the sheet Space (SHEET-1/1b/2), the
     ghost state, edit-in-place (EDIT-1), the LinkedIn ladder removal, the jobs-table render
     fixes and the HIST-1 spec — fifteen commits, each with its own tests and mutations.
     Merging to `main` is still deliberately deferred, and checking out `main` gets you a build
@@ -2965,7 +3060,7 @@ change still needs the `pip install` above — but that copy gives the file a ne
   and the restart ran anyway, because both were in one chained command (§Lessons 63). Use
   `pgrep -fl "applypilot apply"`; recover an orphaned lock with
   `release_stale_locks(max_age_minutes=0)` and ONLY after pgrep comes back empty.
-- **On branch `context`** (2026-08-12, `4988cc0`), **70 commits ahead of `main`**, pushed to
+- **On branch `context`** (2026-08-12, `2f5467a`), **77 commits ahead of `main`**, pushed to
   `origin/context`, nothing uncommitted. `main` last pushed at **`e1f0be6`**. Tags:
   `stable-arch2/3/5/6` · `stable-e2e-20260730` · `stable-crm-20260731`.
 - **A frontend-only edit needs the `pip install` but NOT a dashboard restart** — the copy gives

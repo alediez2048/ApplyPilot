@@ -2015,7 +2015,8 @@ function contactPanel(c) {
   // render, never whether the tab exists. Text is in it for the marker alone: its own pane
   // already handles an absent number, but a strip where two empty channels are flagged and the
   // third is not reads as the third being fine.
-  const usable = {email: !!c.email, linkedin: !!c.linkedin_url, phone: !!c.phone};
+  const usable = {email: !!c.email, linkedin: !!c.linkedin_url, phone: !!c.phone,
+                  meetings: !!(c.transcripts || []).length};
   const stored = CHANNEL_TAB.get(c.id);
   // Still OPENS on a channel that works, or every contact lands on a form instead of their
   // conversation. The stored choice is honoured even when empty — clicking a ＋ tab has to stay
@@ -2027,6 +2028,7 @@ function contactPanel(c) {
   if (ch === 'email')    body = c.email ? emailChannel(c) : addIdentifier(c, 'email');
   if (ch === 'linkedin') body = c.linkedin_url ? linkedinChannel(c) : addIdentifier(c, 'linkedin');
   if (ch === 'phone')    body = smsChannel(c);
+  if (ch === 'meetings') body = transcriptSection(c);
   return `<div class="pbody" onclick="event.stopPropagation()">
       <div class="cmeta">
         ${c.email ? `✉ <a href="mailto:${esc(c.email)}">${esc(c.email)}</a> ${emailBadge(c.email_status)}` : '✉ —'}
@@ -2039,9 +2041,8 @@ function contactPanel(c) {
         ${c.verify_note ? `<div class="verify-note ${esc(c.confidence)}">${c.confidence === 'high' ? '✓' : '?'} ${esc(c.verify_note)}</div>` : ''}
         ${syncGmailBtn(c)}
       </div>
-      <div class="chan">${tab('email','✉ Email')}${tab('linkedin','🔗 LinkedIn')}${tab('phone','💬 Text' + (c.sms_sent_at ? ' ✓' : ''))}</div>
+      <div class="chan">${tab('email','✉ Email')}${tab('linkedin','🔗 LinkedIn')}${tab('phone','💬 Text' + (c.sms_sent_at ? ' ✓' : ''))}${tab('meetings','📝 Meetings' + ((c.transcripts || []).length ? ' ' + c.transcripts.length : ''))}</div>
       ${body}
-      ${transcriptSection(c)}
       ${engagementLog(c)}
       <div class="crow-del"><button class="link-danger" onclick="deleteContact('${esc(c.id)}', decodeURIComponent('${encodeURIComponent(c.full_name || '')}'), ${!!c.emailed})">🗑 Not at this company — remove</button></div>
     </div>`;
@@ -2173,8 +2174,7 @@ function transcriptSection(c) {
       <button class="link-danger tr-del"
         onclick="dropTranscript('${esc(t.id)}','${esc(c.id)}')" title="Remove from this contact">✕</button>
     </div>`).join('');
-  return `<details class="cnotes tr-wrap"${rows.length ? ' open' : ''}>
-      <summary>📝 Meetings${rows.length ? ` (${rows.length})` : ''}</summary>
+  return `<div class="tr-wrap">
       <div class="cnote-body">
         ${list || '<div class="hint" style="margin:0">No transcripts yet.</div>'}
         ${open ? `
@@ -2195,7 +2195,7 @@ function transcriptSection(c) {
           </div>`
         : `<button class="secondary" onclick="toggleTranscript('${esc(c.id)}')">＋ Add a transcript</button>`}
       </div>
-    </details>`;
+    </div>`;
 }
 
 async function saveTranscript(btn) {

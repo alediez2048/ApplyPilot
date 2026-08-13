@@ -1360,7 +1360,9 @@ def test_the_transcript_section_renders_and_posts_what_was_typed(tmp_path):
     """
     fresh = _contact(id="t1", full_name="Dana Okafor")
     fresh["transcripts"] = []
+    fresh["_pick"] = "meetings"
     had = _contact(id="t2", full_name="Sam Iyer")
+    had["_pick"] = "meetings"
     had["transcripts"] = [{"id": "abc", "title": "Intro call", "started_at": "2026-08-01T10:00:00+00:00",
                            "summary": "They are hiring two engineers.", "body_len": 41200,
                            "source": "paste", "matched_by": "manual"}]
@@ -1376,18 +1378,25 @@ def test_the_transcript_section_renders_and_posts_what_was_typed(tmp_path):
     assert proc.returncode == 0, f"node failed:\n{proc.stderr[:2000]}"
     out = json.loads(proc.stdout.strip().splitlines()[-1])
 
-    # The section is on every contact, including one with nothing stored — that is where the
+    # It is a CHANNEL TAB now, beside Text — the strip is where you act on one person, and
+    # what was said on a call belongs there rather than in a fold below everything else.
+    assert "📝 Meetings" in out["fresh"], "the Meetings tab is not on the strip"
+    # Offered even with nothing stored, like the other empty channels: that tab IS where the
     # first transcript gets added, so hiding it until one exists hides the way in (§Lessons 41).
-    assert "📝 Meetings" in out["fresh"]
-    assert "toggleTranscript" in out["fresh"], "no way to open the paste box"
-    assert "No transcripts yet" in out["fresh"]
+    # The ＋ on the TAB itself, not the bare string "add" — that also matches `c-add`,
+    # `data-field` and "Add a transcript", so it passed however the marker was computed.
+    assert "📝 Meetings ＋" in out["fresh"], "an empty Meetings tab is not marked as empty"
+    assert "📝 Meetings ＋" not in out["had"], "a tab with a stored transcript was marked empty"
 
     # A stored one shows what it is, how long it is, and both ways out.
     assert "Intro call" in out["had"]
     assert "They are hiring two engineers" in out["had"]
     assert "41k" in out["had"], "the length is not shown, so a 40 KB call looks like a note"
     assert "showTranscript" in out["had"] and "dropTranscript" in out["had"]
-    assert "📝 Meetings (1)" in out["had"]
+    assert "📝 Meetings 1" in out["had"], "the count is not on the tab"
+    assert "toggleTranscript" in out["had"], "no way to open the paste box"
+    # A tab body is not collapsible — the operator already chose to look at it.
+    assert "tr-wrap" in out["had"] and "<details class=\"cnotes tr-wrap" not in out["had"]
 
 
 @pytest.mark.skipif(not shutil.which("node"), reason="node not available")

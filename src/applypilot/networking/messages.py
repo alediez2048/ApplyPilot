@@ -246,6 +246,37 @@ def set_reply_text(contact_id: str, text: str, conn: sqlite3.Connection | None =
     return True
 
 
+def threads_by_shared_address(conn: sqlite3.Connection | None = None) -> dict:
+    """`{address: [messages]}` for people who exist on MORE THAN ONE contact row.
+
+    `store.contact_id()` hashes `(job_url, linkedin_url, name)`, so the same human found for a
+    second role is a second row with its own empty history — and this table is keyed on
+    `contact_id`. Opening that second card showed a compose box for somebody already
+    mid-conversation, which is how the same person gets written to twice (CO-1's keying half).
+
+    Measured live: **5 addresses**, one of them nine messages deep with three replies. **Zero**
+    have history on BOTH rows, which is what makes surfacing it safe rather than a merge.
+
+    ONE query, and restricted to addresses that genuinely appear twice — the ordinary card pays
+    nothing and the map stays small enough to hoist above the job loop on a 2.5s refresh.
+    """
+    if conn is None:
+        conn = get_connection()
+    init_messages(conn)
+    out: dict[str, list[dict]] = {}
+    for r in conn.execute(
+        "SELECT m.*, LOWER(TRIM(c.email)) AS _addr FROM messages m "
+        "JOIN contacts c ON c.id = m.contact_id "
+        "WHERE LOWER(TRIM(COALESCE(c.email,''))) IN ("
+        "  SELECT LOWER(TRIM(email)) FROM contacts "
+        "  WHERE email IS NOT NULL AND TRIM(email) != '' "
+        "  GROUP BY LOWER(TRIM(email)) HAVING COUNT(*) > 1) "
+        "ORDER BY m.sent_at"
+    ).fetchall():
+        out.setdefault(r["_addr"], []).append(_row(r))
+    return out
+
+
 def threads_by_contact(conn: sqlite3.Connection | None = None) -> dict:
     """Every stored conversation, keyed by contact id. ONE query for the whole database.
 

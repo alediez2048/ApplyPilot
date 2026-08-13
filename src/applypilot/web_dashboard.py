@@ -1886,7 +1886,12 @@ def _contact_payload(c: dict, company: str | None = None, ladders: dict | None =
         # One per conversation, so every thread can be answered rather than only the newest.
         # Seven threads with one person rendered one composer pinned to the last of them, and
         # the other six had no way to reply at all.
-        "reply_targets": _reply_targets(thread or []),
+        # NOT on a borrowed conversation. `send_reply` resolves recipients from this contact's
+        # OWN stored messages, which are empty on a card showing another role's history — so a
+        # composer here would render, look right, and refuse on click.
+        "reply_targets": {} if _is_borrowed(thread) else _reply_targets(thread or []),
+        # Which other application this conversation belongs to, when it is borrowed.
+        "thread_from": _is_borrowed(thread),
         # Whose turn it is. `awaiting_us` means they wrote and nobody answered — the worst
         # outcome the system can produce, since it paid for the reply and then dropped it.
         "conversation": _conversation_state(thread or []),
@@ -1969,6 +1974,8 @@ def _status_payload(space: str = "") -> dict:
     _job_companies = {r["url"]: (_derive.derive_company(dict(zip(r.keys(), r)))
                                  or r["site"] or "") for r in rows}
     _conn_counts = _conns.company_counts(list(set(_job_companies.values())), conn)
+    # ONE query for the whole page, hoisted out of the job loop for the usual reason.
+    _sibling = _sibling_threads(conn)
 
     for row in rows:
         # Status precedence (each maps to a UI indicator):
@@ -2022,7 +2029,7 @@ def _status_payload(space: str = "") -> dict:
                                         contact_company, conn)
         job_threads = _conversations_for_job(row["url"], conn)
         contacts = [_contact_payload(c, contact_company, job_ladders, job_matches,
-                                     thread=job_threads.get(c.get("id")) or [])
+                                     thread=_thread_for(c, job_threads, _sibling))
                     for c in raw_contacts]
         # Engagement moves ONTO the person (UX-1). It used to be a job-level `interactions`
         # key feeding a tab of its own, which across 187 contacts had 2 rows to show — and put
@@ -3257,6 +3264,58 @@ def _introduced_by(contact: dict, thread: list) -> str:
         if email in [_addr(a) for a in (msg.get("cc_addrs") or [])]:
             return msg.get("from_name") or msg.get("from_addr") or ""
     return ""
+
+
+def _is_borrowed(thread: list | None) -> str:
+    """The job url this conversation really belongs to, or "" when the card owns it."""
+    for m in (thread or []):
+        src = (m or {}).get("from_other_role") or ""
+        if src:
+            return src
+    return ""
+
+
+def _thread_for(c: dict, job_threads: dict, sibling: dict) -> list:
+    """This contact's own messages, plus the same PERSON's from another role's card.
+
+    A card with nothing of its own falls back to the sibling history entirely — that is the
+    reported case: a second row for somebody nine messages into a conversation, showing a
+    compose box.
+
+    A card that HAS its own messages keeps them and is not merged. Live, no address has history
+    on both rows, so the merge case does not arise today; if it ever does, silently interleaving
+    two roles' correspondence is a worse answer than showing the one this card owns.
+    """
+    own = job_threads.get(c.get("id")) or []
+    if own:
+        return own
+    addr = (c.get("email") or "").strip().lower()
+    if not addr:
+        return own
+    # Marked WITH ITS SOURCE, so the UI can say where it came from and send the operator to the
+    # card that owns it. A conversation about a different role presented as this card's own is a
+    # quieter version of the same confusion.
+    #
+    # It is also what keeps the composer off this card: `send_reply` resolves recipients from
+    # `thread_for_contact(contact_id)`, which is EMPTY here — a reply box would render, look
+    # entirely normal, and refuse on click.
+    return [dict(m, from_other_role=m.get("job_url") or "")
+            for m in (sibling.get(addr) or [])]
+
+
+def _sibling_threads(conn) -> dict:
+    """`{address: [messages]}` for people on more than one contact row — see
+    `messages.threads_by_shared_address`, which owns the query (ARCH-4: this file runs no SQL).
+
+    Degrades to {} rather than raising, like every other conversation load here: a card must
+    still render if this cannot be worked out.
+    """
+    try:
+        from applypilot.networking import messages as _messages
+        return _messages.threads_by_shared_address(conn)
+    except Exception:  # noqa: BLE001
+        log.debug("Sibling thread load failed", exc_info=True)
+        return {}
 
 
 def _conversations_for_job(job_url: str, conn) -> dict:

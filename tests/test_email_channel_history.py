@@ -132,3 +132,65 @@ def test_a_replied_contact_is_unchanged(tmp_path):
     html = _html(tmp_path, replied)
     assert "conv-msgs" in html and "reply-box" in html
     assert 'class="d-body"' not in html, "a compose box was appended under a live conversation"
+
+
+# ── the same person on a SECOND role's card ─────────────────────────────────
+
+#: Patrick, live: `contact_id` hashes the job url, so being found for a second Google role made
+#: a second row with an empty history — and opening it offered a compose box to somebody nine
+#: messages into a conversation with three replies already in it.
+BORROWED = {
+    "id": "c3", "full_name": "Patrick Omalley", "email": "p@bigco.test", "emailed": False,
+    "outreach_subject": "quick q about the AI Sales Specialist role",
+    "outreach_message": "Hey Patrick, I recently applied...",
+    "thread_from": "http://j/other-role",
+    "thread": [
+        {"thread_id": "t9", "subject": "quick q about the Startups Performance Lead",
+         "sent_at": "2026-08-04T13:49", "direction": "out", "from_addr": "me@work.test",
+         "snippet": "quick q", "from_other_role": "http://j/other-role"},
+        {"thread_id": "t9", "subject": "Re: quick q about the Startups Performance Lead",
+         "sent_at": "2026-08-07T08:32", "direction": "in", "from_addr": "p@bigco.test",
+         "snippet": "happy to help", "from_other_role": "http://j/other-role"},
+    ],
+    "reply_targets": {}, "reply_to": None,
+    "conversation": {"state": "awaiting_them", "who": "Patrick"},
+}
+
+
+def test_a_second_card_for_the_same_person_shows_the_conversation(tmp_path):
+    """The report: opening the second Google card offered a fresh cold email to somebody
+    already mid-conversation."""
+    html = _html(tmp_path, BORROWED)
+    assert "conv-msgs" in html, "the borrowed conversation is not shown"
+    assert "Startups Performance Lead" in html
+
+
+def test_it_says_the_conversation_belongs_ELSEWHERE(tmp_path):
+    """Showing another role's correspondence as this card's own is a quieter version of the
+    same confusion — the operator would reply from the wrong place."""
+    html = _html(tmp_path, BORROWED)
+    assert "borrowed" in html
+    assert "already in touch" in html
+    assert "1 from them" in html, "the banner does not say they have actually replied"
+
+
+def test_no_compose_box_on_a_borrowed_conversation(tmp_path):
+    """The compose box IS the bug. And a reply box would be worse than useless here: sending
+    resolves recipients from this row's own messages, of which there are none, so it would
+    render, look right and refuse on click."""
+    html = _html(tmp_path, BORROWED)
+    assert 'class="d-body"' not in html, "still offering a fresh cold email"
+    assert "reply-box" not in html, "a composer that cannot send was rendered"
+
+
+def test_the_banner_comes_FIRST(tmp_path):
+    """Under the history it would be read after the decision, which is the whole failure."""
+    html = _html(tmp_path, BORROWED)
+    assert html.index("borrowed") < html.index("conv-msgs")
+
+
+def test_a_card_that_OWNS_its_conversation_gets_no_banner(tmp_path):
+    """The negative case. Without it, "warn about borrowed threads" passes by warning on
+    every card — and a banner that is always there is one nobody reads."""
+    html = _html(tmp_path, EMAILED)
+    assert "borrowed" not in html

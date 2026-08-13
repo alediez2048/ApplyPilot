@@ -1806,8 +1806,12 @@ function conversationView(c) {
   }).join('');
   // A contact with a live conversation and NO answerable thread still needs to be told why —
   // `replyBox` renders that explanation, and with nothing to loop over it would never run.
+  //
+  // ...except on a BORROWED conversation, where there is nothing wrong: we know exactly who to
+  // reply to, it simply is not this card's to answer. "Couldn't work out who to reply to" would
+  // be a false alarm, and `borrowedBanner` has already said the true thing.
   const anyTarget = groups.some(g => (c.reply_targets || {})[g.id]);
-  const fallback = anyTarget ? '' : replyBox(c, c.reply_to);
+  const fallback = (anyTarget || c.thread_from) ? '' : replyBox(c, c.reply_to);
   return `<div class="conv">${banner}${intro}
     <div class="conv-msgs">${rows}</div>
     ${fallback}
@@ -2272,6 +2276,24 @@ async function deleteContact(id, name, emailed) {
 //
 // A follow-up ladder still wins when there is no conversation — chasing silence is the right
 // action then. It never wins over an actual reply.
+// You are already talking to this person, on another application. The whole point is that it
+// appears BEFORE any compose box, because the compose box is what caused the double-send.
+function borrowedBanner(c) {
+  const msgs = c.thread || [];
+  const theirs = msgs.filter(m => m.direction === 'in').length;
+  const other = (LAST_JOBS || []).find(j => j.url === c.thread_from);
+  const where = other ? esc(other.title || other.company || 'another application')
+                      : 'another application';
+  const go = other
+    ? `<button class="linklike" onclick="openReply(${tagArg(c.thread_from)}, ${tagArg(c.id)})">Open that application ↗</button>`
+    : '';
+  return `<div class="borrowed">
+    <div><strong>You are already in touch with ${esc(firstName(c.full_name))}</strong> —
+      ${msgs.length} message${msgs.length === 1 ? '' : 's'}${
+        theirs ? `, ${theirs} from them` : ''} on <strong>${where}</strong>.</div>
+    <div class="borrowed-why">Reply there so the conversation stays in one place. ${go}</div>
+  </div>`;
+}
 function hasConversation(c) {
   return ((c.thread || []).some(m => m.direction === 'in'));
 }
@@ -2289,6 +2311,15 @@ function emailChannel(c) {
   // "a contact who has REPLIED gets a conversation, not a form". The rule was always about
   // whether an email had gone out, not about whether one came back (§Lessons 49, half a rule).
   const history = (c.thread || []).length ? conversationView(c) : '';
+  // BORROWED FROM ANOTHER ROLE'S CARD. `contact_id` hashes the job url, so the same person
+  // found for a second role is a second row with an empty history — and opening it showed a
+  // compose box for somebody nine messages into a conversation. Live: 5 cards, one of them
+  // with three replies already on it.
+  //
+  // Shown READ-ONLY and clearly attributed. Sending from here would resolve recipients from
+  // this row's own messages (there are none) and would file the reply under a second contact,
+  // splitting the conversation further — so the offer is to go to the card that owns it.
+  if (c.thread_from) return borrowedBanner(c) + history;
   // With an inbound message the composers already live inside the history, per thread.
   if (hasConversation(c)) return history;
   // A due follow-up is the more urgent thing to WRITE, but it no longer replaces the record of

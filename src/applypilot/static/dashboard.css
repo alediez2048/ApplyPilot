@@ -1372,3 +1372,12 @@
 .fu-card.fu-working { border-color:#93c5fd; background:#eff6ff; }
 .fu-card.fu-ok      { border-color:#86efac; background:#f0fdf4; }
 .fu-card.fu-failed  { border-color:#fca5a5; background:#fef2f2; }
+
+/* Already talking to this person, on another application's card. Sits ABOVE the history and
+   replaces the compose box entirely — the compose box is what produced the second email. */
+.borrowed { border:1px solid #f0c36d; background:#fff8e6; border-radius:8px;
+  padding:8px 10px; margin:0 0 8px; font-size:12px; }
+.borrowed-why { color:var(--soft); margin-top:3px; }
+@media (prefers-color-scheme: dark) {
+  .borrowed { border-color:#7a5c1e; background:#2a2314; }
+}

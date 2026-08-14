@@ -68,6 +68,11 @@ _CONTACT_COLUMNS: dict[str, str] = {
     # dm_status; this is that same fact for texting, and the operator sets it by clicking
     # "✓ I sent it" — we cannot observe an iMessage leaving the Messages app.
     "sms_sent_at": "TEXT",
+    # The phone CALL channel's anchor — the one column it costs. Same fact as `sms_sent_at` and
+    # `dm_sent_at`: proof a first message went out, asserted by the operator because nothing
+    # here can watch a phone ring. A call has no body, so there is no draft column to go with it
+    # and there never will be.
+    "call_made_at": "TEXT",
     # What the OPERATOR noticed about this person — a recent post, a talk, a shared background.
     # Deliberately not scraped. Reading LinkedIn programmatically was abandoned twice here
     # (§Lessons 3), it risks the account the whole outreach ladder runs on, and it produces a
@@ -743,6 +748,29 @@ def mark_sms_sent(contact_id: str, conn: sqlite3.Connection | None = None) -> bo
     if not cur.rowcount:
         return False
     log_contact_event(contact_id, "ok", f"Texted {_contact_label(contact_id, conn)}.", conn)
+    return True
+
+
+def mark_call_made(contact_id: str, conn: sqlite3.Connection | None = None) -> bool:
+    """Record that the FIRST call happened. Returns False if one was already recorded.
+
+    The exact shape of `mark_sms_sent`, deliberately — a call is the same KIND of fact as a
+    text: something that happened away from this machine, which only the operator can assert.
+    Idempotent for the same reason too, and here the stakes are a little higher, because a
+    second stamp would push the one follow-up call three days further out on a person who has
+    already been rung once and said nothing.
+    """
+    if conn is None:
+        conn = get_connection()
+    init_contacts(conn)
+    cur = conn.execute(
+        "UPDATE contacts SET call_made_at = ? WHERE id = ? "
+        "AND (call_made_at IS NULL OR call_made_at = '')",
+        (datetime.now(timezone.utc).isoformat(), contact_id))
+    conn.commit()
+    if not cur.rowcount:
+        return False
+    log_contact_event(contact_id, "ok", f"Called {_contact_label(contact_id, conn)}.", conn)
     return True
 
 

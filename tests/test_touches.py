@@ -292,7 +292,12 @@ def test_a_migrated_database_has_no_ladder_columns_left(db):
     # stayed in it, and disarm the cross-job cooldown (§Lessons 86). Empty on every row that has
     # never been moved, so the column DEFAULT is the whole backfill.
     assert "outreach_job_url" in cols
-    assert len(cols) == 43, f"unexpected contacts columns: {sorted(cols)}"
+    # The phone CALL channel's anchor — the ONE column a fourth channel cost, which is the whole
+    # claim ARCH-3 makes. Same kind of fact as `sms_sent_at` and `dm_sent_at`: proof a first
+    # message went out, asserted by the operator because nothing here can watch a phone. It is
+    # an ANCHOR, not ladder state — the touches are still rows in `touches`.
+    assert "call_made_at" in cols
+    assert len(cols) == 44, f"unexpected contacts columns: {sorted(cols)}"
 
 
 def test_backfill_moves_state_and_verifies_clean(db):

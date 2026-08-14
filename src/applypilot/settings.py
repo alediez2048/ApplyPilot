@@ -111,6 +111,9 @@ SETTINGS: tuple[Setting, ...] = (
             "Same, for LinkedIn. Slower on purpose — nudging a new connection reads badly."),
     Setting("SMS_FOLLOWUP_SCHEDULE", "followup", "csv_int", [72, 168],
             "Same, for iMessage/SMS. Slowest of the three — a text arrives on a lock screen."),
+    Setting("CALL_FOLLOWUP_SCHEDULE", "followup", "csv_int", [72],
+            "Same, for phone calls. ONE more, 3 days later — a third unanswered call is not "
+            "persistence, it is how a number gets blocked."),
     Setting("FOLLOWUP_AFTER_DAYS", "followup", "int", None,
             "DEPRECATED — derived from the first entry of FOLLOWUP_SCHEDULE.",
             deprecated_by="FOLLOWUP_SCHEDULE"),

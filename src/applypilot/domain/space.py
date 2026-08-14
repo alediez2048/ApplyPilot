@@ -25,6 +25,11 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass, field, fields, replace
 
+# The channel registry, for the `channels` default below. Both live in `domain/`, so this
+# crosses no boundary, and the dependency runs one way only — `followup` takes a Space as a
+# duck-typed argument and never imports this module.
+from applypilot.domain.followup import CHANNELS as _CHANNEL_REGISTRY
+
 #: A shape decides what a ROW is. There is no third shape — a flat people list was in v1 of the
 #: PRD for a relationship Space, and the prospects-only decision removed the need for it.
 JOBS_SHAPE = "pipeline/jobs"
@@ -168,7 +173,12 @@ class Space:
     #: prompt instruction is not a guarantee (§Lessons 9, 12) — and it is NEVER force-appended,
     #: because a canned sentence in every draft at one company is §Lessons 42.
     must_mention: tuple[str, ...] = ()
-    channels: tuple[str, ...] = ("email", "linkedin", "sms")
+    #: Which channels this campaign uses. DERIVED from the registry, never typed out: a
+    #: hand-written list here is the same defect that made SMS pass correctly through every part
+    #: of the follow-up engine and then vanish at `followup_panel`'s return statement, which
+    #: spelled both key sets out by hand. A fourth channel would have been silently absent from
+    #: every Space's default the moment it was registered, and nothing would have raised.
+    channels: tuple[str, ...] = tuple(c.name for c in _CHANNEL_REGISTRY)
     schedules: dict = field(default_factory=dict)
     offer_deck: bool = True
     can_autosend: bool = True

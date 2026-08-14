@@ -317,6 +317,47 @@
   .addc-hint { font-size:11.5px; color:var(--faint); flex:1 1 220px; }
   .addc-err { color:var(--red); font-weight:600; }
 
+  /* The Summary tab — the whole job in plan order, before you open anybody.
+     Palette tokens only, both grounds, and every grid cell explicitly placed: an unplaced
+     child lands on a row of its own and renders a name underneath its own counts
+     (§Lessons 106), which is the bug the meeting row shipped with. */
+  .sum { display:flex; flex-direction:column; gap:2px; }
+  .sum-tot { display:flex; flex-wrap:wrap; gap:8px; padding:2px 0 10px; }
+  .sum-s { font-size:12.5px; font-weight:600; color:var(--text); background:var(--surface2);
+      border:1px solid var(--line); border-radius:999px; padding:4px 11px; white-space:nowrap;
+      font-variant-numeric:tabular-nums; }
+  .sum-s.zero { color:var(--faint); font-weight:500; }
+  .sum-s.good { color:var(--green); background:var(--green-soft); border-color:var(--green-soft); }
+  .sum-legend { display:flex; flex-wrap:wrap; gap:14px; font-size:11px; color:var(--faint);
+      padding-bottom:6px; margin-bottom:2px; border-bottom:1px solid var(--line2); }
+  .sum-legend span { display:inline-flex; align-items:center; gap:5px; }
+  .sum-row { display:grid; grid-template-columns:minmax(0,1.4fr) auto minmax(0,1fr) minmax(0,1.3fr);
+      align-items:center; gap:10px; padding:6px 4px; border-bottom:1px solid var(--line2);
+      font-size:12.5px; cursor:pointer; border-radius:6px; }
+  .sum-row:hover { background:var(--surface2); }
+  .sum-name { grid-row:1; font-weight:600; color:var(--text);
+      overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .sum-track { grid-row:1; display:inline-flex; gap:5px; align-items:center; }
+  .sum-counts { grid-row:1; color:var(--muted); font-variant-numeric:tabular-nums;
+      white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .sum-next { grid-row:1; color:var(--faint); overflow:hidden; text-overflow:ellipsis;
+      white-space:nowrap; }
+  .sum-next.do { color:var(--yellow); font-weight:600; }
+  .sum-next.good { color:var(--green); font-weight:600; }
+  /* A dot AND its tooltip, never colour alone — the rule the temperature bands already follow. */
+  .sum-dot { width:9px; height:9px; border-radius:50%; border:1.5px solid var(--line2);
+      background:transparent; display:inline-block; position:relative; }
+  .sum-dot.on { background:var(--green); border-color:var(--green); }
+  /* The legend's own dots explain WHICH position each one is; they must not wear the done
+     state, or the key reads as three completed stages on every job. */
+  .sum-dot.key { background:var(--line2); border-color:var(--line2); }
+  .sum-dot.now { background:var(--yellow); border-color:var(--yellow);
+      box-shadow:0 0 0 3px var(--yellow-soft); }
+  .sum-warn { margin-top:10px; font-size:12.5px; color:var(--yellow);
+      background:var(--yellow-soft); border-radius:6px; padding:8px 11px; line-height:1.5; }
+  .sum-warn-why { display:block; color:var(--muted); font-size:11.5px; margin-top:3px; }
+  .call-num { margin:8px 0; }
+
   /* CO-2 — moving contacts off a closed role. Built from the existing tokens rather than
      hand-picked hex, which is what made the borrowed-conversation banner unreadable: it
      hardcoded a cream background plus the stylesheet's ONLY dark-mode rule, so on a dark OS

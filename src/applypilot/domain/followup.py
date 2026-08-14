@@ -132,7 +132,37 @@ SMS = Channel(
     label="text ",
 )
 
-CHANNELS = (EMAIL, LINKEDIN, SMS)
+# A PHONE CALL. Asked for as part of "3 emails, text + call, text + call again to close the loop".
+#
+# The only channel here with no message to write, and that is the whole of what makes it
+# different: there is nothing to draft, nothing to copy, and nothing that could ever be sent
+# automatically. `can_autosend=False` is not a policy choice on this one, it is a fact.
+#
+# It is a Channel anyway rather than a column somewhere, because everything the operator needs
+# from it — has this happened, is another one owed, when was the last one, does it halt on a
+# reply — is exactly what the ladder engine already answers for the other three. The claim that
+# a channel costs one registry row plus one column is tested
+# (`test_adding_a_channel_needs_no_schema_change`); this is the fourth time it has been spent.
+#
+# ONE follow-up call, three days later, because that is what was asked for: "at least a highlight
+# for a second text/call after 3 days if we don't get a response". A third unanswered call is not
+# persistence, it is the thing that gets a number blocked.
+CALL = Channel(
+    name="call",
+    env_var="CALL_FOLLOWUP_SCHEDULE",
+    default_schedule=(72,),                  # one more, 3d later
+    start_field="call_made_at",
+    # Same shape as SMS and for the same reason: a phone number is entered by hand for anyone
+    # the operator MIGHT ring, so keying readiness on it alone would mark a second call owed to
+    # people nobody has ever dialled. `call_made_at` is the proof, and it is operator-asserted
+    # because nothing here can watch a phone.
+    ready=(("phone", None), ("call_made_at", None)),
+    can_autosend=False,
+    prefix="call_",
+    label="call ",
+)
+
+CHANNELS = (EMAIL, LINKEDIN, SMS, CALL)
 
 
 def channel_by_name(name: str) -> Channel | None:

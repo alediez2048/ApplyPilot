@@ -16,7 +16,8 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from applypilot.domain import channel_schedule, followup_panel, job_checklist
-from applypilot.domain.followup import CHANNELS, EMAIL, EMPTY_LADDER, LINKEDIN, SMS, touch_state
+from applypilot.domain.followup import (CALL, CHANNELS, EMAIL, EMPTY_LADDER, LINKEDIN, SMS,
+                                        touch_state)
 
 NOW = datetime(2026, 7, 28, 12, 0, tzinfo=timezone.utc)
 
@@ -56,9 +57,21 @@ def texted(**over) -> dict:
     return c
 
 
+def called(**over) -> dict:
+    # Same rule as `texted`, one channel over: a phone number is entered by hand for anyone the
+    # operator MIGHT ring, so `call_made_at` is what proves a call actually happened. Nothing
+    # here can watch a phone, so it is asserted by the operator and by nobody else.
+    c = {"id": "c4", "full_name": "Marcus", "title": "Director", "email": "",
+         "emailed": False, "linkedin_url": "", "dm_status": "",
+         "phone": "+1 555 0199", "call_made_at": ago(days=5)}
+    c.update(over)
+    return c
+
+
 #: One ready contact per channel. Adding a channel without adding its fixture makes
 #: `test_every_channel_uses_the_same_engine` fail rather than silently skip it.
-READY_FOR = {EMAIL.name: emailed, LINKEDIN.name: connected, SMS.name: texted}
+READY_FOR = {EMAIL.name: emailed, LINKEDIN.name: connected, SMS.name: texted,
+             CALL.name: called}
 
 
 # ── the engine is one implementation, parameterised ─────────────────────────

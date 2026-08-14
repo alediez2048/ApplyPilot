@@ -1725,6 +1725,24 @@ def _space_of_contact(contact_id: str, conn=None):
         return None
 
 
+def _coverage(contacts: list[dict], ladders: dict | None = None, space=None) -> dict:
+    """The Summary tab's data, plus the close warning it shares with the row menu.
+
+    Never raises into the payload. A missing timestamp on one contact must not blank the whole
+    table — the same guard `_last_interaction` and `_temperature` carry, and for the same
+    reason: everything here is derived, so a bad row should cost its own summary and nothing
+    else.
+    """
+    from applypilot.domain.coverage import close_warning, job_coverage
+    try:
+        cov = job_coverage(contacts, ladders, space=space)
+        cov["close_warning"] = close_warning(cov)
+        return cov
+    except Exception:  # noqa: BLE001
+        log.debug("coverage failed", exc_info=True)
+        return {}
+
+
 def _followup_panel(contacts: list[dict], ladders: dict | None = None, space=None) -> dict:
     """Thin delegate — the rule lives in applypilot.domain.followup.
 
@@ -1783,6 +1801,7 @@ def _legacy_followup_status(ladder: dict) -> str:
 
 def _contact_payload(c: dict, company: str | None = None, ladders: dict | None = None,
                      conn_matches: dict | None = None, thread: list | None = None) -> dict:
+    from applypilot.domain.followup import CHANNELS as _CHANNELS
     from applypilot.domain.followup import EMPTY_LADDER
     from applypilot.domain.followup import exhausted as _exhausted
     from applypilot.domain.followup import outreach_is_for_this_job
@@ -1799,6 +1818,7 @@ def _contact_payload(c: dict, company: str | None = None, ladders: dict | None =
     email_l = ladders.get((cid, "email")) or EMPTY_LADDER
     li_l = ladders.get((cid, "linkedin")) or EMPTY_LADDER
     sms_l = ladders.get((cid, "sms")) or EMPTY_LADDER
+    call_l = ladders.get((cid, "call")) or EMPTY_LADDER
     return {
         "id": c.get("id") or "",
         "full_name": c.get("full_name") or "",
@@ -1854,10 +1874,21 @@ def _contact_payload(c: dict, company: str | None = None, ladders: dict | None =
         "sms_followup_count": sms_l["count"],
         "sms_followup_status": _legacy_followup_status(sms_l),
         "sms_followup_message": sms_l["draft_body"],
+        # The phone CALL channel. One anchor and nothing else — there is no draft, because there
+        # is no message. `call_followup_state` and the rest are stamped by `followup_panel` from
+        # the registry's own prefix, so they need no line here.
+        "call_made_at": c.get("call_made_at") or "",
+        "call_followup_count": call_l["count"],
         # "No response": every channel we actually USED has run out and nobody answered.
         # Derived here rather than stored — a column would be stale between a touch being sent
         # and the next recompute, which is the §Lessons 21 failure with a new name.
-        "exhausted": _exhausted(c, {"email": email_l, "linkedin": li_l, "sms": sms_l}),
+        #
+        # Built FROM the registry. Spelled out by hand this said {"email","linkedin","sms"}, so
+        # a fourth channel would have been dropped silently — a person whose call ladder was
+        # still running would have read as exhausted. Exactly what `followup_panel` did to SMS
+        # at its return statement, in a different file.
+        "exhausted": _exhausted(c, {ch.name: ladders.get((cid, ch.name)) or EMPTY_LADDER
+                                    for ch in _CHANNELS}),
         # What the operator noticed on their profile — the personalisation input that a
         # LinkedIn scraper was considered for and rejected (§Lessons 3).
         "noticed": c.get("noticed") or "",
@@ -2053,6 +2084,12 @@ def _status_payload(space: str = "") -> dict:
         job_checklist = _job_checklist(status, row["applied_at"] or "", contacts, shape,
                                        interview_at=row["interview_at"] or "")
         job_followups = _followup_panel(contacts, job_ladders, manifest)
+        # The Summary tab, the ordered plan and the close guard, from ONE computation over the
+        # rows and ladders already loaded above. Costs no query and no network round-trip — the
+        # two things `/api/status` has repeatedly been taken over budget by (§Lessons 11, 26).
+        # `contacts` rather than `raw_contacts`: the payload rows carry the derived `emailed`,
+        # which is the email channel's proof and is not a column (§Lessons 21).
+        job_cov = _coverage(contacts, job_ladders, manifest)
         net_task = _net_tasks.get(row["url"], {})
         jobs.append({
             "url": row["url"],
@@ -2130,6 +2167,7 @@ def _status_payload(space: str = "") -> dict:
             "introductions": _pending_introductions(job_threads, raw_contacts),
             # When something last happened, and who did it (UX-3). Derived from data already
             # loaded above — no query of its own on a 2.5s path.
+            "coverage": job_cov,
             "last_interaction": _last_interaction(row, contacts, job_ladders),
             # How the application is DOING, as opposed to how far it has travelled (UX-5).
             "temperature": _temperature(row, contacts, job_ladders, job_checklist, job_followups),
@@ -3783,7 +3821,8 @@ def _followup_action(data: dict) -> dict:
     # somebody clicking a button, which makes the double-click the obvious failure: a second
     # stamp would move the anchor forward and silently push every touch later.
     if verb == "connected":
-        setter = {"linkedin": "mark_connected_now", "sms": "mark_sms_sent"}.get(channel.name)
+        setter = {"linkedin": "mark_connected_now", "sms": "mark_sms_sent",
+                  "call": "mark_call_made"}.get(channel.name)
         if not setter:
             return {"ok": False, "message": f"{channel.name} has no anchor to set"}
         # `is False` deliberately, not falsiness: mark_connected_now returns None (it is

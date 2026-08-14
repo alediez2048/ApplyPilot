@@ -1166,13 +1166,18 @@ function smsChannel(c) {
   let ladder = '';
   if (started) {
     const when = String(c.sms_sent_at).slice(0, 10);
+    // The acknowledgement has to be LOUD, because it is the only thing that tells the operator
+    // their click landed — the button that recorded it disappears, and "first text 13 Aug" in
+    // grey is what made a working feature read as a dead one. `.sent-tag` is the same green
+    // affirmative the email side uses when a send really happened.
     ladder = st === 'replied' ? `<span class="sent-tag">✓ replied — sequence stopped</span>`
            : st === 'stopped' ? `<span class="muted">sequence stopped</span>`
-           : st === 'finished' ? `<span class="muted">ladder finished (${total} of ${total} sent)</span>`
+           : st === 'finished' ? `<span class="sent-tag">✓ all ${total} texts sent</span>`
            : st === 'due' ? `<span class="fu-due">↻ follow-up ${touch} of ${total} due</span>`
            : st === 'waiting' && c.sms_followup_due_in_h != null
-             ? `<span class="muted">next text in ${Math.round(c.sms_followup_due_in_h / 24)}d</span>`
-             : `<span class="muted">first text ${esc(when)}</span>`;
+             ? `<span class="sent-tag">✓ texted ${esc(when)}</span>`
+               + `<span class="muted">next in ${Math.max(1, Math.round(c.sms_followup_due_in_h / 24))}d</span>`
+             : `<span class="sent-tag">✓ texted ${esc(when)}</span>`;
   }
 
   // The compose control is an <a> when it can work and a disabled <button> when it cannot —
@@ -1208,6 +1213,55 @@ function smsChannel(c) {
     </div>` + contactNotes(c);
 }
 
+// The phone CALL pane. The only channel here with nothing to write — so there is no composer,
+// no draft, no Regenerate, and nothing that could ever be sent automatically. What it holds is
+// the two things a call actually needs: the number, dialable, and the record that it happened.
+//
+// It renders whether or not there is a number, for the same reason Text always did: the empty
+// pane is where a number gets ENTERED, and hiding a channel that has no identifier removes the
+// dead end together with the only place the identifier could ever be supplied (§Lessons 99).
+function callChannel(c) {
+  const phone = (c.phone || '').trim();
+  const made = !!c.call_made_at;
+  const st = c.call_followup_state || '';
+  const total = c.call_followup_total || 2;
+  let mark = '';
+  if (made) {
+    const when = String(c.call_made_at).slice(0, 10);
+    mark = st === 'replied' ? `<span class="sent-tag">✓ replied — sequence stopped</span>`
+         : st === 'stopped' ? `<span class="muted">sequence stopped</span>`
+         : st === 'finished' ? `<span class="sent-tag">✓ all ${total} calls made</span>`
+         : st === 'due' ? `<span class="fu-due">↻ second call due</span>`
+         : st === 'waiting' && c.call_followup_due_in_h != null
+           ? `<span class="sent-tag">✓ called ${esc(when)}</span>`
+             + `<span class="muted">call again in ${Math.max(1, Math.round(c.call_followup_due_in_h / 24))}d</span>`
+           : `<span class="sent-tag">✓ called ${esc(when)}</span>`;
+  }
+  // Offered only when one is genuinely owed — the same rule the text button needed. Recording a
+  // call nobody made is worse here than anywhere else: it is asserted by the operator, so
+  // nothing downstream can ever contradict it.
+  const btn = !made
+    ? `<button class="secondary" onclick="fuAct('${esc(c.id)}','call_connected',this)"${phone ? '' : ' disabled'}
+        title="Record that you spoke to them or left a message — starts the 3-day clock for the second call">✓ I called</button>`
+    : (st === 'due'
+        ? `<button class="secondary" onclick="fuAct('${esc(c.id)}','call_sent',this)"
+            title="Record the second call">✓ I called again</button>` : '');
+  return `<div class="draft">
+      <div class="d-label">Phone call
+        <span class="sms-to">${phone ? 'to ' + esc(phone) : '— no number yet'}</span>
+        ${mark}
+      </div>
+      ${phone
+        ? `<div class="call-num"><a class="btn-like send" href="tel:${esc(phone.replace(/[^+\d]/g, ''))}">📞 Call ${esc(phone)}</a></div>`
+        : `<div class="sms-locked">Add a phone number below and Save — then this turns on.
+           Apollo won't release direct dials to a local tool, so it is pasted by hand.</div>`}
+      <div class="dbtns">${btn}</div>
+      <div class="sms-hint">Nothing here dials for you and nothing is recorded automatically —
+        a call happens away from this machine, so "✓ I called" is the only evidence there is.
+        Leaving a voicemail counts.</div>
+    </div>` + contactNotes(c);
+}
+
 // "I sent it" means two different things depending on where you are, and conflating them is
 // how a ladder loses its anchor: the FIRST text stamps sms_sent_at and starts the clock, and
 // every later one is a touch. Both are operator-asserted — nothing can watch Messages.app.
@@ -1218,7 +1272,18 @@ function smsSentButton(c, off) {
       title="Record that you sent the first text — starts the follow-up clock">✓ I sent it</button>`;
   const st = c.sms_followup_state || '';
   if (st === 'replied' || st === 'stopped' || st === 'finished') return '';
-  return `<button class="secondary" onclick="fuAct('${esc(c.id)}','sms_sent',this)"
+  // Reported as "the I sent it button on text messages does not do anything". It did: the
+  // server stamps `sms_sent_at` and five live contacts carry one, two of them recorded minutes
+  // before the report. What did nothing was the SCREEN — the button re-rendered identical to
+  // itself, because the follow-up variant was offered the instant the first text was recorded.
+  // Click, "Done ✓", refresh, same button. §Lessons 43's fourth form: the feature works
+  // perfectly and the result is imperceptible.
+  //
+  // Worse than cosmetic. Offered while the ladder is still WAITING, a second click records a
+  // touch for a text nobody sent, moving the whole cadence forward on operator-asserted
+  // evidence that is simply wrong. It is offered only when a follow-up is genuinely due.
+  if (st !== 'due') return '';
+  return `<button class="secondary" onclick="fuAct('${esc(c.id)}','sms_sent',this)"${d}
     title="Record that you sent this follow-up text">✓ I sent it</button>`;
 }
 
@@ -1377,8 +1442,61 @@ async function saveContactDetails(cid, btn) {
 // ── People: one line each until you open one ────────────────────────────────
 const CONTACT_OPEN = new Set();
 const CHANNEL_TAB = new Map();
-function toggleContact(cid) { if (CONTACT_OPEN.has(cid)) CONTACT_OPEN.delete(cid); else CONTACT_OPEN.add(cid); refresh(); }
-function setChannel(cid, ch) { CHANNEL_TAB.set(cid, ch); CONTACT_OPEN.add(cid); refresh(); }
+function toggleContact(cid) {
+  if (CONTACT_OPEN.has(cid)) CONTACT_OPEN.delete(cid);
+  else { CONTACT_OPEN.add(cid); autoSyncGmail(cid); }
+  refresh();
+}
+function setChannel(cid, ch) {
+  CHANNEL_TAB.set(cid, ch);
+  if (!CONTACT_OPEN.has(cid)) autoSyncGmail(cid);
+  CONTACT_OPEN.add(cid);
+  refresh();
+}
+
+// Opening a card pulls the latest Gmail for that person, once.
+//
+// Asked for as: "every time I click on a contact card it autofetches the latest gmail
+// conversation... I keep having to click fetch to make sure I got the latest email I sent, this
+// is important for context for the next email." Correct — the poller only covers contacts in
+// play and runs every five minutes, so an email sent by hand from Gmail two minutes ago is
+// simply not on the card yet, and the next draft is written without it.
+//
+// Three things make this safe to do automatically, and all three are deliberate:
+//
+//   * it is hooked to the CLICK, never to a render. `#jobs` is rebuilt every 2.5s, so a fetch
+//     on the render path would be a Gmail round-trip every 2.5 seconds per open card —
+//     §Lessons 26, where one HTTP call per job took /api/status from 0.04s to 2.4s.
+//   * once per contact per SYNC_TTL, tracked outside the DOM like every other open-state set.
+//     Re-opening a card you looked at ten seconds ago costs nothing.
+//   * it stores HEADERS and Gmail's own snippet — exactly what the five-minute poller already
+//     stores for contacts in play. The documented narrowing is untouched: no message BODY is
+//     ever read automatically, and ⤓ Fetch from Gmail on one thread stays a deliberate click.
+const SYNC_AT = new Map();          // contact id -> ms, so re-opening a card is free
+const SYNC_TTL = 60000;
+
+async function autoSyncGmail(cid) {
+  if (!CONTENT_SCOPE) return;                       // no gmail.readonly: nothing to search with
+  const c = (LAST_JOBS || []).flatMap(j => j.contacts || []).find(x => x.id === cid);
+  if (!c || !c.email) return;                       // the search is BY ADDRESS
+  const last = SYNC_AT.get(cid) || 0;
+  if (Date.now() - last < SYNC_TTL) return;
+  SYNC_AT.set(cid, Date.now());
+  SYNC_MSG.set(cid, {text: 'checking Gmail…', bad: false});
+  const r = await post('/api/contact/sync-gmail', {contact_id: cid});
+  // Silent on success with nothing new: an "up to date" note on every card you open is noise
+  // within a day, and a message that is always there is one nobody reads (CRM-3a's rule).
+  // A real change, and every failure, still says so.
+  //
+  // Keyed on the COUNT the response already carries, never on its prose. `messages` is the
+  // number of new rows; matching a sentence would break the moment the wording changes, and
+  // silently — the note would simply start appearing on every card.
+  if (r.ok && !r.messages) SYNC_MSG.delete(cid);
+  else SYNC_MSG.set(cid, {text: r.message || (r.ok ? 'Synced.' : 'Could not reach Gmail.'),
+                          bad: !r.ok});
+  setTimeout(() => { SYNC_MSG.delete(cid); refresh(); }, 12000);
+  refresh();
+}
 // CRM-4. Someone the OTHER side added to a thread — a recruiter looping in a hiring manager
 // is the single most valuable event in a job-search conversation, and a boolean `replied` threw
 // it away. Surfaced as an offer, never auto-created: a contact added here is one an automated
@@ -2404,7 +2522,7 @@ function contactPanel(c) {
   // already handles an absent number, but a strip where two empty channels are flagged and the
   // third is not reads as the third being fine.
   const usable = {email: !!c.email, linkedin: !!c.linkedin_url, phone: !!c.phone,
-                  meetings: !!(c.transcripts || []).length};
+                  call: !!c.phone, meetings: !!(c.transcripts || []).length};
   const stored = CHANNEL_TAB.get(c.id);
   // Still OPENS on a channel that works, or every contact lands on a form instead of their
   // conversation. The stored choice is honoured even when empty — clicking a ＋ tab has to stay
@@ -2416,6 +2534,7 @@ function contactPanel(c) {
   if (ch === 'email')    body = c.email ? emailChannel(c) : addIdentifier(c, 'email');
   if (ch === 'linkedin') body = c.linkedin_url ? linkedinChannel(c) : addIdentifier(c, 'linkedin');
   if (ch === 'phone')    body = smsChannel(c);
+  if (ch === 'call')     body = callChannel(c);
   if (ch === 'meetings') body = transcriptSection(c);
   return `<div class="pbody" onclick="event.stopPropagation()">
       <div class="cmeta">
@@ -2429,7 +2548,7 @@ function contactPanel(c) {
         ${c.verify_note ? `<div class="verify-note ${esc(c.confidence)}">${c.confidence === 'high' ? '✓' : '?'} ${esc(c.verify_note)}</div>` : ''}
         ${syncGmailBtn(c)}
       </div>
-      <div class="chan">${tab('email','✉ Email')}${tab('linkedin','🔗 LinkedIn')}${tab('phone','💬 Text' + (c.sms_sent_at ? ' ✓' : ''))}${tab('meetings','📝 Meetings' + ((c.transcripts || []).length ? ' ' + c.transcripts.length : ''))}</div>
+      <div class="chan">${tab('email','✉ Email')}${tab('linkedin','🔗 LinkedIn')}${tab('phone','💬 Text' + (c.sms_sent_at ? ' ✓' : ''))}${tab('call','📞 Call' + (c.call_made_at ? ' ✓' : ''))}${tab('meetings','📝 Meetings' + ((c.transcripts || []).length ? ' ' + c.transcripts.length : ''))}</div>
       ${body}
       ${engagementLog(c)}
       <div class="crow-del"><button class="link-danger" onclick="deleteContact('${esc(c.id)}', decodeURIComponent('${encodeURIComponent(c.full_name || '')}'), ${!!c.emailed})">🗑 Not at this company — remove</button></div>
@@ -3732,7 +3851,31 @@ async function markGhost(url, btn) {
                'does, but it is NOT counted as one: nobody read it.')) return;
   return closeJob(url, btn, 'ghost');
 }
+// "I should not close out a job application without having texted and called some of the people
+// whose contacts we found."
+//
+// ONE guard, on the single funnel all three closing actions already went through — rejected,
+// cancelled and ghost. A copy per action is how a rule gets implemented at one of its call
+// sites and quietly not at the others (§Lessons 49, which has fired here at two call sites, at
+// three, and at seven).
+//
+// ADVISORY, and that is the deliberate half. It names what is unspent and asks once more; it
+// never refuses. A req that was genuinely pulled has to be filable without first faking work
+// nobody did, and the row does not know what the operator knows — the same correction the
+// round-two panel needed when it was disabling a button for three true statements about what
+// was merely cheapest (§Lessons 69). It is silent when somebody replied: the point of the
+// outreach was a conversation, and one happened.
+function closeGuard(url) {
+  const j = (LAST_JOBS || []).find(x => x.url === url);
+  const w = ((j || {}).coverage || {}).close_warning;
+  if (!w || !w.warn) return true;
+  const who = (w.names || []).length ? `\n\n${w.names.join(', ')}` : '';
+  return confirm('You have not finished working this one:\n\n  · '
+    + w.lines.join('\n  · ') + who
+    + '\n\nClose it anyway?');
+}
 async function closeJob(url, btn, status) {
+  if (!closeGuard(url)) return;
   btn.disabled = true;
   const r = await post('/api/mark-rejected', {url, status});
   if (r.ok) refresh(); else { btn.disabled = false; alert(r.message || 'Failed'); }
@@ -3985,12 +4128,19 @@ const TAB_OPEN = new Map();
 function activeTab(j) {
   const t = TAB_OPEN.get(j.url);
   if (t) return t;
-  return dueByChannel(j).total ? 'followups' : 'people';
+  // Summary is the default: "every card as soon as you open it should have its own summary
+  // tab". It replaces `people` as the resting default and does NOT replace `followups` —
+  // landing on work that is actually owed still beats landing on a description of it.
+  return dueByChannel(j).total ? 'followups' : 'summary';
 }
 function jobTabs(j) {
   const u = `decodeURIComponent('${encodeURIComponent(j.url)}')`;
   const cur = activeTab(j);
   const defs = [
+    // Asked for as "every card as soon as you open it should have its own summary tab that's
+    // not the email tab". FIRST, and the default — see `activeTab`. It is the one pane that
+    // answers "where is this whole thing up to" without opening anyone.
+    ['summary',   'Summary',    0, false],
     ['people',    'People',     (j.contacts || []).length, false],
     ['followups', 'Follow-ups', dueByChannel(j).total, dueByChannel(j).total > 0],
     ['materials', 'Materials',  (j.materials || []).length, false],
@@ -4226,8 +4376,90 @@ async function logInteraction(cid, kind) {
   refresh();
 }
 
+// ── Summary: the whole job at a glance, in plan order ───────────────────────
+// The three asks that turned out to be one computation — the ordered sequence, the summary
+// pane, and the close guard — all read `j.coverage`, so they cannot disagree about how far a
+// job has been worked. Derived server-side from rows and ladders that were already loaded, at
+// a cost of zero queries and zero network calls.
+const STAGE_DOTS = ['Emails', 'Text + call', 'Text + call again'];
+
+function summaryPane(j) {
+  const cov = j.coverage;
+  if (!cov || !cov.people) {
+    return `<div class="pane-empty">Nobody has been found for this job yet.
+      ${findContactsPrompt(j)}</div>`;
+  }
+  const tot = `<div class="sum-tot">
+      ${sumStat('✉', cov.emails, 'email', 'emails')}
+      ${sumStat('💬', cov.texts, 'text', 'texts')}
+      ${sumStat('📞', cov.calls, 'call', 'calls')}
+      ${sumStat('🔗', cov.invites, 'invite', 'invites')}
+      ${cov.replied ? `<span class="sum-s good">↩ ${cov.replied} replied</span>` : ''}
+    </div>`;
+
+  const rows = (cov.rows || []).map(r => {
+    const ch = r.channels || {};
+    // The plan as a track, so "where is this person" is legible without reading a sentence.
+    // A step is filled when the channel has started, hollow when it has not, and struck
+    // through when it can never run — no phone number is not the same as an unmade call.
+    const dots = STAGE_DOTS.map((label, i) => {
+      const done = r.stage.index > i || r.stage.key === 'done' || r.stage.key === 'replied';
+      const here = r.stage.index === i;
+      return `<span class="sum-dot ${done ? 'on' : here ? 'now' : ''}" data-tip="${esc(label)}"
+        aria-label="${esc(label)}"></span>`;
+    }).join('');
+    const counts = [
+      ch.email && ch.email.possible ? `✉ ${ch.email.sent}/${ch.email.planned}` : '✉ —',
+      ch.sms && ch.sms.possible ? `💬 ${ch.sms.sent}/${ch.sms.planned}` : '💬 —',
+      ch.call && ch.call.possible ? `📞 ${ch.call.sent}/${ch.call.planned}` : '📞 —',
+    ].join(' ');
+    const nxt = r.replied ? `<span class="sum-next good">↩ they replied — your turn</span>`
+      : r.next ? `<span class="sum-next do">${esc(r.next.what)}</span>`
+      : `<span class="sum-next">waiting</span>`;
+    return `<div class="sum-row" onclick="openContactFrom(${
+        `decodeURIComponent('${encodeURIComponent(j.url)}')`}, '${esc(r.id)}')">
+        <span class="sum-name">${esc(r.full_name || r.email || '(no name)')}</span>
+        <span class="sum-track">${dots}</span>
+        <span class="sum-counts">${counts}</span>
+        ${nxt}
+      </div>`;
+  }).join('');
+
+  return `<div class="sum">${tot}
+      <div class="sum-legend">${STAGE_DOTS.map((s, i) =>
+        // NEUTRAL dots. The first version reused `.sum-dot.on`, so the legend rendered three
+        // filled green dots above every job and read as "all three stages complete" — a key
+        // wearing the state it is supposed to explain. Caught in a browser; no markup
+        // assertion would have seen it, because the markup was exactly what I intended.
+        `<span><span class="sum-dot key"></span>${i + 1}. ${esc(s)}</span>`).join('')}</div>
+      ${rows}
+      ${closeNotice(j)}
+    </div>`;
+}
+function sumStat(icon, n, one, many) {
+  return `<span class="sum-s ${n ? '' : 'zero'}">${icon} ${n} ${n === 1 ? one : many}</span>`;
+}
+
+// The close guard, shown IN the summary rather than only in a dialog: "I should not close out a
+// job application without having texted and called some of the people". Seeing it before you
+// reach for the row menu is what makes it advice rather than an interruption.
+function closeNotice(j) {
+  const w = (j.coverage || {}).close_warning;
+  if (!w || !w.warn || isClosed(j) || j.interview_at) return '';
+  return `<div class="sum-warn">⚠ Not fully worked yet — ${esc(w.lines.join(' · '))}.
+      <span class="sum-warn-why">Closing this is still your call; this is what is left.</span>
+    </div>`;
+}
+function openContactFrom(url, cid) {
+  TAB_OPEN.set(url, 'people');
+  CONTACT_OPEN.add(cid);
+  autoSyncGmail(cid);
+  refresh();
+}
+
 function jobPane(j) {
   const t = activeTab(j);
+  if (t === 'summary')   return summaryPane(j);
   if (t === 'job')       return jobDetail(j);
   if (t === 'activity')  return `<div class="timeline">${activityHtml(j.activity)}</div>`;
   if (t === 'materials') return materialLinks(j.materials) || `<div class="pane-empty">No materials generated yet.</div>`;

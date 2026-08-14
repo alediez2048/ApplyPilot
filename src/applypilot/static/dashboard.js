@@ -1020,6 +1020,7 @@ function draftBlock(c, wantEmail, wantLi, historyShown) {
         ${echo ? '' : `<button onclick="copyDraft(this)">Copy email</button>`}
         ${attachBtn}
         ${sendBtn}
+        ${emailSentButton(c)}
         ${followupButton(c)}
       </div>`;
   }
@@ -1046,6 +1047,38 @@ function draftBlock(c, wantEmail, wantLi, historyShown) {
 }
 // Only offered once a follow-up is actually owed — an email that went out an hour ago
 // shouldn't show a follow-up button, and one already logged shows its state instead.
+// "I sent this one myself." The marker every other channel has had since it shipped, and email
+// did not — because Gmail's send response was taken as proof, which it only is for the sends
+// that went THROUGH ApplyPilot. An email typed in Gmail, sent from a phone, or picked up by the
+// address search afterwards leaves the row reading "never emailed": measured live, 9 contacts
+// with outbound mail on record and no send state at all, so their card offered a cold first
+// contact to somebody two to four emails deep.
+//
+// Offered only when this role has NO send recorded, for the same reason the text marker is
+// (§Lessons 43's fourth form): re-rendering the same button after a click is indistinguishable
+// from the click being ignored, and clicking twice would move the ladder's anchor forward.
+// A contact moved from another role IS offered it — their send belongs to the other job, and
+// asserting one here is exactly how the new role's ladder starts.
+function emailSentButton(c) {
+  if (c.emailed || !c.email) return '';
+  return `<button class="secondary" onclick="fuAct('${esc(c.id)}','connected',this)"
+    title="Record that you emailed ${esc(c.full_name || c.email)} yourself — outside ApplyPilot, or before this card existed. Starts the follow-up clock.">✓ I emailed them</button>`;
+}
+
+// The same marker, for the card that shows a CONVERSATION instead of a draft form. It says what
+// is wrong before offering the fix, because on a card already displaying six sent emails "✓ I
+// emailed them" on its own reads as a duplicate of what you are looking at rather than as a
+// correction to a state you cannot otherwise see.
+function markSentBar(c) {
+  if (c.emailed || !c.email || c.thread_from) return '';
+  const out = (c.thread || []).filter(m => (m.direction || '') === 'out').length;
+  return `<div class="marksent">
+      <span>${out ? `${out} email${out === 1 ? '' : 's'} here went out, but nothing is recorded
+        as sent — so no follow-up is scheduled.` : 'No send is recorded for this contact.'}</span>
+      ${emailSentButton(c)}
+    </div>`;
+}
+
 function followupButton(c) {
   if (!c.emailed) return '';
   if (c.followed_up_at) return `<span class="sent-tag">✓ followed up</span>`;
@@ -2807,7 +2840,13 @@ function emailChannel(c) {
   // splitting the conversation further — so the offer is to go to the card that owns it.
   if (c.thread_from) return borrowedBanner(c) + history;
   // With an inbound message the composers already live inside the history, per thread.
-  if (hasConversation(c)) return history;
+  //
+  // The send MARKER still has to be reachable here, though, and this is where the first version
+  // of it was not: it rode in `draftBlock`'s button row, which never renders once a reply
+  // exists. Live, Patrick Omalley had SIX outbound emails, `emailed=false`, and no way to
+  // correct it — the exact contact the operator was pointing at. §Lessons 43 again: a control
+  // that exists in one branch of a render is missing from every other.
+  if (hasConversation(c)) return markSentBar(c) + history;
   // A due follow-up is the more urgent thing to WRITE, but it no longer replaces the record of
   // what was already said — it sits under it.
   if (c.followup_state === 'due' || (c.followup_message || '').trim())

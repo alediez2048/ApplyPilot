@@ -317,6 +317,13 @@
   .addc-hint { font-size:11.5px; color:var(--faint); flex:1 1 220px; }
   .addc-err { color:var(--red); font-weight:600; }
 
+  /* "You sent these, but nothing recorded it." Amber because it is a correction to make, not
+     an error and not good news — and it sits ABOVE the conversation it is about. */
+  .marksent { display:flex; align-items:center; gap:10px; flex-wrap:wrap; font-size:12.5px;
+      color:var(--yellow); background:var(--yellow-soft); border-radius:8px;
+      padding:8px 12px; margin:2px 0 10px; line-height:1.45; }
+  .marksent span { flex:1 1 240px; }
+
   /* A contact whose outreach happened on ANOTHER role. Reads as "yes, we have spoken" —
      `on`, not `off` — while staying visibly distinct from a send about THIS job, because the
      two are different facts and acting on the wrong one is how somebody gets written to twice. */

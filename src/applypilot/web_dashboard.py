@@ -4032,8 +4032,13 @@ def _followup_action(data: dict) -> dict:
     # somebody clicking a button, which makes the double-click the obvious failure: a second
     # stamp would move the anchor forward and silently push every touch later.
     if verb == "connected":
+        # Email is in this map now. It was left out on the reasoning that "Gmail's send response
+        # proves itself" — true of the sends that went THROUGH ApplyPilot, and silent about an
+        # email typed in Gmail or sent from a phone. Live, 9 contacts carried outbound mail and
+        # no send state, so their card offered a cold first contact to somebody already several
+        # emails deep.
         setter = {"linkedin": "mark_connected_now", "sms": "mark_sms_sent",
-                  "call": "mark_call_made"}.get(channel.name)
+                  "call": "mark_call_made", "email": "mark_email_sent"}.get(channel.name)
         if not setter:
             return {"ok": False, "message": f"{channel.name} has no anchor to set"}
         # `is False` deliberately, not falsiness: mark_connected_now returns None (it is

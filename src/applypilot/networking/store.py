@@ -804,6 +804,52 @@ def mark_sms_sent(contact_id: str, conn: sqlite3.Connection | None = None) -> bo
     return True
 
 
+def mark_email_sent(contact_id: str, conn: sqlite3.Connection | None = None) -> bool:
+    """The operator asserting that an email went out. Returns False if one was already recorded.
+
+    Every other channel has had this since it shipped; email did not, because Gmail's send
+    response was assumed to prove itself. It only proves the sends that went THROUGH ApplyPilot.
+    An email typed in Gmail, a reply sent from a phone, or a thread the address-search pulled in
+    afterwards all leave the row reading "never emailed" — measured live: **9 contacts with
+    outbound mail on record and no send state at all**, so the card offered a cold first contact
+    to people already two to four emails deep.
+
+    `sent_message_id` is deliberately NOT faked. It is Gmail's own id and threading reads it, so
+    inventing one would put a follow-up in a thread that does not exist. `submitted_at` plus
+    `outreach_status` is what the ladder and the UI actually consult.
+
+    Idempotent, like the SMS and call markers, and for the same reason: a click is the only
+    evidence, which makes the double-click the obvious failure. A second stamp would move the
+    ladder's anchor forward and silently push every follow-up later.
+    """
+    if conn is None:
+        conn = get_connection()
+    init_contacts(conn)
+    row = conn.execute(
+        "SELECT COALESCE(sent_message_id,'') smi, COALESCE(outreach_status,'') st, "
+        "COALESCE(submitted_at,'') sa, COALESCE(outreach_job_url,'') oju "
+        "FROM contacts WHERE id = ?", (contact_id,)).fetchone()
+    if row is None:
+        return False
+    # A MOVED contact's stored send belongs to the other role (CO-2), so it does not count as
+    # "already recorded" here — the operator is asserting a send about THIS one, and that also
+    # clears the stamp, because the outreach on this row is now about the job it sits on.
+    moved = bool(row["oju"].strip())
+    if not moved and (row["smi"].strip() or row["st"] == "submitted"):
+        return False
+    now = datetime.now(timezone.utc).isoformat()
+    # Keep an existing anchor unless it belonged to another role: overwriting a real send date
+    # would restart a ladder that is already running.
+    anchor = now if (moved or not row["sa"].strip()) else row["sa"]
+    conn.execute(
+        "UPDATE contacts SET submitted_at = ?, outreach_status = 'submitted', "
+        "outreach_job_url = '' WHERE id = ?", (anchor, contact_id))
+    conn.commit()
+    log_contact_event(contact_id, "ok", f"Emailed {_contact_label(contact_id, conn)} "
+                                        "(recorded by hand).", conn)
+    return True
+
+
 def mark_call_made(contact_id: str, conn: sqlite3.Connection | None = None) -> bool:
     """Record that the FIRST call happened. Returns False if one was already recorded.
 

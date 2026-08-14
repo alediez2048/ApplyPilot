@@ -230,7 +230,20 @@ def normalize_for_ladder(contact: dict) -> dict:
     if "emailed" in contact:
         return contact
     ours = outreach_is_for_this_job(contact)
-    out = {**contact, "emailed": ours and bool((contact.get("sent_message_id") or "").strip())}
+    # `sent_message_id` OR `outreach_status == 'submitted'` — the SAME rule `_contact_payload`
+    # has always used. This checked only the message id, which made it the odd one out: an email
+    # the operator marked as sent by hand set `submitted` and no id, so the dashboard read the
+    # contact as emailed while the ladder read the channel as never used and scheduled nothing.
+    # §Lessons 21 exactly — one derived field computed two ways, where `tick` reported 0
+    # follow-ups due against the dashboard's 3.
+    #
+    # The original comment reasoned that "an email with no message id was never delivered". That
+    # held when only the send path could write `submitted`; it is now also what the operator
+    # asserts with "✓ I emailed them", which is the only evidence that exists for mail sent
+    # outside ApplyPilot.
+    out = {**contact,
+           "emailed": ours and (bool((contact.get("sent_message_id") or "").strip())
+                                or contact.get("outreach_status") == "submitted")}
     if not ours:
         # Every channel that runs a ladder, by its own declared anchor — not a hand-written
         # list, which is the thing that silently ignored SMS the moment it shipped.

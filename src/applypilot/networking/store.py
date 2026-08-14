@@ -347,7 +347,7 @@ def contact_counts_by_job(conn: sqlite3.Connection | None = None) -> dict:
         "SELECT job_url, COUNT(*) FROM contacts GROUP BY job_url").fetchall()}
 
 
-def known_at_company(company: str, exclude_job_url: str = "",
+def known_at_company(company: str, exclude_job_url: str = "", space_id: str = "",
                      conn: sqlite3.Connection | None = None) -> list[dict]:
     """Everyone we already have at this employer, on ANY other role.
 
@@ -371,12 +371,19 @@ def known_at_company(company: str, exclude_job_url: str = "",
     key = (company or "").strip().lower()
     if not key:
         return []
+    # Scoped to the SPACE as well as the employer. The same person legitimately appears in two
+    # campaigns — `waheed.brown@arm.com` is an applied Project Manager row in `job-search` and an
+    # Arm target card in `professional-network` — and that is not a duplicate. Flagging it as one
+    # would offer a move that `migrate.plan` correctly refuses, which is a suggestion the
+    # operator cannot act on. `space_id` empty means "do not scope", for callers that have none.
+    scope = " AND j.space_id = ?" if (space_id or "").strip() else ""
+    args = [key, exclude_job_url or ""] + ([space_id] if scope else [])
     rows = conn.execute(
         "SELECT c.id, c.full_name, c.email, c.linkedin_url, c.job_url, c.replied_at, "
         "       c.sent_message_id, c.outreach_status, j.title AS job_title, j.apply_status "
         "FROM contacts c LEFT JOIN jobs j ON j.url = c.job_url "
-        "WHERE LOWER(TRIM(COALESCE(c.company,''))) = ? AND c.job_url != ? "
-        "ORDER BY c.discovered_at", (key, exclude_job_url or "")).fetchall()
+        "WHERE LOWER(TRIM(COALESCE(c.company,''))) = ? AND c.job_url != ?" + scope + " "
+        "ORDER BY c.discovered_at", args).fetchall()
     return [{
         "id": r["id"], "full_name": r["full_name"] or "", "email": _norm_email(r["email"]),
         "linkedin_url": _norm_linkedin(r["linkedin_url"]), "job_url": r["job_url"],

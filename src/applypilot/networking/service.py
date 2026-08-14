@@ -294,7 +294,8 @@ def find_contacts_for_job(
     # already uses to put one person's two rows together (SHEET-1b).
     known_elsewhere: list[dict] = []
     if company:
-        mine = store.known_at_company(company, exclude_job_url=job_url or "")
+        mine = store.known_at_company(company, exclude_job_url=job_url or "",
+                                      space_id=(job or {}).get("space_id") or "")
         if mine:
             by_email = {m["email"]: m for m in mine if m["email"]}
             by_li = {m["linkedin_url"]: m for m in mine if m["linkedin_url"]}

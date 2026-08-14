@@ -233,8 +233,14 @@ def test_replied_at_survives_and_submitted_at_is_not_wiped(db):
 
 def test_the_contact_lands_in_the_destinations_SPACE(db):
     """§Lessons 70 at a fourth write path: 14 live contacts already disagree with their job's
-    Space because a write path left the column DEFAULT to decide."""
-    db.execute("UPDATE jobs SET space_id = 'gauntlet' WHERE url = ?", (LIVE,))
+    Space because a write path left the column DEFAULT to decide.
+
+    BOTH jobs are moved to `gauntlet` — a cross-Space move is refused outright now (the same
+    person tracked in two campaigns is not a duplicate), so the guarantee under test is the one
+    that survives: the contact takes the job's Space rather than the column default of
+    `job-search`.
+    """
+    db.execute("UPDATE jobs SET space_id = 'gauntlet' WHERE url IN (?, ?)", (LIVE, DEAD))
     db.commit()
     cid = _person(db)
     migrate.apply(DEAD, LIVE, [cid], db)

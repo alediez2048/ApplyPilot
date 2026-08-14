@@ -90,6 +90,21 @@ def plan(src_url: str, dst_url: str, conn: sqlite3.Connection | None = None) -> 
     if not src_job or not dst_job:
         return {"ok": False, "error": "one of those applications no longer exists"}
 
+    # Same SPACE only, and this was missing until a live pair exposed it. `waheed.brown@arm.com`
+    # sits on two rows — an applied "Project Manager" in `job-search` and an "Arm" target card in
+    # `professional-network` — and looked exactly like the duplicates this feature removes. It is
+    # not one: it is the same human deliberately tracked in two campaigns, and merging them would
+    # collapse one into the other.
+    #
+    # `targets_for` and `sources_for` already scope their listings by Space, so the BUTTON never
+    # offered it — which is precisely §Lessons 49's shape: a rule enforced at one of its two
+    # layers. `plan()` is reachable directly and said ok=True on that pair.
+    if (src_job.get("space_id") or "") != (dst_job.get("space_id") or ""):
+        return {"ok": False,
+                "error": "those applications are in different Spaces — the same person tracked "
+                         "in two campaigns is not a duplicate, and merging them would collapse "
+                         "one into the other"}
+
     # Same employer only. Not a nicety: these are people who WORK at that company, and a button
     # that can file them under a different one puts real humans on a card where they do not
     # belong — §Lessons 68's cost, arrived at deliberately rather than discovered.

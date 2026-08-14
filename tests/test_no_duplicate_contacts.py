@@ -128,3 +128,54 @@ def test_it_reports_them_rather_than_dropping_them_silently(db):
     src = inspect.getsource(service.find_contacts_for_job)
     assert "known_elsewhere" in src
     assert "result[\"known_elsewhere\"]" in src, "the skip never reaches the caller"
+
+
+# ── the same person in two SPACES is not a duplicate ────────────────────────
+#
+# Found on live data while deduplicating: `waheed.brown@arm.com` sits on two rows — an applied
+# "Project Manager" in `job-search` and an "Arm" target card in `professional-network`. It looks
+# exactly like the duplicates this feature removes and is the opposite: the same human
+# deliberately tracked in two campaigns. Merging them collapses one into the other.
+
+NETJOB = "target:professional-network:arm"
+
+
+def test_a_contact_in_another_SPACE_is_not_reported_as_a_duplicate(db):
+    """Flagging it offers a move that `migrate.plan` correctly refuses — a suggestion the
+    operator cannot act on."""
+    from applypilot.repo import jobs as rj
+    rj.insert_imported(NETJOB, "Arm", "Arm", "Arm", NETJOB, db)
+    db.execute("UPDATE jobs SET space_id='professional-network' WHERE url=?", (NETJOB,))
+    db.commit()
+    store.upsert_contact({"job_url": NETJOB, "full_name": "Waheed Brown", "company": "Webai",
+                          "email": "w@webai.com"}, db)
+    assert store.known_at_company("Webai", exclude_job_url=LIVE, space_id="job-search",
+                                  conn=db) == []
+    # ...and without a Space it is still found, for callers that have none.
+    assert len(store.known_at_company("Webai", exclude_job_url=LIVE, conn=db)) == 1
+
+
+def test_migrate_REFUSES_a_cross_space_move(db):
+    """The rule at its OTHER layer. `targets_for`/`sources_for` scope their listings by Space so
+    the BUTTON never offered this — §Lessons 49's shape, and `plan()` is reachable directly and
+    said ok=True on the live Arm pair."""
+    from applypilot.networking import migrate
+    from applypilot.repo import jobs as rj
+    rj.insert_imported(NETJOB, "Arm", "Webai", "Webai", NETJOB, db)
+    db.execute("UPDATE jobs SET space_id='professional-network' WHERE url=?", (NETJOB,))
+    db.commit()
+    cid = store.upsert_contact({"job_url": NETJOB, "full_name": "Waheed Brown",
+                                "company": "Webai", "email": "w@webai.com"}, db)
+    got = migrate.plan(NETJOB, LIVE, db)
+    assert got["ok"] is False and "different Spaces" in got["error"]
+    assert migrate.apply(NETJOB, LIVE, [cid], db)["ok"] is False
+
+
+def test_the_SAME_space_still_moves(db):
+    """The negative control: without it, "refuse cross-Space" collapses into "refuse everything"
+    and CO-2 stops working entirely."""
+    from applypilot.networking import migrate
+    cid = _known(db)
+    got = migrate.plan(DEAD, LIVE, db)
+    assert got["ok"] is True, got["error"]
+    assert [r["id"] for r in got["movable"]] == [cid]

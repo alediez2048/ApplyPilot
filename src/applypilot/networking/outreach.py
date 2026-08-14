@@ -1509,36 +1509,147 @@ def job_facts(job: dict) -> str:
     return "\n".join(bits)
 
 
+#: How much conversation the prompt may carry. A real thread here runs to 87 messages; handing
+#: all of it over would blow the context and bury the part being answered. The FIRST message is
+#: always kept (it says what this is about) and the rest is filled from the most recent
+#: backwards — the same shape the panel uses when it collapses a long thread.
+_TRANSCRIPT_CHARS = 7000
+
+
 def conversation_transcript(contact: dict, thread: list | None = None,
                             touches: list | None = None, their_reply: str = "") -> str:
     """The whole exchange, in order, as the model should read it.
 
-    Assembled from three separate stores, which is exactly why it is worth having in one
-    function: the first email lives on `contacts`, every follow-up lives in `touches`, and the
-    reply lives in `messages`. A draft written from any one of them repeats what the other two
+    Assembled from three stores, which is exactly why it is worth having in one function: the
+    first email lives on `contacts`, every follow-up lives in `touches`, and the conversation
+    itself lives in `messages`. A draft written from any one of them repeats what the other two
     already said, the specific way an automated-sounding reply gets written.
+
+    **It used to read the `thread` argument for two fields and nothing else** — the last inbound
+    message's sender name and date — so the transcript was our first email, our follow-ups, and
+    ONE reply. §Lessons 39 recorded that exact shape for this exact function ("a function that
+    takes a thread may not read the thread") and it was still true of everything except the
+    final message.
+
+    Measured on the live database when this was fixed:
+
+        Lee Ackerley       87 messages (45 inbound)  -> transcript showed 2 entries
+        Kevin Parakkattu   61 messages (36 inbound)  -> 2
+        Diego Bodart       18 messages (12 inbound)  -> 2
+
+    So a reply "written from the whole sequence" was written from the opening email and the
+    newest message, with everything in between invisible — including every answer WE had already
+    given, which is how a drafter re-asks a question that was settled four messages ago.
+
+    Our own messages come from the FULLER copy where one exists: `contacts.outreach_message` and
+    `touches.body` hold the text as typed, while a synced `messages.snippet` is capped at 200
+    characters. The thread copy of a message we already hold in full is dropped rather than
+    shown twice.
     """
+    events = _transcript_events(contact, thread, touches, their_reply)
+    if not events:
+        return ""
+    kept, skipped = _fit(events, _TRANSCRIPT_CHARS)
     lines = []
+    for i, e in enumerate(kept, start=1):
+        if e is _GAP:
+            lines.append(f"[…{skipped} earlier message{'s' if skipped != 1 else ''} omitted…]")
+            continue
+        when = f" on {e['at'][:10]}" if e.get("at") else ""
+        subj = f", subject: {e['subject']}" if e.get("subject") else ""
+        lines.append(f"[{i}] {e['who']}{when}{subj}:\n{e['body']}")
+    return "\n\n".join(lines)
+
+
+#: Marker for the elided middle. An object rather than a string so it cannot collide with a real
+#: message whose body happens to look like the marker.
+_GAP = object()
+
+
+def _transcript_events(contact: dict, thread, touches, their_reply: str) -> list[dict]:
+    """Every message in the conversation, oldest first, deduplicated across the three stores."""
+    thread = [m for m in (thread or []) if isinstance(m, dict)]
+    events: list[dict] = []
+
+    # Our own messages, from the copies that hold the FULL text.
     first = (contact.get("outreach_message") or "").strip()
+    first_at = (contact.get("submitted_at") or "").strip()
     if first:
-        subj = (contact.get("outreach_subject") or "").strip()
-        when = (contact.get("submitted_at") or "")[:10]
-        lines.append(f"[1] YOU wrote{f' on {when}' if when else ''}"
-                     f"{f', subject: {subj}' if subj else ''}:\n{first[:900]}")
-    n = len(lines) + 1
+        events.append({"who": "YOU wrote", "at": first_at, "body": first[:900],
+                       "subject": (contact.get("outreach_subject") or "").strip()})
+    sent_ats = {first_at[:16]} if first_at else set()
     for t in (touches or []):
         body = (t.get("body") or "").strip()
         if not body:
             continue
-        when = (t.get("sent_at") or "")[:10]
-        lines.append(f"[{n}] YOU followed up{f' on {when}' if when else ''}:\n{body[:600]}")
-        n += 1
-    if their_reply.strip():
-        who = _last_inbound(thread).get("from_name") or "THEY"
-        when = (_last_inbound(thread).get("sent_at") or "")[:10]
-        lines.append(f"[{n}] {who.upper()} REPLIED{f' on {when}' if when else ''}:\n"
-                     f"{their_reply.strip()}")
-    return "\n\n".join(lines)
+        at = (t.get("sent_at") or "").strip()
+        events.append({"who": "YOU followed up", "at": at, "body": body[:600]})
+        if at:
+            sent_ats.add(at[:16])
+
+    # ...and everything in the thread that those do not already cover.
+    #
+    # `contacts.sent_message_id` identifies the first email exactly. Touches carry no message id
+    # (the gap CLAUDE.md records under §Lessons 77), so an outbound thread message is matched to
+    # one by MINUTE — deterministic, and the failure mode is showing a 200-char snippet beside
+    # the full text rather than losing anything.
+    first_id = (contact.get("sent_message_id") or "").strip()
+    for m in thread:
+        body = (m.get("snippet") or "").strip()
+        if not body:
+            continue
+        at = (m.get("sent_at") or "").strip()
+        inbound = (m.get("direction") or "") == "in"
+        if not inbound:
+            if first_id and m.get("message_id") == first_id:
+                continue
+            if at and at[:16] in sent_ats:
+                continue
+        events.append({
+            "who": (f"{(m.get('from_name') or 'THEY').upper()} REPLIED" if inbound
+                    else "YOU wrote"),
+            "at": at, "body": body, "subject": (m.get("subject") or "").strip(),
+        })
+
+    events.sort(key=lambda e: e.get("at") or "")
+
+    # A pasted reply is the operator's own transcription of the newest inbound message and is
+    # usually fuller than the stored snippet, so it REPLACES that message rather than being
+    # appended after it — appended, the model reads the same message twice and treats the
+    # repetition as emphasis.
+    said = (their_reply or "").strip()
+    if said:
+        for e in reversed(events):
+            if "REPLIED" in e["who"]:
+                e["body"] = said
+                break
+        else:
+            last = _last_inbound(thread)
+            events.append({"who": f"{(last.get('from_name') or 'THEY').upper()} REPLIED",
+                           "at": (last.get("sent_at") or ""), "body": said})
+    return events
+
+
+def _fit(events: list, budget: int) -> tuple[list, int]:
+    """Trim to a character budget: keep the FIRST message and as many of the most recent as fit.
+
+    The opening message says what the conversation is about and is what a late reply is still
+    implicitly answering, so it is never the thing dropped. Everything else is filled in from the
+    newest backwards, because the near end is what the reply has to engage with.
+    """
+    total = sum(len(e["body"]) for e in events)
+    if total <= budget or len(events) <= 2:
+        return events, 0
+    head, rest = events[:1], events[1:]
+    used = len(head[0]["body"])
+    tail: list = []
+    for e in reversed(rest):
+        if used + len(e["body"]) > budget and tail:
+            break
+        tail.insert(0, e)
+        used += len(e["body"])
+    skipped = len(rest) - len(tail)
+    return (head + ([_GAP] if skipped else []) + tail), skipped
 
 
 def _last_inbound(thread: list | None) -> dict:

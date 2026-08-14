@@ -200,10 +200,17 @@ def fetch_thread_text(contact: dict, conn=None) -> dict:
     me = _our_addresses()
     rows, stored = [], 0
     for m in msgs:
-        # Trim the quoted original: Gmail's snippet runs through the quote header, so a short
-        # reply can be a third our own email quoted back — and that would reach the drafter as
-        # something they wrote.
-        text = cv.strip_quoted_tail(m.get("snippet"))
+        # The actual BODY, which is the whole point of this path and was never being fetched.
+        # `thread_messages` uses `format="metadata"` and can only return Gmail's ~200-character
+        # snippet, so "⤓ Fetch from Gmail" stored exactly what the automatic sync already had —
+        # measured: of 646 stored messages, none exceeded 200 characters. Falls back to the
+        # snippet when the body cannot be read, so this is never worse than before.
+        #
+        # Quote-trimming matters MORE here, not less: a full body carries the entire quoted
+        # chain beneath the reply, and untrimmed that reaches the drafter as something they
+        # wrote — the failure `strip_quoted_tail` exists for, at ten times the size.
+        text = cv.strip_footer(cv.strip_quoted_tail(gmail_read.message_body(m.get("id"))
+                                                    or m.get("snippet")))
         if not text or cv.addr(m.get("from")) in cv.me_set(me):
             continue
         rows.append({"message_id": m.get("id"), "thread_id": thread_id,
@@ -218,7 +225,10 @@ def fetch_thread_text(contact: dict, conn=None) -> dict:
     if not rows:
         return {"ok": False, "stored": 0,
                 "message": "nothing readable in this thread — Gmail returned no text"}
-    msg_store.upsert_messages(rows, conn)
+    # `full=True`: this is the DELIBERATE read — one thread, on a click — so it stores at
+    # PASTED_MAX rather than the automatic sync's snippet bound. The two other call sites in
+    # this module are the poller and the address search, and both stay at the preview.
+    msg_store.upsert_messages(rows, conn, full=True)
     return {"ok": True, "stored": stored,
             "message": f"Read {stored} message{'s' if stored != 1 else ''} from this thread."}
 

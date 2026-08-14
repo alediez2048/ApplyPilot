@@ -209,6 +209,50 @@ _QUOTE_MARKERS = (
     r"\n-{2,}\s*Original Message", r"\n_{5,}", r"\nFrom:\s", r"\nSent from my ",
 )
 
+# Everything after the message that is not the message: the standard `-- ` signature delimiter,
+# corporate confidentiality boilerplate, and the tracking image a signature service appends.
+#
+# Only worth having since full BODIES are fetched rather than Gmail's ~200-character snippet —
+# a preview rarely reached the footer, and a real body is mostly footer. One live reply is 2781
+# characters of which the last third is a disclaimer and a wisestamp pixel URL, and all of it
+# was about to reach the drafting prompt as something the sender said.
+#
+# Same conservatism as the quote markers, for the same reason: cutting too eagerly throws away
+# the actual message, which is far worse than leaving boilerplate in. So each pattern must match
+# at a LINE START, and the cut only happens when real text survives it.
+_FOOTER_MARKERS = (
+    r"\n--\s*\n",                                   # the RFC signature delimiter
+    r"\n(?:IMPORTANT NOTICE|CONFIDENTIALITY NOTICE|DISCLAIMER)\b",
+    r"\nThis (?:e-?mail|message)\b[^\n]{0,80}?\b"
+    r"(?:confidential|privileged|intended (?:solely |only )?for)\b",
+    r"\nThe (?:contents|information) (?:of|in) this (?:e-?mail|message)\b",
+    r"\n\[https?://\S+\.(?:png|gif|jpg)\]",          # a signature service's tracking pixel
+)
+
+
+#: Inline attachment references — `[cid:97a0aa14-…]` is how an embedded image survives being
+#: flattened to text. REMOVED rather than cut at, because unlike a signature these appear in the
+#: middle of a message as often as at the end, and cutting there would discard the rest of it.
+_CID_RE = re.compile(r"\[cid:[^\]]+\]")
+
+
+def strip_footer(text: str | None) -> str:
+    """Drop a signature or legal disclaimer from the END of a message body.
+
+    Returns the input unchanged when the cut would leave nothing — a message that IS a
+    disclaimer is better kept whole than reduced to an empty string.
+    """
+    body = _CID_RE.sub("", text or "").strip()
+    if not body:
+        return ""
+    cut = len(body)
+    for pattern in _FOOTER_MARKERS:
+        m = re.search(pattern, body, re.IGNORECASE)
+        if m and m.start() > 0:
+            cut = min(cut, m.start())
+    trimmed = body[:cut].strip()
+    return trimmed or body
+
 
 def strip_quoted_tail(text: str | None) -> str:
     """Drop the quoted-original tail from a reply snippet.

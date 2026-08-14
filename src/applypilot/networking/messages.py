@@ -87,7 +87,8 @@ def init_messages(conn: sqlite3.Connection | None = None) -> sqlite3.Connection:
     return conn
 
 
-def upsert_messages(rows: list[dict], conn: sqlite3.Connection | None = None) -> int:
+def upsert_messages(rows: list[dict], conn: sqlite3.Connection | None = None,
+                    full: bool = False) -> int:
     """Store thread messages. Returns how many were NEW.
 
     `INSERT OR REPLACE` on Gmail's message id: re-syncing a thread must not duplicate it, and
@@ -131,7 +132,15 @@ def upsert_messages(rows: list[dict], conn: sqlite3.Connection | None = None) ->
         # holding markup; decoding here means one representation, and the cap then counts
         # CHARACTERS a person reads rather than the 5 bytes an apostrophe costs.
         snippet = _decode(r.get("snippet")).strip() or existing.get(key, "")
-        snippet = snippet[:SNIPPET_MAX]
+        # TWO declared bounds, chosen by the kind of read that produced the row — never a
+        # number a caller invents. `SNIPPET_MAX` is Gmail's ~200-character preview, which is
+        # all an AUTOMATIC sync ever sees; `PASTED_MAX` is for text somebody deliberately asked
+        # for, either by pasting it or by clicking "⤓ Fetch from Gmail".
+        #
+        # Without this the explicit fetch was capped at the automatic bound, so the button that
+        # exists to get the full message stored the same preview — measured: of 646 stored
+        # messages, NONE exceeded 200 characters.
+        snippet = snippet[:(PASTED_MAX if full else SNIPPET_MAX)]
         conn.execute(
             "INSERT OR REPLACE INTO messages (message_id, thread_id, contact_id, job_url, "
             "direction, from_addr, from_name, to_addrs, cc_addrs, subject, sent_at, synced_at, "

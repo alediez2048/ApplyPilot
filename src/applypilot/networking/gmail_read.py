@@ -142,6 +142,91 @@ def search_threads(query: str, limit: int = 25, service=None) -> list[str]:
     return [t.get("id") for t in (res.get("threads") or []) if t.get("id")]
 
 
+def message_body(message_id: str, service=None) -> str:
+    """The actual TEXT of one message. '' when it cannot be read.
+
+    `thread_messages` above asks for `format="metadata"`, which by design returns headers and
+    Gmail's own `snippet` and no body at all. That was the only option when the token carried
+    `gmail.metadata`; `gmail.readonly` has been granted since 2026-07-31 and nothing was changed
+    to use it — so "⤓ Fetch from Gmail" pulled the same ~200-character preview the automatic
+    sync already had, while `PASTED_MAX = 2000` recorded an intent that was never met.
+
+    Measured when this was written: of 646 stored messages, **none exceeded 200 characters** and
+    half sat at 151-199, which is the shape of Gmail's snippet rather than of anybody's writing.
+
+    ONLY on an explicit request. The five-minute poller and the card-open sync still store the
+    snippet and nothing else — the documented narrowing is what we ever *do* read, not what the
+    grant allows, and reading a body is the line that stays behind a click.
+
+    `text/plain` is preferred over `text/html`: it is what the sender's client generated, and the
+    HTML alternative carries markup that would reach a drafting prompt as content.
+    """
+    ok, _why = can_read_content()
+    if not ok:
+        return ""
+    svc = service or _service()
+    if svc is None or not message_id:
+        return ""
+    try:
+        msg = svc.users().messages().get(userId="me", id=message_id, format="full").execute()
+    except Exception as e:  # noqa: BLE001
+        log.debug("Gmail message %s unreadable in full: %s", message_id, e)
+        return ""
+    return message_body_from(msg.get("payload") or {})
+
+
+def message_body_from(payload: dict) -> str:
+    """The text of one already-fetched payload. Split out so the plain-over-html preference can
+    be tested without a Gmail client — testing `_walk_parts` alone proves what was FOUND and not
+    which one is chosen, and the mutation that preferred html survived exactly that gap."""
+    plain, html = _walk_parts(payload)
+    if plain:
+        return plain
+    return _strip_html(html) if html else ""
+
+
+def _walk_parts(payload: dict) -> tuple[str, str]:
+    """(text/plain, text/html) from a MIME tree. Both may be ''.
+
+    Recursive because a real message nests: `multipart/mixed` wrapping `multipart/alternative`
+    wrapping the two bodies is ordinary, and reading only the top level finds neither.
+    """
+    plain, html = "", ""
+    mime = (payload.get("mimeType") or "").lower()
+    data = ((payload.get("body") or {}).get("data")) or ""
+    if data:
+        text = _decode(data)
+        if mime.startswith("text/plain"):
+            plain = text
+        elif mime.startswith("text/html"):
+            html = text
+    for part in (payload.get("parts") or []):
+        p, h = _walk_parts(part)
+        plain = plain or p
+        html = html or h
+    return plain, html
+
+
+def _decode(data: str) -> str:
+    """Gmail returns base64URL, not standard base64 — '-' and '_' for '+' and '/'."""
+    import base64
+    try:
+        return base64.urlsafe_b64decode(data + "=" * (-len(data) % 4)).decode("utf-8", "replace")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _strip_html(html: str) -> str:
+    """Last resort when a sender's client emitted no plain-text alternative."""
+    import re as _re
+    from html import unescape
+    text = _re.sub(r"(?is)<(script|style).*?</\1>", " ", html or "")
+    text = _re.sub(r"(?i)<br\s*/?>|</p>|</div>|</tr>", "\n", text)
+    text = _re.sub(r"(?s)<[^>]+>", " ", text)
+    text = unescape(text)
+    return _re.sub(r"[ \t]{2,}", " ", _re.sub(r"\n{3,}", "\n\n", text)).strip()
+
+
 def can_read_content() -> tuple[bool, str]:
     """May we look at what a reply SAYS? (CRM-4b)
 

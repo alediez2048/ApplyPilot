@@ -100,7 +100,7 @@ def contact_coverage(contact: dict, ladders: dict | None = None, now=None, space
             "possible": _possible(c, ch),
         }
 
-    stage, nxt = _stage(per, replied)
+    stage, nxt = _stage(per, replied, _silent_for(c, now))
     return {"id": cid, "full_name": c.get("full_name") or "", "email": c.get("email") or "",
             "phone": c.get("phone") or "", "replied": replied,
             "channels": per, "stage": stage, "next": nxt,
@@ -119,7 +119,35 @@ def _possible(contact: dict, channel) -> bool:
     return bool((contact.get("linkedin_url") or "").strip())
 
 
-def _stage(per: dict, replied: bool) -> tuple[dict, dict | None]:
+def _silent_for(contact: dict, now) -> float | None:
+    """Hours since the FIRST email, when nobody has answered. None if we never wrote.
+
+    Anchored on the first email rather than the last touch, because the question the operator
+    asked is "have we heard back in the first week or so" — a week from when this started, not a
+    week from whichever nudge happened to go most recently. Anchoring on the last touch would
+    make the escalation slide further away every time a follow-up fired, so a person being
+    chased diligently would be the last one you ever picked up the phone to.
+    """
+    from applypilot.domain.timeutil import hours_since
+    anchor = (contact.get("submitted_at") or "").strip()
+    return hours_since(anchor, now) if anchor else None
+
+
+def reach_after_hours() -> int:
+    """How long silence has to last before the phone opens. Default 168h — a week.
+
+    Read through the settings registry like every other schedule (ARCH-6), so a bad value fails
+    at startup naming the variable instead of quietly becoming zero and putting every contact on
+    a call list (§Lessons 50: `0` has meant "unlimited" in two settings and "send nothing" in a
+    third).
+    """
+    from applypilot import settings
+    values, _ = settings.resolve()
+    got = values.get("REACH_AFTER_HOURS")
+    return int(got) if got else 168
+
+
+def _stage(per: dict, replied: bool, silent_h: float | None = None) -> tuple[dict, dict | None]:
     """Which stage this person is at, and the single next thing to do.
 
     A reply ENDS the plan rather than advancing it. Chasing somebody who answered is the one
@@ -132,8 +160,24 @@ def _stage(per: dict, replied: bool) -> tuple[dict, dict | None]:
     # Stage 1 is the email ladder. It is "done" when nothing more is owed on email — which
     # includes the case where email was never possible, so somebody with only a phone number
     # starts at Text + call rather than waiting forever on a stage that cannot run.
+    #
+    # ...OR when a week of silence has passed, whichever comes FIRST. Waiting for the ladder to
+    # be spent means day 13 on the shipping schedule (48h, then 96h, then 168h), and the live
+    # data says the third email is not what earns the reply: 40% of replies come from the cold
+    # email, 40% from follow-up 1, 20% from follow-up 2, and **0 from follow-up 3** — which had
+    # been sent 4 times in total when this was written.
+    #
+    # The email ladder is NOT cut short by this, and that is the whole point of it being an OR.
+    # This module only DESCRIBES; sending is driven by each channel's own ladder in
+    # `followup.py`, so follow-up 3 still goes out on schedule as the backstop. What changes is
+    # which action the operator is pointed at on day 7 — and the two channels overlapping from
+    # there is ordinary multichannel practice, not a conflict.
     email = per["email"]
-    if email["possible"] and email["state"] not in _SPENT:
+    overdue = silent_h is not None and silent_h >= reach_after_hours()
+    # Did the phone open because a week passed, or because the emails ran out? Different
+    # sentences, and the operator needs the first one to be able to disagree with it.
+    _by_time = overdue and email["state"] not in _SPENT
+    if email["possible"] and email["state"] not in _SPENT and not overdue:
         nxt = {"channel": "email", "what": "follow up by email"} if email["due"] else None
         return {**STAGES[0], "index": 0}, nxt
     if email["possible"] and not email["started"]:
@@ -143,11 +187,24 @@ def _stage(per: dict, replied: bool) -> tuple[dict, dict | None]:
     sms, call = per["sms"], per["call"]
     reachable = sms["possible"] or call["possible"]
     if not reachable:
+        # The plan is genuinely stuck — but `next` must point at something DOABLE. Live, 168
+        # contacts land here (a week past their first email, no reply, no number), and if an
+        # email follow-up is due for one of them, hiding it behind a phone number they do not
+        # have offers an action that cannot be taken while suppressing one that can. §Lessons 43
+        # in its worst form: not a control nobody can find, a control nobody can use.
+        #
+        # So the STAGE stays honest about being blocked, and `next` prefers the email.
+        if email["due"]:
+            return {"key": "blocked", "label": "No phone number", "index": 1}, \
+                   {"channel": "email", "what": "follow up by email — no number to call"}
         return {"key": "blocked", "label": "No phone number", "index": 1}, \
                {"channel": "phone", "what": "add a phone number to text or call"}
 
     if not sms["started"] and not call["started"]:
-        return {**STAGES[1], "index": 1}, {"channel": "sms", "what": "text and call them"}
+        # Say WHY the phone opened. "a week with no answer" is a fact the operator can act on
+        # and disagree with; "text and call them" appearing from nowhere is an instruction.
+        why = "no answer in a week — text and call them" if _by_time else "text and call them"
+        return {**STAGES[1], "index": 1}, {"channel": "sms", "what": why}
     # First contact made on at least one of them: finish the pair, then wait for the second.
     if sms["possible"] and not sms["started"]:
         return {**STAGES[1], "index": 1}, {"channel": "sms", "what": "text them"}

@@ -187,3 +187,96 @@ def test_the_totals_are_summed_across_people():
            person(id="c2", emailed=True, submitted_at=ago(days=9), call_made_at=ago(days=1))]
     cv = _job(ppl)
     assert (cv["people"], cv["emails"], cv["calls"]) == (2, 2, 1)
+
+
+# ── the phone opens on SILENCE, not only on a spent ladder ──────────────────
+#
+# Asked for as: "we should try to start texting and calling if we don't hear back in the first
+# week or so." Waiting for the email ladder to be spent means day 13 on the shipping schedule
+# (48h → 96h → 168h), and the live data says the third email is not what earns the reply: of 15
+# replies, 40% came from the cold email, 40% from follow-up 1, 20% from follow-up 2, and NONE
+# from follow-up 3, which had been sent 4 times in total.
+
+def test_the_phone_opens_after_a_week_of_silence():
+    """Day 8, ladder still running — the phone opens anyway."""
+    c = person(emailed=True, submitted_at=ago(days=8))
+    got = cov(c, email=ladder(count=2, last=ago(days=2)))     # FU3 still pending
+    assert got["stage"]["key"] == "reach"
+    assert "week" in got["next"]["what"], got["next"]
+
+
+def test_it_does_NOT_open_on_day_five():
+    """The negative control. Without it, a stage that always escalates passes the test above."""
+    c = person(emailed=True, submitted_at=ago(days=5))
+    got = cov(c, email=ladder(count=2, last=ago(days=1)))
+    assert got["stage"]["key"] == "email"
+
+
+def test_the_email_ladder_is_NOT_cut_short_by_the_escalation():
+    """The operator's own decision: "the sequence is good as is". This module only DESCRIBES —
+    sending is driven by each channel's ladder in `followup.py` — so follow-up 3 must still be
+    owed on day 8 while the phone is open. The two channels overlapping is the intent.
+    """
+    from applypilot.domain import followup as fu
+    c = person(emailed=True, submitted_at=ago(days=8))
+    lad = ladder(count=2, last=ago(days=8))                   # touch 3 due 168h after touch 2
+    got = cov(c, email=lad)
+    assert got["stage"]["key"] == "reach", "the phone did not open"
+    state, _ = fu.touch_state(fu.normalize_for_ladder(c), fu.EMAIL, [48, 96, 168], NOW, lad)
+    assert state == "due", "escalating to the phone silently retired the third email"
+
+
+def test_a_REPLY_still_beats_the_clock():
+    """Silence is the trigger; an answer is not silence. Ringing somebody who wrote back is the
+    one escalation guaranteed to cost something."""
+    c = person(emailed=True, submitted_at=ago(days=20), replied_at=ago(days=1))
+    assert cov(c, email=ladder(count=1))["stage"]["key"] == "replied"
+
+
+def test_a_spent_ladder_still_opens_the_phone_early():
+    """The OTHER door, unchanged: someone whose emails ran out at day 4 does not wait a week."""
+    c = person(emailed=True, submitted_at=ago(days=4))
+    got = cov(c, email=ladder(count=3, last=ago(days=1)))
+    assert got["stage"]["key"] == "reach"
+    assert "week" not in got["next"]["what"], "credited the clock for a ladder that simply ended"
+
+
+def test_no_phone_number_turns_the_week_into_a_dated_ASK():
+    """Live, 8 of 373 contacts have a number. On day 8 that stops being a background gap and
+    becomes the thing blocking the next step, which is exactly when it is worth surfacing."""
+    c = person(phone="", emailed=True, submitted_at=ago(days=8))
+    got = cov(c, email=ladder(count=2, last=ago(days=2)))
+    assert got["stage"]["key"] == "blocked"
+    assert "phone number" in got["next"]["what"]
+
+
+def test_the_threshold_is_a_SETTING_not_a_literal():
+    from applypilot.domain.coverage import reach_after_hours
+    assert reach_after_hours() == 168
+
+
+def test_the_threshold_is_read_through_the_registry(monkeypatch):
+    """ARCH-6: a bad value fails at startup naming the variable rather than silently becoming
+    zero and putting every contact ever emailed onto a call list (§Lessons 50)."""
+    from applypilot.domain.coverage import reach_after_hours
+    monkeypatch.setenv("REACH_AFTER_HOURS", "72")
+    assert reach_after_hours() == 72
+    c = person(emailed=True, submitted_at=ago(days=4))
+    assert cov(c, email=ladder(count=1, last=ago(days=1)))["stage"]["key"] == "reach"
+
+
+def test_a_blocked_person_with_an_email_DUE_is_pointed_at_the_email():
+    """Live, 168 contacts sit at `blocked` — a week past their first email, no reply, no number.
+    If a follow-up is due for one of them, offering "add a phone number" instead is an action
+    that cannot be taken suppressing one that can."""
+    c = person(phone="", emailed=True, submitted_at=ago(days=9))
+    got = cov(c, email=ladder(count=1, last=ago(days=5)))     # FU2 due 96h after FU1
+    assert got["stage"]["key"] == "blocked", "the stage should stay honest about being stuck"
+    assert got["next"]["channel"] == "email", got["next"]
+    assert "no number" in got["next"]["what"]
+
+
+def test_a_blocked_person_with_NOTHING_due_still_asks_for_the_number():
+    c = person(phone="", emailed=True, submitted_at=ago(days=30))
+    got = cov(c, email=ladder(count=3, last=ago(days=10)))
+    assert got["next"]["channel"] == "phone"

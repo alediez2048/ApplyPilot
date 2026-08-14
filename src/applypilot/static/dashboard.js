@@ -956,6 +956,9 @@ let ATTACH_DOCS = true;
 // gmail.readonly granted? Decides whether we can offer "⤓ Fetch from Gmail" at all. False on a
 // default install, where pasting is the only path.
 let CONTENT_SCOPE = false;
+//: CAL-1. Whether the token carries `calendar.events`, so the Invite tab renders the
+//: form or the one command that enables it.
+let CALENDAR_SCOPE = false;
 //: The most recent /api/status jobs array, for click handlers that run after render.
 let LAST_JOBS = [];
 //: The exact HTML last written into #jobs. The 2.5s poll rebuilds that subtree from scratch, and
@@ -1210,6 +1213,139 @@ function smsChannel(c) {
       <div class="sms-hint">Written for a phone: no links (a URL from an unknown number is the
         strongest spam signal there is) and it says who you are, because they do not have your
         number saved.</div>
+    </div>` + contactNotes(c);
+}
+
+// ── CAL-1: send a Google Calendar invite ────────────────────────────────────
+// Sits after Call because that is the order the conversation goes in: you write, you text, you
+// ring, and then you put a time in the diary. It is the ONLY control in this app that creates
+// something on a stranger's calendar, so it is deliberately the one that asks the most before
+// it fires — a form you fill in, a confirm that echoes the exact local time back, and a Cancel
+// that ships with it rather than after it.
+//
+// Never automatic. Not on the poller, not in `tick`, not in the bulk follow-up path.
+const INVITE_FORM = new Map();   // contact id -> {title, day, time, duration, agenda, meet, err, busy}
+
+function invState(c) {
+  if (!INVITE_FORM.has(c.id)) {
+    const d = new Date(Date.now() + 864e5);         // tomorrow, as a starting point
+    INVITE_FORM.set(c.id, {
+      // Their first name alone. The sender's own name is not on this payload, and reaching
+      // for an identifier that does not exist is a ReferenceError that blanks the entire
+      // jobs table as silently as a syntax error (§Lessons 7).
+      title: `Intro call${c.full_name ? ' — ' + c.full_name.split(' ')[0] : ''}`,
+      day: d.toISOString().slice(0, 10), time: '10:00', duration: 30,
+      agenda: '', meet: true, err: '', busy: false,
+    });
+  }
+  return INVITE_FORM.get(c.id);
+}
+function onInvField(cid, k, v) {
+  const s = INVITE_FORM.get(cid); if (!s) return;
+  s[k] = (k === 'duration') ? parseInt(v, 10) : (k === 'meet' ? !!v : v);
+  // Deliberately NO refresh() here: the panel is rewritten every 2.5s and re-rendering on every
+  // keystroke would destroy the field being typed in. The guard on the jobs table does not
+  // cover this pane, so the state map IS the source of truth and the DOM catches up on the
+  // next natural render.
+}
+
+async function sendInvite(cid, btn) {
+  const s = INVITE_FORM.get(cid); if (!s) return;
+  // The confirm echoes the exact local time back, because a mistyped hour is the failure mode
+  // here and it is unrecoverable — the invitation is on their calendar the instant it is made
+  // (§Lessons 29: the operator has to be shown what it does before they can meaningfully click).
+  const when = `${s.day} at ${s.time} · ${s.duration} min${s.meet ? ' · Google Meet' : ''}`;
+  if (!confirm(`Send this calendar invite?\n\n${s.title}\n${when}\n\nTo: ${
+      (LAST_JOBS || []).flatMap(j => j.contacts || []).find(x => x.id === cid)?.email || ''
+    }\n\nGoogle emails it immediately. You can cancel it afterwards.`)) return;
+  s.busy = true; s.err = ''; btn.disabled = true; btn.textContent = 'Sending…';
+  const r = await post('/api/contact/invite', {contact_id: cid, ...s});
+  s.busy = false;
+  if (!r.ok) { s.err = r.message || 'Could not send it.'; btn.disabled = false;
+               btn.textContent = 'Send invite'; refresh(); return; }
+  INVITE_FORM.delete(cid);
+  refresh();
+}
+
+async function cancelInvite(cid, eventId, btn) {
+  if (!confirm('Cancel this meeting?\n\nGoogle will email them the cancellation.')) return;
+  btn.disabled = true; btn.textContent = 'Cancelling…';
+  const r = await post('/api/contact/invite-cancel', {contact_id: cid, event_id: eventId});
+  if (!r.ok) { btn.disabled = false; btn.textContent = '✕ Cancel meeting';
+               alert(r.message || 'Could not cancel it.'); return; }
+  refresh();
+}
+
+function inviteChannel(c) {
+  // Already scheduled: show the meeting, not a second form. Two invites for one conversation is
+  // how a calendar ends up with duplicates nobody can tell apart.
+  if (c.invite) {
+    const iv = c.invite;
+    const when = new Date(iv.at);
+    const nice = isNaN(when) ? iv.at
+      : when.toLocaleString(undefined, {weekday: 'short', day: 'numeric', month: 'short',
+                                        hour: 'numeric', minute: '2-digit'});
+    return `<div class="draft">
+        <div class="d-label">Meeting scheduled <span class="sent-tag">✓ invite sent</span></div>
+        <div class="inv-card">
+          <div class="inv-when">${esc(nice)}</div>
+          <div class="inv-t">${esc(iv.title || 'Meeting')} · ${iv.duration} min${
+            iv.tz ? ' · ' + esc(iv.tz) : ''}</div>
+          ${iv.meet ? `<a class="inv-meet" href="${esc(iv.meet)}" target="_blank"
+             rel="noopener">📹 Google Meet ↗</a>` : ''}
+          ${iv.link ? `<a class="inv-link" href="${esc(iv.link)}" target="_blank"
+             rel="noopener">Open in Calendar ↗</a>` : ''}
+        </div>
+        <div class="dbtns">
+          <button class="secondary" onclick="cancelInvite('${esc(c.id)}','${esc(iv.event_id)}',this)"
+            >✕ Cancel meeting</button>
+        </div>
+        <div class="sms-hint">Cancelling emails them automatically. To move it, cancel and send
+          a new one — a rescheduled invite they never see is worse than an extra email.</div>
+      </div>` + contactNotes(c);
+  }
+  // No address: the same rule every other channel follows — the empty pane is where the
+  // identifier gets entered, so it renders the input rather than a sentence about the absence.
+  if (!c.email) return addIdentifier(c, 'email');
+  // No scope: name the ONE command, because the alternative is filling in a meeting and
+  // discovering at Send that Google refuses with a 403 nobody can read.
+  if (!CALENDAR_SCOPE) {
+    return `<div class="draft">
+        <div class="d-label">Calendar invite</div>
+        <div class="sms-locked">Calendar access has not been granted yet. Run this once:
+          <code class="inv-cmd">applypilot network --gmail-connect --with-calendar</code>
+          It opens a Google consent screen and keeps your existing Gmail access. Restart the
+          dashboard afterwards.</div>
+      </div>` + contactNotes(c);
+  }
+  const s = invState(c);
+  const f = (k, type, extra = '') =>
+    `<input class="inv-f" type="${type}" value="${esc(String(s[k]))}" ${extra}
+       oninput="onInvField('${esc(c.id)}','${k}',this.value)">`;
+  return `<div class="draft">
+      <div class="d-label">Calendar invite
+        <span class="sms-to">to ${esc(c.email)}</span></div>
+      <div class="inv-grid">
+        <label>Title${f('title', 'text')}</label>
+        <label>Day${f('day', 'date')}</label>
+        <label>Time${f('time', 'time')}</label>
+        <label>Length<select class="inv-f"
+          onchange="onInvField('${esc(c.id)}','duration',this.value)">
+          ${[15, 30, 45, 60].map(d =>
+            `<option value="${d}" ${s.duration === d ? 'selected' : ''}>${d} min</option>`).join('')}
+        </select></label>
+      </div>
+      <textarea class="d-sms inv-agenda" rows="3" placeholder="Agenda — what you want to cover"
+        oninput="onInvField('${esc(c.id)}','agenda',this.value)">${esc(s.agenda)}</textarea>
+      <label class="inv-meetrow"><input type="checkbox" ${s.meet ? 'checked' : ''}
+        onchange="onInvField('${esc(c.id)}','meet',this.checked)"> Add a Google Meet link</label>
+      <div class="dbtns">
+        <button class="send" onclick="sendInvite('${esc(c.id)}', this)">Send invite</button>
+        ${s.err ? `<span class="addc-err">${esc(s.err)}</span>` : ''}
+      </div>
+      <div class="sms-hint">Google emails the invitation from your own account, with RSVP
+        buttons. This is for a time you have already agreed — for one you have not, the
+        scheduling link in your emails is the right tool.</div>
     </div>` + contactNotes(c);
 }
 
@@ -2522,7 +2658,8 @@ function contactPanel(c) {
   // already handles an absent number, but a strip where two empty channels are flagged and the
   // third is not reads as the third being fine.
   const usable = {email: !!c.email, linkedin: !!c.linkedin_url, phone: !!c.phone,
-                  call: !!c.phone, meetings: !!(c.transcripts || []).length};
+                  call: !!c.phone, invite: !!c.email,
+                  meetings: !!(c.transcripts || []).length};
   const stored = CHANNEL_TAB.get(c.id);
   // Still OPENS on a channel that works, or every contact lands on a form instead of their
   // conversation. The stored choice is honoured even when empty — clicking a ＋ tab has to stay
@@ -2535,6 +2672,7 @@ function contactPanel(c) {
   if (ch === 'linkedin') body = c.linkedin_url ? linkedinChannel(c) : addIdentifier(c, 'linkedin');
   if (ch === 'phone')    body = smsChannel(c);
   if (ch === 'call')     body = callChannel(c);
+  if (ch === 'invite')   body = inviteChannel(c);
   if (ch === 'meetings') body = transcriptSection(c);
   return `<div class="pbody" onclick="event.stopPropagation()">
       <div class="cmeta">
@@ -2548,7 +2686,7 @@ function contactPanel(c) {
         ${c.verify_note ? `<div class="verify-note ${esc(c.confidence)}">${c.confidence === 'high' ? '✓' : '?'} ${esc(c.verify_note)}</div>` : ''}
         ${syncGmailBtn(c)}
       </div>
-      <div class="chan">${tab('email','✉ Email')}${tab('linkedin','🔗 LinkedIn')}${tab('phone','💬 Text' + (c.sms_sent_at ? ' ✓' : ''))}${tab('call','📞 Call' + (c.call_made_at ? ' ✓' : ''))}${tab('meetings','📝 Meetings' + ((c.transcripts || []).length ? ' ' + c.transcripts.length : ''))}</div>
+      <div class="chan">${tab('email','✉ Email')}${tab('linkedin','🔗 LinkedIn')}${tab('phone','💬 Text' + (c.sms_sent_at ? ' ✓' : ''))}${tab('call','📞 Call' + (c.call_made_at ? ' ✓' : ''))}${tab('invite','📅 Invite' + (c.invite ? ' ✓' : ''))}${tab('meetings','📝 Meetings' + ((c.transcripts || []).length ? ' ' + c.transcripts.length : ''))}</div>
       ${body}
       ${engagementLog(c)}
       <div class="crow-del"><button class="link-danger" onclick="deleteContact('${esc(c.id)}', decodeURIComponent('${encodeURIComponent(c.full_name || '')}'), ${!!c.emailed})">🗑 Not at this company — remove</button></div>
@@ -3789,6 +3927,7 @@ async function refresh() {
   // nothing to sync by hand — and nothing to fight a click mid-toggle.
   ATTACH_DOCS = data.attach_docs !== false;
   CONTENT_SCOPE = !!data.content_scope;
+  CALENDAR_SCOPE = !!data.calendar_scope;
   CONV_SNIPPET_MAX = data.snippet_max || 0;
   if (data.poll_every_s) POLL_EVERY_S = data.poll_every_s;
   const allJobs = data.jobs || [];

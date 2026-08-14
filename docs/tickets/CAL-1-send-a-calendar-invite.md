@@ -1,6 +1,6 @@
 # CAL-1 — Send a Google Calendar invite from the contact view
 
-**Size:** M · **Depends on:** a new OAuth consent · **Status:** SCOPED, not built
+**Size:** M · **Depends on:** a new OAuth consent · **Status:** **BUILT 2026-08-14** (phases 1–3). Blocked on ONE operator action: `applypilot network --gmail-connect --with-calendar`. Everything else is shipped and tested.
 
 Asked for as: *"choose a day, time, description, google meet invite and send straight from
 there."*
@@ -132,3 +132,47 @@ used.
 2. **Which calendar?** `primary` is the obvious default; a second one would need to be named.
 3. **Does it need cancel/reschedule on day one, or is send enough to try it?** Phase 3 is small
    but it is the difference between an experiment and something you can rely on.
+
+
+---
+
+## Built 2026-08-14
+
+Phases 1–3 in one pass. Phase 4 (read back an ACCEPTED RSVP) is still not built and should only
+be considered if 1–3 get used.
+
+**Where it lives:** a `📅 Invite` tab on the contact card, after `📞 Call` — the operator's own
+placement, and the right one: it is the order the conversation goes in. Title, day, time, length,
+agenda and a Google Meet toggle; Send; and Cancel on the meeting once it exists.
+
+**What is different from the plan:** nothing structural. Two things were added while building.
+
+*The reconnect carries held scopes forward.* Re-running `connect()` REPLACES the token, so
+`--with-calendar` alone would have silently revoked the `gmail.readonly` grant CRM-4b depends
+on — the operator would gain invites and lose reply text, with nothing saying so until a thread
+came back empty. `connect()` now unions whatever the current token holds. A test pins it.
+
+*The `＋` marker keyed on the wrong thing.* On every other channel `＋` means "the identifier is
+missing and this pane is where it gets typed". Keyed on "is a meeting scheduled" it would be lit
+for almost every contact forever — the badge failure CRM-3a exists to prevent. The invite
+channel's identifier is the ADDRESS, so it is marked on exactly the same condition as email.
+
+**The guards are checked before the API call, not inherited.** `sendUpdates=all` means Google
+mails the invitation, so this never passes through `gmail_send`. It calls `can_send()` directly
+and lets exactly two of its refusals through — "already sent to this contact" and the cross-role
+cooldown — because both are about COLD outreach and an invite goes to somebody mid-conversation.
+Refusing there would block the one person the feature exists for.
+
+**23 tests, 5 mutations killed**, including: the guards being skipped, attendees taken from the
+page rather than the stored contact, `conferenceDataVersion` dropped (which creates the event and
+silently omits the Meet link — a success response for a half-made meeting), `calendar.events`
+leaking into `SCOPES`, and the reconnect dropping a held scope.
+
+**The ARCH-4 boundary caught the first draft**: `_upcoming_invites` and the cancel DELETE were
+written inline in `web_dashboard.py`. They live in `interactions_store` now, which already owned
+that table.
+
+### Still true, and the operator's decision
+
+Nothing works until the consent screen is accepted. The live token carries four Gmail scopes and
+no calendar scope; the Invite tab renders the exact command instead of a form until it does.

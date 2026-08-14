@@ -2207,6 +2207,10 @@ def _status_payload(space: str = "") -> dict:
         # instead of only a paste box. Cached inside gmail_oauth (keyed on the token file's
         # mtime), so this costs nothing on a 2.5s refresh.
         "content_scope": _content_scope(),
+        # CAL-1. Whether the token carries `calendar.events`, so the Invite tab can render the
+        # form or the one command that enables it — rather than letting the operator fill in a
+        # meeting and discover at Send that Google refuses with a 403 they cannot read.
+        "calendar_scope": _calendar_scope(),
         # The auto-sync snippet cap, read from the module that ENFORCES it. Hardcoding 200 in
         # the frontend would be a second copy of a bound the store layer owns, and a default in
         # two places is two defaults — the intro-deck PDF rode along on 34 real emails while
@@ -2308,6 +2312,96 @@ def _pending_introductions(job_threads: dict, raw_contacts: list) -> list[dict]:
     except Exception:  # noqa: BLE001
         log.debug("Pending-introduction scan failed", exc_info=True)
         return []
+
+
+def _send_invite(data: dict) -> dict:
+    """CAL-1. Create a calendar event for one contact and let Google mail the invitation.
+
+    The guards are checked HERE rather than inherited, and that is the whole shape of this
+    endpoint. `sendUpdates=all` means GOOGLE sends the mail, so this never passes through
+    `gmail_send` — the daily limit, the per-company cap and the address cooldown would never see
+    it. §Lessons 77 is exactly that: a path that sends without being counted, in a system whose
+    limits exist to protect a single mailbox's reputation.
+    """
+    from applypilot.database import log_event
+    from applypilot.domain import invite as _inv
+    from applypilot.networking import calendar_send, gmail_send, interactions_store as _inter
+    from applypilot.networking import store as _store
+
+    conn = get_connection()
+    _store.init_contacts(conn)
+    cid = (data.get("contact_id") or "").strip()
+    contact = _store.get_contact(cid, conn) if cid else None
+    if not contact:
+        return {"ok": False, "message": "contact not found"}
+
+    # Attendees come from the STORED contact, never from the page. The dangerous half of an
+    # outward-facing action is the half that looks identical when it is wrong (§Lessons 29), and
+    # a `to` accepted from the browser is how an invite reaches somebody nobody chose.
+    attendees = [a for a in [(contact.get("email") or "").strip()] if a]
+    v = _inv.validate(title=data.get("title", ""), day=data.get("day", ""),
+                      time=data.get("time", ""), duration=int(data.get("duration") or 30),
+                      attendees=attendees, tz=data.get("tz", ""))
+    if not v["ok"]:
+        return {"ok": False, "message": v["error"]}
+
+    # Reuse the ONE guard the send paths use, rather than a second copy of the same four rules
+    # (§Lessons 49). `confirm_unverified=True` because an address good enough to have been
+    # emailed and answered is good enough to invite, and the invite is only offered on a
+    # conversation that already exists.
+    ok, why = gmail_send.can_send(contact, confirm_unverified=True)
+    # Two of its refusals do not apply here and must be let through, or the feature refuses
+    # exactly the person it exists for:
+    #   "already sent to this contact"  — an invite goes to somebody mid-conversation
+    #   "already emailed … another role" — the cooldown is about COLD outreach
+    if not ok and not ("already sent" in why or "already emailed" in why):
+        return {"ok": False, "message": why}
+
+    meet = bool(data.get("meet", True))
+    body = _inv.event_body(title=v["title"], start=v["start"], end=v["end"], tz=v["tz"],
+                           attendees=v["attendees"], agenda=data.get("agenda", ""), meet=meet,
+                           request_id=f"ap-{cid}-{v['start']}")
+    got = calendar_send.create(body)
+    if not got["ok"]:
+        return {"ok": False, "message": got["error"]}
+
+    # The event id is what makes cancelling possible, so it is stored before anything else can
+    # go wrong. `interactions` already holds "an event with nowhere else to live" and has a
+    # `booked` kind; `invited` is its twin and needs no schema change.
+    _inter.record(cid, "invited", at=v["start"], source="manual",
+                  detail=json.dumps({"event_id": got["id"], "title": v["title"],
+                                     "meet": got["meet"], "link": got["link"],
+                                     "tz": v["tz"], "duration": v["duration"]}),
+                  job_url=contact.get("job_url") or "", conn=conn)
+    log_event(contact.get("job_url") or "", "outreach", "ok",
+              f"Calendar invite sent to {contact.get('full_name') or cid}: "
+              f"{v['title']} at {v['start']} ({v['tz']}).", conn)
+    return {"ok": True, "message": f"Invite sent — {_inv.describe(v, bool(got['meet']))}",
+            "event_id": got["id"], "meet": got["meet"], "link": got["link"]}
+
+
+def _cancel_invite(data: dict) -> dict:
+    """Withdraw an invite. Google mails the cancellation."""
+    from applypilot.database import log_event
+    from applypilot.networking import calendar_send
+    from applypilot.networking import store as _store
+    conn = get_connection()
+    cid = (data.get("contact_id") or "").strip()
+    eid = (data.get("event_id") or "").strip()
+    got = calendar_send.cancel(eid)
+    if not got["ok"]:
+        return {"ok": False, "message": got["error"]}
+    # The row is removed only after Google confirms, so a failed cancel never leaves the card
+    # claiming there is no meeting when there is one.
+    try:
+        from applypilot.networking import interactions_store as _inter
+        _inter.drop_invite(cid, eid, conn)
+    except Exception:  # noqa: BLE001
+        log.debug("could not clear the invite row", exc_info=True)
+    contact = _store.get_contact(cid, conn) or {}
+    log_event(contact.get("job_url") or "", "outreach", "ok",
+              f"Calendar invite to {contact.get('full_name') or cid} cancelled.", conn)
+    return {"ok": True, "message": got.get("note") or "Invite cancelled — they were notified."}
 
 
 def _migrate_plan(data: dict) -> dict:
@@ -2674,9 +2768,28 @@ def _attach_transcripts(jobs: list, conn) -> None:
             by_contact = _tr.for_contacts(everyone, conn)
         except Exception:  # noqa: BLE001 — a missing table must not blank the dashboard
             log.debug("Could not attach transcripts", exc_info=True)
+    # CAL-1's upcoming invites ride along in the SAME pass, for the reason stated above: this
+    # runs once for the whole payload rather than once per job, because a statement per job on a
+    # 2.5s refresh is what took the budget from 74 to 90.
+    invites = _upcoming_invites(everyone, conn) if everyone else {}
     for j in jobs:
         for c in (j.get("contacts") or []):
             c["transcripts"] = by_contact.get(c.get("id")) or []
+            c["invite"] = invites.get(c.get("id"))
+
+
+def _upcoming_invites(ids: list, conn) -> dict:
+    """CAL-1's meetings, from the table's own repository (ARCH-4 — this file runs zero SQL).
+
+    Never raises into the payload: a missing table must not blank the dashboard, which is the
+    same guard the transcript attach above carries.
+    """
+    try:
+        from applypilot.networking import interactions_store as _inter
+        return _inter.upcoming_invites(ids, conn)
+    except Exception:  # noqa: BLE001
+        log.debug("Could not read invites", exc_info=True)
+        return {}
 
 
 def _attach_interactions(job_url: str, contacts: list, conn) -> None:
@@ -3170,6 +3283,20 @@ def _content_scope() -> bool:
     try:
         from applypilot.networking import gmail_oauth
         return bool(gmail_oauth.can_read_content())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _calendar_scope() -> bool:
+    """Does the stored token allow creating calendar events (CAL-1)? Never raises.
+
+    Reads the same mtime-cached scope list `_content_scope` does, so it costs nothing on the
+    2.5s refresh — the §Lessons 26 rule, where one uncached Gmail round-trip per job took this
+    endpoint from 0.043s to 2.4s.
+    """
+    try:
+        from applypilot.networking import gmail_oauth
+        return bool(gmail_oauth.can_send_invites())
     except Exception:  # noqa: BLE001
         return False
 
@@ -4373,6 +4500,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/contact/add-introduced":
                 _json_response(self, _add_introduced_contact(data))
+                return
+            if path == "/api/contact/invite":
+                _json_response(self, _send_invite(data))
+                return
+            if path == "/api/contact/invite-cancel":
+                _json_response(self, _cancel_invite(data))
                 return
             # CO-2. Three doors rather than one, because the preview is read-only and must be
             # cheap to ask for repeatedly while the operator changes the destination.

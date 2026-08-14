@@ -18,6 +18,7 @@ What lands here is what has no column of its own:
 from __future__ import annotations
 
 import hashlib
+import json
 import sqlite3
 from datetime import datetime, timezone
 
@@ -81,6 +82,62 @@ def record(contact_id: str, kind: str, at: str = "", detail: str = "",
          datetime.now(timezone.utc).isoformat()))
     conn.commit()
     return seen is None
+
+
+#: CAL-1's kind. An invite is an event with nowhere else to live, which is what this table is
+#: for — and it sits beside `booked`, the cal.com detection it complements.
+INVITED = "invited"
+
+
+def upcoming_invites(contact_ids: list[str],
+                     conn: sqlite3.Connection | None = None) -> dict:
+    """contact_id -> the meeting scheduled with them, if any. ONE query for the whole payload.
+
+    Lives here rather than in `web_dashboard.py` because that file runs zero SQL (ARCH-4), and
+    `interactions` already has its own repository — a second door onto one table is the failure
+    that boundary exists to prevent.
+    """
+    if not contact_ids:
+        return {}
+    if conn is None:
+        conn = get_connection()
+    init_interactions(conn)
+    marks = ",".join("?" for _ in contact_ids)
+    rows = conn.execute(
+        f"SELECT contact_id, at, detail FROM interactions WHERE kind = ? "
+        f"AND contact_id IN ({marks}) ORDER BY at", [INVITED, *contact_ids]).fetchall()
+    out: dict = {}
+    for r in rows:
+        try:
+            d = json.loads(r["detail"] or "{}")
+        except Exception:  # noqa: BLE001
+            d = {}
+        # Last one wins: a rescheduled meeting is the later row, and showing the first would put
+        # a time on the card that nobody is turning up to.
+        out[r["contact_id"]] = {"at": r["at"] or "", "event_id": d.get("event_id") or "",
+                                "title": d.get("title") or "", "meet": d.get("meet") or "",
+                                "link": d.get("link") or "", "tz": d.get("tz") or "",
+                                "duration": d.get("duration") or 30}
+    return out
+
+
+def drop_invite(contact_id: str, event_id: str,
+                conn: sqlite3.Connection | None = None) -> int:
+    """Remove one recorded invite, by the EVENT id it carries.
+
+    Keyed on the event rather than the contact: someone can have had a meeting cancelled and a
+    new one sent, and deleting every `invited` row for them would clear the live one too.
+    """
+    if not (contact_id and event_id):
+        return 0
+    if conn is None:
+        conn = get_connection()
+    init_interactions(conn)
+    cur = conn.execute(
+        "DELETE FROM interactions WHERE contact_id = ? AND kind = ? AND detail LIKE ?",
+        (contact_id, INVITED, f'%"{event_id}"%'))
+    conn.commit()
+    return cur.rowcount
 
 
 def for_job(job_url: str, conn: sqlite3.Connection | None = None) -> dict:

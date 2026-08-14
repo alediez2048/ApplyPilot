@@ -280,6 +280,7 @@ def network(
     linkedin_login: bool = typer.Option(False, "--linkedin-login", help="One-time: open Chrome to log into LinkedIn (for the fallback)."),
     gmail_connect: bool = typer.Option(False, "--gmail-connect", help="One-time: connect Gmail via OAuth for sending outreach."),
     with_content: bool = typer.Option(False, "--with-content", help="With --gmail-connect: also grant gmail.readonly so ApplyPilot can read what replies SAY (CRM-4b). Off by default."),
+    with_calendar: bool = typer.Option(False, "--with-calendar", help="With --gmail-connect: also grant calendar.events so ApplyPilot can send Google Calendar invites from a contact card (CAL-1). Off by default."),
     fix_threads: bool = typer.Option(False, "--fix-threads", help="Recover Gmail thread ids so follow-ups reply in the original conversation."),
     import_connections: Optional[str] = typer.Option(None, "--import-connections", help="Import your LinkedIn Connections.csv (to flag existing connections)."),
     dm_login: bool = typer.Option(False, "--dm-login", help="One-time: open a browser to log into LinkedIn for the DM sender (agent-browser)."),
@@ -345,7 +346,21 @@ def network(
         else:
             console.print("  [dim]· reply CONTENT is off — add --with-content to let ApplyPilot "
                           "read what replies say.[/dim]")
-        ok, msg = gmail_oauth.connect(with_content=with_content)
+        if with_calendar:
+            # The first non-Gmail scope this project asks for, so it is named before the browser
+            # opens rather than explained afterwards.
+            console.print("  [yellow]· PLUS calendar.events — lets ApplyPilot create, update and "
+                          "delete events on your calendars.[/yellow]")
+            console.print("  [dim]  The NARROW one: it cannot browse or read your existing "
+                          "events, only manage the ones it makes.\n"
+                          "    Nothing is ever scheduled automatically — an invite is one click, "
+                          "for one person, by you.[/dim]")
+        else:
+            console.print("  [dim]· calendar INVITES are off — add --with-calendar to send them "
+                          "from a contact card.[/dim]")
+        # Scopes already on the token are carried forward inside connect(), so reconnecting for
+        # one grant never silently revokes another.
+        ok, msg = gmail_oauth.connect(with_content=with_content, with_calendar=with_calendar)
         console.print(f"[green]{msg}[/green]" if ok else f"[red]{msg}[/red]")
         if ok:
             # Recover thread ids for anything sent before they were persisted, so those

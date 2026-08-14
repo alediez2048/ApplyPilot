@@ -41,6 +41,18 @@ SETTINGS_SCOPE = "https://www.googleapis.com/auth/gmail.settings.basic"
 # no future scope addition drags it along. Turning it on is `--with-content`, an explicit act.
 CONTENT_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
 
+# CAL-1, OPT-IN ONLY, and the first non-Gmail scope this project has ever asked for. It creates,
+# updates and deletes events on the operator's own calendars.
+#
+# `calendar.events` rather than `calendar`: the wider one grants READ of every event on every
+# calendar the account can see, which for a work account is the whole organisation's meeting
+# habits. `events` is enough to create, patch and delete, and nothing here needs to browse.
+#
+# Kept OUT of SCOPES for the same reason CONTENT_SCOPE is: the ordinary `--gmail-connect` must
+# never quietly start asking for calendar access, and no future scope addition may drag it
+# along. A test pins its absence.
+CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar.events"
+
 SCOPES = [SEND_SCOPE, READ_SCOPE, SETTINGS_SCOPE]
 CLIENT_SECRET_PATH = config.APP_DIR / "gmail_oauth_client.json"
 TOKEN_PATH = config.APP_DIR / "gmail_token.json"
@@ -133,12 +145,27 @@ def can_read_content() -> bool:
     return has_scope(CONTENT_SCOPE)
 
 
-def connect(with_content: bool = False) -> tuple[bool, str]:
+def can_send_invites() -> bool:
+    """True when the stored token carries `calendar.events` (CAL-1).
+
+    The ONE gate on creating a calendar event. Everything else in the app runs on Gmail scopes,
+    so a False here means the invite UI must refuse and say how to fix it rather than failing at
+    the API with a 403 the operator cannot read.
+    """
+    return has_scope(CALENDAR_SCOPE)
+
+
+def connect(with_content: bool = False, with_calendar: bool = False) -> tuple[bool, str]:
     """Run the one-time OAuth flow (opens a browser). Stores the token. Returns (ok, msg).
 
-    `with_content` adds `gmail.readonly` — the CRM-4b opt-in. It must be passed explicitly by
-    something the operator typed; nothing in the codebase defaults it to True, and a test pins
-    that the ordinary flow requests only SCOPES.
+    `with_content` adds `gmail.readonly` — the CRM-4b opt-in. `with_calendar` adds
+    `calendar.events` — CAL-1's. Both must be passed explicitly by something the operator typed;
+    nothing in the codebase defaults either to True, and a test pins that the ordinary flow
+    requests only SCOPES.
+
+    Re-running this REPLACES the token, so a reconnect that omits a flag silently drops that
+    grant. The message below therefore states what the new token carries rather than only what
+    was just added.
     """
     if not CLIENT_SECRET_PATH.exists():
         return False, _SETUP_HELP
@@ -146,7 +173,16 @@ def connect(with_content: bool = False) -> tuple[bool, str]:
         _Request, _Credentials, InstalledAppFlow, _build = _libs()
     except ImportError:
         return False, "Install deps: pip install google-api-python-client google-auth-oauthlib"
-    scopes = list(SCOPES) + ([CONTENT_SCOPE] if with_content else [])
+    # Carry FORWARD whatever the current token already holds. Re-running connect replaces the
+    # token, so `--gmail-connect --with-calendar` without this would silently drop the
+    # `gmail.readonly` grant that CRM-4b's conversation reading depends on — the operator would
+    # gain invites and lose reply text, with nothing saying so until a thread came back empty.
+    held = set(granted_scopes() or [])
+    scopes = list(SCOPES)
+    if with_content or CONTENT_SCOPE in held:
+        scopes.append(CONTENT_SCOPE)
+    if with_calendar or CALENDAR_SCOPE in held:
+        scopes.append(CALENDAR_SCOPE)
     try:
         flow = InstalledAppFlow.from_client_secrets_file(str(CLIENT_SECRET_PATH), scopes)
         creds = flow.run_local_server(port=0)
@@ -158,9 +194,12 @@ def connect(with_content: bool = False) -> tuple[bool, str]:
     # process that does not exist: nothing is read until the operator asks for one thread.
     note = (" Reply content is ON — nothing is read automatically; click “⤓ Fetch from Gmail” "
             "on a conversation to read that one."
-            if with_content else
+            if CONTENT_SCOPE in scopes else
             " Reply content is OFF (headers only). Add --with-content to enable it.")
-    return True, f"Gmail connected. Token stored at {TOKEN_PATH}.{note}"
+    cal = (" Calendar invites are ON — you can send one from a contact's 📅 Invite tab."
+           if CALENDAR_SCOPE in scopes else
+           " Calendar invites are OFF. Add --with-calendar to enable them.")
+    return True, f"Gmail connected. Token stored at {TOKEN_PATH}.{note}{cal}"
 
 
 def probe() -> tuple[bool, str]:

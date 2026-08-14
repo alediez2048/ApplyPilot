@@ -1725,6 +1725,37 @@ def _space_of_contact(contact_id: str, conn=None):
         return None
 
 
+def _sources_by_employer(rows, job_companies: dict, conn) -> dict:
+    """job_url -> the OTHER roles at that employer that have contacts on them (CO-3).
+
+    ONE query for the whole page. `companies_match` is not used here and that is deliberate:
+    this decides whether to OFFER a button, and the authoritative check runs again in
+    `migrate.plan` before anything moves — so a loose match here costs a button that then
+    refuses with a reason, while a loose match there would move real people onto the wrong card.
+    """
+    try:
+        from applypilot.networking.store import contact_counts_by_job
+        counts = contact_counts_by_job(conn)
+    except Exception:  # noqa: BLE001 — never blank the dashboard over a decoration
+        log.debug("Could not count contacts per job", exc_info=True)
+        return {}
+    by_co: dict[str, list] = {}
+    for r in rows:
+        co = (job_companies.get(r["url"]) or "").strip().lower()
+        if co:
+            by_co.setdefault(co, []).append(r)
+    out: dict[str, list] = {}
+    for co, group in by_co.items():
+        if len(group) < 2:
+            continue
+        for r in group:
+            others = [{"url": o["url"], "title": o["title"] or "", "people": counts.get(o["url"], 0)}
+                      for o in group if o["url"] != r["url"] and counts.get(o["url"], 0)]
+            if others:
+                out[r["url"]] = others
+    return out
+
+
 def _coverage(contacts: list[dict], ladders: dict | None = None, space=None) -> dict:
     """The Summary tab's data, plus the close warning it shares with the row menu.
 
@@ -2017,6 +2048,14 @@ def _status_payload(space: str = "") -> dict:
     _conn_counts = _conns.company_counts(list(set(_job_companies.values())), conn)
     # ONE query for the whole page, hoisted out of the job loop for the usual reason.
     _sibling = _sibling_threads(conn)
+    # CO-3. Which jobs share an employer with another job that HAS contacts — so a live card can
+    # offer "⤓ Bring contacts here" rather than leaving the operator to notice the duplicate on
+    # one card and go hunting for the button on a different one (§Lessons 89).
+    #
+    # Costs NO query: `_job_companies` is already resolved above and the per-job contact counts
+    # come from one pass over the same rows. This path re-renders every 2.5s with six statements
+    # of headroom, and a lookup per job is exactly how the budget went 74 → 90 (§Lessons 11).
+    _dupe_sources = _sources_by_employer(rows, _job_companies, conn)
 
     for row in rows:
         # Status precedence (each maps to a UI indicator):
@@ -2168,6 +2207,10 @@ def _status_payload(space: str = "") -> dict:
             # When something last happened, and who did it (UX-3). Derived from data already
             # loaded above — no query of its own on a 2.5s path.
             "coverage": job_cov,
+            # CO-3. Whether ANOTHER role at this employer holds contacts, so a live card can
+            # offer "⤓ Bring contacts here". Derived from rows already loaded — `_dupe_sources`
+            # is a dict comprehension over the same contact list, not a query per job.
+            "dupe_sources": _dupe_sources.get(row["url"]) or [],
             "last_interaction": _last_interaction(row, contacts, job_ladders),
             # How the application is DOING, as opposed to how far it has travelled (UX-5).
             "temperature": _temperature(row, contacts, job_ladders, job_checklist, job_followups),
@@ -2419,6 +2462,19 @@ def _migrate_plan(data: dict) -> dict:
     conn = get_connection()
     src = (data.get("src") or "").strip()
     dst = (data.get("dst") or "").strip()
+    # PULL: the operator is standing on the live role and wants people brought here. `src` is
+    # then what we are listing, not what we hold — the mirror of the push case, and the one that
+    # matches where the duplicate is actually noticed.
+    if (data.get("mode") or "") == "pull":
+        here = (data.get("dst") or "").strip()
+        sources = _migrate.sources_for(here, conn)
+        if not src:
+            return {"ok": bool(sources), "sources": sources, "plan": None,
+                    "error": "" if sources else
+                             "no other application at this employer has contacts on it"}
+        return {"ok": True, "sources": sources, "plan": _migrate.plan(src, here, conn),
+                "error": ""}
+
     targets = _migrate.targets_for(src, conn)
     if not dst:
         return {"ok": bool(targets), "targets": targets, "plan": None,

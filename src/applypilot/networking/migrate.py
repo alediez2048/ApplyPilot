@@ -118,13 +118,30 @@ def plan(src_url: str, dst_url: str, conn: sqlite3.Connection | None = None) -> 
             continue
         victim = _collision(c, dst_url, here, by_email)
         if victim is not None:
-            mine, theirs = row["messages"], len(dst_threads.get(victim["id"]) or [])
-            if mine and theirs:
-                # Interleaving two real conversations is unrecoverable, and live there are zero
-                # such pairs — so refusing costs nothing today and keeps the operator deciding.
-                refused.append({**row, "why": f"{row['full_name']} has a conversation on BOTH "
-                                              "applications; merging them is not reversible"})
+            src_msgs = {m.get("message_id") for m in (threads.get(c["id"]) or [])}
+            dst_msgs = {m.get("message_id") for m in (dst_threads.get(victim["id"]) or [])}
+            mine, theirs = row["messages"], len(dst_msgs)
+            # Two conversations, or ONE conversation stored twice? The distinction is the
+            # message IDS, not the counts.
+            #
+            # `replies.sync_all_with()` searches Gmail by ADDRESS and files what it finds under
+            # whichever contact row asked — so the same thread lands on both of a duplicated
+            # person's rows, with identical message ids. Counting rows called that two
+            # conversations and refused the merge, which blocked the exact repair this exists
+            # for: live, both WebAI pairs hold the SAME 4 messages, `identical=True`.
+            #
+            # A genuine second exchange is one the destination holds and the source does not.
+            separate = bool(dst_msgs - src_msgs)
+            if mine and theirs and separate:
+                # Interleaving two real conversations is unrecoverable, so it is refused and
+                # named rather than guessed at.
+                refused.append({**row, "why": f"{row['full_name']} has a SEPARATE conversation on "
+                                              "both applications; merging them is not reversible"})
                 continue
+            if theirs and not separate:
+                # A copy, not a conversation. The destination row adds nothing, so the source
+                # wins on whatever else it carries and the duplicate goes.
+                theirs = 0
             keep_src = mine >= theirs
             collisions.append({**row, "keeps": "moved" if keep_src else "existing",
                                "other_messages": theirs})
@@ -436,6 +453,41 @@ def _restore(snap: dict, conn: sqlite3.Connection) -> None:
             marks = ", ".join("?" for _ in row)
             conn.execute(f"INSERT OR REPLACE INTO {table} ({cols}) VALUES ({marks})",
                          tuple(row.values()))
+
+
+def sources_for(dst_url: str, conn: sqlite3.Connection | None = None) -> list[dict]:
+    """Other roles at this employer that HAVE contacts — the ones worth pulling from.
+
+    The mirror of `targets_for`, and it exists because of where the operator is standing. The
+    duplicate is noticed on the LIVE role ("2 of these are already on another role here"), and
+    `targets_for` only offers a move outward from the dead one — so acting on what you just read
+    meant navigating to a different card to find the button. §Lessons 89: findable is not the
+    same as findable FROM WHERE THE WORK IS.
+
+    Closed roles are INCLUDED here, unlike `targets_for` which excludes them. That is the point:
+    a cancelled role is exactly the thing you pull people off.
+    """
+    if conn is None:
+        conn = get_connection()
+    from applypilot.repo import jobs as _jobs
+    dst_job = _jobs.find_by_any_url(dst_url, conn)
+    if not dst_job:
+        return []
+    mine = _employer(dst_job)
+    if not mine:
+        return []
+    out = []
+    for row in _jobs.dashboard_rows(conn=conn, space_id=dst_job.get("space_id")):
+        job = dict(row)
+        if job.get("url") == dst_url:
+            continue
+        if not companies_match(mine, _employer(job)):
+            continue
+        n = len(store.get_contacts_for_job(job["url"], conn))
+        if n:
+            out.append({"url": job.get("url") or "", "title": job.get("title") or "",
+                        "people": n, "closed": bool((job.get("rejected_at") or "").strip())})
+    return out
 
 
 def targets_for(src_url: str, conn: sqlite3.Connection | None = None) -> list[dict]:

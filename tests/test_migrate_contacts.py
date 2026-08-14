@@ -302,7 +302,10 @@ def test_two_real_conversations_are_REFUSED_rather_than_interleaved(db):
         "sent_at": "2026-08-09T09:00", "rfc_message_id": "<gm9>", "snippet": "hi"}], db)
     got = migrate.plan(DEAD, LIVE, db)
     assert [r["id"] for r in got["movable"]] == []
-    assert "BOTH" in got["refused"][0]["why"]
+    # "SEPARATE", not merely "both": the destination holds a message the source does not, which
+    # is what distinguishes a second exchange from one conversation the address-based Gmail sync
+    # filed under two contact rows.
+    assert "SEPARATE" in got["refused"][0]["why"]
     assert migrate.apply(DEAD, LIVE, [src], db)["ok"] is False
 
 
@@ -381,3 +384,78 @@ def test_targets_are_same_employer_and_exclude_closed_rows(db):
 def _now():
     from datetime import datetime, timezone
     return datetime(2026, 8, 13, tzinfo=timezone.utc)
+
+
+# ── one conversation stored twice is NOT two conversations ──────────────────
+
+def test_a_COPIED_conversation_does_not_block_the_merge(db):
+    """The live WebAI case, and the reason the refusal was comparing the wrong thing.
+
+    `replies.sync_all_with()` searches Gmail by ADDRESS and files what it finds under whichever
+    contact row asked, so the same thread lands on BOTH rows of a duplicated person with
+    identical message ids. Counting rows called that two conversations and refused — blocking the
+    exact repair the feature exists for. Measured: both WebAI pairs hold the SAME 4 messages.
+    """
+    src = _emailed(db, name="Marcus", email="m@google.test")
+    dst = _person(db, job=LIVE, name="Marcus Godin", email="m@google.test")
+    # The identical message, filed under the second row too — what the address search does.
+    _msg.upsert_messages([{
+        "message_id": "gm1", "thread_id": "t1", "contact_id": dst, "job_url": LIVE,
+        "direction": "out", "from_addr": ME, "from_name": "", "to_addrs": ["m@google.test"],
+        "cc_addrs": [], "subject": "quick question about the Startups Performance Lead role",
+        "sent_at": "2026-08-01T09:00", "rfc_message_id": "<gm1>", "snippet": "I just applied"}],
+        db)
+    got = migrate.plan(DEAD, LIVE, db)
+    assert got["refused"] == [], f"a copied thread was treated as a second conversation: {got['refused']}"
+    assert [r["id"] for r in got["movable"]] == [src]
+    assert got["collisions"][0]["keeps"] == "moved"
+    assert migrate.apply(DEAD, LIVE, [src], db)["ok"]
+    assert store.get_contact(dst, db) is None
+
+
+def test_a_GENUINELY_separate_conversation_is_still_refused(db):
+    """The negative control. Without it, the fix above collapses into "never refuse", and two
+    real exchanges get interleaved unrecoverably."""
+    src = _emailed(db, name="Marcus", email="m@google.test")
+    dst = _person(db, job=LIVE, name="Marcus Godin", email="m@google.test")
+    _msg.upsert_messages([{
+        "message_id": "OTHER", "thread_id": "t9", "contact_id": dst, "job_url": LIVE,
+        "direction": "in", "from_addr": "m@google.test", "from_name": "Marcus",
+        "to_addrs": [ME], "cc_addrs": [], "subject": "different thread entirely",
+        "sent_at": "2026-08-09T09:00", "rfc_message_id": "<o>", "snippet": "hi"}], db)
+    got = migrate.plan(DEAD, LIVE, db)
+    assert [r["id"] for r in got["movable"]] == []
+    assert "SEPARATE" in got["refused"][0]["why"]
+    assert migrate.apply(DEAD, LIVE, [src], db)["ok"] is False
+
+
+# ── pulling FROM the live role, which is where the duplicate is noticed ─────
+
+def test_sources_for_lists_the_roles_worth_pulling_FROM(db):
+    """`targets_for`'s mirror. The duplicate is noticed on the LIVE role ("2 of these are
+    already on another role here"), and offering only an outward move meant navigating to a
+    different card to act on what you had just read (§Lessons 89)."""
+    _emailed(db, name="Marcus", email="m@google.test")
+    got = migrate.sources_for(LIVE, db)
+    assert [s["url"] for s in got] == [DEAD]
+    assert got[0]["people"] == 1
+
+
+def test_a_CLOSED_role_is_included_as_a_source(db):
+    """The opposite of `targets_for`, deliberately: a cancelled role is exactly the thing you
+    pull people off."""
+    _emailed(db, name="Marcus", email="m@google.test")
+    db.execute("UPDATE jobs SET rejected_at='2026-08-01', apply_status='cancelled' WHERE url=?",
+               (DEAD,))
+    db.commit()
+    got = migrate.sources_for(LIVE, db)
+    assert [s["url"] for s in got] == [DEAD] and got[0]["closed"] is True
+
+
+def test_a_role_with_NOBODY_on_it_is_not_offered_as_a_source(db):
+    assert migrate.sources_for(LIVE, db) == []
+
+
+def test_a_different_employer_is_never_a_source(db):
+    _person(db, job=OTHER, name="Someone", email="s@acme.test")
+    assert migrate.sources_for(LIVE, db) == []

@@ -1753,17 +1753,21 @@ let MIGRATE_UNDO = null;            // {token, moved, title} — one at a time, 
 
 function migState(url) {
   if (!MIGRATE.has(url)) MIGRATE.set(url, {open: false, targets: null, dst: '', plan: null,
-                                           picked: null, busy: false, err: ''});
+                                           picked: null, busy: false, err: '',
+                                           pull: false});
   return MIGRATE.get(url);
 }
 
-async function toggleMigrate(url) {
+async function toggleMigrate(url, pull) {
   const s = migState(url);
   s.open = !s.open;
+  s.pull = !!pull;
   if (!s.open) { refresh(); return; }
   s.busy = true; s.err = ''; refresh();
-  const r = await post('/api/contacts/migrate-plan', {src: url});
-  s.targets = r.targets || [];
+  // PULL asks the mirror question: which OTHER roles at this employer have people on them.
+  const r = await post('/api/contacts/migrate-plan',
+                       pull ? {mode: 'pull', dst: url} : {src: url});
+  s.targets = (pull ? r.sources : r.targets) || [];
   s.err = r.error || '';
   // Preselected when there is exactly one — and still NAMED in the dialog. The ticket left this
   // open ("is one target enough?"); showing it costs a line and moving eleven people on an
@@ -1772,11 +1776,14 @@ async function toggleMigrate(url) {
   s.busy = false; refresh();
 }
 
-async function pickMigrateTarget(url, dst) {
+async function pickMigrateTarget(url, other) {
   const s = migState(url);
-  s.dst = dst; s.busy = true; s.err = ''; s.plan = null; refresh();
-  const r = await post('/api/contacts/migrate-plan', {src: url, dst});
-  s.targets = r.targets || s.targets;
+  s.dst = other; s.busy = true; s.err = ''; s.plan = null; refresh();
+  // In PULL mode `other` is the SOURCE and this card is the destination — the same plan
+  // endpoint, with the pair the other way round.
+  const r = await post('/api/contacts/migrate-plan',
+                       s.pull ? {mode: 'pull', src: other, dst: url} : {src: url, dst: other});
+  s.targets = (s.pull ? r.sources : r.targets) || s.targets;
   s.plan = r.plan || null;
   s.err = (r.plan && !r.plan.ok ? r.plan.error : '') || r.error || '';
   // Everyone movable starts ticked. The excluded are not in this set and cannot be added to it
@@ -1805,7 +1812,8 @@ async function runMigrate(url, btn) {
       + (p.drafts_cleared ? `\n\n${p.drafts_cleared} unsent draft`
           + `${p.drafts_cleared > 1 ? 's' : ''} naming the old role will be cleared.` : ''))) return;
   s.busy = true; btn.disabled = true; refresh();
-  const r = await post('/api/contacts/migrate', {src: url, dst: s.dst, ids});
+  const r = await post('/api/contacts/migrate',
+                       s.pull ? {src: s.dst, dst: url, ids} : {src: url, dst: s.dst, ids});
   s.busy = false;
   if (!r.ok) { s.err = r.error || 'Could not move them.'; refresh(); return; }
   MIGRATE.delete(url);
@@ -1828,15 +1836,24 @@ async function undoMigrate(btn) {
 function dismissMigrateUndo() { MIGRATE_UNDO = null; refresh(); }
 
 function migrateBar(j) {
-  // Only where the situation exists: a role that has CLOSED, with people on it. A live job's
-  // contacts are not stranded and the button would be noise on every card.
-  if (!isClosed(j) || !(j.contacts || []).length) return '';
   const u = `decodeURIComponent('${encodeURIComponent(j.url)}')`;
   const s = migState(j.url);
+  // A LIVE role offers the PULL instead: bring people here from another application at this
+  // employer. That is where the duplicate is noticed — discovery reports "2 of these are already
+  // on another role here" on the card you are searching from — and offering only the outward
+  // move meant navigating to a different card to act on what you had just read (§Lessons 89:
+  // findable is not the same as findable FROM WHERE THE WORK IS).
+  const pull = !isClosed(j);
+  if (pull && !s.open && !(j.dupe_sources || []).length) return '';
+  if (!pull && !(j.contacts || []).length) return '';
   if (!s.open) {
-    return `<div class="mig-row"><button class="ghost mig-open" onclick="toggleMigrate(${u})"
-        title="This role is closed. Move the people you were already talking to onto a live application at the same company."
-        >→ Move contacts to another application</button></div>`;
+    return pull
+      ? `<div class="mig-row"><button class="ghost mig-open" onclick="toggleMigrate(${u}, true)"
+          title="You already have contacts at this company on another application. Bring them here instead of starting a second conversation with the same people."
+          >⤓ Bring contacts here from another role</button></div>`
+      : `<div class="mig-row"><button class="ghost mig-open" onclick="toggleMigrate(${u})"
+          title="This role is closed. Move the people you were already talking to onto a live application at the same company."
+          >→ Move contacts to another application</button></div>`;
   }
   if (s.busy && !s.plan) return `<div class="mig"><div class="mig-head">Working…</div></div>`;
 
@@ -1848,16 +1865,20 @@ function migrateBar(j) {
     body = `<div class="mig-none">No other open application at ${esc(j.contact_company || j.company || 'this employer')}.
       Import the live posting first, then come back — contacts only move between roles at the same company.</div>`;
   } else {
+    const dir = s.pull ? 'From' : 'To';
     const pick = targets.length === 1
-      ? `<div class="mig-to">To <strong>${esc(targets[0].title || targets[0].url)}</strong></div>`
-      : `<div class="mig-to">To <select onchange="pickMigrateTarget(${u}, this.value)">
+      ? `<div class="mig-to">${dir} <strong>${esc(targets[0].title || targets[0].url)}</strong>${
+          targets[0].people ? ` · ${targets[0].people} people` : ''}</div>`
+      : `<div class="mig-to">${dir} <select onchange="pickMigrateTarget(${u}, this.value)">
            <option value="">Choose an application…</option>
            ${targets.map(t => `<option value="${esc(t.url)}" ${t.url === s.dst ? 'selected' : ''}>${esc(t.title || t.url)}</option>`).join('')}
          </select></div>`;
     body = pick + migratePlanBody(j, s, u);
   }
   return `<div class="mig">
-      <div class="mig-head">Move contacts off “${esc(j.title || 'this role')}”
+      <div class="mig-head">${s.pull
+          ? `Bring contacts into “${esc(j.title || 'this role')}”`
+          : `Move contacts off “${esc(j.title || 'this role')}”`}
         <button class="ghost mig-x" onclick="toggleMigrate(${u})" title="Close">✕</button></div>
       ${body}
       ${s.err ? `<div class="mig-err">${esc(s.err)}</div>` : ''}

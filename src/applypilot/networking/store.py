@@ -334,6 +334,59 @@ def emails_sent_to_company(company: str, conn: sqlite3.Connection | None = None)
     return int(first) + int(later)
 
 
+def contact_counts_by_job(conn: sqlite3.Connection | None = None) -> dict:
+    """job_url -> how many contacts are on it. ONE query for the whole payload.
+
+    Lives here rather than in the dashboard because that file runs zero SQL (ARCH-4), and it is
+    a single GROUP BY rather than a lookup per job — this is the 2.5s refresh path.
+    """
+    if conn is None:
+        conn = get_connection()
+    init_contacts(conn)
+    return {r[0]: r[1] for r in conn.execute(
+        "SELECT job_url, COUNT(*) FROM contacts GROUP BY job_url").fetchall()}
+
+
+def known_at_company(company: str, exclude_job_url: str = "",
+                     conn: sqlite3.Connection | None = None) -> list[dict]:
+    """Everyone we already have at this employer, on ANY other role.
+
+    `contact_id` hashes `job_url`, so the same human found for a second role at the same company
+    is a second row with its own ladder, its own drafts and an empty history — and nothing in
+    discovery was looking wider than the job it was running for. Measured on the live database
+    when this was written: 4 addresses on 2 rows each, and the WebAI pair is what the cost
+    actually looks like — two people four emails deep on a cancelled role, re-found for the live
+    one, each handed a fresh cold email draft and a text opening "I applied for the AI Software
+    Engineer role" as though no conversation existed.
+
+    Per COMPANY rather than per job, because that is the unit the recipient experiences — the
+    same reasoning as `emails_sent_to_company` and the per-company cap.
+
+    Returns enough to NAME them in a refusal: a count is not actionable, "Marcus Godin — already
+    on AI Forward Deployed Engineer, 4 emails sent" is.
+    """
+    if conn is None:
+        conn = get_connection()
+    init_contacts(conn)
+    key = (company or "").strip().lower()
+    if not key:
+        return []
+    rows = conn.execute(
+        "SELECT c.id, c.full_name, c.email, c.linkedin_url, c.job_url, c.replied_at, "
+        "       c.sent_message_id, c.outreach_status, j.title AS job_title, j.apply_status "
+        "FROM contacts c LEFT JOIN jobs j ON j.url = c.job_url "
+        "WHERE LOWER(TRIM(COALESCE(c.company,''))) = ? AND c.job_url != ? "
+        "ORDER BY c.discovered_at", (key, exclude_job_url or "")).fetchall()
+    return [{
+        "id": r["id"], "full_name": r["full_name"] or "", "email": _norm_email(r["email"]),
+        "linkedin_url": _norm_linkedin(r["linkedin_url"]), "job_url": r["job_url"],
+        "job_title": r["job_title"] or "", "apply_status": r["apply_status"] or "",
+        "replied": bool((r["replied_at"] or "").strip()),
+        "emailed": bool((r["sent_message_id"] or "").strip())
+                   or r["outreach_status"] == "submitted",
+    } for r in rows]
+
+
 def copy_already_sent_to_company(company: str, exclude_id: str | None = None,
                                  conn: sqlite3.Connection | None = None) -> list[dict]:
     """Subjects and bodies already drafted for this employer — so the next one can differ.

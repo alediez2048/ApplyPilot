@@ -279,6 +279,37 @@ def find_contacts_for_job(
     # Round two. Excluded by the SAME identity function that stores them — computing a fresh
     # name/email match here would be a second answer to "is this the same person", and the two
     # would disagree (§Lessons 1 is a whole family of exactly that).
+    # ── Anyone we already have at this EMPLOYER is not a new contact ────────────
+    #
+    # Unconditional, and that is the change: `skip_known` below is opt-in and per JOB, so a
+    # FIRST search on a second role at a company we already work had no exclusion at all. That
+    # is how the WebAI pair happened — two people four emails deep on a cancelled role, re-found
+    # for the live one, each given a fresh cold email draft and a text opening "I applied for
+    # the AI Software Engineer role" as though the conversation did not exist.
+    #
+    # Runs BEFORE enrichment, so a person we already hold costs no Apollo credit either.
+    #
+    # Matched on EMAIL then LinkedIn then NAME — never on `contact_id`, which hashes `job_url`
+    # and therefore differs for exactly the rows this exists to catch. Same order the card
+    # already uses to put one person's two rows together (SHEET-1b).
+    known_elsewhere: list[dict] = []
+    if company:
+        mine = store.known_at_company(company, exclude_job_url=job_url or "")
+        if mine:
+            by_email = {m["email"]: m for m in mine if m["email"]}
+            by_li = {m["linkedin_url"]: m for m in mine if m["linkedin_url"]}
+            by_name = {(m["full_name"] or "").strip().lower(): m for m in mine if m["full_name"]}
+            fresh = []
+            for c in ranked:
+                hit = (by_email.get(store._norm_email(c.get("email")))
+                       or by_li.get(store._norm_linkedin(c.get("linkedin_url")))
+                       or by_name.get((c.get("full_name") or "").strip().lower()))
+                (known_elsewhere.append(hit) if hit else fresh.append(c))
+            if known_elsewhere:
+                log.info("%d of %d candidates at %s are already stored on another role",
+                         len(known_elsewhere), len(ranked), company)
+            ranked = fresh
+
     already = 0
     if skip_known and job_url:
         known = {c["id"] for c in store.get_contacts_for_job(job_url)}
@@ -459,14 +490,35 @@ def find_contacts_for_job(
             f"skipped {len(excluded)} in {places}"
         log.info("Location filter skipped %d contact(s) at %s: %s",
                  len(excluded), company, ", ".join(excluded))
+    # People we already hold on another role at this employer. Reported SEPARATELY from every
+    # other skip, because it is the only one that is not a loss: they are not gone, they are one
+    # card over with a live conversation on them, and the fix is to MOVE them rather than to
+    # widen a setting or correct an employer name (§Lessons 91's rule — "does not work there"
+    # and "works there, already ours" are different findings and merging them makes a
+    # deduplication read as a data-quality failure).
+    if known_elsewhere:
+        result["known_elsewhere"] = [
+            {"id": m["id"], "full_name": m["full_name"], "email": m["email"],
+             "job_url": m["job_url"], "job_title": m["job_title"],
+             "emailed": m["emailed"], "replied": m["replied"]}
+            for m in known_elsewhere]
+        names = ", ".join(m["full_name"] or m["email"] for m in known_elsewhere[:4])
+        result["note"] = (result["note"] + "; " if result["note"] else "") + \
+            f"{len(known_elsewhere)} already on another role here ({names})"
+        log.info("Skipped %d already-known contact(s) at %s: %s",
+                 len(known_elsewhere), company, names)
+
     hot_n = result.get("hot", 0)
+    dupes = (f" {len(known_elsewhere)} more are already on another role at this company — "
+             f"move them across instead of writing to them twice."
+             if known_elsewhere else "")
     dropped = f" Dropped {len(rejected)} who work elsewhere." if rejected else ""
     skipped = (f" Skipped {len(excluded)} based in "
                f"{', '.join(sorted({p.title() for p in _exclusions()}))}.") if excluded else ""
     if stored_contacts:
         warm = f", {hot_n} you already know" if hot_n else ""
         _log(f"Found {len(stored_contacts)} contact(s) at {company or 'the employer'} — "
-             f"{result['revealed']} with a verified email{warm}.{dropped}{skipped}")
+             f"{result['revealed']} with a verified email{warm}.{dropped}{skipped}{dupes}")
     else:
         # Nobody survived. This is the case that used to be silent, and it is the one the
         # operator most needs explained: the search DID run and DID spend credits. Naming the
@@ -475,7 +527,15 @@ def find_contacts_for_job(
         who = f" ({', '.join(rejected[:4])})" if rejected else ""
         # An empty result caused by the location filter has a DIFFERENT fix — widen the setting,
         # not the employer name — so it must not be reported as an ambiguous company.
-        if excluded and not rejected:
+        if known_elsewhere and not rejected and not excluded:
+            # NOT a failed search. Every candidate the provider returned is somebody we already
+            # have on another role here, which is the correct outcome and the whole point of the
+            # exclusion — reporting it as "the employer name may match more than one company"
+            # would send the operator to fix a name that is right.
+            _log(f"Nobody new at {company or 'the employer'} — all "
+                 f"{len(known_elsewhere)} are already on another role here. Move them to this "
+                 f"application rather than starting a second conversation with them.", "warn")
+        elif excluded and not rejected:
             _log(f"No contacts kept at {company or 'the employer'} — all {len(excluded)} "
                  f"considered are based in "
                  f"{', '.join(sorted({p.title() for p in _exclusions()}))}. "

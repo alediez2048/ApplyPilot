@@ -1863,10 +1863,19 @@ def _contact_payload(c: dict, company: str | None = None, ladders: dict | None =
         "notes": c.get("notes") or "",
         "apollo_url": _apollo_profile_url(c.get("apollo_id")),
         "apollo_search_url": _apollo_search_url(c.get("full_name"), company or c.get("company")),
-        "outreach_subject": c.get("outreach_subject") or "",
-        "outreach_message": c.get("outreach_message") or "",
-        "linkedin_message": c.get("linkedin_message") or "",
-        "outreach_status": c.get("outreach_status") or "none",
+        # Scoped like `emailed` and `submitted_at`, and this is the interaction that made it
+        # necessary. A moved contact reads `emailed=False` on the new card — correct, that
+        # outreach was for the other role — so the card offers a first contact. If the stored
+        # copy came with it, that compose box arrives PRE-FILLED with the dead role's words:
+        # live, three WebAI contacts sat on the AI Software Engineer card holding "I just
+        # applied for the Forward Deployed Engineer role", one click from being sent.
+        #
+        # The text is NOT deleted — it is the record of what actually went out, and it still
+        # renders in the conversation above. It simply is not this role's draft.
+        "outreach_subject": (c.get("outreach_subject") or "") if _outreach_here else "",
+        "outreach_message": (c.get("outreach_message") or "") if _outreach_here else "",
+        "linkedin_message": (c.get("linkedin_message") or "") if _outreach_here else "",
+        "outreach_status": (c.get("outreach_status") or "none") if _outreach_here else "none",
         # Ground-truth "an email actually went out": Gmail returned a message id. This survives a
         # later draft edit/regenerate (which resets outreach_status to 'drafted') — so the UI and
         # send-gate rely on THIS, not just outreach_status, to know a contact was already emailed.

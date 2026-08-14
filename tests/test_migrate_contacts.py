@@ -459,3 +459,42 @@ def test_a_role_with_NOBODY_on_it_is_not_offered_as_a_source(db):
 def test_a_different_employer_is_never_a_source(db):
     _person(db, job=OTHER, name="Someone", email="s@acme.test")
     assert migrate.sources_for(LIVE, db) == []
+
+
+def test_a_moved_contact_is_not_offered_the_OLD_ROLES_copy(db):
+    """Found on the live WebAI cards after a real move, and it is the miscommunication the whole
+    feature exists to prevent.
+
+    Two correct rules interacted badly. `outreach_job_url` scoping makes `emailed` read False on
+    the new card — right, that outreach was for the other role — so the card offers a first
+    contact. And the sent copy is preserved — right, it is the only record of what went out.
+    Together they pre-filled the fresh compose box with the dead role's words: three contacts
+    holding "I just applied for the Forward Deployed Engineer role" on the AI Software Engineer
+    card, one click from sending.
+
+    The text is not destroyed. It still renders in the conversation. It just is not this role's
+    draft.
+    """
+    from applypilot import web_dashboard as wd
+    cid = _emailed(db)
+    migrate.apply(DEAD, LIVE, [cid], db)
+    new_id = store.contact_id(LIVE, None, "Carol Reed")
+    c = store.get_contact(new_id, db)
+    # The record survives in the database — that is the half that must NOT change.
+    assert "Startups Performance Lead" in (c["outreach_message"] or "")
+
+    payload = wd._contact_payload(c, company="Google", ladders={}, conn_matches={})
+    assert payload["outreach_message"] == "", "the dead role's copy is offered as a new draft"
+    assert payload["outreach_subject"] == ""
+    assert payload["outreach_status"] == "none"
+
+
+def test_a_contact_that_never_moved_keeps_its_draft(db):
+    """The negative control. Scoping this must not blank the draft on the 373 rows that have
+    never been moved — which is all of them until the button is used."""
+    from applypilot import web_dashboard as wd
+    c = store.get_contact(_person(db, outreach_status="drafted",
+                                  outreach_message="hello there"), db)
+    payload = wd._contact_payload(c, company="Google", ladders={}, conn_matches={})
+    assert payload["outreach_message"] == "hello there"
+    assert payload["outreach_status"] == "drafted"

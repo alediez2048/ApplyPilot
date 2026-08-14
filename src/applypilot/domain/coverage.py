@@ -101,9 +101,27 @@ def contact_coverage(contact: dict, ladders: dict | None = None, now=None, space
         }
 
     stage, nxt = _stage(per, replied, _silent_for(c, now))
+    # TIME, which the first version of this pane had nowhere and which is the actual question a
+    # sequence view answers: when did we last touch this person, and when is the next thing owed.
+    # Four rows out of five read "waiting" with no hint of what they were waiting FOR.
+    lasts = [p["last_at"] for p in per.values() if (p["last_at"] or "").strip()]
+    waiting = [p for p in per.values() if p["state"] == "waiting" and p["due_in_h"] is not None]
+    waiting.sort(key=lambda p: p["due_in_h"])
+    dues = [p["due_in_h"] for p in waiting]
+    # WHICH message is next, not merely that one is. "next in 1d" is the same non-answer as the
+    # "waiting" it replaced — it says a clock is running and nothing about what it will do.
+    nxt_lbl = ""
+    if waiting:
+        w = waiting[0]
+        nxt_lbl = f"{w['label']} {w['sent'] + 1} of {w['planned']}"
     return {"id": cid, "full_name": c.get("full_name") or "", "email": c.get("email") or "",
+            "title": c.get("title") or "",
             "phone": c.get("phone") or "", "replied": replied,
+            "replied_at": (c.get("replied_at") or "").strip(),
             "channels": per, "stage": stage, "next": nxt,
+            "last_at": max(lasts) if lasts else "",
+            "next_in_h": min(dues) if dues else None,
+            "next_label": nxt_lbl,
             "emails": per["email"]["sent"], "texts": per["sms"]["sent"],
             "calls": per["call"]["sent"], "invites": per["linkedin"]["sent"]}
 

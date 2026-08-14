@@ -317,43 +317,76 @@
   .addc-hint { font-size:11.5px; color:var(--faint); flex:1 1 220px; }
   .addc-err { color:var(--red); font-weight:600; }
 
-  /* The Summary tab — the whole job in plan order, before you open anybody.
-     Palette tokens only, both grounds, and every grid cell explicitly placed: an unplaced
-     child lands on a row of its own and renders a name underneath its own counts
-     (§Lessons 106), which is the bug the meeting row shipped with. */
-  .sum { display:flex; flex-direction:column; gap:2px; }
-  .sum-tot { display:flex; flex-wrap:wrap; gap:8px; padding:2px 0 10px; }
-  .sum-s { font-size:12.5px; font-weight:600; color:var(--text); background:var(--surface2);
-      border:1px solid var(--line); border-radius:999px; padding:4px 11px; white-space:nowrap;
-      font-variant-numeric:tabular-nums; }
-  .sum-s.zero { color:var(--faint); font-weight:500; }
-  .sum-s.good { color:var(--green); background:var(--green-soft); border-color:var(--green-soft); }
-  .sum-legend { display:flex; flex-wrap:wrap; gap:14px; font-size:11px; color:var(--faint);
-      padding-bottom:6px; margin-bottom:2px; border-bottom:1px solid var(--line2); }
-  .sum-legend span { display:inline-flex; align-items:center; gap:5px; }
-  .sum-row { display:grid; grid-template-columns:minmax(0,1.4fr) auto minmax(0,1fr) minmax(0,1.3fr);
-      align-items:center; gap:10px; padding:6px 4px; border-bottom:1px solid var(--line2);
-      font-size:12.5px; cursor:pointer; border-radius:6px; }
+  /* The Summary tab — the job's sequence, before you open anybody.
+     Rebuilt after the first version was reported as looking bare, and the diagnosis was
+     information rather than decoration: four rows in five said "waiting" and nothing else, no
+     row carried a TIME, and a four-cell grid stretched the width of the table so the eye
+     crossed an inch of nothing between a name and its status.
+     Palette tokens only, both grounds, every grid cell explicitly placed (§Lessons 106). */
+  /* Capped. The panel is ~1100px wide and five short rows stretched across all of it, so the
+     eye crossed an inch of nothing between a name and its status — the dead space that made
+     this read as bare in the first place. */
+  .sum { display:flex; flex-direction:column; max-width:900px; }
+  .sum-head { display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:2px 0 8px; }
+  .sum-h-l { font-size:12.5px; color:var(--muted); font-variant-numeric:tabular-nums; }
+  .sum-s { font-size:11.5px; font-weight:700; border-radius:999px; padding:3px 10px;
+      white-space:nowrap; letter-spacing:.2px; }
+  .sum-s.good { color:var(--green); background:var(--green-soft); }
+  .sum-s.do { color:var(--yellow); background:var(--yellow-soft); }
+  /* The job's own progress: one segment per stage, filled by how many people cleared it. */
+  .sum-bar { display:grid; grid-template-columns:repeat(3, 1fr); gap:10px;
+      margin-bottom:12px; max-width:600px; }
+  .sum-seg { display:flex; flex-direction:column; gap:4px; }
+  .sum-seg-bar { height:4px; border-radius:3px; background:var(--line2); overflow:hidden; }
+  .sum-seg-bar i { display:block; height:100%; background:var(--green); border-radius:3px; }
+  .sum-seg-l { font-size:10.5px; text-transform:uppercase; letter-spacing:.5px;
+      color:var(--faint); font-weight:600; }
+
+  .sum-g { display:flex; align-items:center; gap:7px; font-size:10.5px; font-weight:700;
+      text-transform:uppercase; letter-spacing:.6px; color:var(--faint);
+      padding:12px 2px 5px; }
+  .sum-g.do { color:var(--yellow); }
+  .sum-g-n { background:var(--surface2); border-radius:999px; padding:1px 7px;
+      font-size:10px; color:var(--soft); }
+
+  /* Two lines. Name + track + status on top, who they are and when we last spoke below. */
+  /* The name column is BOUNDED, not fractional. As `1.1fr` it grew to fill the panel and
+     pushed the track into the middle of an empty row. */
+  .sum-row { display:grid; gap:2px 14px; padding:8px 10px; border-radius:8px;
+      grid-template-columns:minmax(120px,220px) auto minmax(0,1fr) auto;
+      align-items:center; border:1px solid transparent; }
+  .sum-row + .sum-row { border-top:1px solid var(--line2); border-radius:0; }
   .sum-row:hover { background:var(--surface2); }
-  .sum-name { grid-row:1; font-weight:600; color:var(--text);
+  .sum-row.act { background:var(--yellow-soft); border-color:var(--yellow-soft);
+      border-radius:8px; }
+  .sum-row.rep { background:var(--green-soft); border-color:var(--green-soft);
+      border-radius:8px; }
+  .sum-name { grid-row:1; grid-column:1; justify-self:start; font-weight:600; font-size:13px;
+      color:var(--text); background:none; border:0; padding:0; cursor:pointer; text-align:left;
+      overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:100%; }
+  .sum-name:hover { color:var(--blue); text-decoration:underline; }
+  .sum-track { grid-row:1; grid-column:2; display:inline-flex; gap:9px; align-items:center; }
+  .sum-st { grid-row:1; grid-column:3; font-size:12.5px; color:var(--muted);
       overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .sum-track { grid-row:1; display:inline-flex; gap:5px; align-items:center; }
-  .sum-counts { grid-row:1; color:var(--muted); font-variant-numeric:tabular-nums;
-      white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-  .sum-next { grid-row:1; color:var(--faint); overflow:hidden; text-overflow:ellipsis;
-      white-space:nowrap; }
-  .sum-next.do { color:var(--yellow); font-weight:600; }
-  .sum-next.good { color:var(--green); font-weight:600; }
-  /* A dot AND its tooltip, never colour alone — the rule the temperature bands already follow. */
-  .sum-dot { width:9px; height:9px; border-radius:50%; border:1.5px solid var(--line2);
-      background:transparent; display:inline-block; position:relative; }
-  .sum-dot.on { background:var(--green); border-color:var(--green); }
-  /* The legend's own dots explain WHICH position each one is; they must not wear the done
-     state, or the key reads as three completed stages on every job. */
-  .sum-dot.key { background:var(--line2); border-color:var(--line2); }
-  .sum-dot.now { background:var(--yellow); border-color:var(--yellow);
-      box-shadow:0 0 0 3px var(--yellow-soft); }
-  .sum-warn { margin-top:10px; font-size:12.5px; color:var(--yellow);
+  .sum-st.do { color:var(--yellow); font-weight:600; }
+  .sum-st.good { color:var(--green); font-weight:600; }
+  .sum-sub { grid-row:2; grid-column:1 / span 3; font-size:11.5px; color:var(--faint);
+      overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .sum-act { grid-row:1 / span 2; grid-column:4; justify-self:end; }
+  .sum-go { font-size:11.5px; font-weight:600; padding:4px 11px; border-radius:6px;
+      border:1px solid var(--line2); background:var(--surface); color:var(--soft);
+      cursor:pointer; white-space:nowrap; }
+  .sum-go:hover { border-color:var(--blue); color:var(--blue); }
+
+  /* One group of pips per channel: a pip per PLANNED message, filled for each one sent. */
+  .sq { display:inline-flex; align-items:center; gap:3px; font-size:11px; line-height:1; }
+  .sq i { width:5px; height:5px; border-radius:50%; background:var(--line2);
+      display:inline-block; }
+  .sq i.on { background:var(--green); }
+  .sq i.due { background:var(--yellow); box-shadow:0 0 0 2px var(--yellow-soft); }
+  .sq.off { opacity:.3; filter:grayscale(1); }
+
+  .sum-warn { margin-top:12px; font-size:12.5px; color:var(--yellow);
       background:var(--yellow-soft); border-radius:6px; padding:8px 11px; line-height:1.5; }
   .sum-warn-why { display:block; color:var(--muted); font-size:11.5px; margin-top:3px; }
   .call-num { margin:8px 0; }

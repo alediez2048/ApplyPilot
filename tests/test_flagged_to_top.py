@@ -2,7 +2,7 @@
 
 Asked for as *"if I click Highlight on a contact, I want it to go all the way up to the top"*.
 
-`peopleList` already grouped people twice — `🔥 People you know here` and `🧊 New contacts` —
+`peopleList` already grouped people twice — `🔥 People you know here` and `🧊 No prior connection` —
 so the cheap reading is "sort flagged first within each group". That fails the request exactly
 where it matters: a flagged COLD contact would still render below every hot one, which on a job
 with fifteen connections is nowhere near the top. The flag is pulled out of both groups into a
@@ -144,11 +144,14 @@ const off = F.peopleList(job);
 console.log(JSON.stringify({
   onTop: on.indexOf('Zoe') < on.indexOf('Hana'),
   offTop: off.indexOf('Zoe') < off.indexOf('Hana'),
-  backInCold: off.indexOf('New contacts') < off.indexOf('Zoe'),
+  coldHdr: off.indexOf('No prior connection'),
+  backInCold: off.indexOf('No prior connection') >= 0 && off.indexOf('No prior connection') < off.indexOf('Zoe'),
   noHdr: !off.includes('Highlighted'),
 }));
 """, tmp_path)
-    assert out == {"onTop": True, "offTop": False, "backInCold": True, "noHdr": True}
+    assert out["coldHdr"] >= 0, "the cold group header is gone — backInCold cannot mean anything"
+    assert {k: out[k] for k in ("onTop", "offTop", "backInCold", "noHdr")} == \
+        {"onTop": True, "offTop": False, "backInCold": True, "noHdr": True}
 
 
 # ── the move happens on the click, not 2.5s later ───────────────────────────

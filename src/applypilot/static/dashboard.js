@@ -1977,7 +1977,12 @@ function peopleList(j) {
   let out = intro + bulkBar(j);
   if (flagged.length) out += `<div class="ppl-group flagged">💡 Highlighted <span class="ppl-g-n">${flagged.length}</span></div>` + flagged.map(c => contactRow(c)).join('');
   if (hot.length)  out += `<div class="ppl-group hot">🔥 People you know here <span class="ppl-g-n">${hot.length}</span></div>` + hot.map(c => contactRow(c)).join('');
-  if (cold.length) out += `<div class="ppl-group cold">🧊 New contacts <span class="ppl-g-n">${cold.length}</span></div>` + cold.map(c => contactRow(c)).join('');
+  // "No prior connection", NOT "new". The split here is about the LAYER a contact came from —
+  // someone you already know versus someone Apollo found — and it says nothing about whether
+  // they have been written to. Labelled "New contacts" it read as a claim about contact state,
+  // and directly contradicted the row beside it: three people showing "✉ 4 sent · earlier role"
+  // sat under a heading calling them new.
+  if (cold.length) out += `<div class="ppl-group cold">🧊 No prior connection <span class="ppl-g-n">${cold.length}</span></div>` + cold.map(c => contactRow(c)).join('');
   return `<div class="plist">${out}</div>`;
 }
 // "Jul 28" from an ISO timestamp, without dragging in a formatter.
@@ -1990,7 +1995,23 @@ function shortDate(iso) {
 function contactRow(c) {
   const open = CONTACT_OPEN.has(c.id);
   const pills = [];
-  pills.push(c.emailed ? `<span class="pill on">✉ sent</span>`
+  // Three states, not two, and the third is what a MOVED contact needs.
+  //
+  // `emailed` is scoped to this role so the new application can run its own sequence — right —
+  // but the pill reads it, so somebody four emails deep who was moved across arrived showing
+  // "✉ draft", as though nobody had ever written to them. That is the opposite of what is
+  // needed at a glance and is how the same person gets written to twice.
+  //
+  // Marked rather than merged with `✉ sent`: what went out was about a DIFFERENT role, so
+  // "we have spoken" and "we have spoken about this job" are different facts and the row has
+  // to be able to say which.
+  const prior = c.prior_outreach;
+  pills.push(
+    c.emailed ? `<span class="pill on">✉ sent</span>`
+    : (prior && prior.emails)
+      ? `<span class="pill on prev" title="${esc(prior.emails)} email${prior.emails === 1 ? '' : 's'} already sent to them${
+          prior.job_title ? ` for “${esc(prior.job_title)}”` : ' for another role'} — nothing has been sent about THIS one yet"
+         >✉ ${prior.emails} sent · earlier role</span>`
     : (c.email ? `<span class="pill off">✉ draft</span>` : `<span class="pill off">✉ no email</span>`));
   pills.push((c.dm_status === 'sent' || c.dm_status === 'manual') ? `<span class="pill on">🔗 connected</span>`
     : (c.linkedin_url ? `<span class="pill off">🔗 —</span>` : ''));
@@ -4288,19 +4309,12 @@ const TAB_OPEN = new Map();
 function activeTab(j) {
   const t = TAB_OPEN.get(j.url);
   if (t) return t;
-  // Summary is the default: "every card as soon as you open it should have its own summary
-  // tab". It replaces `people` as the resting default and does NOT replace `followups` —
-  // landing on work that is actually owed still beats landing on a description of it.
-  return dueByChannel(j).total ? 'followups' : 'summary';
+  return dueByChannel(j).total ? 'followups' : 'people';
 }
 function jobTabs(j) {
   const u = `decodeURIComponent('${encodeURIComponent(j.url)}')`;
   const cur = activeTab(j);
   const defs = [
-    // Asked for as "every card as soon as you open it should have its own summary tab that's
-    // not the email tab". FIRST, and the default — see `activeTab`. It is the one pane that
-    // answers "where is this whole thing up to" without opening anyone.
-    ['summary',   'Summary',    0, false],
     ['people',    'People',     (j.contacts || []).length, false],
     ['followups', 'Follow-ups', dueByChannel(j).total, dueByChannel(j).total > 0],
     ['materials', 'Materials',  (j.materials || []).length, false],
@@ -4536,179 +4550,8 @@ async function logInteraction(cid, kind) {
   refresh();
 }
 
-// ── Summary: the whole job at a glance, in plan order ───────────────────────
-// The three asks that turned out to be one computation — the ordered sequence, the summary
-// pane, and the close guard — all read `j.coverage`, so they cannot disagree about how far a
-// job has been worked. Derived server-side from rows and ladders that were already loaded, at
-// a cost of zero queries and zero network calls.
-// The channels the SEQUENCE runs on, in plan order. LinkedIn is deliberately absent from the
-// track: it has no ladder (the invite is the whole channel), so a marker for it would sit
-// permanently at 1/1 and imply a step that is never owed.
-const SEQ_CHANNELS = [
-  {key: 'email', icon: '✉', label: 'email'},
-  {key: 'sms',   icon: '💬', label: 'text'},
-  {key: 'call',  icon: '📞', label: 'call'},
-];
-
-// How long ago, in words. Time was the whole thing missing from the first version of this pane:
-// four rows in five read "waiting" with no hint of what they were waiting for or for how long.
-function agoWords(iso) {
-  if (!iso) return '';
-  const h = (Date.now() - new Date(iso).getTime()) / 36e5;
-  if (!isFinite(h) || h < 0) return '';
-  if (h < 1) return 'just now';
-  if (h < 24) return `${Math.round(h)}h ago`;
-  const d = Math.round(h / 24);
-  return d < 14 ? `${d}d ago` : `${Math.round(d / 7)}w ago`;
-}
-function inWords(h) {
-  if (h == null) return '';
-  if (h <= 0) return 'now';
-  if (h < 24) return `in ${Math.round(h)}h`;
-  return `in ${Math.round(h / 24)}d`;
-}
-
-function summaryPane(j) {
-  const cov = j.coverage;
-  if (!cov || !cov.people) {
-    return `<div class="pane-empty">Nobody has been found for this job yet.
-      ${findContactsPrompt(j)}</div>`;
-  }
-  const rows = cov.rows || [];
-  // Grouped by whether the row is asking for something. A flat list makes the one person who
-  // needs you look exactly like the four who do not — which is the failure the 🔔 counter
-  // exists to prevent, reproduced one level down. Headers only appear when both groups are
-  // non-empty, so the ordinary case is not wrapped in furniture that says nothing.
-  const act = rows.filter(r => r.replied || r.next);
-  const idle = rows.filter(r => !(r.replied || r.next));
-  const group = (label, n, list, cls) => !list.length ? ''
-    : `${(act.length && idle.length) ? `<div class="sum-g ${cls}">${label}
-        <span class="sum-g-n">${list.length}</span></div>` : ''}`
-      + list.map(r => sumRow(j, r)).join('');
-
-  return `<div class="sum">
-      ${sumHeader(cov)}
-      ${group('Needs you', act.length, act, 'do')}
-      ${group('In sequence', idle.length, idle, '')}
-      ${closeNotice(j)}
-    </div>`;
-}
-
-// The job's own progress along the plan, as a segmented bar — one segment per stage, filled by
-// how many people have cleared it. It replaces four count chips that said what had been SENT
-// and never what it added up to.
-function sumHeader(cov) {
-  const rows = cov.rows || [];
-  const n = rows.length || 1;
-  const at = i => rows.filter(r => r.stage.index > i || r.stage.key === 'replied'
-                                   || r.stage.key === 'done').length;
-  const segs = STAGE_LABELS.map((label, i) => {
-    const pct = Math.round(100 * at(i) / n);
-    return `<div class="sum-seg" data-tip="${esc(label)} — ${at(i)} of ${n} past this"
-        aria-label="${esc(label)}">
-        <div class="sum-seg-bar"><i style="width:${pct}%"></i></div>
-        <div class="sum-seg-l">${esc(label)}</div>
-      </div>`;
-  }).join('');
-  const bits = [
-    `${cov.people} ${cov.people === 1 ? 'person' : 'people'}`,
-    `${cov.emails} email${cov.emails === 1 ? '' : 's'}`,
-    cov.texts ? `${cov.texts} text${cov.texts === 1 ? '' : 's'}` : '',
-    cov.calls ? `${cov.calls} call${cov.calls === 1 ? '' : 's'}` : '',
-    cov.invites ? `${cov.invites} invite${cov.invites === 1 ? '' : 's'}` : '',
-  ].filter(Boolean).join(' · ');
-  return `<div class="sum-head">
-      <div class="sum-h-l">${esc(bits)}</div>
-      ${cov.replied ? `<span class="sum-s good">↩ ${cov.replied} replied</span>` : ''}
-      ${cov.due ? `<span class="sum-s do">${cov.due} need${cov.due === 1 ? 's' : ''} you</span>` : ''}
-    </div>
-    <div class="sum-bar">${segs}</div>`;
-}
-const STAGE_LABELS = ['Emails', 'Text + call', 'Text + call again'];
-
-// One person. Two lines rather than one: the name and where they are in the plan on top, who
-// they are and what has actually happened underneath. The first version was a single row of
-// four cells stretched across the table, so the eye crossed an inch of nothing to get from a
-// name to its status.
-function sumRow(j, r) {
-  const u = `decodeURIComponent('${encodeURIComponent(j.url)}')`;
-  const track = SEQ_CHANNELS.map(c => {
-    const ch = (r.channels || {})[c.key] || {};
-    if (!ch.possible) {
-      return `<span class="sq off" data-tip="no ${c.key === 'email' ? 'address' : 'number'}"
-        aria-label="no ${c.key === 'email' ? 'address' : 'number'}">${c.icon}</span>`;
-    }
-    // A pip per PLANNED message, filled for each one actually sent. This is what makes the
-    // pane read as a sequence rather than a list — "1 of 4 emails, no texts yet" is legible
-    // without reading a number, and it is the same shape for every channel.
-    const pips = Array.from({length: ch.planned}, (_, i) =>
-      `<i class="${i < ch.sent ? 'on' : ch.due && i === ch.sent ? 'due' : ''}"></i>`).join('');
-    return `<span class="sq" data-tip="${ch.sent} of ${ch.planned} ${esc(c.label)}${ch.planned === 1 ? '' : 's'} sent"
-      aria-label="${ch.sent} of ${ch.planned} ${esc(c.label)}s sent">${c.icon}${pips}</span>`;
-  }).join('');
-
-  const when = r.replied ? agoWords(r.replied_at) || agoWords(r.last_at)
-             : r.next ? '' : inWords(r.next_in_h);
-  const status = r.replied
-    ? `<span class="sum-st good">↩ they replied${when ? ' · ' + esc(when) : ''}</span>`
-    : r.next
-      ? `<span class="sum-st do">${esc(r.next.what)}</span>`
-      // Names the MESSAGE, not just the clock. "next in 1d" was the same non-answer as the
-      // "waiting" it replaced: it says a timer is running and nothing about what it will do.
-      : `<span class="sum-st">${esc(r.next_label || 'next')}${when ? ' · ' + esc(when) : ''}</span>`;
-  // The action, inline. A summary whose job is to drive work and offers nothing to click is a
-  // report (§Lessons 43's family) — so the row carries the button for whatever it is asking.
-  const act = sumAction(j, r, u);
-  const sub = [r.title, r.last_at ? `last touch ${agoWords(r.last_at)}` : 'never contacted']
-    .filter(Boolean).join(' · ');
-
-  return `<div class="sum-row ${r.replied ? 'rep' : r.next ? 'act' : ''}">
-      <button class="sum-name" onclick="openContactFrom(${u}, '${esc(r.id)}')"
-        title="Open ${esc(r.full_name || r.email)}">${esc(r.full_name || r.email || '(no name)')}</button>
-      <span class="sum-track">${track}</span>
-      ${status}
-      <span class="sum-sub">${esc(sub)}</span>
-      <span class="sum-act">${act}</span>
-    </div>`;
-}
-
-// Which channel the next action belongs to decides which tab opening the card lands on — the
-// button says "text them", so it must not open on email.
-const NEXT_TAB = {email: 'email', sms: 'phone', call: 'call', phone: 'phone'};
-function sumAction(j, r, u) {
-  const go = (label, ch) => `<button class="sum-go" onclick="openContactFrom(${u},
-    '${esc(r.id)}', '${ch}')">${label}</button>`;
-  if (r.replied) return go('Reply ↗', 'email');
-  if (!r.next) return '';
-  return go(r.next.channel === 'phone' ? 'Add number ↗'
-          : r.next.channel === 'sms' ? 'Text ↗'
-          : r.next.channel === 'call' ? 'Call ↗' : 'Write ↗',
-          NEXT_TAB[r.next.channel] || 'email');
-}
-
-// The close guard, shown IN the summary rather than only in a dialog: "I should not close out a
-// job application without having texted and called some of the people". Seeing it before you
-// reach for the row menu is what makes it advice rather than an interruption.
-function closeNotice(j) {
-  const w = (j.coverage || {}).close_warning;
-  if (!w || !w.warn || isClosed(j) || j.interview_at) return '';
-  return `<div class="sum-warn">⚠ Not fully worked yet — ${esc(w.lines.join(' · '))}.
-      <span class="sum-warn-why">Closing this is still your call; this is what is left.</span>
-    </div>`;
-}
-function openContactFrom(url, cid, channel) {
-  TAB_OPEN.set(url, 'people');
-  CONTACT_OPEN.add(cid);
-  // Land on the channel the button named. "Text ↗" opening the email composer is the same
-  // promise-the-page-does-not-keep as a span shaped like a button (§Lessons 88).
-  if (channel) CHANNEL_TAB.set(cid, channel);
-  autoSyncGmail(cid);
-  refresh();
-}
-
 function jobPane(j) {
   const t = activeTab(j);
-  if (t === 'summary')   return summaryPane(j);
   if (t === 'job')       return jobDetail(j);
   if (t === 'activity')  return `<div class="timeline">${activityHtml(j.activity)}</div>`;
   if (t === 'materials') return materialLinks(j.materials) || `<div class="pane-empty">No materials generated yet.</div>`;

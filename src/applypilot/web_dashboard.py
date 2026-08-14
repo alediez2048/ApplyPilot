@@ -1831,7 +1831,8 @@ def _legacy_followup_status(ladder: dict) -> str:
 
 
 def _contact_payload(c: dict, company: str | None = None, ladders: dict | None = None,
-                     conn_matches: dict | None = None, thread: list | None = None) -> dict:
+                     conn_matches: dict | None = None, thread: list | None = None,
+                     job_titles: dict | None = None) -> dict:
     from applypilot.domain.followup import CHANNELS as _CHANNELS
     from applypilot.domain.followup import EMPTY_LADDER
     from applypilot.domain.followup import exhausted as _exhausted
@@ -1889,6 +1890,20 @@ def _contact_payload(c: dict, company: str | None = None, ladders: dict | None =
         "emailed": _outreach_here and (bool((c.get("sent_message_id") or "").strip())
                                        or c.get("outreach_status") == "submitted"),
         "outreach_from_job": "" if _outreach_here else (c.get("outreach_job_url") or ""),
+        # What was ALREADY said to this person, before they were moved here.
+        #
+        # `emailed` is scoped so the new role can run its own sequence — right — but the row
+        # PILLS read it, so a contact four emails deep arrived showing "✉ draft", as though
+        # nobody had ever written to them. That is the opposite of what the operator needs at a
+        # glance and is how the same person gets written to twice.
+        #
+        # Counted from the messages actually on the card rather than from `touches`: the
+        # conversation moved with the person, so it is the honest record, and a ladder count is
+        # deliberately zero here.
+        "prior_outreach": None if _outreach_here else {
+            "emails": sum(1 for m in (thread or []) if (m.get("direction") or "") == "out"),
+            "job_title": (job_titles or {}).get(c.get("outreach_job_url") or "", ""),
+        },
         # Checklist + follow-up inputs.
         "submitted_at": (c.get("submitted_at") or "") if _outreach_here else "",
         "followed_up_at": email_l["last_sent_at"],
@@ -2065,6 +2080,9 @@ def _status_payload(space: str = "") -> dict:
     # come from one pass over the same rows. This path re-renders every 2.5s with six statements
     # of headroom, and a lookup per job is exactly how the budget went 74 → 90 (§Lessons 11).
     _dupe_sources = _sources_by_employer(rows, _job_companies, conn)
+    # url -> title, for naming the role a moved contact's outreach belonged to. Built from the
+    # rows already in hand; a lookup per contact would be an N+1 on the 2.5s path.
+    _job_titles = {r["url"]: (r["title"] or "") for r in rows}
 
     for row in rows:
         # Status precedence (each maps to a UI indicator):
@@ -2118,7 +2136,8 @@ def _status_payload(space: str = "") -> dict:
                                         contact_company, conn)
         job_threads = _conversations_for_job(row["url"], conn)
         contacts = [_contact_payload(c, contact_company, job_ladders, job_matches,
-                                     thread=_thread_for(c, job_threads, _sibling))
+                                     thread=_thread_for(c, job_threads, _sibling),
+                                     job_titles=_job_titles)
                     for c in raw_contacts]
         # Engagement moves ONTO the person (UX-1). It used to be a job-level `interactions`
         # key feeding a tab of its own, which across 187 contacts had 2 rows to show — and put

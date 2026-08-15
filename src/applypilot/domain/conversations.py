@@ -302,15 +302,25 @@ def thread_key(msg: dict) -> str:
 
 
 def group_threads(messages: list[dict]) -> list[dict]:
-    """Stored rows -> one entry per Gmail conversation, oldest thread LAST.
+    """Stored rows -> one entry per Gmail conversation, in the order the conversations BEGAN.
 
     `thread_for_contact` returns every message stored for a person, merged and sorted by date. One
     live contact had **18 messages across 7 threads** — a calendar invite, an introduction and two
     deals — and reading them as one stream is what "this just looks like one long conversation
     which is not" was.
 
-    Ordered by each thread's LAST message, so the live conversation is last: that is where the
-    composer is anchored, and it is the thread a reply almost always belongs to.
+    Ordered by each thread's FIRST message. It used to be the LAST, so that the live conversation
+    sat at the bottom beside the composer — a good reason that stopped being true when every
+    answerable thread got its own composer. What it cost was legibility whenever two threads
+    OVERLAP in time, which is common: one live contact has a 3-message thread running Jul 22 to
+    Aug 10 and a single stray message on Jul 28, and sorting by last message put the Jul 28 one
+    first. Reading the card top to bottom then went Jul 28, Jul 22, Aug 3, Aug 10 — backwards at
+    the second message, which is what "make sure the threads are oldest to newest" was.
+
+    Overlapping threads cannot BOTH be contiguous, so this does not promise a globally
+    chronological read. It promises a rule a reader can hold — conversations appear in the order
+    they started — and the separator carries each thread's full date range so the overlap is
+    visible rather than surprising.
     """
     by: dict[str, dict] = {}
     for m in messages or []:
@@ -326,7 +336,7 @@ def group_threads(messages: list[dict]) -> list[dict]:
         subs = sorted((m.get("subject") or "" for m in g["msgs"] if (m.get("subject") or "")),
                       key=len)
         g["subject"] = subs[0] if subs else ""
-    out.sort(key=lambda g: str(g["msgs"][-1].get("sent_at") or g["msgs"][-1].get("at") or ""))
+    out.sort(key=lambda g: str(g["msgs"][0].get("sent_at") or g["msgs"][0].get("at") or ""))
     return out
 
 

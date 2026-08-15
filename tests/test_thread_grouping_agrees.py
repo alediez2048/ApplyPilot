@@ -40,6 +40,13 @@ FIXTURE = [
     {"thread_id": "", "subject": "Friday Co", "sent_at": "2026-08-09T10:00"},
     # No subject and no id at all. Must not vanish, and must not join anything named.
     {"thread_id": "", "subject": "", "sent_at": "2026-08-10T10:00"},
+    # An OVERLAPPING thread: starts before everything and ends after everything. Without a row
+    # like this every thread here is contiguous, so ordering by the first message and ordering by
+    # the last give the identical answer — and the ordering assertion below cannot fail however
+    # either side is written. That is the same trap as a sort test whose input is pre-sorted, one
+    # level up, and it let a mutation reverting the server's sort survive.
+    {"thread_id": "t3", "subject": "Long running deal", "sent_at": "2026-07-30T10:00"},
+    {"thread_id": "t3", "subject": "Re: Long running deal", "sent_at": "2026-08-11T10:00"},
 ]
 
 
@@ -87,9 +94,27 @@ def test_every_message_gets_the_same_thread_key_in_both(js):
 
 
 def test_the_groups_themselves_match_in_content_and_order(js):
-    """Order too: the composer anchors under the LAST group, so a different order is a different
-    default thread."""
+    """Order too. Both sides sort by each thread's FIRST message so a card reads oldest to
+    newest, and the two must agree — the browser posts the key it is showing and the server
+    resolves it."""
     assert js["groups"] == [g["key"] for g in cv.group_threads(FIXTURE)]
+
+
+def test_the_fixture_can_tell_the_two_orderings_APART(js):
+    """Guards the assertion above from being vacuous.
+
+    With no overlapping thread, sorting by the first message and sorting by the last produce the
+    identical list, so both sides could sort either way and still agree. `t3` runs from before
+    the earliest message to after the latest, which puts it first under one rule and last under
+    the other.
+    """
+    groups = cv.group_threads(FIXTURE)
+    by_first = [g["key"] for g in groups]
+    by_last = [g["key"] for g in sorted(
+        groups, key=lambda g: str(g["msgs"][-1].get("sent_at") or ""))]
+    assert by_first != by_last, "the fixture cannot distinguish the two orderings"
+    assert by_first[0] == "t3", "the overlapping thread starts earliest, so it comes first"
+    assert by_last[-1] == "t3"
 
 
 def test_the_fixture_would_actually_catch_a_disagreement(js):

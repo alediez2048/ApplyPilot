@@ -2328,9 +2328,15 @@ function conversationView(c) {
   // the last thing on a card is often our own unanswered email, or a calendar acceptance, so a
   // banner reading "your turn — X replied 1d ago" would sit above a COLLAPSED reply box while
   // an unanswerable thread was the one hanging open.
+  //
+  // Picked by DATE, not by position. Groups are ordered by when each conversation began, so the
+  // last one in the list is the most recently STARTED — which is not the most recently active,
+  // and on the live Marcus card those are different threads. Taking `[length - 1]` would open a
+  // thread that went quiet weeks ago and collapse the one still moving.
+  const lastAt = g => msgAt(g.msgs[g.msgs.length - 1]);
+  const mostRecent = list => list.reduce((best, g) => !best || lastAt(g) > lastAt(best) ? g : best, null);
   const answerable = groups.filter(g => (c.reply_targets || {})[g.id]);
-  const newest = (answerable.length ? answerable[answerable.length - 1]
-                                    : groups[groups.length - 1] || {}).id || '';
+  const newest = (mostRecent(answerable.length ? answerable : groups) || {}).id || '';
   const rows = groups.map(g => {
     const key = `${c.id}|${g.id}`;
     const open = groups.length === 1 || g.id === newest
@@ -2348,7 +2354,7 @@ function conversationView(c) {
           <span class="th-caret">${open ? '▾' : '▸'}</span>
           <span class="th-subj">${esc(g.subject || '(no subject)')}</span>
           <span class="th-meta">${mark}${g.msgs.length} message${g.msgs.length === 1 ? '' : 's'} · ${
-            esc(shortDate(msgAt(g.msgs[g.msgs.length - 1])))}</span>
+            esc(threadSpan(g))}</span>
         </button>
       </div>`;
     if (!open) return head;
@@ -2431,6 +2437,19 @@ function threadKey(m) {
   return tid || `subj:${stripRe((m && m.subject) || '').trim().toLowerCase()}`;
 }
 
+// When a thread RAN, not just when it last moved.
+//
+// The header used to show the last message's date alone. Beside threads now ordered by their
+// first message that reads as a contradiction — a thread labelled "Aug 10" sitting below one
+// labelled "Jul 28" — and it hid the overlap that makes two conversations confusing to read in
+// the first place. A range states it: `Jul 22 – Aug 10` above `Jul 28` is obviously interleaved,
+// and nobody has to reconstruct that from the message list.
+function threadSpan(g) {
+  const first = shortDate(msgAt(g.msgs[0]));
+  const last = shortDate(msgAt(g.msgs[g.msgs.length - 1]));
+  return first === last ? last : `${first} – ${last}`;
+}
+
 function groupThreads(msgs) {
   const by = new Map();
   for (const m of msgs || []) {
@@ -2446,8 +2465,11 @@ function groupThreads(msgs) {
     g.subject = g.msgs.map(m => m.subject || '').filter(Boolean)
       .sort((a, b) => a.length - b.length)[0] || '';
   }
-  return out.sort((a, b) => msgAt(a.msgs[a.msgs.length - 1])
-    .localeCompare(msgAt(b.msgs[b.msgs.length - 1])));
+  // By each thread's FIRST message — the order the conversations BEGAN. See the long note on
+  // `group_threads` in domain/conversations.py: sorting by the LAST message put a stray Jul 28
+  // message above a thread that started Jul 22, so reading a card went backwards at the second
+  // message. Both sides sort the same way and `test_thread_grouping_agrees.py` proves it.
+  return out.sort((a, b) => msgAt(a.msgs[0]).localeCompare(msgAt(b.msgs[0])));
 }
 
 //: Per-thread open state. Two sets rather than one, because the DEFAULT differs: the newest

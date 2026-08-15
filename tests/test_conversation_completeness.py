@@ -305,6 +305,31 @@ def test_the_separator_names_the_conversation(tmp_path):
         "a separator is titled with a reply prefix"
 
 
+def test_a_multi_message_separator_shows_the_DATE_RANGE(tmp_path):
+    """When a thread ran, not just when it last moved.
+
+    Threads are ordered by their first message now, so a header carrying only the LAST date reads
+    as a contradiction — `Aug 10` sitting below `Jul 28` — and it hides the overlap that makes two
+    conversations hard to read in the first place. `Aug 1 – Aug 9` above `Aug 3` states it.
+    """
+    out = _multi(tmp_path, _contact([
+        _m("tA", "External Partner Chat", 1),
+        _m("tA", "Re: External Partner Chat", 9),
+        _m("tB", "AMSYS OS Follow Up", 3),
+    ]))
+    # Asserted structurally, never against literal dates: `shortDate` renders in the LOCAL zone,
+    # so a fixture stamped 00:00 UTC lands on the previous day in half the world and a hardcoded
+    # "Aug 1" makes this pass or fail on where it runs.
+    spanning = [m for m in out["metas"] if m.startswith("2 messages")]
+    single = [m for m in out["metas"] if m.startswith("1 message")]
+    assert len(spanning) == 1 and len(single) == 1, out["metas"]
+    left, sep, right = spanning[0].partition(" – ")
+    assert sep, f"the spanning thread shows no range: {spanning[0]}"
+    assert left.split("·")[-1].strip() != right.strip(), "a range with the same date twice"
+    # A one-day thread has no range to show, and "Aug 3 – Aug 3" is noise.
+    assert " – " not in single[0], f"a one-message thread rendered a range: {single[0]}"
+
+
 def test_only_the_newest_thread_opens_by_default(tmp_path):
     """Seven expanded threads is the wall this replaced, and the live conversation is the one
     you came for — so it sits at the bottom, open, next to the composer."""
@@ -314,25 +339,46 @@ def test_only_the_newest_thread_opens_by_default(tmp_path):
     assert out["subjects"][-1] == "Ormus Solutions <> AMSYS AI", "newest thread is not last"
 
 
-def test_threads_are_ordered_by_their_LAST_message(tmp_path):
-    """The live conversation belongs at the bottom, beside the composer.
+def test_threads_are_ordered_by_their_FIRST_message(tmp_path):
+    """Conversations appear in the order they BEGAN, so a card reads oldest to newest.
 
-    The fixture is deliberately out of order — built newest-thread-first — because the earlier
+    This asserted the LAST message until 2026-08-15, for a reason that was true and expired: the
+    live conversation belonged at the bottom because that is where the single composer was. Every
+    answerable thread has its own composer now, and the default-open thread is chosen by DATE
+    rather than by position (see the test below), so nothing depends on the newest being last any
+    more — while sorting by last message actively cost legibility whenever two threads overlap.
+    Reported on a live card whose threads read Jul 28, Jul 22, Aug 3, Aug 10.
+
+    The fixture stays deliberately out of order — built newest-thread-first — because an earlier
     version happened to insert chronologically, so removing the sort entirely left every test
     green. A test whose input is already sorted cannot see a sort.
-
-    Ordered by the LAST message rather than the first: a thread opened in June and answered
-    yesterday is the current one, however old it started.
     """
     out = _multi(tmp_path, _contact([
-        _m("tC", "Ormus Solutions <> AMSYS AI", 9),      # newest, listed first
+        _m("tC", "Ormus Solutions <> AMSYS AI", 9),      # started last, listed first
         _m("tA", "External Partner Chat", 1),
-        _m("tA", "Re: External Partner Chat", 7),        # started first, answered recently
-        _m("tB", "AMSYS OS Follow Up", 3),               # oldest last message
+        _m("tA", "Re: External Partner Chat", 7),        # started FIRST, answered recently
+        _m("tB", "AMSYS OS Follow Up", 3),
     ]))
-    assert [g["id"] for g in out["groups"]] == ["tB", "tA", "tC"], \
-        "threads are not ordered by their most recent message"
-    assert out["subjects"][-1] == "Ormus Solutions <> AMSYS AI"
+    assert [g["id"] for g in out["groups"]] == ["tA", "tB", "tC"], \
+        "threads are not ordered by the message that started them"
+
+
+def test_the_thread_that_OPENS_is_the_most_recently_active_not_the_last_one(tmp_path):
+    """The property the ordering test used to carry, now held where it belongs.
+
+    Ordering by first message means the last group is the most recently STARTED, which is not the
+    most recently active — a thread opened in June and answered yesterday is still the current
+    one. Taking `groups[length - 1]` would open a conversation that went quiet weeks ago and
+    collapse the one still moving.
+    """
+    out = _multi(tmp_path, _contact([
+        _m("tA", "External Partner Chat", 1),
+        _m("tA", "Re: External Partner Chat", 9),        # started first, ACTIVE most recently
+        _m("tC", "Ormus Solutions <> AMSYS AI", 7),      # started last, quieter since
+    ]))
+    assert [g["id"] for g in out["groups"]] == ["tA", "tC"], "sanity: ordered by first message"
+    assert out["shutSeps"] == 1, "exactly one thread should be open"
+    assert out["bodies"] == 2, "the two-message thread (tA) is the one that should be open"
 
 
 def test_an_older_thread_opens_when_asked(tmp_path):

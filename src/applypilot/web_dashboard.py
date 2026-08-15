@@ -1031,6 +1031,12 @@ def _account_purge() -> dict:
 
 log = logging.getLogger(__name__)
 
+def _thread_key_of(message: dict) -> str:
+    """One spelling of "which conversation is this message in", shared by every caller here."""
+    from applypilot.domain import conversations as cv
+    return cv.thread_key(message)
+
+
 def _log_scheduled_refusal(contact_id: str, why: str) -> None:
     """Record that a promised send did not happen, and why.
 
@@ -1181,8 +1187,58 @@ class ReplyPoller:
                 # contact's own card. A scheduled send that quietly did not happen is the
                 # failure mode this whole feature has to avoid.
                 _log_scheduled_refusal(row["contact_id"], res.get("message") or "")
-        return {"sent": sent, "failed": len(failed),
-                "why": failed[:3]}
+        rep = ReplyPoller._poll_scheduled_replies(now, grace)
+        return {"sent": sent, "failed": len(failed), "why": failed[:3], **rep}
+
+    @staticmethod
+    def _poll_scheduled_replies(now, grace: int) -> dict:
+        """Fire the REPLIES promised for a time that has now arrived.
+
+        Separate from the follow-up half above because the two are separate everywhere else —
+        `send_reply` is not `send_followup`, a reply consumes no touch, and its recipients come
+        from the thread rather than from the contact row.
+
+        The guard that only exists here is staleness. A follow-up chases silence, so nothing the
+        other person does can invalidate it short of replying, which stops the ladder anyway. A
+        reply is an ANSWER: if they wrote again overnight, the queued text was composed against a
+        conversation that has moved, and sending it unattended answers a message the operator has
+        never read. That one is refused and left for a human.
+        """
+        from applypilot.domain import sendtime
+        from applypilot.networking import messages as _msgs, reply_queue
+        from applypilot.networking import gmail_send
+
+        claimed = reply_queue.claim_due(now.isoformat(), sendtime.lapsed_before(now, grace))
+        if not claimed:
+            return {"replies_sent": 0, "replies_failed": 0}
+        conn = get_connection()
+        sent, failed = 0, []
+        for row in claimed:
+            try:
+                stored = _msgs.thread_for_contact(row["contact_id"], conn)
+                why = reply_queue.stale_against(row, [
+                    m for m in stored
+                    if _thread_key_of(m) == row["thread_key"]])
+                if why:
+                    res = {"ok": False, "message": why}
+                else:
+                    space = _space_of_contact(row["contact_id"], conn)
+                    if space is not None and not space.can_autosend:
+                        res = {"ok": False,
+                               "message": f"“{space.name}” has auto-send off"}
+                    else:
+                        res = gmail_send.send_reply(
+                            row["contact_id"], row["body"], subject=row.get("subject") or "",
+                            cc=row.get("cc"), conn=conn, thread=row["thread_key"])
+            except Exception as exc:  # noqa: BLE001 — one bad row must not stop the rest
+                res = {"ok": False, "message": str(exc)}
+            if res.get("ok"):
+                sent += 1
+            else:
+                failed.append(res.get("message") or "")
+                _log_scheduled_refusal(row["contact_id"], res.get("message") or "")
+        return {"replies_sent": sent, "replies_failed": len(failed),
+                "replies_why": failed[:3]}
 
     @staticmethod
     def _poll_accounts() -> dict:
@@ -1913,7 +1969,8 @@ def _legacy_followup_status(ladder: dict) -> str:
 
 def _contact_payload(c: dict, company: str | None = None, ladders: dict | None = None,
                      conn_matches: dict | None = None, thread: list | None = None,
-                     job_titles: dict | None = None) -> dict:
+                     job_titles: dict | None = None,
+                     queued_replies: dict | None = None) -> dict:
     from applypilot.domain.followup import CHANNELS as _CHANNELS
     from applypilot.domain.followup import EMPTY_LADDER
     from applypilot.domain.followup import exhausted as _exhausted
@@ -2072,6 +2129,14 @@ def _contact_payload(c: dict, company: str | None = None, ladders: dict | None =
         # OWN stored messages, which are empty on a card showing another role's history — so a
         # composer here would render, look right, and refuse on click.
         "reply_targets": {} if _is_borrowed(thread) else _reply_targets(thread or []),
+        # Replies promised for later, keyed by the same thread key the composer posts. Without
+        # this the operator opens a conversation they scheduled an answer on, sees an empty
+        # composer, and writes the answer a second time.
+        "scheduled_replies": {k: {"scheduled_at": v.get("scheduled_at") or "",
+                                  "subject": v.get("subject") or "",
+                                  "body": v.get("body") or ""}
+                              for k, v in ((queued_replies or {}).get(c.get("id") or "")
+                                           or {}).items()},
         # Which other application this conversation belongs to, when it is borrowed.
         "thread_from": _is_borrowed(thread),
         # Whose turn it is. `awaiting_us` means they wrote and nobody answered — the worst
@@ -2158,6 +2223,10 @@ def _status_payload(space: str = "") -> dict:
     _conn_counts = _conns.company_counts(list(set(_job_companies.values())), conn)
     # ONE query for the whole page, hoisted out of the job loop for the usual reason.
     _sibling = _sibling_threads(conn)
+    # Same treatment, same reason: replies promised for later. Loaded whole rather than filtered
+    # per job — the table holds one row per outstanding promise, so one unfiltered read is
+    # cheaper than N filtered ones against a budget with six statements spare.
+    _queued_replies = _scheduled_replies(conn)
     # CO-3. Which jobs share an employer with another job that HAS contacts — so a live card can
     # offer "⤓ Bring contacts here" rather than leaving the operator to notice the duplicate on
     # one card and go hunting for the button on a different one (§Lessons 89).
@@ -2223,7 +2292,8 @@ def _status_payload(space: str = "") -> dict:
         job_threads = _conversations_for_job(row["url"], conn)
         contacts = [_contact_payload(c, contact_company, job_ladders, job_matches,
                                      thread=_thread_for(c, job_threads, _sibling),
-                                     job_titles=_job_titles)
+                                     job_titles=_job_titles,
+                                     queued_replies=_queued_replies)
                     for c in raw_contacts]
         # Engagement moves ONTO the person (UX-1). It used to be a job-level `interactions`
         # key feeding a tab of its own, which across 187 contacts had 2 rows to show — and put
@@ -3593,6 +3663,61 @@ def _draft_reply(data: dict) -> dict:
             "message": "Draft ready — read it before you send it."}
 
 
+def _schedule_reply(cid: str, contact: dict, body: str, at_raw: str,
+                    subject: str, cc, thread: str, conn) -> dict:
+    """Promise to send this reply later, or withdraw the promise.
+
+    Validated the same way a scheduled follow-up is, and refused early for the same reason: a
+    Space with auto-send off will never fire this, so accepting the promise would put a time on a
+    conversation that is guaranteed not to arrive.
+
+    **The thread is required here even though sending tolerates its absence.** `send_reply`
+    without one answers the newest inbound across every conversation — acceptable when a human
+    is watching and picked the box, and not acceptable for something that fires days later into
+    whichever thread happens to be newest by then.
+    """
+    from applypilot.domain import conversations as cv, sendtime
+    from applypilot.networking import messages as _msgs, reply_queue
+    # The SAME set of addresses `send_reply` uses to decide what is ours. The operator has more
+    # than one and six functions once assumed otherwise (§Lessons 102) — resolving it here from
+    # a second source is how the seventh gets added.
+    from applypilot.networking.gmail_send import _our_addresses
+
+    if not thread:
+        return {"ok": False, "message": "open the conversation you want to answer, then schedule "
+                                        "from its own reply box"}
+    if at_raw == "cancel":
+        # Handing the text back is the point: this table is the ONLY copy of it, so a cancel that
+        # merely deleted the row would throw away what the operator wrote.
+        pending = reply_queue.pending_for([cid], conn).get(cid, {}).get(thread) or {}
+        reply_queue.cancel(cid, thread, conn)
+        return {"ok": True, "message": "no longer scheduled", "body": pending.get("body") or ""}
+
+    at_iso, err = sendtime.validate(at_raw)
+    if err:
+        return {"ok": False, "message": err}
+    space = _space_of_contact(cid, conn)
+    if space is not None and not space.can_autosend:
+        return {"ok": False, "message": f"“{space.name}” has auto-send off, so a scheduled reply "
+                                        "could never fire — send it yourself when you are ready"}
+
+    stored = _msgs.thread_for_contact(cid, conn)
+    target = cv.reply_target(stored, _our_addresses(), thread=thread)
+    if not target:
+        return {"ok": False, "message": "that conversation has nothing to reply to"}
+    # The newest inbound AT THE MOMENT OF PROMISING. If a newer one has arrived by firing time
+    # the queued text is answering a conversation that moved, and the poller refuses.
+    groups = {g["key"]: g["msgs"] for g in cv.group_threads(stored)}
+    last_in = max((str(m.get("sent_at") or "") for m in groups.get(thread, [])
+                   if (m.get("direction") or "") == "in"), default="")
+
+    cc_list = list(target["cc"]) if cc is None else list(cc)
+    reply_queue.schedule(cid, thread, body, at_iso, subject=subject or target.get("subject") or "",
+                         cc=cc_list, last_inbound_at=last_in, conn=conn)
+    return {"ok": True, "scheduled_at": at_iso,
+            "message": f"scheduled — it will go to {target['to_addr']} on its own"}
+
+
 def _send_reply(data: dict) -> dict:
     """Answer a live conversation, in-thread, from the dashboard.
 
@@ -3627,6 +3752,16 @@ def _send_reply(data: dict) -> dict:
     # operator removed everyone, which is a different instruction and must survive the trip.
     cc = data.get("cc")
     cc = None if cc is None else [str(c) for c in cc if str(c).strip()]
+
+    # SCHEDULING takes the same door as sending, on purpose. The alternative is a second endpoint
+    # that has to re-derive the contact, the thread and the Cc — three chances to disagree with
+    # this one about who a message reaches (§Lessons 49, aimed at the least reversible action in
+    # the app). What differs is only WHEN, so only the tail differs.
+    at_raw = str(data.get("at") or "").strip()
+    if at_raw:
+        return _schedule_reply(cid, contact, body, at_raw,
+                               subject=(data.get("subject") or ""), cc=cc,
+                               thread=(data.get("thread") or "").strip(), conn=conn)
 
     res = gmail_send.send_reply(cid, body, subject=(data.get("subject") or ""),
                                 cc=cc, conn=conn,
@@ -3698,6 +3833,20 @@ def _thread_for(c: dict, job_threads: dict, sibling: dict) -> list:
     # entirely normal, and refuse on click.
     return [dict(m, from_other_role=m.get("job_url") or "")
             for m in (sibling.get(addr) or [])]
+
+
+def _scheduled_replies(conn) -> dict:
+    """`{contact_id: {thread_key: row}}` — replies promised for a time that has not arrived.
+
+    Degrades to {} rather than raising, like every other conversation load here: a card must
+    still render if this cannot be worked out.
+    """
+    try:
+        from applypilot.networking import reply_queue
+        return reply_queue.pending_all(conn)
+    except Exception:  # noqa: BLE001
+        log.debug("Scheduled reply load failed", exc_info=True)
+        return {}
 
 
 def _sibling_threads(conn) -> dict:

@@ -2581,20 +2581,38 @@ function replyBox(c, t) {
     return `<button class="cc-chip${off ? ' off' : ''}" title="${off ? 'Add back' : 'Remove from this reply'}"
       onclick="toggleCc(${ka}, decodeURIComponent('${encodeURIComponent(x)}'))">${esc(x)} ${off ? '＋' : '✕'}</button>`;
   }).join('');
-  const body = REPLY_DRAFT.get(k) || '';
+  // A reply already promised for later. The queued TEXT is the authority while it exists — the
+  // browser draft is per-session, so after a reload the composer would otherwise be empty on a
+  // conversation that has an answer waiting to go, and the operator would write it again.
+  const queued = (c.scheduled_replies || {})[tk];
+  const body = queued ? queued.body : (REPLY_DRAFT.get(k) || '');
+  const queuedRow = queued ? `<div class="fu-sendat">⏰ This reply sends
+      ${esc(fmtSched(queued.scheduled_at))} on its own
+      <button class="ghost" onclick="unscheduleReply(${ka}, this)">Cancel</button></div>` : '';
   return `<div class="reply-box" data-reply-for="${esc(c.id)}" data-cc="${esc(JSON.stringify(cc))}" data-to="${esc(t.to)}" data-thread="${esc(tk)}">
     <div class="reply-hdr">↩ Reply to <strong>${esc(t.to)}</strong>${
       cc.length ? ` · cc ${cc.length}` : (t.cc || []).length ? ' · <span class="cc-none">cc removed</span>' : ''}</div>
     ${(t.cc || []).length ? `<div class="cc-row">${chips}</div>` : ''}
     ${lastReplyCard(c, tk)}
     <div class="reply-subj">${esc(t.subject)}</div>
+    ${queuedRow}
     <textarea class="reply-body" rows="6" placeholder="Write your reply…"
       oninput="REPLY_DRAFT.set('${esc(k)}', this.value)">${esc(body)}</textarea>
     <div class="reply-actions">
       <button class="secondary" onclick="draftReply(${ka}, this)">✍ Draft an answer</button>
       <button class="primary" onclick="sendReply(${ka}, this)">Send reply</button>
+      ${queued ? '' : `<button class="secondary" onclick="scheduleReply(${ka}, this)">⏰ Send later…</button>`}
       <span class="reply-hint">Goes into this thread. No attachments.</span>
     </div>
+    ${SCHED_OPEN.has(k) && !queued ? `<div class="fu-sendat-form">
+      <label>Send at
+        <input type="datetime-local" class="fu-sendat-input" value="${esc(SCHED_AT[k] || nextNineAm())}"
+               onchange="SCHED_AT[${tagArg(k)}] = this.value" /></label>
+      <button class="send" onclick="scheduleReply(${ka}, this, true)">Schedule</button>
+      <div class="fu-sendat-note">Leave this dashboard running — scheduled sends fire from it,
+        within about ${Math.round(POLL_EVERY_S / 60)} minutes. If they write again before then,
+        this waits for you rather than answering a conversation that has moved.</div>
+    </div>` : ''}
     ${replyMsg(c.id, tk)}
     <input class="r-style" placeholder="✨ Tweak the vibe, then Draft again — e.g. 'warmer', 'shorter', 'more direct'"
       value="${esc(REPLY_STYLE.get(k) || '')}"
@@ -2763,6 +2781,44 @@ function toggleCc(cid, tk, address) {
   REPLY_DROP.set(k, set);
   refresh();
 }
+// Two clicks: the first opens the picker, the second commits. Same shape as the bulk bar, and
+// for the same reason — a date input sitting permanently between Draft and Send is a control
+// that gets used by accident on the least reversible action in the app.
+async function scheduleReply(cid, tk, btn, commit) {
+  const k = rkey(cid, tk);
+  if (!commit) { SCHED_OPEN.has(k) ? SCHED_OPEN.delete(k) : SCHED_OPEN.add(k); rerenderJobs(true); return; }
+  const card = btn.closest('.reply-box');
+  const body = (REPLY_DRAFT.get(k) || '').trim();
+  const say = (m, bad) => { setReplyMsg(cid, tk, m, bad); refresh(); };
+  if (!body) { say('Write a reply before scheduling one.', true); return; }
+  const input = card.querySelector('.fu-sendat-input');
+  const at = schedToUtc((input && input.value) || SCHED_AT[k] || '');
+  if (!at) { say('Pick a date and time first.', true); return; }
+  let cc = [];
+  try { cc = JSON.parse(card.dataset.cc || '[]'); } catch { cc = []; }
+  const who = card.dataset.to || 'them';
+  if (!confirm(`Send this reply to ${who} ${fmtSched(at)}?\n\n` +
+               `It goes on its own — leave this dashboard running.`)) return;
+  btn.disabled = true; btn.textContent = 'Scheduling…';
+  const r = await post('/api/contact/reply',
+    {contact_id: cid, body, cc, thread: card.dataset.thread || '', at});
+  if (r.ok) { SCHED_OPEN.delete(k); REPLY_DRAFT.delete(k); }
+  say(r.message || (r.ok ? 'Scheduled.' : 'Failed.'), !r.ok);
+}
+
+// Cancelling hands the TEXT back, because `reply_queue` is the only copy of it — the operator
+// asked for it not to go yet, not to lose what they wrote.
+async function unscheduleReply(cid, tk, btn) {
+  const k = rkey(cid, tk);
+  btn.disabled = true; btn.textContent = 'Cancelling…';
+  const card = btn.closest('.reply-box');
+  const r = await post('/api/contact/reply',
+    {contact_id: cid, body: 'x', thread: card.dataset.thread || '', at: 'cancel'});
+  if (r.ok && r.body) REPLY_DRAFT.set(k, r.body);
+  setReplyMsg(cid, tk, r.message || (r.ok ? 'No longer scheduled.' : 'Failed.'), !r.ok);
+  refresh();
+}
+
 async function sendReply(cid, tk, btn) {
   const k = rkey(cid, tk);
   const card = btn.closest('.reply-box');

@@ -992,7 +992,10 @@ def delete_contact(contact_id: str, conn: sqlite3.Connection | None = None) -> b
     """
     if conn is None:
         conn = get_connection()
-    for table in ("touches", "sequences", "messages", "interactions"):
+    # `reply_queue` is in this loop for a sharper reason than the others: a row left behind is
+    # not stale state, it is an EMAIL that the poller would still send, to a person the operator
+    # deleted, from a conversation that no longer renders anywhere.
+    for table in ("touches", "sequences", "messages", "interactions", "reply_queue"):
         try:
             conn.execute(f"DELETE FROM {table} WHERE contact_id = ?", (contact_id,))
         except sqlite3.OperationalError:

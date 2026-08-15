@@ -195,6 +195,11 @@ def test_sql_lives_only_in_the_data_layer():
         "networking/messages.py",                            # the CRM-4 conversation store
         "networking/interactions_store.py",                  # the `interactions` table's own repository
         "networking/transcripts.py",                         # the `transcripts` table's own repository
+        # The `reply_queue` table's own repository. A table repository is a legitimate member of
+        # this list rather than unmigrated scope — the rule is that SQL lives in ONE place per
+        # table, and this is that place. `web_dashboard.py` stays at zero: it calls
+        # `reply_queue.pending_all()` / `.claim_due()` and never writes a statement.
+        "networking/reply_queue.py",
         # CO-2. Data layer by nature rather than unmigrated scope: moving one person between
         # roles is ONE transaction across contacts + messages + touches + sequences +
         # interactions + transcript_contacts, so it cannot live inside any single table's

@@ -117,6 +117,11 @@ SETTINGS: tuple[Setting, ...] = (
     Setting("CALL_FOLLOWUP_SCHEDULE", "followup", "csv_int", [72],
             "Same, for phone calls. ONE more, 3 days later — a third unanswered call is not "
             "persistence, it is how a number gets blocked."),
+    Setting("SCHEDULED_SEND_GRACE_HOURS", "followup", "int", 24,
+            "How late a SCHEDULED follow-up may still fire on its own. Nothing runs while the "
+            "dashboard is closed, so a send promised at 09:00 on a shut laptop is late rather "
+            "than cancelled — inside this window it goes when the dashboard is next opened, "
+            "past it the card reads 'missed' and waits for you."),
     Setting("FOLLOWUP_AFTER_DAYS", "followup", "int", None,
             "DEPRECATED — derived from the first entry of FOLLOWUP_SCHEDULE.",
             deprecated_by="FOLLOWUP_SCHEDULE"),

@@ -190,9 +190,12 @@ def test_draft_and_send_act_on_DIFFERENT_people():
     no draft is not a send, it is an error fifty times over."""
     js = _js()
     fn = js[js.index("async function fuBulk("):js.index("function fuFlash(")]
-    assert "action === 'send'" in fn
-    assert "? due.filter(c => (c.followup_message || '').trim())" in fn
-    assert ": due.filter(c => !(c.followup_message || '').trim())" in fn
+    # A ternary once, an if-chain since scheduling and unscheduling joined them — so this
+    # asserts the two RULES rather than the shape they are written in. `written` is the shared
+    # predicate; sending keeps only those, drafting keeps only the rest.
+    assert "const written = c => (c.followup_message || '').trim();" in fn
+    assert "action === 'send') due = due.filter(written)" in fn
+    assert "action === 'draft') due = due.filter(c => !written(c))" in fn
 
 
 def test_a_disabled_button_says_why():

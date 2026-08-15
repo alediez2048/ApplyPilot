@@ -63,6 +63,17 @@ _TOUCH_COLUMNS: dict[str, str] = {
     # The disagreement is deliberate. A follow-up drafter wants everything (so it does not
     # repeat itself); the scheduler wants only the plan it is executing.
     "job_url": "TEXT",
+    # When this drafted touch should be SENT without anybody clicking (bulk scheduling).
+    #
+    # Deliberately a column here rather than a `scheduled_sends` table: the pending touch row
+    # already IS this follow-up — its draft, its seq, its delivery status. A promise to send it
+    # is a property of that row, and putting it anywhere else creates two records of one thing
+    # that can disagree about which text goes out.
+    #
+    # Empty on every row that was never scheduled, so nothing is backfilled and the ordinary
+    # draft-then-click path is unchanged. `due_at` above is NOT this: that one records when a
+    # touch came due after the fact, this one is a promise about the future.
+    "scheduled_at": "TEXT",
 }
 
 _SEQUENCE_COLUMNS: dict[str, str] = {
@@ -91,14 +102,26 @@ def init_touches(conn: sqlite3.Connection | None = None) -> sqlite3.Connection:
     conn.execute(
         f"CREATE TABLE IF NOT EXISTS sequences ({seq_cols}, PRIMARY KEY (contact_id, channel))"
     )
+    conn.commit()
+    _ensure_columns(conn, "touches", _TOUCH_COLUMNS)
+    _ensure_columns(conn, "sequences", _SEQUENCE_COLUMNS)
+    # Indexes come AFTER the column pass, and that order is load-bearing rather than tidy.
+    # On an existing database `CREATE TABLE IF NOT EXISTS` above is a no-op, so a column added
+    # to `_TOUCH_COLUMNS` does not exist until `_ensure_columns` runs — indexing it any earlier
+    # raises `no such column` on every install that already had this table, and on none of the
+    # fresh ones a test would build. Same race the migrations warn about, one layer down.
+    #
     # Reads are always "this contact, this channel, in order".
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_touches_ladder "
                  "ON touches(contact_id, channel, seq)")
     # What a scheduler asks for (CRM-3): what is owed, oldest first.
     conn.execute("CREATE INDEX IF NOT EXISTS idx_touches_due ON touches(status, due_at)")
+    # What the POLLER asks for, every five minutes, forever: which promises have come due.
+    # The index above looks like it covers this and does not — `due_at` records when a touch
+    # became owed, `scheduled_at` is when we promised to send it.
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_touches_scheduled "
+                 "ON touches(status, scheduled_at)")
     conn.commit()
-    _ensure_columns(conn, "touches", _TOUCH_COLUMNS)
-    _ensure_columns(conn, "sequences", _SEQUENCE_COLUMNS)
     return conn
 
 
@@ -119,7 +142,8 @@ def _ensure_columns(conn: sqlite3.Connection, table: str, spec: dict[str, str]) 
 
 def _empty_state() -> dict:
     return {"count": 0, "last_sent_at": "", "sequence_status": "",
-            "touch_status": "", "draft_subject": "", "draft_body": "", "error": ""}
+            "touch_status": "", "draft_subject": "", "draft_body": "", "error": "",
+            "scheduled_at": ""}
 
 
 def ladder_state(contact_id: str, channel: str,
@@ -197,7 +221,7 @@ def ladder_states(contact_ids: list[str],
     # `store.delete_contact`). Still ONE statement — this runs on the 2.5s refresh path.
     for row in conn.execute(
         f"SELECT t.contact_id, t.channel, t.seq, t.sent_at, t.status, t.subject, t.body, "
-        f"t.error FROM touches t LEFT JOIN contacts c ON c.id = t.contact_id "
+        f"t.error, t.scheduled_at FROM touches t LEFT JOIN contacts c ON c.id = t.contact_id "
         f"WHERE t.contact_id IN ({marks}) "
         f"AND COALESCE(t.job_url, '') IN ('', COALESCE(c.job_url, '')) "
         f"ORDER BY t.contact_id, t.channel, t.seq",
@@ -215,6 +239,11 @@ def ladder_states(contact_ids: list[str],
             st["draft_subject"] = row["subject"] or ""
             st["draft_body"] = row["body"] or ""
             st["error"] = row["error"] or ""
+            # Rides the SAME query the dashboard already runs for every contact on every 2.5s
+            # refresh. Reading it separately would be one statement per contact against a
+            # budget with six of eighty to spare (§Lessons 11) — and the whole reason
+            # `ladder_states` is a bulk load in the first place.
+            st["scheduled_at"] = row["scheduled_at"] or ""
 
     for row in conn.execute(
         f"SELECT contact_id, channel, status FROM sequences WHERE contact_id IN ({marks})",
@@ -269,10 +298,100 @@ def set_draft(contact_id: str, channel: str, subject: str, body: str,
         "SELECT seq FROM touches WHERE contact_id = ? AND channel = ? AND status != 'sent' "
         "ORDER BY seq LIMIT 1", (contact_id, channel)).fetchone()
     seq = pending["seq"] if pending else next_seq(contact_id, channel, conn)
+    # `scheduled_at` is deliberately NOT in this list, so re-drafting a scheduled touch keeps
+    # its appointment. Revising the words and withdrawing the promise are different intentions,
+    # and only one of them has a button: silently unscheduling on every redraft would mean an
+    # operator who fixed a typo at 5pm quietly stopped tomorrow's send with nothing on screen
+    # to say so. `cancel_schedule` is how you take it back.
     _upsert_touch(conn, contact_id, channel, seq,
                   subject=subject or "", body=body or "", status="drafted", error=None)
     conn.commit()
     return seq
+
+
+def schedule_send(contact_id: str, channel: str, at_iso: str,
+                  conn: sqlite3.Connection | None = None) -> bool:
+    """Promise to send the pending DRAFT at `at_iso`. False when there is nothing to promise.
+
+    Only ever touches a row that is already drafted — you cannot schedule text that does not
+    exist yet. That is not a storage limitation, it is the rule: a send you have not read is a
+    send you cannot judge, and this is the one path in the app that acts while nobody is
+    watching. Drafting first is a click, and it is the click where the operator sees the words.
+
+    `status` is left at 'drafted'. A scheduled send is an ordinary pending touch with a time on
+    it, so every reader that already understood drafts — the card, the ladder, the counter —
+    keeps working untouched, and a schedule that never fires degrades to exactly the state the
+    operator was in before they set one.
+    """
+    if conn is None:
+        conn = get_connection()
+    init_touches(conn)
+    cur = conn.execute(
+        "UPDATE touches SET scheduled_at = ?, updated_at = ? "
+        "WHERE contact_id = ? AND channel = ? AND status = 'drafted' "
+        "AND TRIM(COALESCE(body, '')) != ''",
+        (at_iso, _now(), contact_id, channel))
+    conn.commit()
+    return cur.rowcount >= 1
+
+
+def cancel_schedule(contact_id: str, channel: str,
+                    conn: sqlite3.Connection | None = None) -> bool:
+    """Withdraw the promise, keep the draft.
+
+    Cancelling a scheduled send must never destroy the words — the operator asked to not send
+    it *now*, which is a different request from "throw it away", and the draft may have been
+    hand-edited.
+    """
+    if conn is None:
+        conn = get_connection()
+    init_touches(conn)
+    cur = conn.execute(
+        "UPDATE touches SET scheduled_at = NULL, updated_at = ? "
+        "WHERE contact_id = ? AND channel = ? AND COALESCE(scheduled_at, '') != ''",
+        (_now(), contact_id, channel))
+    conn.commit()
+    return cur.rowcount >= 1
+
+
+def claim_due_scheduled(now_iso: str, lapsed_before: str,
+                        limit: int = 50,
+                        conn: sqlite3.Connection | None = None) -> list[dict]:
+    """Take every promise that has come due, CLEARING it in the same statement.
+
+    Two properties, and both are about the fact that this runs unattended every five minutes:
+
+    **The claim happens before the send, never after.** If the process dies mid-send the promise
+    is already gone, so the worst case is a follow-up that went out and is not marked scheduled
+    any more — recoverable, visible, and one email. Clearing afterwards inverts that into a
+    crash-loop that re-sends the same message every five minutes, which is the worst outcome
+    this subsystem can produce.
+
+    **Firing consumes the promise whatever the outcome.** A send refused by the daily limit or
+    the per-company cap does not stay scheduled and retry itself into the same refusal forever;
+    the draft survives, the card shows it as ordinary due work, and the operator decides. A
+    scheduled send is a promise to try once at a time, not a standing order.
+
+    `lapsed_before` excludes promises too old to fire on their own — see `domain/sendtime.py`.
+    They are deliberately NOT claimed and NOT cleared, so they stay visible on the card as
+    missed rather than disappearing or arriving a week late.
+    """
+    if conn is None:
+        conn = get_connection()
+    init_touches(conn)
+    rows = conn.execute(
+        "SELECT contact_id, channel, scheduled_at FROM touches "
+        "WHERE status = 'drafted' AND COALESCE(scheduled_at, '') != '' "
+        "AND scheduled_at <= ? AND scheduled_at > ? "
+        "ORDER BY scheduled_at LIMIT ?",
+        (now_iso, lapsed_before, limit)).fetchall()
+    claimed = [dict(zip(r.keys(), r)) for r in rows]
+    for row in claimed:
+        conn.execute("UPDATE touches SET scheduled_at = NULL, updated_at = ? "
+                     "WHERE contact_id = ? AND channel = ? AND scheduled_at = ?",
+                     (_now(), row["contact_id"], row["channel"], row["scheduled_at"]))
+    conn.commit()
+    return claimed
 
 
 def claim_send(contact_id: str, channel: str,
@@ -308,8 +427,13 @@ def record_sent(contact_id: str, channel: str, due_at: str = "",
         "SELECT seq FROM touches WHERE contact_id = ? AND channel = ? AND status != 'sent' "
         "ORDER BY seq LIMIT 1", (contact_id, channel)).fetchone()
     seq = pending["seq"] if pending else next_seq(contact_id, channel, conn)
+    # `scheduled_at` is cleared here too. The poller already clears it when it claims a promise,
+    # so this covers the other way a scheduled touch leaves the queue: the operator got there
+    # first and sent it by hand. Leaving the timestamp on a sent row would put a future
+    # appointment on a message that has already gone.
     _upsert_touch(conn, contact_id, channel, seq,
-                  status="sent", sent_at=now, error=None, due_at=due_at or None)
+                  status="sent", sent_at=now, error=None, due_at=due_at or None,
+                  scheduled_at=None)
     conn.commit()
     row = conn.execute("SELECT COUNT(*) AS n FROM touches WHERE contact_id = ? AND channel = ? "
                        "AND status = 'sent'", (contact_id, channel)).fetchone()

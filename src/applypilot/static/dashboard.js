@@ -970,6 +970,70 @@ let LAST_JOBS_HTML = null;
 //: How often the dashboard's background poller runs, mirrored from the server so the
 //: Interactions tab can state the real cadence instead of a hardcoded guess.
 let POLL_EVERY_S = 300;
+//: How late a scheduled send may still fire, mirrored from `domain/sendtime.py` via the payload
+//: rather than written here. The card and the poller MUST agree on due-vs-missed: a second copy
+//: of this number is how the screen ends up telling the operator to send something by hand at
+//: the same moment the poller sends it for them.
+let SCHED_GRACE_H = 24;
+//: Which jobs have the schedule picker open, and what has been typed into it. Outside the DOM
+//: like PANEL_OPEN and CONV_EXPANDED, because `#jobs` is rebuilt every 2.5s — state left in the
+//: markup is state that survives only until the next tick.
+const SCHED_OPEN = new Set();
+const SCHED_AT = {};
+
+// ── Scheduled sends ─────────────────────────────────────────────────────────
+//
+// The one thing in this app that acts with nobody watching, so the vocabulary is worth being
+// exact about: PENDING is a promise not yet due, DUE is one the poller is about to fire, and
+// MISSED is one it will never fire because too much time passed with the dashboard closed.
+//
+// This mirrors `sendtime.state()` and is checked against it by a test — see
+// `tests/test_scheduled_followups.py`, which runs the same cases through both.
+function schedState(iso) {
+  if (!iso) return '';
+  const t = Date.parse(iso);
+  if (isNaN(t)) return '';
+  const now = Date.now();
+  if (t > now) return 'pending';
+  return t > now - SCHED_GRACE_H * 3600 * 1000 ? 'due' : 'missed';
+}
+
+// Local time, always. The server stores and ships UTC because it has no idea where the operator
+// is; the browser is the only layer that does, so this is the only place a time becomes words.
+function fmtSched(iso) {
+  try {
+    const d = new Date(iso);
+    const today = new Date();
+    const sameDay = d.toDateString() === today.toDateString();
+    const tomorrow = new Date(today.getTime() + 86400000).toDateString() === d.toDateString();
+    const time = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    if (sameDay) return `today ${time}`;
+    if (tomorrow) return `tomorrow ${time}`;
+    return d.toLocaleString([], { weekday: 'short', month: 'short', day: 'numeric',
+                                  hour: 'numeric', minute: '2-digit' });
+  } catch { return iso; }
+}
+
+// What a <input type="datetime-local"> wants: local wall-clock, no zone, no seconds. Defaults to
+// the next 9am — the hour a follow-up should land in somebody's morning, and the reason this has
+// a default at all is that "tomorrow morning" is the request nine times out of ten.
+function nextNineAm() {
+  const d = new Date();
+  d.setSeconds(0, 0);
+  if (d.getHours() >= 9) { d.setDate(d.getDate() + 1); }
+  d.setHours(9, 0, 0, 0);
+  const pad = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+// The picker gives local wall-clock with no zone. `new Date()` reads exactly that as local, so
+// toISOString() is the operator's chosen moment expressed in UTC — which is what the server
+// stores. Sending the raw string instead would have the server read 9am as 9am UTC, i.e. 3am
+// for an operator in Austin, and the email would already be gone by breakfast.
+function schedToUtc(local) {
+  const d = new Date(local);
+  return isNaN(d.getTime()) ? '' : d.toISOString();
+}
 // `wantEmail` / `wantLi` select ONE channel — the contact panel shows them as tabs now, so
 // rendering both at once is what made every contact card ~200px tall. Omit both to get the
 // old stacked behaviour.
@@ -4011,6 +4075,8 @@ async function refresh() {
   CALENDAR_SCOPE = !!data.calendar_scope;
   CONV_SNIPPET_MAX = data.snippet_max || 0;
   if (data.poll_every_s) POLL_EVERY_S = data.poll_every_s;
+  // `!= null` rather than `||`: 0 is a real value here and means "never fire late" (§Lessons 50).
+  if (data.scheduled_grace_h != null) SCHED_GRACE_H = data.scheduled_grace_h;
   const allJobs = data.jobs || [];
   // Kept for handlers that need the payload AFTER a click rather than during render — the
   // bulk Gmail fetch has to know which contacts a job has, and an inline onclick cannot be
@@ -4722,12 +4788,70 @@ function fuBulkBar(j, f, byId) {
     ? `<button class="send" onclick="fuBulk(${key}, 'send', this)">Send all ${drafted.length} drafted</button>`
     : `<button class="send" disabled title="Draft them first — there is nothing written to send">Send all drafted</button>`;
 
+  // Scheduling acts on the SAME set as sending — what is written — for the same reason: you
+  // cannot promise to send words that do not exist yet, and drafting is the click where the
+  // operator reads them. Scheduling text nobody has seen is the one thing this feature must
+  // not make easy.
+  // A MISSED promise counts as schedulable, not as scheduled. It will never fire on its own, so
+  // treating it as spoken-for would leave the only way to re-promise it a per-card Clear on
+  // every one — the fix for a dead end that removes the way out of it (§Lessons 99). `due` is
+  // different and is deliberately grouped with pending: the poller is about to send it.
+  const promised = drafted.filter(c => ['pending', 'due'].includes(schedState(c.followup_scheduled_at)));
+  const missed = drafted.filter(c => schedState(c.followup_scheduled_at) === 'missed');
+  const schedulable = drafted.filter(c => !['pending', 'due'].includes(schedState(c.followup_scheduled_at)));
+  const open = SCHED_OPEN.has(j.url);
+
+  // BOTH, when both apply. An either/or left a job with one promise and four unscheduled drafts
+  // showing only "Unschedule" — so scheduling the other four meant withdrawing the promise you
+  // had already made. The two buttons act on disjoint sets, so there is no reason to hide one.
+  const schedBtn = (schedulable.length
+    ? `<button class="secondary" onclick="fuSchedToggle(${key})">${open ? 'Close' : `⏰ Schedule ${schedulable.length}…`}</button>`
+    : (promised.length ? ''
+      : `<button class="secondary" disabled title="Draft them first — there is nothing written to schedule">⏰ Schedule</button>`))
+    + (promised.length
+    ? `<button class="ghost" onclick="fuBulk(${key}, 'unschedule', this)" title="Withdraw the promise. The drafts stay exactly as they are.">✕ Unschedule ${promised.length}</button>`
+    : '');
+
+  // Stated, never implied. Nothing fires while the dashboard is closed, and an operator who
+  // schedules five sends and shuts the laptop has to know that before they walk away — not
+  // afterwards, from five emails that never arrived.
+  const picker = open && schedulable.length ? `
+    <div class="fu-sendat-form">
+      <label>Send ${schedulable.length} at
+        <input type="datetime-local" class="fu-sendat-input" value="${esc(SCHED_AT[j.url] || nextNineAm())}"
+               onchange="SCHED_AT[decodeURIComponent('${encodeURIComponent(j.url)}')] = this.value" />
+      </label>
+      <button class="send" onclick="fuBulk(${key}, 'schedule', this)">Schedule</button>
+      <div class="fu-sendat-note">Leave this dashboard running — scheduled sends fire from it,
+        within about ${Math.round(POLL_EVERY_S / 60)} minutes of the time you pick. If it is
+        closed, they go when you next open it, or read <em>missed</em> after ${SCHED_GRACE_H}h.</div>
+    </div>` : '';
+
+  // Missed gets its own count. Folded into "scheduled" it would read as work in hand when it is
+  // the opposite — nothing is going to happen to those without the operator.
+  const schedNote = (promised.length
+    ? `<span class="fu-bulk-sched">⏰ ${promised.length} scheduled ${esc(fmtSched(promised[0].followup_scheduled_at))}</span>`
+    : '') + (missed.length
+    ? `<span class="fu-bulk-sched fu-bulk-missed" title="These came due while the dashboard was closed. They will not send on their own — schedule them again or send them.">⚠ ${missed.length} missed</span>`
+    : '');
+
   return `<div class="fu-bulk">
     <span class="fu-bulk-n">${due.length} due</span>
     <span class="fu-bulk-sub">${drafted.length} drafted · ${undrafted} not yet</span>
-    ${draftBtn}${sendBtn}
+    ${schedNote}
+    ${draftBtn}${sendBtn}${schedBtn}
     <span class="fu-bulk-status" data-bulk-status></span>
+    ${picker}
   </div>`;
+}
+
+// `force`, for the same reason `startEdit` needs it: the operator clicked a button asking the
+// panel to change, and a deliberate render is not a refresh. Without it the guard that protects
+// an open editor can veto the render that opens this one (§Lessons 94), and the click reads as
+// doing nothing.
+function fuSchedToggle(url) {
+  if (SCHED_OPEN.has(url)) SCHED_OPEN.delete(url); else SCHED_OPEN.add(url);
+  rerenderJobs(true);
 }
 
 async function fuBulk(url, action, btn) {
@@ -4735,33 +4859,63 @@ async function fuBulk(url, action, btn) {
   if (!j) return;
   const byId = {}; (j.contacts || []).forEach(c => byId[c.id] = c);
   let due = ((j.followups || {}).due || []).map(d => byId[d.id]).filter(Boolean);
-  // Sending acts ONLY on what is already written. Drafting acts only on what is not — otherwise
-  // "Draft all" silently discards drafts the operator has edited by hand.
-  due = action === 'send'
-    ? due.filter(c => (c.followup_message || '').trim())
-    : due.filter(c => !(c.followup_message || '').trim());
+  // Each action acts on a DIFFERENT set, and the differences are the whole safety story.
+  // Sending and scheduling touch only what is already written; drafting touches only what is
+  // not, or "Draft all" silently discards drafts the operator edited by hand; unscheduling
+  // touches only what actually carries a promise.
+  const written = c => (c.followup_message || '').trim();
+  if (action === 'send') due = due.filter(written);
+  else if (action === 'draft') due = due.filter(c => !written(c));
+  // Same split as the bar: a missed promise is schedulable (it will never fire on its own) and
+  // an outstanding one is not (re-promising it would silently move a send the operator set).
+  else if (action === 'schedule')
+    due = due.filter(c => written(c) && !['pending', 'due'].includes(schedState(c.followup_scheduled_at)));
+  else if (action === 'unschedule')
+    due = due.filter(c => !!schedState(c.followup_scheduled_at));
   if (!due.length) return;
+
+  const body = { action, contact_ids: due.map(c => c.id) };
 
   if (action === 'send') {
     const who = due.map(c => c.full_name).join(', ');
     if (!confirm(`Send ${due.length} follow-up email(s) for ${j.contact_company || j.company}?\n\n` +
                  `${who}\n\nThis cannot be undone.`)) return;
   }
+  if (action === 'schedule') {
+    // The picker is read at CLICK time, not at render time, so a value typed and not yet
+    // committed to SCHED_AT still counts — the input is the thing on screen and it is what the
+    // operator believes they chose.
+    const input = btn.parentElement.querySelector('.fu-sendat-input');
+    const local = (input && input.value) || SCHED_AT[j.url] || '';
+    body.at = schedToUtc(local);
+    if (!body.at) { alert('Pick a date and time first.'); return; }
+    const who = due.map(c => c.full_name).join(', ');
+    // Names the time in the operator's own words AND the people, for the same reason the send
+    // confirm does: this is scoped to one job, so it can afford to list eight names you can
+    // read rather than a count you cannot check.
+    if (!confirm(`Schedule ${due.length} follow-up email(s) for ` +
+                 `${j.contact_company || j.company} to send ${fmtSched(body.at)}?\n\n${who}\n\n` +
+                 `They send on their own — leave this dashboard running.`)) return;
+  }
 
-  const status = btn.parentElement.querySelector('[data-bulk-status]');
+  const status = btn.closest('.fu-bulk').querySelector('[data-bulk-status]');
   const was = btn.textContent;
   btn.disabled = true;
-  btn.textContent = action === 'draft' ? 'Drafting…' : 'Sending…';
+  btn.textContent = { draft: 'Drafting…', send: 'Sending…',
+                      schedule: 'Scheduling…', unschedule: 'Clearing…' }[action] || 'Working…';
   // Highlight the cards this is about to touch, so it is obvious WHO is included before anything
   // happens — the whole reason this belongs on the job rather than in a global panel.
   due.forEach(c => fuFlash(c.id, 'working'));
   if (status) status.textContent = `${due.length} queued…`;
 
   try {
-    const r = await post('/api/followup/bulk', { action, contact_ids: due.map(c => c.id) });
+    const r = await post('/api/followup/bulk', body);
     if (status) status.textContent = r.message || (r.ok ? 'done' : 'failed');
     const failed = new Set((r.results || []).filter(x => x.contact_id && !x.ok).map(x => x.contact_id));
     due.forEach(c => fuFlash(c.id, failed.has(c.id) ? 'failed' : 'ok'));
+    // Close the picker once it has done its job — leaving it open beside a bar that now reads
+    // "5 scheduled" invites a second identical promise on top of the first.
+    if (action === 'schedule' && r.ok) SCHED_OPEN.delete(j.url);
   } catch (e) {
     if (status) status.textContent = String(e);
     due.forEach(c => fuFlash(c.id, 'failed'));
@@ -4787,6 +4941,18 @@ function followupCard(c, d, totalTouches) {
   const has = !!(c.followup_message || '').trim();
   const warn = c.threaded ? '' : `<span class="fu-warn" title="This email predates threading, so the follow-up arrives as a new message rather than a reply">⚠ won't thread</span>`;
   const err = c.followup_error ? `<div class="fu-err">${esc(c.followup_error)}</div>` : '';
+  // A promise made in the bulk bar has to be legible on the PERSON it is aimed at. Shown only
+  // in the bar, the operator opening one card would see an ordinary unsent draft and send it by
+  // hand — and then the poller would find nothing, which looks like the scheduling silently
+  // failed rather than like the send already happening twice over.
+  const sched = schedState(c.followup_scheduled_at);
+  const schedRow = !sched ? '' : (sched === 'missed'
+    ? `<div class="fu-sendat fu-sendat-missed">⚠ Missed — this was due to send
+         ${esc(fmtSched(c.followup_scheduled_at))}, but the dashboard was not running. It will
+         not go on its own now; send it below or leave it.
+         <button class="ghost" onclick="fuAct('${esc(c.id)}','unschedule',this)">Clear</button></div>`
+    : `<div class="fu-sendat">⏰ Scheduled to send ${esc(fmtSched(c.followup_scheduled_at))}
+         <button class="ghost" onclick="fuAct('${esc(c.id)}','unschedule',this)">Cancel</button></div>`);
   return `
     <div class="fu-card" data-cid="${esc(c.id)}">
       <div class="fu-head">
@@ -4794,6 +4960,7 @@ function followupCard(c, d, totalTouches) {
         <span class="fu-touch">touch ${d.touch} of ${totalTouches || 3}</span>${warn}
       </div>
       <div class="fu-meta">First emailed ${fmtDate(c.submitted_at)} · no reply recorded</div>
+      ${schedRow}
       ${err}
       ${has ? `
         <input class="fu-subj" value="${esc(c.followup_subject)}" placeholder="Subject…" />

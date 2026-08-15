@@ -1031,6 +1031,23 @@ def _account_purge() -> dict:
 
 log = logging.getLogger(__name__)
 
+def _log_scheduled_refusal(contact_id: str, why: str) -> None:
+    """Record that a promised send did not happen, and why.
+
+    Best-effort by design: a failure to log must never abort the rest of the batch. But it is
+    worth the call, because this is the one refusal in the app nobody is present for — the
+    operator scheduled something, walked away, and the only way they can ever learn it was the
+    daily limit rather than a bug is if it is written down somewhere they look.
+    """
+    try:
+        from applypilot.networking import store
+        store.log_contact_event(
+            contact_id, "warn",
+            f"Scheduled follow-up did not send: {why or 'refused'}. The draft is still here.")
+    except Exception:  # noqa: BLE001
+        log.debug("Could not log a scheduled-send refusal", exc_info=True)
+
+
 #: Background reply polling. Gmail is the slow part, so it never runs inside a request — a
 #: 2.5s dashboard refresh cannot wait on a mailbox round-trip.
 class ReplyPoller:
@@ -1072,8 +1089,15 @@ class ReplyPoller:
         #
         # Each is isolated: a dead cal.com search must not stop reply detection, which is the
         # one people notice.
+        #
+        # `scheduled` runs LAST, and specifically after the reply poll above. A follow-up
+        # promised yesterday must not go out to somebody who answered this morning — the guard
+        # that stops it is `sequences.status='replied'`, which `reply_svc.poll` is what writes.
+        # Reversing these two would send the one message the whole system exists to avoid
+        # (§Lessons 27), five minutes before learning it should not have.
         for name, fn in (("bookings", self._poll_bookings), ("deck", self._poll_deck),
-                         ("accounts", self._poll_accounts)):
+                         ("accounts", self._poll_accounts),
+                         ("scheduled", self._poll_scheduled)):
             try:
                 res[name] = fn()
             except Exception:  # noqa: BLE001
@@ -1102,6 +1126,63 @@ class ReplyPoller:
             return {"skipped": True}
         r = deck_hits.poll()
         return {"recorded": r.get("recorded", 0), "new": r.get("new", 0)}
+
+    @staticmethod
+    def _poll_scheduled() -> dict:
+        """Fire the follow-ups the operator promised for a time that has now arrived.
+
+        **This is the only thing in ApplyPilot that sends without a click**, so two things are
+        deliberately true of it.
+
+        It goes through `_followup_action`, exactly as the bulk button does, rather than calling
+        `send_followup` directly. Every guard the manual path has is therefore inherited and
+        re-evaluated NOW, not at the moment the promise was made: the Space's `can_autosend`,
+        the daily limit, the per-company cap, a sequence stopped because they replied, a job
+        marked interviewing. The world moves between promising and sending, and the guards are
+        the only thing that notices.
+
+        And it lives here, on the dashboard's existing five-minute timer, rather than in
+        `applypilot tick`. `tick` is scheduled by launchd and `schedule.installed()` is False on
+        this machine — a feature that only fires from a scheduler nobody installed does not
+        exist (§Lessons 31), and that is a much worse failure for a promised send than for a
+        deck-click poll: the operator would be told an email was scheduled and it would never go.
+
+        The honest consequence, which the UI states rather than hides: nothing fires while the
+        dashboard is closed. A promise comes due late instead, and lapses if it comes due too
+        late — see `domain/sendtime.py`.
+        """
+        from datetime import datetime, timezone
+
+        from applypilot.domain import sendtime
+        from applypilot.networking import touches
+        now = datetime.now(timezone.utc)
+        grace = sendtime.grace_hours()
+        claimed = touches.claim_due_scheduled(
+            now.isoformat(), sendtime.lapsed_before(now, grace))
+        if not claimed:
+            return {"sent": 0, "failed": 0}
+        sent, failed = 0, []
+        for row in claimed:
+            # Email only, and by construction — nothing else can be scheduled (see
+            # `_bulk_followups`). Asserted here anyway because this is the unattended path and
+            # a channel that reached it would be auto-sending something designed to be
+            # copy-pasted by a human (§Lessons 3).
+            if row.get("channel") != "email":
+                continue
+            try:
+                res = _followup_action({"contact_id": row["contact_id"], "action": "send"})
+            except Exception as exc:  # noqa: BLE001 — one bad row must not stop the rest
+                res = {"ok": False, "message": str(exc)}
+            if res.get("ok"):
+                sent += 1
+            else:
+                failed.append(res.get("message") or "")
+                # The refusal is logged where the operator will actually meet it: on the
+                # contact's own card. A scheduled send that quietly did not happen is the
+                # failure mode this whole feature has to avoid.
+                _log_scheduled_refusal(row["contact_id"], res.get("message") or "")
+        return {"sent": sent, "failed": len(failed),
+                "why": failed[:3]}
 
     @staticmethod
     def _poll_accounts() -> dict:
@@ -1912,6 +1993,11 @@ def _contact_payload(c: dict, company: str | None = None, ladders: dict | None =
         "followup_subject": email_l["draft_subject"],
         "followup_message": email_l["draft_body"],
         "followup_error": email_l["error"],
+        # When this drafted follow-up is promised to send itself. Rides the ladder state the
+        # payload already loaded, so it costs no statement — and it ships the raw UTC stamp
+        # rather than a rendered sentence, because only the browser knows the operator's own
+        # timezone and only `sendtime.state()` decides whether a past one is due or missed.
+        "followup_scheduled_at": email_l.get("scheduled_at") or "",
         "threaded": bool((c.get("thread_id") or "").strip()
                          or (c.get("rfc_message_id") or "").strip()),
         # The thread Gmail gave us at SEND time. `threaded` above is the boolean derived from it
@@ -2287,6 +2373,11 @@ def _status_payload(space: str = "") -> dict:
         # two places is two defaults — the intro-deck PDF rode along on 34 real emails while
         # `doctor --config` reported it off, for exactly this reason.
         "snippet_max": _snippet_max(),
+        # How late a scheduled send may still fire, served from the domain module the POLLER
+        # reads — never a second number in the frontend. If the card called a promise "missed"
+        # while the poller still considered it due, the operator would be told to send something
+        # by hand at the same moment the machine sent it for them.
+        "scheduled_grace_h": _scheduled_grace_h(),
         # The real poller cadence, so the UI states it rather than hardcoding a guess
         # that silently becomes wrong the moment the interval changes.
         "poll_every_s": _replies.interval_s,
@@ -4053,6 +4144,15 @@ def _followup_action(data: dict) -> dict:
         touches.set_draft(cid, channel.name, data.get("subject", ""), data.get("body", ""))
         return {"ok": True, "message": "saved"}
 
+    if verb == "unschedule":
+        # `ok` either way, deliberately: the operator asked for this not to send on its own, and
+        # it now will not. Reporting a failure because there was nothing to cancel would make a
+        # button that reached the state it promised look broken — and this races the poller by
+        # design, so "already gone" is a normal outcome rather than an error.
+        cleared = touches.cancel_schedule(cid, channel.name, conn)
+        return {"ok": True, "message": "no longer scheduled" if cleared
+                else "it was not scheduled"}
+
     if verb == "sent":
         # YOU sent it (LinkedIn is copy-paste only — CLAUDE.md §Lessons 3).
         n = touches.record_sent(cid, channel.name, conn=conn)
@@ -4113,6 +4213,78 @@ def _followup_action(data: dict) -> dict:
     return {"ok": False, "message": f"unknown action: {raw_action!r}"}
 
 
+def _bulk_schedule(action: str, ids: list[str], at_raw: str) -> dict:
+    """Promise (or withdraw) a send for many contacts at one time.
+
+    Scheduling is NOT a send, and the split in what gets checked here follows from that:
+
+    * **Time validity is checked now**, because it is the only thing that cannot be re-checked
+      later — a bad time means there is nothing to fire.
+    * **`can_autosend` is checked now as well**, even though the poller will check it again.
+      Not redundancy: a Space with auto-send off will refuse this send forever, so accepting the
+      promise would put a time on a card that is guaranteed never to arrive. Refusing early is
+      the difference between "we will send this at 9am" being true and being decoration.
+    * **Everything else is checked at FIRE time and deliberately not here** — the daily limit,
+      the per-company cap, whether they have replied. All four can change between now and then,
+      and the answer that matters is the one at the moment of sending. Pre-refusing on today's
+      daily limit would block a send promised for next week.
+
+    Email only, like the bulk send it sits beside: SMS and LinkedIn are copy-paste by design
+    (§Lessons 3), and there is no such thing as scheduling a message a human has to paste.
+    """
+    from applypilot.networking import touches
+    init_db()
+    conn = get_connection()
+    touches.init_touches(conn)
+
+    at_iso = ""
+    if action == "schedule":
+        from applypilot.domain import sendtime
+        at_iso, err = sendtime.validate(at_raw)
+        if err:
+            return {"ok": False, "message": err}
+
+    done, failed = [], []
+    for cid in ids:
+        try:
+            if action == "unschedule":
+                ok = touches.cancel_schedule(cid, "email", conn)
+                msg = "" if ok else "was not scheduled"
+            else:
+                space = _space_of_contact(cid, conn)
+                if space is not None and not space.can_autosend:
+                    ok, msg = False, (f"“{space.name}” has auto-send off, so a scheduled send "
+                                      "could never fire — copy the draft and send it yourself")
+                else:
+                    ok = touches.schedule_send(cid, "email", at_iso, conn)
+                    msg = "" if ok else "no draft to send — draft it first"
+        except Exception as exc:  # noqa: BLE001 — one bad row must not abort the batch
+            ok, msg = False, str(exc)
+        (done if ok else failed).append({"contact_id": cid, "ok": bool(ok), "message": msg})
+
+    if action == "unschedule":
+        note = f"{len(done)} unscheduled"
+    else:
+        # Echoed back in UTC. The browser renders it in local time, which is the only place
+        # that knows the operator's own — the server has no business guessing a timezone it
+        # was never told (see `dashboard.js`, where the picker converts both ways).
+        note = f"{len(done)} scheduled"
+    return {"ok": bool(done), "done": len(done), "failed": len(failed),
+            "scheduled_at": at_iso, "results": done + failed,
+            "message": (note + (f", {len(failed)} skipped" if failed else "")) if done
+            else (failed[0]["message"] if failed else "nothing to do")}
+
+
+def _scheduled_grace_h() -> int:
+    """The scheduled-send grace window, from the module the poller itself reads."""
+    try:
+        from applypilot.domain import sendtime
+        return sendtime.grace_hours()
+    except Exception:  # noqa: BLE001 — the payload must not 500 over a setting
+        from applypilot.domain import sendtime
+        return sendtime.GRACE_HOURS
+
+
 def _snippet_max() -> int:
     """The auto-sync snippet cap, from the module that enforces it — never a second literal."""
     from applypilot.networking import messages as _m
@@ -4152,7 +4324,7 @@ def _bulk_followups(data: dict) -> dict:
     that does not exist.
     """
     action = (data.get("action") or "").strip()
-    if action not in ("draft", "send"):
+    if action not in ("draft", "send", "schedule", "unschedule"):
         return {"ok": False, "message": f"unknown bulk action {action!r}"}
     ids = [str(i).strip() for i in (data.get("contact_ids") or []) if str(i).strip()]
     if not ids:
@@ -4162,6 +4334,11 @@ def _bulk_followups(data: dict) -> dict:
     if len(ids) > _BULK_MAX:
         return {"ok": False, "message": f"{len(ids)} is more than {_BULK_MAX} in one go — "
                                         "narrow it down or run it twice"}
+    # AFTER the cap, not before it. Promising 500 sends for 9am is the same blast radius as
+    # sending 500 now, just deferred — the only difference is that nobody is watching when it
+    # lands, which argues for the ceiling rather than against it.
+    if action in ("schedule", "unschedule"):
+        return _bulk_schedule(action, ids, str(data.get("at") or ""))
 
     done, failed = [], []
     for cid in ids:
@@ -4169,8 +4346,12 @@ def _bulk_followups(data: dict) -> dict:
             res = _followup_action({"contact_id": cid, "action": action})
         except Exception as exc:  # noqa: BLE001 — one bad row must not abort the batch
             res = {"ok": False, "message": str(exc)}
+        # `ok` rides on every result. It used to be omitted, and the browser's
+        # `.filter(x => !x.ok)` was therefore true for EVERY row — so a batch where all eight
+        # sends succeeded flashed all eight cards red. The set that says what failed has to be
+        # derived from something the server actually states (§Lessons 103).
         (done if res.get("ok") else failed).append(
-            {"contact_id": cid, "message": res.get("message") or ""})
+            {"contact_id": cid, "ok": bool(res.get("ok")), "message": res.get("message") or ""})
         # A refusal that will repeat for every remaining contact is not worth 56 more attempts,
         # and on the send path each attempt is a real Gmail call. The daily limit and the
         # per-company cap are the two that say "stop", as opposed to "not this one".

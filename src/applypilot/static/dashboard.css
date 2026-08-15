@@ -1434,6 +1434,34 @@
 .fu-bulk-sub { font-size:12px; color:var(--muted,#6b7280); margin-right:auto; }
 .fu-bulk-status { font-size:12px; font-weight:600; color:var(--muted,#6b7280); }
 
+/* Scheduled sends. Built from the palette's own tokens rather than fresh hex, and background
+   and foreground are always set together — a soft fill with an inherited text colour is exactly
+   how the borrowed-contact banner became unreadable (§Lessons 105). */
+.fu-bulk-sched { font-size:12px; font-weight:600; color:var(--accent);
+                 background:var(--accent-soft); border-radius:999px; padding:2px 9px;
+                 white-space:nowrap; }
+.fu-bulk-sched.fu-bulk-missed { color:var(--yellow); background:var(--yellow-soft); }
+/* Its own line inside the wrapping flex row: the picker is a second thought, not a fourth
+   button, and squeezing a date input between Send and Schedule is how it gets clicked by
+   mistake. */
+.fu-sendat-form { flex-basis:100%; display:flex; align-items:center; gap:8px; flex-wrap:wrap;
+                 margin-top:8px; padding-top:8px; border-top:1px solid var(--line,#e5e7eb); }
+.fu-sendat-form label { font-size:12px; color:var(--muted,#6b7280); display:flex;
+                       align-items:center; gap:6px; }
+.fu-sendat-form input[type="datetime-local"] { font:inherit; font-size:13px; padding:4px 6px;
+                       border:1px solid var(--line,#e5e7eb); border-radius:6px;
+                       background:var(--bg,#fff); color:inherit; }
+.fu-sendat-note { flex-basis:100%; font-size:11px; line-height:1.5; color:var(--muted,#6b7280); }
+
+/* On the person, not only in the bar. `align-items:center` on a flex row would stretch the
+   button; this is a block with an inline button so a long sentence wraps under itself. */
+.fu-sendat { font-size:12px; font-weight:600; color:var(--accent);
+            background:var(--accent-soft); border-radius:6px; padding:5px 8px; margin:6px 0;
+            line-height:1.5; }
+.fu-sendat.fu-sendat-missed { color:var(--yellow); background:var(--yellow-soft);
+            font-weight:500; }
+.fu-sendat button { margin-left:6px; vertical-align:baseline; }
+
 /* Which person the batch is on. Transient by design — refresh() rebuilds the tab every 2.5s, so
    this marks the moment the operator is watching rather than storing a state that could drift. */
 .fu-card.fu-working { border-color:#93c5fd; background:#eff6ff; }

@@ -179,3 +179,70 @@ def test_the_EXPLICIT_fetch_stores_more_than_the_automatic_one(tmp_path, monkeyp
     assert got["auto"] == _m.SNIPPET_MAX
     assert got["explicit"] == 1500, "the deliberate fetch was capped at the automatic bound"
     assert got["explicit"] <= _m.PASTED_MAX
+
+
+def test_the_auto_sync_never_DOWNGRADES_a_fetched_body(tmp_path, monkeypatch):
+    """The fix was being undone within minutes of shipping.
+
+    "Never downgrade what we already hold" was written for OUTBOUND only, and the inbound branch
+    took Gmail's ~200-character snippet unconditionally. Harmless while that was the best text
+    available; destructive the moment `fetch_thread_text` started storing real bodies, because
+    opening the card auto-syncs. Measured 20 minutes after shipping the body fetch: a thread
+    stored at 613, 486 and 262 characters was back to ZERO messages over 200.
+    """
+    from applypilot.networking import replies
+    long_body = "the whole message, fetched on purpose. " * 12    # ~460 chars
+    short = "the whole message, fetched on p"
+    assert replies._keep_longer(short, long_body) == "", "the preview overwrote the full body"
+    # `.strip()` — the helper normalises, so compare against the normalised form.
+    assert replies._keep_longer(long_body, short) == long_body.strip(), \
+        "a real improvement was dropped"
+    assert replies._keep_longer("", long_body) == ""
+    assert replies._keep_longer(long_body, "") == long_body.strip()
+
+
+def test_the_rule_is_the_same_in_BOTH_directions(tmp_path):
+    """It was applied to our own sent text and not to theirs — §Lessons 49's shape, and the half
+    that was missing is the half that mattered once bodies existed."""
+    import inspect
+
+    from applypilot.networking import replies
+    src = inspect.getsource(replies.sync_all_with)
+    assert "_keep_longer" in src
+    # The snippet expression must not branch on direction. Checked on the ROW BUILD rather than
+    # the whole function, which mentions direction for other, legitimate reasons.
+    row = src[src.index('"snippet"'):src.index('"snippet"') + 200]
+    assert "inbound" not in row, "direction still decides whether a stored body survives"
+
+
+def test_PRESERVED_text_is_not_re_capped(tmp_path, monkeypatch):
+    """The second half of the same bug, and the one that made the first fix look ineffective.
+
+    `sync_all_with` correctly declined to overwrite a fetched body — and `upsert_messages` then
+    applied the SNIPPET bound to the text it was merely preserving. A thread fetched at
+    613/486/262 characters came back 200/200/200/200 after one automatic sync that stored
+    nothing new. The cap belongs to what is ARRIVING; stored text was already capped correctly
+    when it was written.
+    """
+    import applypilot.database as database
+    from applypilot.networking import messages as _m, store
+    path = tmp_path / "t.db"
+    monkeypatch.setattr(database, "DB_PATH", path)
+    database.close_connection(path)
+    database.init_db(path)
+    conn = database.get_connection(path)
+    store.init_contacts(conn)
+    _m.init_messages(conn)
+    body = "y" * 900
+
+    def row(snippet):
+        return {"message_id": "m1", "thread_id": "t1", "contact_id": "c1",
+                "job_url": "http://j/1", "direction": "in", "from_addr": "a@b.test",
+                "from_name": "A", "to_addrs": [], "cc_addrs": [], "subject": "s",
+                "sent_at": "2026-08-01T09:00", "rfc_message_id": "<x>", "snippet": snippet}
+
+    _m.upsert_messages([row(body)], conn, full=True)          # ⤓ Fetch from Gmail
+    assert len(_m.thread_for_contact("c1", conn)[0]["snippet"]) == 900
+    _m.upsert_messages([row("")], conn)                        # the automatic sync, declining
+    assert len(_m.thread_for_contact("c1", conn)[0]["snippet"]) == 900, \
+        "the preserved body was re-capped at the snippet bound"

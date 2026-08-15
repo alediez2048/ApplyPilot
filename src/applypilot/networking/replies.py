@@ -102,6 +102,18 @@ def _sync_thread(contact: dict, msgs: list[dict], me: str, conn) -> dict:
     return {"new_messages": new, "introductions": intro}
 
 
+def _keep_longer(incoming: str, stored: str) -> str:
+    """The snippet to write: '' when what we already hold is at least as good.
+
+    `upsert_messages` treats an empty snippet as "leave the stored one alone", so returning ''
+    is how a sync declines to overwrite. Used for BOTH directions — a full body fetched on
+    purpose must survive the next automatic sync, and so must our own sent text.
+    """
+    incoming = (incoming or "").strip()
+    stored = (stored or "").strip()
+    return incoming if len(incoming) > len(stored) else ""
+
+
 def sync_all_with(contact: dict, conn=None, limit: int = 25) -> dict:
     """Pull EVERY Gmail conversation with this person, not just the one ApplyPilot started.
 
@@ -151,7 +163,6 @@ def sync_all_with(contact: dict, conn=None, limit: int = 25) -> dict:
         rows = []
         for m in cv.timeline(msgs, me):
             raw = next((x for x in msgs if x.get("id") == m["id"]), {})
-            inbound = m["direction"] == "in"
             rows.append({
                 "message_id": m["id"], "thread_id": tid,
                 "contact_id": contact["id"], "job_url": contact.get("job_url"),
@@ -159,13 +170,23 @@ def sync_all_with(contact: dict, conn=None, limit: int = 25) -> dict:
                 "from_name": m["from_name"], "to_addrs": m["to_addrs"],
                 "cc_addrs": m["cc_addrs"], "subject": m["subject"],
                 "sent_at": _iso(m["at"]), "rfc_message_id": m.get("rfc_message_id") or "",
-                # Inbound: take Gmail's text. Outbound: only when we hold NOTHING for it —
-                # a reply ApplyPilot sent was recorded in full at send time and must not be
-                # downgraded to a truncated snippet, but a message sent straight from Gmail
-                # has no stored text at all and would otherwise render as a blank row forever.
-                "snippet": (cv.strip_quoted_tail(raw.get("snippet")) if inbound
-                            else ("" if (have.get(m["id"]) or "").strip()
-                                  else cv.strip_quoted_tail(raw.get("snippet")))),
+                # NEVER DOWNGRADE WHAT WE ALREADY HOLD — in either direction.
+                #
+                # That rule was written for outbound only ("a reply ApplyPilot sent was recorded
+                # in full at send time"), and the inbound branch took Gmail's ~200-character
+                # snippet unconditionally. Harmless while that was the best text available;
+                # actively destructive the moment `fetch_thread_text` started storing real
+                # bodies, because opening the card auto-syncs and overwrote every one of them.
+                # Measured 20 minutes after shipping the body fetch: a thread stored at 613,
+                # 486 and 262 characters was back to ZERO messages over 200.
+                #
+                # Comparing LENGTH rather than tracking provenance: the incoming snippet is a
+                # prefix of the full body, so "shorter than what is stored" is exactly the
+                # question, and it needs no new column to answer. An empty snippet means "keep
+                # what you have" to `upsert_messages`, which is the same mechanism the poller
+                # already relies on.
+                "snippet": _keep_longer(cv.strip_quoted_tail(raw.get("snippet")),
+                                        have.get(m["id"]) or ""),
             })
         total_new += msg_store.upsert_messages(rows, conn)
 

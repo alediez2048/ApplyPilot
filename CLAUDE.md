@@ -12,9 +12,10 @@ campaign happens to be a job search** — see `docs/crm-prd.md` for where that g
 - **Packaging:** Hatchling, `src/` layout, single package `applypilot`
 - **Entry point:** `applypilot = "applypilot.cli:app"` (Typer CLI)
 - **License:** AGPL-3.0-only · **Version:** 0.4.0 (`pyproject.toml`)
-- **Tests:** 2511 passing (`tests/`, 128 files) · ruff clean (line-length 120, py311) · ESLint clean
-- **Schema version:** 4 (`applypilot migrate --status`) · **Settings:** 52 declared in `settings.py`
-- **Branch:** everything current lives on `context`, **90 commits ahead of `main`**, pushed to `origin/context`, working tree CLEAN as of 2026-08-13 (§Dev workflow). `main` has
+- **Tests:** 2687 passing (`tests/`, 138 files) · ruff clean (line-length 120, py311) · ESLint clean
+- **Schema version:** 4 (`applypilot migrate --status`) · **Settings:** 54 declared in `settings.py`
+- **Branch:** everything current lives on `context`, **105 commits ahead of `main`**, pushed to
+  `origin/context`, working tree CLEAN as of 2026-08-14 (`20e054b`, §Dev workflow). `main` has
   none of it. Check `git log --oneline -1` before believing anything here (§Dev workflow).
 
 ## Quick orientation
@@ -62,7 +63,7 @@ than a shared queue.
 | `database.py` | SQLite layer. Owns `jobs` + `job_events`. Thread-local WAL, additive column pass, then numbered migrations. `get_connection()` returns a subclass carrying a per-connection schema memo — see §Lessons 11. |
 | `llm.py` | Multi-provider client (round-robin + failover: OpenAI/Gemini/Anthropic/local). |
 | `view.py` | Static HTML results export. |
-| `web_dashboard.py` | **The operator dashboard.** 4,095 lines, **zero SQL** — data access goes through `repo/` and `store.py` (ARCH-4). |
+| `web_dashboard.py` | **The operator dashboard.** 4,907 lines, **zero SQL** — data access goes through `repo/` and `store.py` (ARCH-4). |
 | `repo/jobs.py` | Every `jobs` query as a named function. Owns `QUEUE_SQL` (provenance — how a row arrived) and `_in_spaces` / `_one_space` (membership — which panel it is in). Those two never do each other's job (SPACE-1a D2). |
 | `repo/spaces.py` | The `spaces` / `identities` registries. `jobs_shaped_ids()` and `document_making_ids()` gate the pipeline stages and RAISE on an empty registry rather than returning `[]`. |
 | `scoring/resume_sections.py` | Parses the BASE résumé into its own sections. The base résumé is the template; tailoring rewrites content inside it. |
@@ -239,31 +240,26 @@ re-reading a thread you have already logged is a no-op rather than a duplicate.
 | `identities` | `repo/spaces.py` | One row per SENDER (mailbox, from-name, deck, limits). Created by 003, **read by nothing yet** — ID-1. |
 | `schema_migrations` | `migrations/` | Version, status, `claimed_at` lease. See §Lessons on the 300s lease. |
 
-Live counts (2026-08-12, a snapshot — these move within minutes of real use, so treat them as
-orders of magnitude and re-measure before reasoning from one): jobs **80** (29 applied,
-2 rejected, **1 ghost**, 1 needs_human, 1 failed — and **46 with no apply_status at all**,
-because 45 of them are company cards that were never applied to), contacts **352**
-(156 emailed, **12 replied**), touches 233, messages 393, connections 899.
-**Four Spaces**, and the row count is no longer mostly job-search:
+Live counts (**2026-08-14**, a snapshot — these move within minutes of real use, so treat them
+as orders of magnitude and re-measure before reasoning from one): jobs **94**, contacts **368**
+(44 columns), of whom **175 emailed** and **15 replied** — an 8.6% reply rate, which is upper
+quartile for cold outreach. touches 250, messages 646, connections 899.
+**Only 9 contacts have a phone number**, which is the binding constraint on the whole text/call
+half of the sequence (§The outreach sequence).
 
-| Space | template | shape | rows | contacts (by job) |
-|---|---|---|---|---|
-| `job-search` | jobs | pipeline/jobs | 34 | 250 |
-| `gauntlet` | jobs | pipeline/jobs | 2 | 10 |
-| `partnerships` | outreach | pipeline/targets | **3** | 0 |
-| `sheet-search` ("Lead Sheet") | **sheet** | pipeline/targets | 45 | 105 |
+| Space | shape | jobs | contacts |
+|---|---|---|---|
+| `job-search` | pipeline/jobs | 40 | 246 |
+| `sheet-search` ("Lead Sheet") | pipeline/targets | 45 | 106 |
+| `partnerships` | pipeline/targets | 6 | 5 |
+| `gauntlet` | pipeline/jobs | 2 | 10 |
+| `professional-network` | pipeline/targets | 1 | 1 |
 
-**`partnerships` is no longer empty** (3 rows, 2026-08-12). It held zero from SPACE-3 until now,
-which is why SHEET-1 doubled as the falsifier the PRD asked for — the targets shape had never
-once run (§Spaces, §The sheet Space).
+**Duplicate addresses across the whole database: 1**, and it is correct data — the same person
+on a `job-search` job and a `professional-network` target card, which is two campaigns rather
+than a duplicate (§No duplicate contacts). It was 4 before CO-2 and the discovery dedup.
 
-**`contacts.space_id` disagrees with the job's on 14 rows, and nothing reports it** (measured
-2026-08-12): 10 on gauntlet, 3 on partnerships, 1 on sheet-search, every one of them filed
-`job-search` — the column DEFAULT. §Lessons 70 at a third write path, and the read side hides it
-exactly as before, because every panel scopes by the JOB rather than by this column. What does
-read it is CRM-2's `all_contacts_for_metrics(space_id=…)`, so per-Space reply rates are wrong by
-those 14. Not yet fixed; a backfill from `jobs.space_id` is the whole repair.
-**Schema version 3**, and SHEET-1 needed no migration.
+**Schema version 4.**
 
 `contacts.source` is now the honest split: apollo 206, **import 105**, connection 28,
 **manual 10**, hunter 5, introduction 1. Manual went 6 → 10 the day the ＋ tabs shipped. That column is what CRM-2's `by_layer()` divides by, and it
@@ -301,7 +297,10 @@ operator(`phone,notes`,**`flagged_at`** — the 💡 marker, the one signal on a
 Localhost-only (`127.0.0.1:8765`), Origin/CSRF-guarded. Restructured 2026-07-28 from four
 sibling accordions into:
 
-**Five tabs**: People · Follow-ups · Materials · Activity · **Job**. The Interactions tab was
+**Five tabs**: People · Follow-ups · Materials · Activity · **Job**. A **Summary** tab was
+built and removed on 2026-08-14 — reported as confusing rather than clarifying, because the
+People tab already breaks the touchpoints down and a second view of the same state is one more
+place for the two to disagree. `coverage` stays on the payload: the close guard reads it. The Interactions tab was
 retired 2026-08-04 (UX-1) — see §The row, and §Lessons on why its ledger was kept.
 
 **The 🔔 counter, top right** (2026-08-02) — every outstanding action across every application,
@@ -588,7 +587,8 @@ corrupt reply detection. `dm_status` only ever recorded what WE sent. So both di
 - **One tabbed panel**: People · Follow-ups · Materials · Activity. `PANEL_OPEN` / `TAB_OPEN`
   survive the 2.5s refresh.
 - **Contacts collapse to one line** with channel pills (`✉ sent · 🔗 connected · ↻ due`).
-  Opening one shows channels as tabs: **✉ Email · 🔗 LinkedIn · 💬 Text · 📝 Meetings**.
+  Opening one shows channels as tabs: **✉ Email · 🔗 LinkedIn · 💬 Text · 📞 Call ·
+  📅 Invite · 📝 Meetings**.
   **All are always offered, and an empty one is where its identifier gets ENTERED**
   (2026-08-12) — the rule Text had always followed alone, which made the others §Lessons 49. An empty tab is marked `＋`
   and dashed, so which identifiers are missing is legible from the strip without opening all
@@ -937,17 +937,222 @@ hidden on a jobs Space, so the field could be read by nothing AND typed by no on
 from `space.OFFER_COPY` via the payload so the panel cannot describe the field differently from
 the manifest.
 
-## Follow-up sequences
+## Sending a calendar invite (CAL-1, 2026-08-14)
 
-**TWO** independent ladders, all human-in-the-loop. Only email can auto-send.
+A `📅 Invite` tab on the contact card, **after `📞 Call`** — the operator's own placement and the
+right one: it is the order the conversation goes in. Title, day, time, length, agenda, a Google
+Meet toggle, Send, and Cancel once the meeting exists.
 
-| | Email | SMS / iMessage | ~~LinkedIn~~ |
+**BLOCKED on one operator action.** The live token carries four Gmail scopes and no calendar
+scope; `calendar.events` is a new Google consent screen, not a config change. Until then the tab
+renders the exact command instead of a form:
+
+    applypilot network --gmail-connect --with-calendar
+
+Kept OUT of `SCOPES`, the pattern CRM-4b set for `gmail.readonly` — no ordinary `--gmail-connect`
+may quietly start asking for calendar write access, and a test pins its absence. It is the NARROW
+`calendar.events`; full `calendar` grants read of every event on every calendar the account sees.
+
+**The send guards are checked HERE, not inherited.** `sendUpdates=all` means GOOGLE mails the
+invitation, so it never passes through `gmail_send` and the daily limit, per-company cap and
+cooldown would never see it — §Lessons 77's shape exactly. It calls `can_send()` directly and
+lets through precisely two of its refusals ("already sent to this contact" and the cross-role
+cooldown), both of which are about COLD outreach; an invite goes to somebody mid-conversation.
+
+Attendees come from the STORED contact, never the page (§Lessons 29). The event id is written to
+`interactions` (kind `invited`, no schema change) before anything else can fail, because cancel
+ships WITH send — an invite you can create and not withdraw is half a feature.
+
+Two things found while building. Re-running `connect()` REPLACES the token, so `--with-calendar`
+alone would have silently revoked the `gmail.readonly` grant; held scopes are carried forward
+now. And the `＋` tab marker keyed on "is a meeting scheduled", which is the normal state for
+almost every contact — permanently lit, and a badge that is always on is one you stop reading.
+
+`conferenceDataVersion=1` is the single easiest thing to omit: without it Google ACCEPTS
+`conferenceData` and silently drops it, so the event is created, the invitation goes out, and
+there is no Meet link — a success response for a half-made meeting.
+
+## One person, one conversation (CO-2 + dedup, 2026-08-13/14)
+
+`store.contact_id()` hashes `(job_url, linkedin_url, name)`, so the same human found for a second
+role at the same company is a second row with its own ladder, its own drafts and an empty
+history. Reported from WebAI, and **the row is the visible half**: the two new rows carried the
+old role's messages re-stamped with the new job's URL, a fresh cold email draft, and a queued
+text opening *"I applied for the AI Software Engineer role"* — to somebody four emails deep on a
+cancelled one.
+
+### Moving somebody — `networking/migrate.py`
+
+`plan()` → `apply()` → `undo()`, ONE transaction across contacts, messages, touches, sequences,
+interactions and transcript_contacts. Not `repo/contacts.py`: `store.py` already IS that
+repository, and two abstractions over one table is what ARCH-4's ticket warns about.
+
+**The move is NON-DESTRUCTIVE, and the ticket's own design was wrong about why.** It said
+"ladders reset, the sequence is closed on arrival" — but `ladder_states` counts sent touches
+against `len(schedule)`, so three carried touches make the channel read `finished` immediately
+and reopening does not help. And clearing `submitted_at` would drop real sends out of the CRM-2
+funnel while their replies stayed in it, and disarm the cross-job cooldown (§Lessons 86).
+
+So nothing is destroyed; the outreach is **STAMPED** with the role it was for
+(`contacts.outreach_job_url`, `touches.job_url`, both empty on every row that has never moved).
+Two readers of one table now disagree deliberately:
+
+    sent_touches()   what have we ever said to this person?   ALL of it — so the drafter
+                                                              does not repeat itself
+    ladder_states()  how far through THIS role's plan?        only this job's
+
+`outreach_is_for_this_job()` is ONE predicate shared by the ladder and the payload — half a rule
+is how the same person gets written to twice.
+
+Destroyed, both recorded for undo: an **unsent** draft (all 16 named the dead role, one click
+from sending) and the emptier half of a collision. Two real conversations are refused rather than
+interleaved — but **one conversation stored TWICE is not two conversations**, and comparing
+counts said it was: `sync_all_with` files by ADDRESS, so the same thread lands on both rows with
+identical message ids (`identical=True` on both WebAI pairs). It compares message IDS now.
+
+**Both directions have a button**, because the duplicate is noticed on the LIVE role: `→ Move
+contacts to another application` on a closed card, `⤓ Bring contacts here from another role` on
+an open one (§Lessons 89). **A moved contact's row REMEMBERS** — `prior_outreach` renders
+`✉ 4 sent · earlier role`, marked rather than merged with an ordinary send, because "we have
+spoken" and "we have spoken about this job" are different facts.
+
+Run live: WebAI 2 people, Google 11 of 16 (5 with no address stay behind — the operator's rule,
+since the premise is continuing an outreach that already began). Zero orphans, backups written.
+
+### Not creating the duplicate in the first place
+
+`skip_known` existed and did not cover it: opt-in, and scoped to ONE job, so a FIRST search on a
+second role at a company already worked had no exclusion at all. `store.known_at_company()` runs
+BEFORE enrichment, so a person we already hold costs no Apollo credit either. Matched on email →
+LinkedIn → name, **never on `contact_id`**, which hashes `job_url` and therefore differs for
+exactly the rows this exists to catch.
+
+Reported separately from every other skip: "already ours" and "works elsewhere" have different
+fixes, and merging them makes a deduplication read as a data-quality failure (§Lessons 91).
+
+**A cross-SPACE move is refused.** The same person on a `job-search` job and a
+`professional-network` target card is two campaigns, not a duplicate — merging them collapses one
+into the other. `targets_for`/`sources_for` already scoped their listings by Space so the BUTTON
+never offered it; `plan()` is reachable directly and said ok=True (§Lessons 49, at one of its two
+layers). Both agree now, and the discovery check is scoped too so it cannot suggest a move that
+would then be refused.
+
+## Reading a conversation (2026-08-14)
+
+Three defects in one chain, each hiding the next.
+
+**The draft-a-reply button read two fields off the thread it was given.**
+`conversation_transcript` took `thread` and used it for the last inbound message's sender name
+and date; everything it rendered came from `contacts.outreach_message`, `touches`, and ONE reply
+passed in separately. §Lessons 39 recorded that exact shape for that exact function and it was
+still true of every message but the newest:
+
+    Lee Ackerley       87 messages (45 inbound)  ->  transcript showed 2 entries
+    Kevin Parakkattu   61 messages (36 inbound)  ->  2
+    Diego Bodart       18 messages (12 inbound)  ->  2
+
+Built from the thread as the spine now, merged with the fuller stored copies of our own messages
+(matched by `sent_message_id` for the first email, by MINUTE for touches, which carry no message
+id). Trimmed to a character budget with the OPENING always kept — a late reply still implicitly
+answers it — and the gap stated rather than silent.
+
+**And every message in it was Gmail's ~200-character preview.** `thread_messages` requests
+`format="metadata"`, which by design returns no body. Correct under `gmail.metadata`;
+`gmail.readonly` has been granted since 2026-07-31 with nothing changed to use it, so
+"⤓ Fetch from Gmail" stored the same preview the automatic sync already had, while
+`PASTED_MAX = 2000` recorded an intent never met. **Of 646 stored messages, NONE exceeded 200
+characters.** `message_body()` fetches `format="full"`, walks the MIME tree preferring
+`text/plain`, and decodes base64URL.
+
+**Then it was undone within 20 minutes.** Two more:
+
+- *"Never downgrade what we already hold"* was written for OUTBOUND only, so the inbound branch
+  took the snippet unconditionally — and opening a card auto-syncs. `_keep_longer` applies the
+  rule in both directions, comparing LENGTH rather than tracking provenance.
+- `upsert_messages` then **re-capped the text it was preserving**. The cap belongs to what is
+  ARRIVING; stored text was already capped correctly when written. There are TWO declared bounds
+  — `SNIPPET_MAX` for an automatic sync, `PASTED_MAX` for a deliberate fetch — chosen by the kind
+  of read, never a number a caller invents.
+
+**The narrowing is unchanged and is the point:** the poller and the card-open sync still store
+the snippet. A BODY is read only when the operator asks for one conversation by name.
+
+A full body also arrives with everything that is not the message — one live reply is 2781
+characters of which the last third is a legal disclaimer and a tracking pixel. `strip_footer`
+cuts at a signature delimiter, confidentiality boilerplate or a tracking image, keyed on the
+disclaimer VOCABULARY rather than sentence shape, and `[cid:…]` refs are removed inline rather
+than cut at. Live: 504 → 178, 2781 → 454.
+
+**Also new:** opening a contact card auto-fetches their Gmail, hooked to the CLICK and never the
+render — `#jobs` is rebuilt every 2.5s, so a fetch on the render path is a round-trip every 2.5
+seconds per open card (§Lessons 26). Once per contact per 60s, silent when nothing is new.
+
+**And `✓ I emailed them`** — the operator-asserted marker every other channel had since it
+shipped. Gmail's send response only proves the sends that went THROUGH ApplyPilot; 9 contacts
+carried outbound mail and no send state. It does NOT fake a `sent_message_id` (threading reads
+it), and recording it did nothing until `normalize_for_ladder` was fixed to use the same
+`emailed` rule as the payload — §Lessons 21, one derived field computed two ways.
+
+## The outreach sequence (2026-08-14)
+
+**THREE ladders and one ordered plan.** All human-in-the-loop; only email can auto-send.
+
+| | Email | SMS / iMessage | Phone call | ~~LinkedIn~~ |
+|---|---|---|---|---|
+| Anchor | `submitted_at` | `sms_sent_at` | `call_made_at` | — |
+| Proof it started | `sent_message_id` **or** `outreach_status='submitted'` | operator clicks `✓ I sent it` | operator clicks `✓ I called` | — |
+| Default | `48,96,168` (2d/4d/7d) | `72,168` (3d/7d) | `72` (3d, once) | **no ladder** |
+| Send | `send_followup()`, threaded | copy → open Messages → paste | nothing dials for you | — |
+| Stop | reply / stop / complete | same | same | — |
+
+**The CALL channel is the fourth, and it cost one column** (`call_made_at`), one registry row,
+one settings entry — the claim ARCH-3 makes, spent for the fourth time. It is the only channel
+with nothing to write: no draft, no composer, nothing that could ever be sent automatically.
+`can_autosend=False` there is a fact rather than a policy.
+
+Adding it found four couplings, and every one was a hand-written list that should have been
+derived: `Space.channels`, the `exhausted` dict in `_contact_payload`, a test fixture map, and
+the column-count guard. **Two of those would have silently dropped the new channel** — exactly
+what `followup_panel` did to SMS at its return statement.
+
+### The ORDERED plan — `domain/coverage.py`
+
+Asked for as *"3 emails, text + call, text + call again to close the loop"*. The channel ladders
+above are independent by design; this is the layer that says which comes FIRST.
+
+```
+Emails  →  Text + call  →  Text + call again
+```
+
+DERIVED, never stored — a stored stage would need recomputing on every touch, reply and schedule
+change, and the copy on disk would be wrong in between (§Lessons 21). **A reply ENDS the plan**
+rather than advancing it.
+
+**The phone opens after a week of SILENCE, not after the emails run out** (`REACH_AFTER_HOURS`,
+default 168). Waiting for the ladder to be spent meant day 13, and the operator's own data says
+the third email is not what earns the reply:
+
+| stage | reached | replied | rate |
 |---|---|---|---|
-| Anchor | `submitted_at` | `sms_sent_at` | — |
-| Proof it started | `sent_message_id` | operator clicks `✓ I sent it` | — |
-| Default | `48,96,168` (2d/4d/7d) | `72,168` (3d/7d) | **no ladder** |
-| Send | `send_followup()`, threaded | copy → open Messages → paste | — |
-| Stop | reply / stop / complete | same | — |
+| Cold email | 175 | 15 | 8.6% |
+| + follow-up 1 (48h) | 119 (68%) | 9 | 7.6% |
+| + follow-up 2 (96h) | 68 (39%) | 3 | 4.4% |
+| + follow-up 3 (168h) | **4 (2%)** | 0 | — |
+
+It is an OR, not a replacement: `coverage.py` only DESCRIBES, sending is driven by each
+channel's own ladder, so follow-up 3 still goes out as the backstop and a test pins that
+escalating does not silently retire it. Anchored on the FIRST email, because anchoring on the
+last touch slides the escalation further away every time a follow-up fires — so the person being
+chased most diligently would be the last one ever phoned.
+
+**The plan is gated on data that does not exist.** 9 of 368 contacts have a phone number, so
+**168 people sit at `blocked`** — a week past their first email, no reply, nobody to ring. That
+is the next real decision, and Apollo will not release a direct dial to a local tool
+(§Lessons 4), so it is copy-by-hand or a different provider.
+
+`close_warning()` is the same computation read a third way: marking a job rejected/cancelled/ghost
+names what is unspent and asks once more. **ADVISORY, never a refusal** (§Lessons 69) — a req
+that was genuinely pulled has to be filable without first faking work nobody did.
 
 **LinkedIn has no follow-up ladder (2026-08-11).** The connection invitation is the whole
 channel: send it and you are done. `Channel.follows_up=False`, and everything else about
@@ -2532,6 +2737,75 @@ company `"Jobs"` — the same substring bug class, inside the function written t
     pasted**, so they are long by default — the one-line grid only ever worked for a short
     fixture.
 
+107. **A ticket's prescribed fix can be wrong in a way only the code shows.** CO-2 said "ladders
+    reset, the sequence is closed on arrival". `ladder_states` counts sent touches against
+    `len(schedule)`, so three carried touches make the channel read `finished` immediately —
+    and marking the sequence `stopped` changes the WORD on the card and nothing else, because
+    reopening it still reads finished. The six emailed-no-reply contacts the feature exists for
+    would have arrived permanently unfollowable. §Lessons 28's family: a ticket is a hypothesis,
+    and this one was specific, plausible and untestable without running it.
+
+108. **Two correct rules can produce a wrong result together.** Scoping `emailed` to the current
+    role is right (the new application runs its own sequence). Preserving a SENT copy is right
+    (it is the only record of what went out). Together they pre-filled a fresh compose box with
+    the dead role's words — three contacts on the live Google card holding "I just applied for
+    the Forward Deployed Engineer role", one click from sending. Neither rule was wrong and
+    neither could be dropped; the fix was scoping the draft FIELDS the same way the flags were.
+    **Check what a new rule composes with, not only what it replaces.**
+
+109. **Comparing counts when the question is identity.** CO-2 refused to merge two rows that
+    both had messages, to avoid interleaving two conversations. `sync_all_with` files by ADDRESS,
+    so the same thread lands on both rows of a duplicated person with IDENTICAL message ids —
+    `identical=True` on both live WebAI pairs. Counting called that "two conversations" and
+    blocked the exact repair the feature existed for. The distinction is the ids, not the
+    lengths; a genuine second exchange is one the destination holds and the source does not.
+
+110. **The rule was enforced at the UI layer and not at the function.** `targets_for` and
+    `sources_for` scope their listings by Space, so the migrate BUTTON never offered a
+    cross-Space move. `plan()` is reachable directly and said `ok=True` on the live Arm pair —
+    an applied `Project Manager` in `job-search` and an `Arm` target card in
+    `professional-network`, which is the same human tracked in two campaigns and not a duplicate
+    at all. §Lessons 49 with the layers stacked rather than the call sites: a guard that only
+    exists on the path the UI happens to take is not a guard.
+
+111. **A fix can be undone by the system within minutes, and only re-measuring finds it.**
+    Twenty minutes after shipping the full-body fetch, the database was back to ZERO messages
+    over 200 characters — a thread stored at 613/486/262 was 200/200/200/200 again. Two causes,
+    stacked: "never downgrade what we already hold" had been written for OUTBOUND only, so the
+    automatic sync overwrote every fetched body; and `upsert_messages` then **re-capped the text
+    it was merely preserving**, which made the first fix look ineffective after it was correct.
+    Nobody reported either. The only reason they were found is that re-indexing this file
+    involves measuring the database, and the number contradicted what had just been shipped.
+    **Re-measure after shipping, not only before.**
+
+112. **`format="metadata"` cannot return a body, and the code that knew that outlived the
+    reason.** `thread_messages` was written under `gmail.metadata`, where asking for `full` is
+    refused. `gmail.readonly` was granted on 2026-07-31 and nothing was changed — so for six
+    weeks "⤓ Fetch from Gmail" stored the same ~200-character preview the automatic sync already
+    had, while `PASTED_MAX = 2000` sat in the code recording an intent that was never met. The
+    tell was in the data and nowhere else: **of 646 stored messages, none exceeded 200
+    characters, and half sat at 151-199** — the shape of Gmail's snippet rather than of anybody's
+    writing. When a capability is granted, sweep for the constraints that were written around
+    its absence.
+
+113. **Four of six mutations survived because the TESTS were wrong, not the code.** In one
+    sitting: a fixture where the stripped HTML equalled the plain text, so "prefer html" passed;
+    a scope gate asserted on a return value that is `""` whether the gate exists or not; a
+    mutation aimed at `strip_quoted_tail` when `strip_footer` was the target; and no test at all
+    for the two write bounds. Every one looked like a real test and none could fail. The
+    recurring tell is §Lessons 71's: **an assertion that still passes when the thing under test
+    is emptied.** Check that before checking whether it is correct.
+
+114. **iCloud is a third party to this repository.** Rapid file rewrites — a mutation harness
+    reinstalling between every mutation — make macOS sync produce `" N"`-suffixed duplicates.
+    In one session it created **38 `applypilot` binaries in `.venv/bin`** (the real one gone),
+    resurrected `tests/test_summary_pane.py` after deletion, and restored a stale
+    `migrate 2.py` TWICE. Symptoms: the CLI vanishes, the suite goes from 85s to a 5-minute
+    timeout, and `test_sql_lives_only_in_the_data_layer` fails on a module nobody wrote.
+    Recovery is `find . -name "* [0-9]*"`, delete, reinstall — and **check whether a resurrected
+    file is the stale copy before deleting it**, because twice it was and once the live file was
+    the newer one. The real fix is keeping `.venv` and the repo out of a synced folder.
+
 Shipped in one session, in this order: **CRM-3a → CRM-1 → CRM-2 → CRM-3b → CRM-4a.**
 Tickets in `docs/tickets/CRM-*.md`; two of them had instructions that were factually wrong
 before being revised (they told you to write `followup_status`, removed by ARCH-3).
@@ -2865,6 +3139,18 @@ is 2,137 lines of keyword SEARCH across boards. Those are not two implementation
 idea; for RELEVANCE the recommender wins, and running ours would buy throughput at worse
 precision that the operator would then have to filter back down. Do not "fix" this by default.
 
+**THE CHEAPEST WIN ON THE BOARD, still not done:** the SUBJECT LINES repeat. Measured
+2026-08-12 across 13 live drafts — `ai` in 13/13, `austin` in 12/13, max pairwise word overlap
+**89%** — while the BODIES held at 2% median similarity. The system prompt's "several people at
+the same company get these" rule is aimed at the body; the subject spec says only
+"lowercase-ish, specific, no quick question". The subject is the most visible surface there is:
+you do not have to open anything to see thirteen versions of one sentence. About an hour.
+
+**THE BINDING CONSTRAINT on everything built on 2026-08-14:** only **9 of 368 contacts have a
+phone number**, so the text+call stages cannot run for the 168 people who are past a week of
+silence. Apollo will not release a direct dial to a local tool (§Lessons 4), so this is
+copy-by-hand from its UI or a different provider — worth deciding before building more there.
+
 **Open, and the real ceiling:** nothing could tell you what works. 131 emails, 7 replies, and no
 way to ask whether the personalised ones did better — so every improvement to the copy was
 unfalsifiable. `draft_variant` (2026-08-03) starts fixing it, but nothing is readable until
@@ -2983,36 +3269,15 @@ already contacts** — while the real history is employer-agnostic (400+ threads
 2017–2026) and every employer narrows to an **11-second crawl or less**. `gmail.readonly` is
 already granted, so `q=` search works; ~2–3 days.
 
-**`docs/tickets/CO-2-migrate-contacts-to-another-role.md`** (2026-08-13) — **SCOPED, answered,
-NOT built.** CO-1's other half, from the direction that hurts. The live Google case: *Startups
-Performance Lead* is **cancelled with 16 contacts (7 emailed)** and *AI Sales Specialist* is live
-with 1. A move carries 25 messages, 13 touches and 5 sequences — and `touches`/`sequences` have
-no `job_url` at all, so they follow `contact_id` blindly, which makes this **the only operation
-in the app that can silently destroy a ladder**.
-**The measurement that decides it: 16 of 16 stored messages and drafts name the cancelled role by
-name.** So the obvious build — rewrite the foreign keys and stop — leaves unsent drafts pitching
-a dead role on a live card, one click from sending, and ladders whose next touch follows up on a
-job that no longer exists. Every row in the right place and the feature worse than not having it.
-Decided: re-key rather than copy; unsent drafts CLEARED and sent messages never touched; ladders
-reset while touches move as history (so the new role is a genuine first contact and
-`burned_block` finally has something to read); the richer row wins a collision and two real
-conversations are refused rather than interleaved; same employer only. Operator answered:
-**a contact with no email does not move** (5 of 16, so the Google move is **11 people**, shown as
-excluded with the reason rather than hidden), messages follow the person, and **undo ships in the
-first cut**. ~2 days.
+**`docs/tickets/CO-2-migrate-contacts-to-another-role.md`** — **BUILT and RUN 2026-08-13/14.**
+See §One person, one conversation. Two of the ticket's three decisions did not survive the
+code (§Lessons 107) and the ticket records which. Run live on WebAI (2) and Google (11 of
+16); duplicate addresses across the database went 4 → 1, and the one left is correct data.
 
-**`docs/tickets/CAL-1-send-a-calendar-invite.md`** (2026-08-13) — **SCOPED, NOT built, and gated
-on a new OAuth consent.** The live token carries four Gmail scopes and nothing else; creating an
-event needs `calendar.events`, which is a new consent screen rather than a config change. A Meet
-link needs `conferenceData` on `events.insert`, which is why the previously built-and-reverted
-`.ics` approach (`3480c37`, reverted `82eb429`) cannot be revived for this — it deliberately
-avoided the scope and so could not produce a Meet link or reach the sender's own calendar.
-It answers the operator's own objection to that revert: **cal.com is for a time NOT yet agreed;
-a direct invite is for one that HAS been**, usually named by them in the thread. Two traps
-recorded: `sendUpdates=all` means GOOGLE mails it, so it bypasses `gmail_send` and the daily
-limit, company cap and cooldown never see it (§Lessons 77's shape); and cancel/reschedule must
-ship WITH send. The agent check was re-run — its allowlist is two tools and `Read`/`Bash` are
-denied, so the scope widens a STOLEN token, not the agent.
+**`docs/tickets/CAL-1-send-a-calendar-invite.md`** — **BUILT 2026-08-14**, phases 1-3. See
+§Sending a calendar invite. Blocked on ONE operator action: `applypilot network
+--gmail-connect --with-calendar`, a Google consent screen. Phase 4 (read back an accepted
+RSVP) is not built and is only worth it if 1-3 get used.
 
 **`docs/tickets/CO-1-one-employer-many-roles.md`** (2026-08-11) — **the band is BUILT**; the
 contact-keying half is not. Asked for as "bundle the cards for two jobs at one company", and the
@@ -3108,7 +3373,7 @@ What is actually open now, ordered by leverage:
    `test_sql_lives_only_in_the_data_layer` names the remainder in an allowlist, so the list can
    only shrink and no NEW module can join it. Deliberately deferred; see ARCH-4's ticket.
 
-5. **`web_dashboard.py` is 4,095 lines** (and `dashboard.js` is 4,154), all Python, zero SQL. ~430 lines are pipeline
+5. **`web_dashboard.py` is 4,907 lines** (and `dashboard.js` is 5,275), all Python, zero SQL. ~430 lines are pipeline
    orchestration (`run_dashboard_prepare/apply/fill_one/restart/continue`) that are not HTTP
    concerns. Extracting them is the natural companion to debt item 1.
 
@@ -3131,17 +3396,18 @@ What is actually open now, ordered by leverage:
    the documented `identity_id` freeze **does not exist** — `domain/space.py:240` freezes
    `("id", "shape")` only, so a Space with 133 sent emails is repointable today with no error.
 
-10. **`context` is 90 commits ahead of `main`, pushed, and the working tree is CLEAN**
-    (2026-08-13, `2eae04d`). The 2026-08-11/13 run added the sheet Space (SHEET-1/1b/2), the
-    ghost state, edit-in-place (EDIT-1), the LinkedIn ladder removal, the jobs-table render
-    fixes, the HIST-1 spec, the multi-address identity fix, thread-scoped replies and parallel
-    apply — each with its own tests and mutations.
+10. **`context` is 105 commits ahead of `main`, pushed, and the working tree is CLEAN**
+    (2026-08-14, `20e054b`). The 2026-08-13/14 run added CO-2 and the contact deduplication, the
+    phone CALL channel and the ordered sequence, CAL-1's calendar invites, the Gmail auto-fetch
+    and full-body read, the "✓ I emailed them" marker, and the conversation-transcript fix — each
+    with its own tests and mutations.
     Merging to `main` is still deliberately deferred, and checking out `main` gets you a build
-    without Spaces, the sheet import, the deck fix, the Oracle fix, any of the UX work or any
-    outreach context.
-    **The `~/.applypilot/` database is not in git either** — latest backup
-    `applypilot-20260812-pre-direction-fix.db`, taken with the sqlite backup API because the WAL
-    routinely holds more than the main file (4.1 MB against 1.8 MB once).
+    without Spaces, the sheet import, the deck fix, any of the UX work, any outreach context, or
+    anything in this paragraph.
+    **The `~/.applypilot/` database is not in git either** — and it now has TWO pre-migrate
+    backups from the CO-2 runs (`applypilot-20260814-163948-pre-migrate.db`,
+    `applypilot-20260814-171317-pre-migrate.db`), taken with the sqlite backup API because the
+    WAL routinely holds more than the main file.
 
 6. ~~**No per-company outreach cap.**~~ **CLOSED 2026-08-03** (`OUTREACH_COMPANY_CAP`, default
    8). Kept for the number: six companies were already OVER the cap the moment it shipped, three
@@ -3292,15 +3558,24 @@ change still needs the `pip install` above — but that copy gives the file a ne
   nothing rewrites a PDF in place.
 - Working tree was previously at **`b9163ac`** — deck tracking live + the SMS channel,
   merged and pushed. Tags: `stable-arch2/3/5/6` · `stable-e2e-20260730` · `stable-crm-20260731`.
-- **Check `git log --oneline -1` before believing anything about this repo.** Found on
-  2026-08-02 checked out on `crm-phase-1` (an ancestor of `main`, nothing unique on it) with
-  ~50 of main's files showing as *staged* — they only look staged because HEAD is an older
-  commit. Nothing was lost; `git checkout main` fixed it, and the tree already matched.
-  Alongside it were four **`" 2"`-suffixed duplicate files** (`web_dashboard 2.py`,
-  `service 2.py`, `dashboard 2.css`, `test_repo_jobs 2.py`) — macOS/iCloud sync-conflict copies
-  dated two days stale, containing none of the recent work. They **fail two tests**: the
-  SQL-boundary check counts them as new SQL-executing modules, and the duplicate test file runs
-  twice. Delete them; verify with `git log` and a clean `pytest` before diagnosing anything.
+- **iCloud will fight you, and it is the single biggest time sink in this repo.** The project
+  lives on the Desktop, which macOS syncs, and rapid file rewrites — a mutation harness
+  reinstalling between every mutation — produce `" N"`-suffixed duplicates. On 2026-08-14 it
+  created **38 `applypilot` binaries in `.venv/bin`** with the real one gone, resurrected a
+  DELETED test file, and restored a stale `migrate 2.py` twice. Symptoms: the `applypilot`
+  command vanishes, the suite goes from 85s to a five-minute timeout, and
+  `test_sql_lives_only_in_the_data_layer` fails on a module nobody wrote. Recovery:
+
+      find . -name "* [0-9]*" -not -path "./.git/*"     # look before deleting
+      find .venv -maxdepth 4 -name "applypilot [0-9]*" -exec rm -rf {} +
+      .venv/bin/python -m pip install ".[gmail]" --quiet
+      .venv/bin/python -c "import applypilot; print(applypilot.__version__)"
+
+  **Check whether a resurrected file is the STALE copy before deleting it** — twice it was, once
+  the live file was the newer one, and `git checkout` on a file with uncommitted work loses it
+  (that happened to `store.py` and cost a re-write of `known_at_company`). The real fix is
+  moving the repo and `.venv` out of a synced folder.
+- **Check `git log --oneline -1` before believing anything about this repo.**
 - **A tag restores CODE only.** `~/.applypilot/` — 16 jobs, 64 contacts, 34 sent emails, 54
   stored messages, 899 connections — is not in git and needs its own backup
   (`~/.applypilot/backups/`). Nothing does this automatically. Latest:

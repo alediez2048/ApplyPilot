@@ -1429,9 +1429,19 @@ refuses it and leaves it for a human. Compared against the newest INBOUND only: 
 messages do not invalidate an answer we wrote, and the send path appends one itself.
 
 **Ran live.** 33 scheduled follow-ups fired on 2026-08-17 across Acrisure, Zapier, Expedia,
-Sentilink, SpaceX, Okta, Texas Children's and Miro — all sent, none stuck. **They all went in the
-same poll**, which is 5 emails to one employer inside a minute; that is the unit the per-company
-cap exists to notice, and staggering is deliberately NOT built. Decide it before the next batch.
+Sentilink, SpaceX, Okta, Texas Children's and Miro — all sent, none stuck.
+
+**ONE EMPLOYER PER POLL** (`_PER_COMPANY_PER_POLL`, 1). That first batch went out in a single
+pass, giving **Acrisure 5 emails inside two seconds** and Texas Children's 5 in three. Neither
+existing guard could see it — the daily limit is global, the cooldown is per ADDRESS, and both
+are `0` on this machine — and the employer is the unit the recipient experiences: five people
+comparing notes see five emails, and identical timestamps are what makes them machine-sent.
+
+Throttled at the CLAIM rather than with a sleep, which is what makes it safe: an unclaimed
+promise is still a promise, so the rest wait for the next pass and the spacing IS the poller's
+five-minute cadence — no timer, no blocked thread. A contact with no employer is keyed on its own
+id rather than bucketed with every other blank, or one unresolved company would throttle
+unrelated people. Replayed against that batch: 5 passes, and Acrisure's five span 20 minutes.
 
 ## The drafter reads the conversation, not a preview (2026-08-17)
 
@@ -3031,6 +3041,28 @@ company `"Jobs"` — the same substring bug class, inside the function written t
     not connected", a red herring I had manufactured. **Reproduce with the test's own fixtures
     before believing the error you get by hand.**
 
+122. **I reported 33 and it was 261.** The empty message bodies were noticed on the day a
+    scheduled batch fired, so that batch's count became the number in the commit message and in
+    this file. Counting the CONDITION rather than the incident found every outbound row the
+    poller had ever written — 261, going back weeks, because it records our own messages with
+    `snippet: ""` and nothing filled them in until 2026-08-17. **An incident tells you a bug
+    exists; it does not tell you its size**, and the number that reaches the doc should come
+    from a query, not from the thing that made you look.
+
+123. **Validate an inference BEFORE writing 168 rows, not after.** Recovering a follow-up's text
+    meant matching a `messages` row to the `touches` row that sent it by MINUTE, because
+    `touches` has no message id (§Lessons 77). That is a guess, so it was measured first: max
+    **1.3 seconds** apart, mean 0.7, and zero rows matching two touches. The repair was worth
+    doing because the number came back that tight — and if it had come back at 45 seconds the
+    honest answer would have been to leave the holes.
+
+124. **A decoy that the buggy code would also get right is not a decoy.** The minute-match test
+    was mutation-proofed twice and failed twice. One touch on the contact: deleting the minute
+    constraint still returns the right body. Two touches: the subquery's `ORDER BY seq LIMIT 1`
+    picks the correct row anyway. It only bites once the WRONG row is the one a
+    constraint-free query would choose — so the decoy has to be seq 1. Ask what the mutated code
+    would return, not merely whether the fixture has more than one row.
+
 Shipped in one session, in this order: **CRM-3a → CRM-1 → CRM-2 → CRM-3b → CRM-4a.**
 Tickets in `docs/tickets/CRM-*.md`; two of them had instructions that were factually wrong
 before being revised (they told you to write `followup_status`, removed by ARCH-3).
@@ -3376,15 +3408,19 @@ phone number**, so the text+call stages cannot run for the ~168 people who are p
 silence. Apollo will not release a direct dial to a local tool (§Lessons 4), so this is
 copy-by-hand from its UI or a different provider — worth deciding before building more there.
 
-**OPEN AND UNDECIDED — scheduled sends do not stagger.** 33 fired in one poll on 2026-08-17, five
-of them to Expedia inside a minute. That is the unit the per-company cap exists to notice, and
-the cap is currently `0` on this machine. It matches what bulk Send already does, which is why it
-was not changed unilaterally, but the first batch is now real traffic rather than a hypothetical.
+~~**OPEN — scheduled sends do not stagger.**~~ **CLOSED 2026-08-17.** One promise per EMPLOYER
+per poll, throttled at the CLAIM so an unclaimed promise is still a promise and the spacing is
+the poller's own cadence. Kept for the number: the first real batch gave **Acrisure 5 emails
+inside two seconds**, and neither existing guard could see it — the daily limit is global, the
+cooldown is per address, and both are `0` on this machine. Replayed against that batch, the five
+now span 20 minutes.
 
-**Also open: the 33 follow-ups sent on 2026-08-17 stored EMPTY message bodies.** New sends record
-their text; those rows are still blank and their words live only in `touches`. Backfillable by
-matching on minute, which is the same fragile join §Lessons 77 records — a message id on
-`touches` is what would close it properly.
+~~**Also open: EMPTY message bodies on our own sent mail.**~~ **CLOSED 2026-08-17** —
+`doctor --bodies` / `--fix-bodies`. It was **261 rows, not the 33** first reported: the poller
+records every message it sees with `snippet: ""`, ours included, so every outbound row predating
+the send-path fix is a hole. 254 recovered (86 by exact message id, 168 from the touch that sent
+them, matched by minute — validated at max 1.3s apart, zero ambiguous). The 7 left were sent from
+Gmail directly, which is also why `fetch_thread_text` now reads BOTH directions.
 
 **Open, and the real ceiling:** nothing could tell you what works. 131 emails, 7 replies, and no
 way to ask whether the personalised ones did better — so every improvement to the copy was
@@ -3790,6 +3826,9 @@ change still needs the `pip install` above — but that copy gives the file a ne
   read affirmatively; open the probe URL in a real browser (curl runs no JavaScript) and allow
   up to a minute before calling it a failure.
 - **`applypilot ats`** is the fastest way to check a résumé is readable and see keyword gaps.
+- **`applypilot doctor --bodies`** audits our own sent messages stored with no text, and
+  `--fix-bodies` restores them from the touch or first email that sent them. Reports before it
+  writes, only ever fills a row that is still EMPTY, and is safe to re-run.
 - **All 28 existing résumé PDFs carry an em dash** from the old renderer and need a re-render;
   nothing rewrites a PDF in place.
 - Working tree was previously at **`b9163ac`** — deck tracking live + the SMS channel,

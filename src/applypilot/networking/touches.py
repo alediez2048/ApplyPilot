@@ -354,8 +354,41 @@ def cancel_schedule(contact_id: str, channel: str,
     return cur.rowcount >= 1
 
 
+#: How many promises to ONE employer may fire in a single poll. The unit is the employer because
+#: that is the unit the RECIPIENT experiences — five people at one company comparing notes see
+#: five emails, and what makes them look machine-sent is the timestamps being identical.
+#:
+#: Measured on the first real batch (2026-08-17): 33 sends, and **Acrisure got 5 in two seconds**,
+#: Texas Children's 5 in three, Miro 3 in one. Both existing guards were blind to it — the daily
+#: limit is global and the cooldown is per address — and both are set to 0 on this machine anyway.
+#:
+#: The spacing is the POLLER'S OWN CADENCE rather than a sleep: hold the rest back and they are
+#: claimed on the next pass, so five at one company spread across ~20 minutes with no timer, no
+#: blocked thread, and no new failure mode. Anything not claimed is not cleared either, so a
+#: held-back promise is still exactly a promise.
+_PER_COMPANY_PER_POLL = 1
+
+
+def _one_per_company(rows: list[dict], cap: int) -> list[dict]:
+    """Keep at most `cap` rows per employer, earliest first. Rows arrive ordered by due time.
+
+    An empty company is NOT collapsed into one bucket: a target card or an unresolved employer
+    would otherwise throttle every unrelated row down to one per poll. Those are keyed on the
+    contact instead, which makes them their own bucket and preserves the old behaviour exactly.
+    """
+    seen: dict[str, int] = {}
+    out = []
+    for r in rows:
+        key = (r.get("company") or "").strip().lower() or f"~{r.get('contact_id')}"
+        if seen.get(key, 0) >= cap:
+            continue
+        seen[key] = seen.get(key, 0) + 1
+        out.append(r)
+    return out
+
+
 def claim_due_scheduled(now_iso: str, lapsed_before: str,
-                        limit: int = 50,
+                        limit: int = 50, per_company: int = _PER_COMPANY_PER_POLL,
                         conn: sqlite3.Connection | None = None) -> list[dict]:
     """Take every promise that has come due, CLEARING it in the same statement.
 
@@ -379,13 +412,16 @@ def claim_due_scheduled(now_iso: str, lapsed_before: str,
     if conn is None:
         conn = get_connection()
     init_touches(conn)
+    from applypilot.networking.store import init_contacts
+    init_contacts(conn)
     rows = conn.execute(
-        "SELECT contact_id, channel, scheduled_at FROM touches "
-        "WHERE status = 'drafted' AND COALESCE(scheduled_at, '') != '' "
-        "AND scheduled_at <= ? AND scheduled_at > ? "
-        "ORDER BY scheduled_at LIMIT ?",
+        "SELECT t.contact_id, t.channel, t.scheduled_at, COALESCE(c.company, '') AS company "
+        "FROM touches t LEFT JOIN contacts c ON c.id = t.contact_id "
+        "WHERE t.status = 'drafted' AND COALESCE(t.scheduled_at, '') != '' "
+        "AND t.scheduled_at <= ? AND t.scheduled_at > ? "
+        "ORDER BY t.scheduled_at LIMIT ?",
         (now_iso, lapsed_before, limit)).fetchall()
-    claimed = [dict(zip(r.keys(), r)) for r in rows]
+    claimed = _one_per_company([dict(zip(r.keys(), r)) for r in rows], per_company)
     for row in claimed:
         conn.execute("UPDATE touches SET scheduled_at = NULL, updated_at = ? "
                      "WHERE contact_id = ? AND channel = ? AND scheduled_at = ?",

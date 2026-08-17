@@ -282,3 +282,106 @@ def test_the_RFC_MESSAGE_ID_is_preserved_the_same_way_a_snippet_is(tmp_path, mon
     # ...and a caller that DOES know it can still correct one.
     _m.upsert_messages([row("<corrected@header>")], conn)
     assert _m.thread_for_contact("c1", conn)[0]["rfc_message_id"] == "<corrected@header>"
+
+
+# ── restoring our own sent text ─────────────────────────────────────────────
+
+def _restore_db(tmp_path, monkeypatch):
+    import applypilot.database as database
+    from applypilot.networking import messages as _m, store, touches
+    path = tmp_path / "restore.db"
+    monkeypatch.setattr(database, "DB_PATH", path)
+    database.close_connection(path)
+    database.init_db(path)
+    conn = database.get_connection(path)
+    store.init_contacts(conn)
+    _m.init_messages(conn)
+    touches.init_touches(conn)
+    return conn
+
+
+def _empty_out(conn, mid, cid, at):
+    from applypilot.networking import messages as _m
+    _m.upsert_messages([{"message_id": mid, "thread_id": "t1", "contact_id": cid,
+                         "job_url": "http://j/1", "direction": "out", "from_addr": "me@x.test",
+                         "from_name": "", "to_addrs": [], "cc_addrs": [], "subject": "s",
+                         "sent_at": at, "rfc_message_id": "", "snippet": ""}], conn)
+
+
+def test_the_first_cold_email_is_recovered_by_EXACT_message_id(tmp_path, monkeypatch):
+    """`contacts.sent_message_id` is Gmail's own id, so this match cannot be wrong."""
+    from applypilot.networking import messages as _m, store
+    conn = _restore_db(tmp_path, monkeypatch)
+    store.upsert_contact({"id": "c1", "job_url": "http://j/1", "full_name": "Dana",
+                          "sent_message_id": "m1", "outreach_message": "Hi Dana, I applied."}, conn)
+    _empty_out(conn, "m1", "c1", "2026-08-01T09:00:00+00:00")
+    got = _m.recoverable_outbound_bodies(conn)
+    assert len(got) == 1 and got[0]["body"] == "Hi Dana, I applied."
+    assert "exact message id" in got[0]["how"]
+
+
+def test_a_follow_up_is_recovered_from_the_touch_that_sent_it(tmp_path, monkeypatch):
+    """Matched by MINUTE, because `touches` has no message id (§Lessons 77). Verified on live
+    data to be unambiguous: max 1.3 seconds apart, zero rows matching two touches."""
+    from applypilot.networking import messages as _m, store, touches
+    conn = _restore_db(tmp_path, monkeypatch)
+    store.upsert_contact({"id": "c1", "job_url": "http://j/1", "full_name": "Dana"}, conn)
+    # An OLDER touch first, so it is seq 1. Both halves of that matter: with only one touch the
+    # minute constraint can be deleted and the right body still comes back, and with the decoy
+    # second the subquery's `ORDER BY seq LIMIT 1` picks the correct row anyway. The decoy has to
+    # be the one a constraint-free query would choose, or the test proves nothing.
+    touches.set_draft("c1", "email", "s", "AN EARLIER, UNRELATED FOLLOW-UP.", conn)
+    touches.record_sent("c1", "email", conn=conn)
+    conn.execute("UPDATE touches SET sent_at = '2026-07-01T09:00:00+00:00' WHERE seq = 1")
+    conn.commit()
+    touches.set_draft("c1", "email", "s", "Just checking in on this.", conn)
+    touches.record_sent("c1", "email", conn=conn)
+    at = conn.execute("SELECT sent_at FROM touches WHERE contact_id='c1' AND seq=2").fetchone()[0]
+    _empty_out(conn, "m2", "c1", at)
+    got = _m.recoverable_outbound_bodies(conn)
+    assert len(got) == 1, got
+    assert got[0]["body"] == "Just checking in on this.", "it matched the wrong touch"
+    assert "matched by minute" in got[0]["how"]
+
+
+def test_a_message_we_never_held_is_reported_as_UNRECOVERABLE(tmp_path, monkeypatch):
+    """Sent from Gmail directly. Saying so is the point — inventing text for it would be worse
+    than the hole."""
+    from applypilot.networking import messages as _m, store
+    conn = _restore_db(tmp_path, monkeypatch)
+    store.upsert_contact({"id": "c1", "job_url": "http://j/1", "full_name": "Dana"}, conn)
+    _empty_out(conn, "m3", "c1", "2026-08-05T09:00:00+00:00")
+    assert _m.recoverable_outbound_bodies(conn) == []
+
+
+def test_restoring_NEVER_overwrites_text_that_is_already_there(tmp_path, monkeypatch):
+    """The repair runs long after the rows were written, so anything since fetched or pasted is
+    better than what is being restored. A repair that can destroy real text is not a repair."""
+    from applypilot.networking import messages as _m, store
+    conn = _restore_db(tmp_path, monkeypatch)
+    store.upsert_contact({"id": "c1", "job_url": "http://j/1", "full_name": "Dana",
+                          "sent_message_id": "m1", "outreach_message": "SHORT stored copy."}, conn)
+    _empty_out(conn, "m1", "c1", "2026-08-01T09:00:00+00:00")
+    rows = _m.recoverable_outbound_bodies(conn)
+    # Somebody fetched the real body in between.
+    _m.upsert_messages([{"message_id": "m1", "thread_id": "t1", "contact_id": "c1",
+                         "job_url": "http://j/1", "direction": "out", "from_addr": "me@x.test",
+                         "from_name": "", "to_addrs": [], "cc_addrs": [], "subject": "s",
+                         "sent_at": "2026-08-01T09:00:00+00:00", "rfc_message_id": "",
+                         "snippet": "THE REAL FULL BODY, fetched from Gmail."}], conn, full=True)
+    assert _m.restore_outbound_bodies(rows, conn) == 0, "it overwrote a row that had text"
+    assert _m.thread_for_contact("c1", conn)[0]["snippet"].startswith("THE REAL FULL BODY")
+
+
+def test_restoring_fills_the_empty_row_and_is_idempotent(tmp_path, monkeypatch):
+    from applypilot.networking import messages as _m, store
+    conn = _restore_db(tmp_path, monkeypatch)
+    store.upsert_contact({"id": "c1", "job_url": "http://j/1", "full_name": "Dana",
+                          "sent_message_id": "m1", "outreach_message": "Hi Dana, I applied."}, conn)
+    _empty_out(conn, "m1", "c1", "2026-08-01T09:00:00+00:00")
+    rows = _m.recoverable_outbound_bodies(conn)
+    assert _m.restore_outbound_bodies(rows, conn) == 1
+    assert _m.thread_for_contact("c1", conn)[0]["snippet"] == "Hi Dana, I applied."
+    # Re-running finds nothing left to do, because the row is no longer empty.
+    assert _m.recoverable_outbound_bodies(conn) == []
+    assert _m.restore_outbound_bodies(rows, conn) == 0

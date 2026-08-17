@@ -340,3 +340,83 @@ def _row(r) -> dict:
         except (ValueError, TypeError):
             d[key] = []
     return d
+
+
+def recoverable_outbound_bodies(conn: sqlite3.Connection | None = None) -> list[dict]:
+    """Our own sent messages stored with NO text, and where the text still is.
+
+    The poller writes a row for every message it sees, including ours, with `snippet: ""` — right
+    for it, since the automatic path reads no text at all. But nothing else filled them in until
+    2026-08-17, so the conversation carries a hole wherever we spoke: the card renders
+    "Sent from ApplyPilot." and the drafter's transcript is missing our own half.
+
+    Measured when this was written: **261 empty outbound rows, 254 of them recoverable** — 168
+    from the `touches` row that sent them and 86 from `contacts.outreach_message`, with ZERO
+    ambiguous. The remaining 7 were sent from Gmail directly and were never ours to hold.
+
+    Two sources, in priority order, and the FIRST-EMAIL one is exact:
+
+      * `contacts.sent_message_id` identifies the first cold email by Gmail's own id, so that
+        match cannot be wrong.
+      * A touch is matched by MINUTE, because `_TOUCH_COLUMNS` has no message id (§Lessons 77).
+        Deterministic, and verified to have no collisions on the live data — but it is an
+        inference, so it is reported as one and applied second.
+
+    Returns rows rather than writing, so the audit and the repair read the same list and the
+    operator sees the count before anything changes.
+    """
+    if conn is None:
+        conn = get_connection()
+    init_messages(conn)
+    from applypilot.networking.store import init_contacts
+    init_contacts(conn)
+    out: list[dict] = []
+    for r in conn.execute("""
+        SELECT m.message_id, m.contact_id, m.sent_at, ct.full_name, ct.sent_message_id,
+               ct.outreach_message,
+               (SELECT t.body FROM touches t
+                 WHERE t.contact_id = m.contact_id
+                   AND substr(COALESCE(t.sent_at,''),1,16) = substr(COALESCE(m.sent_at,''),1,16)
+                   AND TRIM(COALESCE(t.body,'')) != ''
+                 ORDER BY t.seq LIMIT 1) AS touch_body
+          FROM messages m LEFT JOIN contacts ct ON ct.id = m.contact_id
+         WHERE m.direction = 'out' AND TRIM(COALESCE(m.snippet,'')) = ''
+         ORDER BY m.sent_at"""):
+        row = dict(zip(r.keys(), r))
+        first = (row.get("outreach_message") or "").strip()
+        touch = (row.get("touch_body") or "").strip()
+        if row.get("sent_message_id") and row["message_id"] == row["sent_message_id"] and first:
+            body, how = first, "first email (exact message id)"
+        elif touch:
+            body, how = touch, "follow-up touch (matched by minute)"
+        else:
+            continue
+        out.append({"message_id": row["message_id"], "contact_id": row["contact_id"],
+                    "full_name": row.get("full_name") or "", "sent_at": row.get("sent_at") or "",
+                    "body": body, "how": how})
+    return out
+
+
+def restore_outbound_bodies(rows: list[dict],
+                            conn: sqlite3.Connection | None = None) -> int:
+    """Write recovered text back. Only ever fills a row that is still EMPTY.
+
+    The `TRIM(...) = ''` guard is not belt-and-braces: this runs long after the rows were
+    written, and anything that has since been fetched or pasted is better than what is being
+    restored here. A repair that can overwrite real text is not a repair.
+    """
+    if conn is None:
+        conn = get_connection()
+    init_messages(conn)
+    n = 0
+    for row in rows:
+        body = (row.get("body") or "").strip()[:PASTED_MAX]
+        if not body:
+            continue
+        cur = conn.execute(
+            "UPDATE messages SET snippet = ? WHERE message_id = ? AND contact_id = ? "
+            "AND TRIM(COALESCE(snippet,'')) = ''",
+            (body, row["message_id"], row["contact_id"]))
+        n += cur.rowcount
+    conn.commit()
+    return n

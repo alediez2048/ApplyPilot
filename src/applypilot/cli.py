@@ -881,6 +881,66 @@ def _audit_employers(apply_fix: bool = False) -> None:
                   "re-run Find contacts on any row marked [red]![/red].")
 
 
+def _audit_bodies(apply_fix: bool = False) -> None:
+    """Our own sent messages that were stored with no text at all, and where the text still is.
+
+    The five-minute poller records a row for every message in a thread, ours included, with an
+    empty snippet — correct for it, because the automatic path deliberately reads no message
+    text. Nothing filled ours in until the send paths started recording what they sent
+    (2026-08-17), so every earlier outbound row is a hole: the contact card renders the
+    placeholder "Sent from ApplyPilot." where our email should be, and the reply drafter builds
+    its transcript without our half of the conversation.
+
+    A one-off repair, like `--fix-directions`, and kept as a command for the same reason: it
+    reports before it writes, and it can be re-run safely as more rows age out of the send path.
+
+    Measured on the live database: 261 empty outbound rows, 254 recoverable, 0 ambiguous.
+    """
+    from applypilot.database import get_connection, init_db
+    from applypilot.networking import messages as _messages
+
+    init_db()
+    conn = get_connection()
+    rows = _messages.recoverable_outbound_bodies(conn)
+    empty = conn.execute(
+        "SELECT COUNT(*) FROM messages WHERE direction = 'out' "
+        "AND TRIM(COALESCE(snippet,'')) = ''").fetchone()[0]
+
+    if not empty:
+        console.print("[green]Every message we sent has its text stored.[/green]")
+        return
+    if not rows:
+        console.print(f"[yellow]{empty} of our own sent messages have no stored text[/yellow], "
+                      "and none of them can be recovered — they were sent from Gmail directly, "
+                      "so this app never held the words. Use \u2393 Fetch from Gmail on the ones "
+                      "that matter.")
+        return
+
+    by_how: dict[str, int] = {}
+    for r in rows:
+        by_how[r["how"]] = by_how.get(r["how"], 0) + 1
+    console.print(f"[bold]{empty}[/bold] of our own sent messages have no stored text; "
+                  f"[bold]{len(rows)}[/bold] can be recovered:")
+    for how, n in sorted(by_how.items(), key=lambda kv: -kv[1]):
+        console.print(f"  {n:>4}  from the {how}")
+    lost = empty - len(rows)
+    if lost:
+        console.print(f"  {lost:>4}  [dim]unrecoverable — sent from Gmail directly, never ours "
+                      f"to hold[/dim]")
+    for r in rows[:5]:
+        console.print(f"    [dim]{r['sent_at'][:10]}  {r['full_name'][:22]:<22} "
+                      f"{r['body'][:48].replace(chr(10), ' ')}...[/dim]")
+
+    if not apply_fix:
+        console.print(f"\n[dim]Re-run with --fix-bodies to restore {len(rows)} message(s). "
+                      f"Nothing is overwritten: only rows that are still empty are filled.[/dim]")
+        return
+
+    n = _messages.restore_outbound_bodies(rows, conn)
+    console.print(f"\n[green]Restored {n} message(s).[/green] "
+                  "Their text now shows on the contact card and reaches the reply drafter.")
+
+
 def _audit_directions(apply_fix: bool = False) -> None:
     """Every stored message, its `direction` against who actually sent it.
 
@@ -996,6 +1056,8 @@ def doctor(
     fix_employers: bool = typer.Option(False, "--fix-employers", help="With --employers: write the corrected names back to the jobs table."),
     directions: bool = typer.Option(False, "--directions", help="Audit whether each stored message is attributed to the right side of the conversation."),
     fix_directions: bool = typer.Option(False, "--fix-directions", help="With --directions: write the corrected directions back to the messages table."),
+    bodies: bool = typer.Option(False, "--bodies", help="Audit our own sent messages that were stored with no text."),
+    fix_bodies: bool = typer.Option(False, "--fix-bodies", help="With --bodies: restore the text from the touch or first email that sent it."),
     write_env_example: bool = typer.Option(False, "--write-env-example", help="Regenerate .env.example from the schema."),
 ) -> None:
     """Check your setup and diagnose missing requirements."""
@@ -1009,6 +1071,10 @@ def doctor(
 
     if directions:
         _audit_directions(apply_fix=fix_directions)
+        return
+
+    if bodies:
+        _audit_bodies(apply_fix=fix_bodies)
         return
 
     if write_env_example:

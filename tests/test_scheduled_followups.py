@@ -127,12 +127,17 @@ def db():
     # Only THIS file's rows. Wiping the tables would be tidier and would quietly break any other
     # test that shares the ambient database — the suite passes today in one order and there is
     # nothing enforcing that order.
-    mine = ("c1", "c2", "c3")
-    marks = ",".join("?" for _ in mine)
-    for table in ("touches", "sequences", "contacts"):
-        conn.execute(f"DELETE FROM {table} WHERE contact_id IN ({marks})"
-                     if table != "contacts" else
-                     f"DELETE FROM contacts WHERE id IN ({marks})", mine)
+    #
+    # Scoped by JOB rather than by a list of contact ids, which is what it was and which leaked:
+    # every test here files its people under `j1`, but a hardcoded ("c1","c2","c3") missed the
+    # ones the throttle tests mint (`acr0`, `pAcrisure`, …), so those survived into the next test
+    # and it counted four claims where it expected three. A cleanup keyed on the thing the tests
+    # actually share cannot fall behind the tests.
+    conn.execute("DELETE FROM touches WHERE contact_id IN "
+                 "(SELECT id FROM contacts WHERE job_url = 'j1')")
+    conn.execute("DELETE FROM sequences WHERE contact_id IN "
+                 "(SELECT id FROM contacts WHERE job_url = 'j1')")
+    conn.execute("DELETE FROM contacts WHERE job_url = 'j1'")
     conn.execute("DELETE FROM job_events WHERE job_url = 'j1'")
     conn.commit()
     store.upsert_contact({"id": "c1", "job_url": "j1", "full_name": "Dana",
@@ -590,3 +595,76 @@ def test_no_scheduling_rule_sets_display_flex_on_a_table_cell():
     for sel, _rule in re.findall(r"([^{}]+)\{([^}]*)\}", css):
         if "fu-sendat" in sel and sel.strip().rstrip().endswith("td"):
             raise AssertionError(f"{sel} sets display on a table cell")
+
+
+# ── one employer per pass ───────────────────────────────────────────────────
+
+def _person(conn, cid, company):
+    from applypilot.networking import store, touches
+    store.upsert_contact({"id": cid, "job_url": "j1", "full_name": cid, "company": company,
+                          "email": f"{cid}@x.com", "sent_message_id": "m" + cid}, conn)
+    touches.set_draft(cid, "email", "s", "body", conn)
+    touches.schedule_send(cid, "email", (_now() - timedelta(minutes=5)).isoformat(), conn)
+
+
+def test_only_ONE_promise_per_employer_is_claimed_in_a_pass(db):
+    """Five people at one company got five emails inside TWO SECONDS on the first real batch.
+    The daily limit is global and the cooldown is per address, so neither could see it — and both
+    are 0 on this machine anyway. The employer is the unit the RECIPIENT experiences."""
+    from applypilot.networking import touches
+    for i in range(5):
+        _person(db, f"acr{i}", "Acrisure")
+    now = _now()
+    got = touches.claim_due_scheduled(now.isoformat(), sendtime.lapsed_before(now, 24), conn=db)
+    assert len(got) == 1, [g["contact_id"] for g in got]
+
+
+def test_the_ones_held_back_are_NOT_cleared_and_go_on_the_next_pass(db):
+    """Throttling at the CLAIM is what makes this safe: an unclaimed promise is still a promise.
+    Clearing them would silently drop four of five sends the operator scheduled."""
+    from applypilot.networking import touches
+    for i in range(3):
+        _person(db, f"acr{i}", "Acrisure")
+    now = _now()
+    seen = []
+    for _ in range(3):
+        got = touches.claim_due_scheduled(now.isoformat(),
+                                          sendtime.lapsed_before(now, 24), conn=db)
+        assert len(got) == 1
+        seen += [g["contact_id"] for g in got]
+    assert sorted(seen) == ["acr0", "acr1", "acr2"], seen
+    assert touches.claim_due_scheduled(now.isoformat(),
+                                       sendtime.lapsed_before(now, 24), conn=db) == []
+
+
+def test_DIFFERENT_employers_still_all_go_at_once(db):
+    """The throttle is per company, not a global rate limit — spacing unrelated employers would
+    delay work for no reason, since no recipient can see across them."""
+    from applypilot.networking import touches
+    for co in ("Acrisure", "Zapier", "Expedia", "Miro"):
+        _person(db, f"p{co}", co)
+    now = _now()
+    got = touches.claim_due_scheduled(now.isoformat(), sendtime.lapsed_before(now, 24), conn=db)
+    assert len(got) == 4, [g["contact_id"] for g in got]
+
+
+def test_contacts_with_NO_employer_are_not_collapsed_into_one_bucket(db):
+    """A target card or an unresolved employer has an empty company. Bucketed together they would
+    throttle each other to one per pass despite being unrelated people."""
+    from applypilot.networking import touches
+    for i in range(3):
+        _person(db, f"solo{i}", "")
+    now = _now()
+    got = touches.claim_due_scheduled(now.isoformat(), sendtime.lapsed_before(now, 24), conn=db)
+    assert len(got) == 3, [g["contact_id"] for g in got]
+
+
+def test_the_earliest_promise_at_an_employer_goes_first(db):
+    from applypilot.networking import touches
+    for i, mins in ((0, 5), (1, 30), (2, 60)):
+        _person(db, f"acr{i}", "Acrisure")
+        touches.schedule_send(f"acr{i}", "email",
+                              (_now() - timedelta(minutes=mins)).isoformat(), db)
+    now = _now()
+    got = touches.claim_due_scheduled(now.isoformat(), sendtime.lapsed_before(now, 24), conn=db)
+    assert [g["contact_id"] for g in got] == ["acr2"], got

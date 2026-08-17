@@ -203,7 +203,10 @@ def fetch_thread_text(contact: dict, conn=None, thread_id: str = "") -> dict:
     on every poll forever. That distinction is worth having even though the grant is identical —
     it is the difference between a tool that can read your mail and a tool that is reading it.
 
-    Inbound messages only. Our own sent text is already ours.
+    BOTH directions. This said "inbound only — our own sent text is already ours", which holds
+    for anything sent through ApplyPilot and not for an email typed in Gmail; a real thread has
+    both, and the 7 rows left textless after every other source was exhausted were all the second
+    kind.
 
     `thread_id` names WHICH conversation, and a caller with more than one open must pass it.
     Falling back to `contacts.thread_id` is right for the button (one contact, one obvious
@@ -239,12 +242,23 @@ def fetch_thread_text(contact: dict, conn=None, thread_id: str = "") -> dict:
         # wrote — the failure `strip_quoted_tail` exists for, at ten times the size.
         text = cv.strip_footer(cv.strip_quoted_tail(gmail_read.message_body(m.get("id"))
                                                     or m.get("snippet")))
-        if not text or cv.addr(m.get("from")) in cv.me_set(me):
+        if not text:
             continue
+        # OURS IS FETCHED TOO, and the comment this replaces said why it should not be: "our own
+        # sent text is already ours". That is true of anything sent THROUGH ApplyPilot and false
+        # of anything typed in Gmail — and a thread holds both. Measured after restoring every
+        # body recoverable from `touches` and `contacts`: 7 outbound rows were left with no text
+        # anywhere, each one an email the operator wrote from Gmail, and the button whose whole
+        # job is "read this conversation properly" skipped exactly those.
+        #
+        # There is no privacy question here — it is our own mail — and no new scope: this is the
+        # same already-granted read, on the same explicit click, for the same one conversation.
+        ours = cv.addr(m.get("from")) in cv.me_set(me)
         rows.append({"message_id": m.get("id"), "thread_id": thread_id,
                      "contact_id": contact["id"], "job_url": contact.get("job_url"),
-                     "direction": "in", "from_addr": cv.addr(m.get("from")),
-                     "from_name": cv.display_name(m.get("from")),
+                     "direction": "out" if ours else "in",
+                     "from_addr": cv.addr(m.get("from")),
+                     "from_name": "" if ours else cv.display_name(m.get("from")),
                      "to_addrs": cv.split_parts(m.get("to")),
                      "cc_addrs": cv.split_parts(m.get("cc")),
                      "subject": m.get("subject") or "", "sent_at": _iso(m.get("internalDate", "")),

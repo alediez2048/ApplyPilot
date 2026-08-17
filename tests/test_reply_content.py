@@ -179,9 +179,20 @@ def test_fetching_refuses_without_the_scope_and_says_why(db, monkeypatch):
     assert res["stored"] == 0
 
 
-def test_fetching_never_stores_our_own_messages_as_theirs(db, monkeypatch):
-    """Our sent text is already ours, and mislabelling it inbound would make the conversation
-    claim they wrote something we did."""
+def test_fetching_never_stores_our_own_messages_as_THEIRS(db, monkeypatch):
+    """The invariant that matters: mislabelling our own mail inbound would make the conversation
+    claim they wrote something we did — and `direction` decides who owes whom a reply, whether a
+    ladder halts on a "reply", and who a reply is addressed to (§Lessons 102).
+
+    This asserted that our own messages were SKIPPED entirely, on the reasoning "our sent text is
+    already ours". True of anything sent through ApplyPilot and false of an email typed in Gmail,
+    and a real thread holds both: after every other source was exhausted, 7 outbound rows were
+    left with no text anywhere, all of them the second kind — and this path, whose whole job is
+    reading a conversation properly, was skipping exactly those.
+
+    Rewritten around the invariant rather than the old behaviour, because a test pinning the old
+    decision holds the bug in place more firmly than the code does (§Lessons 85, 99).
+    """
     from applypilot.networking import gmail_oauth, gmail_read, replies
 
     ours = dict(_thread_msg("what I wrote to them"), **{"from": ME})
@@ -190,8 +201,12 @@ def test_fetching_never_stores_our_own_messages_as_theirs(db, monkeypatch):
     monkeypatch.setattr(gmail_oauth, "connected_email", lambda: ME)
 
     res = replies.fetch_thread_text({"id": "c1", "job_url": "http://j/1", "thread_id": "t1"}, db)
-    assert res["ok"] is False and res["stored"] == 0
-    assert msg_store.thread_for_contact("c1", db) == []
+    assert res["ok"] is True and res["stored"] == 1
+    rows = msg_store.thread_for_contact("c1", db)
+    assert len(rows) == 1
+    assert rows[0]["direction"] == "out", "our own message was filed as theirs"
+    assert rows[0]["snippet"] == "what I wrote to them"
+    assert not (rows[0]["from_name"] or ""), "a display name on our own message reads as a sender"
 
 
 def test_a_later_poll_does_not_erase_what_was_fetched(db, monkeypatch):

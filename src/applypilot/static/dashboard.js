@@ -4924,7 +4924,9 @@ function fuBulkBar(j, f, byId) {
       <button class="send" onclick="fuBulk(${key}, 'schedule', this)">Schedule</button>
       <div class="fu-sendat-note">Leave this dashboard running — scheduled sends fire from it,
         within about ${Math.round(POLL_EVERY_S / 60)} minutes of the time you pick. If it is
-        closed, they go when you next open it, or read <em>missed</em> after ${SCHED_GRACE_H}h.</div>
+        closed, they go when you next open it, or read <em>missed</em> after ${SCHED_GRACE_H}h.
+        <strong>One per employer per pass</strong>, so several people at the same company are
+        spaced out rather than arriving in the same second.</div>
     </div>` : '';
 
   // Missed gets its own count. Folded into "scheduled" it would read as work in hand when it is

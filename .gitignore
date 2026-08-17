@@ -54,3 +54,16 @@ Thumbs.db
 # ARCH-2: dev-only ESLint toolchain for src/applypilot/static (never shipped)
 node_modules/
 package-lock.json
+
+# iCloud sync conflicts. The repo lives on the Desktop, which macOS syncs, and rapid rewrites
+# (a mutation harness reinstalling between mutations) make it drop `<name> 2.py` copies beside
+# the real file. Left unignored, `git add -A` commits them: `dashboard 2.js` — a three-day-old
+# copy missing every change in the commit that carried it — went in exactly that way.
+# Ignoring them is the only guard that works, because the duplicate appears between the edit
+# and the commit and looks like an ordinary untracked file (CLAUDE.md §Lessons 114).
+* [0-9].py
+* [0-9].js
+* [0-9].css
+* [0-9].md
+* [0-9].json
+* [0-9][0-9].py

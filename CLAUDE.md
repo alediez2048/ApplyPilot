@@ -12,11 +12,11 @@ campaign happens to be a job search** — see `docs/crm-prd.md` for where that g
 - **Packaging:** Hatchling, `src/` layout, single package `applypilot`
 - **Entry point:** `applypilot = "applypilot.cli:app"` (Typer CLI)
 - **License:** AGPL-3.0-only · **Version:** 0.4.0 (`pyproject.toml`)
-- **Tests:** 2687 passing (`tests/`, 138 files) · ruff clean (line-length 120, py311) · ESLint clean
-- **Schema version:** 4 (`applypilot migrate --status`) · **Settings:** 54 declared in `settings.py`
-- **Branch:** everything current lives on `context`, **105 commits ahead of `main`**, pushed to
-  `origin/context`, working tree CLEAN as of 2026-08-14 (`20e054b`, §Dev workflow). `main` has
-  none of it. Check `git log --oneline -1` before believing anything here (§Dev workflow).
+- **Tests:** 2804 passing (`tests/`, 142 files) · ruff clean (line-length 120, py311) · ESLint clean
+- **Schema version:** 4 (`applypilot migrate --status`) · **Settings:** 55 declared in `settings.py`
+- **Branch:** everything current lives on `context`, **111 commits ahead of `main`**, working tree
+  clean as of 2026-08-17 (§Dev workflow). `main` has none of it. Check `git log --oneline -1`
+  before believing anything here (§Dev workflow).
 
 ## Quick orientation
 
@@ -227,7 +227,8 @@ re-reading a thread you have already logged is a no-op rather than a duplicate.
 |-------|-------|---------|
 | `jobs` (37 cols) | `database.py` | The 6-stage state machine. `_ALL_COLUMNS` is its source of truth. Holds **targets too** — a targets row is a `jobs` row keyed `target:<space>:<slug>` (SPACE-1a D1). |
 | `contacts` (42 cols) | `networking/store.py` | People per job + outreach + verification. `test_a_migrated_database_has_no_ladder_columns_left` locks the COUNT, so a new column has to be argued for in that test. |
-| `touches` | `networking/touches.py` | One follow-up touch per row, ANY channel. `seq` is per (contact, channel). |
+| `touches` | `networking/touches.py` | One follow-up touch per row, ANY channel. `seq` is per (contact, channel). **`scheduled_at`** is a promise to send the pending draft later — a property of the row that already holds that draft, never a second table that could disagree about which text goes out. |
+| `reply_queue` | `networking/reply_queue.py` | A REPLY promised for later, one row per (contact, thread). Separate from `touches.scheduled_at` because a reply is not a ladder step and has no row there — and because it must carry the Cc the operator approved and the inbound message it answers. See §Scheduling a send. |
 | `sequences` | `networking/touches.py` | Terminal state per (contact, channel): `stopped` / `replied`. |
 | `connections` | `networking/connections.py` | Imported LinkedIn CSV. |
 | `messages` | `networking/messages.py` | **CRM-4 conversation memory.** Headers plus ONE content column: `snippet`, capped at the WRITE (`SNIPPET_MAX` 200 auto / `PASTED_MAX` 2000 pasted) and **decoded** there too, since Gmail returns it HTML-escaped (§Lessons 90). *This row said "no body/snippet column exists, and a test asserts it" for two sessions — CRM-4b added one and the index was never corrected.* Keyed by `(message_id, contact_id)`, so re-syncing is a no-op. `rfc_message_id` is what lets a reply chain `References` across the whole thread. |
@@ -240,20 +241,24 @@ re-reading a thread you have already logged is a no-op rather than a duplicate.
 | `identities` | `repo/spaces.py` | One row per SENDER (mailbox, from-name, deck, limits). Created by 003, **read by nothing yet** — ID-1. |
 | `schema_migrations` | `migrations/` | Version, status, `claimed_at` lease. See §Lessons on the 300s lease. |
 
-Live counts (**2026-08-14**, a snapshot — these move within minutes of real use, so treat them
+Live counts (**2026-08-17**, a snapshot — these move within minutes of real use, so treat them
 as orders of magnitude and re-measure before reasoning from one): jobs **94**, contacts **368**
 (44 columns), of whom **175 emailed** and **15 replied** — an 8.6% reply rate, which is upper
-quartile for cold outreach. touches 250, messages 646, connections 899.
-**Only 9 contacts have a phone number**, which is the binding constraint on the whole text/call
+quartile for cold outreach. touches **285** (14 columns), messages **684**, connections 899.
+**Only 11 contacts have a phone number**, which is the binding constraint on the whole text/call
 half of the sequence (§The outreach sequence).
 
 | Space | shape | jobs | contacts |
 |---|---|---|---|
-| `job-search` | pipeline/jobs | 40 | 246 |
-| `sheet-search` ("Lead Sheet") | pipeline/targets | 45 | 106 |
-| `partnerships` | pipeline/targets | 6 | 5 |
+| `sheet-search` ("Agent Outreach") | pipeline/targets | 45 | 106 |
+| `job-search` ("Job Search") | pipeline/jobs | 40 | 246 |
+| `partnerships` ("Business Network") | pipeline/targets | 6 | 5 |
 | `gauntlet` | pipeline/jobs | 2 | 10 |
 | `professional-network` | pipeline/targets | 1 | 1 |
+
+Two of those were RENAMED by the operator (`sheet-search` was "Lead Sheet", `partnerships` was
+"Partnerships"). The id is the stable key and the name is theirs to change — anything that
+matches on the display name is already wrong.
 
 **Duplicate addresses across the whole database: 1**, and it is correct data — the same person
 on a `job-search` job and a `professional-network` target card, which is two campaigns rather
@@ -1378,6 +1383,157 @@ write.
 schedule --install` exists and has never been run), **no per-company cap** — 5 contacts × 3
 touches is 15 emails at one company, and SMS now adds 2 more per person on top. Reply detection
 is CLOSED (CRM-1).
+
+---
+
+## Scheduling a send (2026-08-15/17)
+
+Asked for as *"I don't want to send follow-ups manually for 5 people, I want a bulk schedule
+send option"*, then *"I also want the ability to schedule regular email threads, not just follow
+ups"*. Measured before building: 48 follow-ups due across 15 employers, 14 of them with 2+.
+
+**It fires from the DASHBOARD's five-minute poller, not `applypilot tick`.** `tick` needs launchd
+and has never been installed, so a promised send scheduled there would simply never go —
+§Lessons 31, and far worse for an email somebody is waiting on than for a deck poll. The honest
+consequence is stated in the UI rather than hidden: **nothing fires while the dashboard is
+closed.**
+
+| | Follow-ups | Replies |
+|---|---|---|
+| Where | `touches.scheduled_at` | `reply_queue` (own table) |
+| Control | `⏰ Schedule N…` on a job's Follow-ups tab | `⏰ Send later…` on the thread's own composer |
+| Why separate | the draft already has a row | a reply is not a ladder step and has NO row |
+| Extra state | — | the Cc the operator approved + the inbound it answers |
+
+**Guards are re-checked at FIRE time, never at promise time.** The poller loops
+`_followup_action` — the same door the bulk button uses — so a reply arriving overnight halts the
+send, along with the Space's `can_autosend`, the daily limit and the per-company cap. Proven by
+patching only the TRANSPORT: the first attempt stubbed `send_followup` itself, which deleted the
+very guard under test and passed.
+
+**Claiming clears the promise in the same statement, before the send.** A crash mid-send loses a
+promise; clearing afterwards re-sends the same email every five minutes forever. And firing
+CONSUMES the promise whatever the outcome — a refusal does not retry itself into the same
+refusal, the draft survives, and the refusal is logged on the contact where somebody will meet
+it.
+
+**A promise too old to fire is neither fired nor erased.** `domain/sendtime.py` owns the states
+(`pending` / `due` / `missed`) and both the poller and the card read the same function, because a
+card calling something missed while the poller still sent it is the one disagreement this cannot
+afford. `SCHEDULED_SEND_GRACE_HOURS` (default 24) is the line; **0 means "never fire late"**, so
+it is read with `is None` rather than `or` (§Lessons 50).
+
+**A reply can go STALE and a follow-up cannot.** If they write again between the promise and the
+firing, the queued text answers a conversation that has moved — so `reply_queue.stale_against`
+refuses it and leaves it for a human. Compared against the newest INBOUND only: our own later
+messages do not invalidate an answer we wrote, and the send path appends one itself.
+
+**Ran live.** 33 scheduled follow-ups fired on 2026-08-17 across Acrisure, Zapier, Expedia,
+Sentilink, SpaceX, Okta, Texas Children's and Miro — all sent, none stuck. **They all went in the
+same poll**, which is 5 emails to one employer inside a minute; that is the unit the per-company
+cap exists to notice, and staggering is deliberately NOT built. Decide it before the next batch.
+
+## The drafter reads the conversation, not a preview (2026-08-17)
+
+Reported as three things that turned out to be one chain: *"gmail threads keep getting cut up"*,
+*"we are not importing the entire gmail thread"*, *"when I try drafting a response the drafting is
+not accurate"*.
+
+**Of 682 stored messages, ZERO exceeded 200 characters, and 85 of 136 inbound sat on Gmail's
+preview length.** Every draft in the product was written from previews. On the Miro card the
+transcript ended Yukiko's reply at *"Could you kindly let me know"* and presented it as complete,
+so the model answered **"your message got cut off at the end — what were you about to ask?"** — a
+sentence about ApplyPilot's own storage, addressed to a recruiter whose email was intact, sitting
+one click from Send.
+
+**Asking for a draft now READS the conversation in full first**, scoped to the thread the composer
+names. This does not widen the documented narrowing: the rule was never *read less than the grant
+allows* — the grant is all-or-nothing — it is *only ever read ONE conversation, and only when the
+operator asks for it by name*. Clicking ✍ Draft an answer IS that request, at the bar
+⤓ Fetch from Gmail already meets. **The five-minute poller still stores previews** and a test pins
+it. Verified end to end on a live thread: **196 → 410 characters**, disclaimer stripped.
+
+**Anything still truncated is MARKED**, inline on the line where the text stops, saying the cut is
+ours and forbidding the model to mention it. That is the half that has to hold when the fetch
+cannot run — no scope, no network, a subject-keyed thread with no Gmail id.
+
+The marker rule was **wrong twice**, and both are worth keeping:
+
+- Comparing length to `SNIPPET_MAX` missed most cuts, because **Gmail's snippet ends on a WORD
+  boundary**, not at exactly 200. 236 live rows sat between 150 and 195 — including a message in
+  the very transcript used to verify the fix, cut at 194 ending "On a".
+- The replacement then marked *"Best, Liz"* as continuing. **Over-reporting being the safe
+  DIRECTION is not a licence to state something known to be untrue** — a marker claiming a
+  message continues when it does not is a false claim in a prompt, which is what §Lessons 40/42
+  are about. A sign-off is a complete ending.
+
+### A quiet thread gets a NUDGE, not another answer
+
+Reported as *"this follow up is repeating myself"*, and it was exact. Liz acknowledged the
+application; we answered *"Looking forward to hearing from your team. Let me know if you need
+anything else from me in the meantime"*; three days later the drafter returned *"look forward to
+hearing back from your team soon. If there's anything else you need from my side, just let me
+know."*
+
+**Nothing was missing from the transcript.** Our reply was in it, directly under a line reading
+*"Everything above marked YOU is already in their inbox. Do not repeat any of it."* That rule lost
+to the TASK, which said *"Answer what they said"* — and answering an already-answered message can
+only produce the answer again. §Lessons 40: two instructions disagreeing is a code bug, and the
+one naming the task wins.
+
+`conversation_state` had known the whole time — `awaiting_them`, `stalled`, 91 hours — and no
+drafter had ever been told (§Lessons 21). `_turn_block` now asserts whose turn it is and QUOTES
+our unanswered message beside the task, and `_turn_task` **replaces** the instruction rather than
+caveating it. The quoted message resets on every inbound: what matters is the one they have not
+answered, and an outbound from before their reply was already answered by it.
+
+Live, before and after on the same card:
+
+    was:  "thanks for the update... look forward to hearing back from your team soon.
+           If there's anything else you need from my side, just let me know."
+    now:  "I know you mentioned you'd be in touch after reviewing my application.
+           I'd love to get an update on the timeline or next steps."
+
+**5 of 5 generated drafts clean.** The ban on *asking whether they need anything* exists only
+because generating found it: the first tightened version banned the OFFER and the model asked the
+QUESTION instead (§Lessons 42 — generate against real data before believing a prompt).
+
+### `last_reply` → `last_replies`, keyed BY CONVERSATION
+
+One value for the whole card meant a composer on one thread quoted a message from another (10
+live contacts have several threads), and it kept presenting a message as pending after we had
+answered it (**22 of 184**). The card now reads *"You already answered this · Aug 13"* and keeps
+the intent chip, because *they said no* stays true and the job may still need marking rejected —
+what goes is the pending framing and the paste box.
+
+`Object.keys(...).length` in the employer band, never the object: `last_replies` is a MAP and
+`{}` is truthy, so a bare `|| c.last_replies` would count every contact as having replied.
+
+**Two smaller repairs rode along.** Our own sent text is now stored when a follow-up sends — the
+poller writes those rows with no text, so the thread carried holes rendering as
+*"Sent from ApplyPilot."*, 33 of them after the first scheduled batch. And `rfc_message_id` now
+survives a caller that does not know it, exactly as the snippet already did: `INSERT OR REPLACE`
+was blanking the column a later reply chains `References` from.
+
+## Threads read oldest to newest (2026-08-15)
+
+Groups were ordered by each thread's LAST message, so the live conversation sat at the bottom
+beside the composer. That was right when there was ONE composer per card and stopped being right
+on 2026-08-13, when every answerable thread got its own — and the sort never moved with it.
+
+What it cost was legibility whenever two threads OVERLAP, which is ordinary: one live contact has
+a 3-message thread running Jul 22 to Aug 10 and a single stray message on Jul 28, and reading the
+card went **Jul 28, Jul 22, Aug 3, Aug 10** — backwards at the second message.
+
+Ordered by each thread's FIRST message now, on both sides. Overlapping threads cannot both be
+contiguous, so this does not promise a globally chronological read; it promises a rule a reader
+can hold — conversations appear in the order they STARTED — and the separator carries the full
+range (`3 messages · Jul 22 – Aug 10`) so the overlap is visible rather than surprising. A
+one-day thread still shows a single date.
+
+**The property the old ordering carried moved to where it belongs**: the thread that OPENS by
+default is picked by DATE, not by position. The last group is now the most recently STARTED,
+which on that very card is not the most recently active.
 
 ---
 
@@ -2805,6 +2961,75 @@ company `"Jobs"` — the same substring bug class, inside the function written t
     Recovery is `find . -name "* [0-9]*"`, delete, reinstall — and **check whether a resurrected
     file is the stale copy before deleting it**, because twice it was and once the live file was
     the newer one. The real fix is keeping `.venv` and the repo out of a synced folder.
+    **`git add -A` will COMMIT one** (2026-08-17): `dashboard 2.js`, a three-day-old copy missing
+    every change in the commit that carried it, went into `2fca9eb` exactly that way and was
+    found the next time `git status` was read. The duplicate appears between the edit and the
+    commit and looks like an ordinary untracked file, so noticing it is not a plan — `.gitignore`
+    now carries the `* [0-9].py|js|css|md|json` patterns, which is the only guard that works.
+
+115. **An index on a new column must come AFTER the additive column pass, and no fresh-database
+    test can see it.** On an existing install `CREATE TABLE IF NOT EXISTS` is a no-op, so
+    `CREATE INDEX ... ON touches(status, scheduled_at)` raises `no such column` on **every real
+    database and none of the ones a test builds**. Proved it with a three-line sqlite repro
+    before moving the line, rather than reasoning about it. The test that guards it has to
+    construct the OLD table shape deliberately.
+
+116. **A stored preview is not a message, and the drafter could not tell.** The automatic sync
+    stores Gmail's ~200-character snippet by design; the transcript presented those as complete
+    messages, so the model wrote *"your message got cut off at the end — what were you about to
+    ask?"* to a recruiter whose email was intact. **682 stored messages, ZERO over 200
+    characters** — the number is the whole diagnosis, and it was visible any day anyone counted.
+    Fixed by reading the conversation in full when the operator asks for a draft (a deliberate,
+    named request — not a loosening of the narrowing), plus an inline marker for whatever is
+    still cut.
+    Its own detection rule was wrong twice: **Gmail's snippet ends on a WORD boundary**, so
+    `len == 200` missed 236 rows between 150 and 195; and the replacement then claimed
+    *"Best, Liz"* continues. **Over-reporting being the safe direction is not a licence to state
+    something known to be untrue** — a false claim in a prompt is the thing §Lessons 40 and 42
+    are both about.
+
+117. **The task instruction beats every rule above it, and "do not repeat yourself" was above
+    it.** A drafter told *"Answer what they said"* answered a message we had already answered,
+    producing a paraphrase of our own sent email — directly under a line reading *"Everything
+    above marked YOU is already in their inbox. Do not repeat any of it."* Nothing was missing
+    from the transcript and no rule was absent; the two disagreed and the task won (§Lessons 40,
+    now four occurrences). The fix REPLACES the task when they owe us, and quotes the specific
+    sentence not to rewrite beside it rather than leaving it to be inferred.
+    `conversation_state` had known it was `awaiting_them` and stalled for 91 hours the whole
+    time. **Every drafter in the product was ignorant of whose turn it was** (§Lessons 21).
+
+118. **Generating found what tightening a prompt could not.** After banning "offer to send
+    anything else", the model wrote *"Is there anything else you need from me"* — the QUESTION
+    form of the same sentence, which is what the operator had already sent. Banning the offer is
+    not banning the question. Five live generations settled in twenty minutes what re-reading the
+    prompt would not have surfaced at all (§Lessons 42, and it keeps being true).
+
+119. **The claim must be cleared BEFORE the send, not after.** For anything that fires unattended,
+    clearing afterwards turns one crash into an email re-sent every five minutes forever, while
+    clearing first turns it into one send that is not marked — recoverable, visible, and one
+    message. The same asymmetry decides the retry rule: **firing consumes the promise whatever
+    the outcome**, so a refusal cannot retry itself into the same refusal.
+
+120. **A test that supplies a field the code path fills is measuring nothing.** Every
+    reply-firing test passed `last_inbound_at` itself, so all of them stayed green against an
+    endpoint that recorded it nowhere — which silently disables the staleness guard entirely.
+    Its sibling: a `conversation_state` fixture with no `from_addr`, where `is_robot("")` is true,
+    so the function saw NO conversation and ten assertions measured the empty case. §Lessons 13
+    and 100, and four of the fifteen mutations run this session survived on exactly this.
+
+121. **A DATE BOMB: four tests broke with nothing changed, three days after they were written.**
+    `test_invite.py` froze `NOW = 2026-08-14` and built its day as `NOW + 3 days`. That is right
+    for the domain tests, which pass `now=NOW` and are hermetic — and wrong for the four that go
+    through `_send_invite`, because the ENDPOINT takes no `now` and validates against the real
+    clock. The date resolved to 2026-08-17, safely in the future until 2026-08-17, and at 14:00
+    Central that day it became "that time is in the past".
+    **A fixture frozen in the past does not stay in the future.** Anything crossing into code
+    that reads the real clock has to be built from the real clock (`soon()`), and only the
+    hermetic callers may use the frozen one.
+    It also cost a wrong diagnosis first: the failure looked like a regression from the commit
+    minutes earlier, and my own repro — run WITHOUT the test's stub — produced "Gmail/Calendar is
+    not connected", a red herring I had manufactured. **Reproduce with the test's own fixtures
+    before believing the error you get by hand.**
 
 Shipped in one session, in this order: **CRM-3a → CRM-1 → CRM-2 → CRM-3b → CRM-4a.**
 Tickets in `docs/tickets/CRM-*.md`; two of them had instructions that were factually wrong
@@ -3146,10 +3371,20 @@ the same company get these" rule is aimed at the body; the subject spec says onl
 "lowercase-ish, specific, no quick question". The subject is the most visible surface there is:
 you do not have to open anything to see thirteen versions of one sentence. About an hour.
 
-**THE BINDING CONSTRAINT on everything built on 2026-08-14:** only **9 of 368 contacts have a
-phone number**, so the text+call stages cannot run for the 168 people who are past a week of
+**THE BINDING CONSTRAINT on everything built on 2026-08-14:** only **11 of 368 contacts have a
+phone number**, so the text+call stages cannot run for the ~168 people who are past a week of
 silence. Apollo will not release a direct dial to a local tool (§Lessons 4), so this is
 copy-by-hand from its UI or a different provider — worth deciding before building more there.
+
+**OPEN AND UNDECIDED — scheduled sends do not stagger.** 33 fired in one poll on 2026-08-17, five
+of them to Expedia inside a minute. That is the unit the per-company cap exists to notice, and
+the cap is currently `0` on this machine. It matches what bulk Send already does, which is why it
+was not changed unilaterally, but the first batch is now real traffic rather than a hypothetical.
+
+**Also open: the 33 follow-ups sent on 2026-08-17 stored EMPTY message bodies.** New sends record
+their text; those rows are still blank and their words live only in `touches`. Backfillable by
+matching on minute, which is the same fragile join §Lessons 77 records — a message id on
+`touches` is what would close it properly.
 
 **Open, and the real ceiling:** nothing could tell you what works. 131 emails, 7 replies, and no
 way to ask whether the personalised ones did better — so every improvement to the copy was
@@ -3396,11 +3631,12 @@ What is actually open now, ordered by leverage:
    the documented `identity_id` freeze **does not exist** — `domain/space.py:240` freezes
    `("id", "shape")` only, so a Space with 133 sent emails is repointable today with no error.
 
-10. **`context` is 105 commits ahead of `main`, pushed, and the working tree is CLEAN**
-    (2026-08-14, `20e054b`). The 2026-08-13/14 run added CO-2 and the contact deduplication, the
-    phone CALL channel and the ordered sequence, CAL-1's calendar invites, the Gmail auto-fetch
-    and full-body read, the "✓ I emailed them" marker, and the conversation-transcript fix — each
-    with its own tests and mutations.
+10. **`context` is 111 commits ahead of `main`** (2026-08-17). The 2026-08-13/14 run added CO-2
+    and the contact deduplication, the phone CALL channel and the ordered sequence, CAL-1's
+    calendar invites, the Gmail auto-fetch and full-body read, the "✓ I emailed them" marker, and
+    the conversation-transcript fix. The 2026-08-15/17 run added scheduled sends (both kinds),
+    oldest-to-newest thread ordering, and the drafting repairs — each with its own tests and
+    mutations.
     Merging to `main` is still deliberately deferred, and checking out `main` gets you a build
     without Spaces, the sheet import, the deck fix, any of the UX work, any outreach context, or
     anything in this paragraph.

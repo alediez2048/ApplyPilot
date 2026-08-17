@@ -28,7 +28,23 @@ NOW = datetime(2026, 8, 14, 9, 0)
 
 
 def when(days=3, t="14:00"):
+    """A day/time relative to the FROZEN `NOW`. Only for callers that also pass `now=NOW`."""
     return (NOW + timedelta(days=days)).strftime("%Y-%m-%d"), t
+
+
+def soon(days=3, t="14:00"):
+    """A day/time relative to the REAL clock — for anything that goes through `_send_invite`.
+
+    `when()` is anchored to `NOW = 2026-08-14`, which is correct for the domain tests because they
+    pass `now=NOW` and are hermetic. The ENDPOINT does not take a `now`: it validates against the
+    real clock, and `validate()` refuses a time in the past.
+
+    So `when(days=3)` was a DATE BOMB. It resolved to 2026-08-17, which was safely in the future
+    until 2026-08-17 — and at 14:00 Central that day four tests began failing with "that time is
+    in the past", three days after they were written and with nothing having changed. A fixture
+    frozen in the past does not stay in the future.
+    """
+    return (datetime.now() + timedelta(days=days)).strftime("%Y-%m-%d"), t
 
 
 def ok_args(**over):
@@ -212,7 +228,7 @@ def test_the_daily_limit_is_checked_even_though_GOOGLE_sends_the_mail(db, monkey
     cid = _contact(db)
     monkeypatch.setattr(gmail_send, "can_send",
                         lambda c, confirm_unverified=False: (False, "daily send limit reached (20)"))
-    d, t = when()
+    d, t = soon()
     got = wd._send_invite({"contact_id": cid, "title": "x", "day": d, "time": t, "duration": 30})
     assert got["ok"] is False and "daily send limit" in got["message"]
     assert calls == [], "an event was created despite the send limit"
@@ -226,7 +242,7 @@ def test_the_two_refusals_that_do_NOT_apply_are_let_through(db, monkeypatch):
     from applypilot.networking import gmail_send
     _stub_calendar(monkeypatch)
     cid = _contact(db)
-    d, t = when()
+    d, t = soon()
     for why in ("already sent to this contact", "already emailed dana@bigco.test for another role"):
         monkeypatch.setattr(gmail_send, "can_send", lambda c, confirm_unverified=False, w=why: (False, w))
         got = wd._send_invite({"contact_id": cid, "title": "x", "day": d, "time": t,
@@ -243,7 +259,7 @@ def test_the_attendee_comes_from_the_STORED_contact_not_the_page(db, monkeypatch
     monkeypatch.setattr(gmail_send, "can_send", lambda c, confirm_unverified=False: (True, "ok"))
     calls = _stub_calendar(monkeypatch)
     cid = _contact(db)
-    d, t = when()
+    d, t = soon()
     wd._send_invite({"contact_id": cid, "title": "x", "day": d, "time": t, "duration": 30,
                      "attendees": ["attacker@evil.test"], "to": "attacker@evil.test"})
     assert [a["email"] for a in calls[0]["attendees"]] == ["dana@bigco.test"]
@@ -257,7 +273,7 @@ def test_the_event_id_is_STORED_so_it_can_be_cancelled(db, monkeypatch):
     monkeypatch.setattr(gmail_send, "can_send", lambda c, confirm_unverified=False: (True, "ok"))
     _stub_calendar(monkeypatch)
     cid = _contact(db)
-    d, t = when()
+    d, t = soon()
     assert wd._send_invite({"contact_id": cid, "title": "Intro", "day": d, "time": t,
                             "duration": 30})["ok"]
     row = db.execute("SELECT detail FROM interactions WHERE contact_id=? AND kind='invited'",
@@ -275,7 +291,7 @@ def test_a_failed_create_stores_NOTHING(db, monkeypatch):
     _stub_calendar(monkeypatch, {"ok": False, "error": "Google said no", "id": "", "link": "",
                                  "meet": ""})
     cid = _contact(db)
-    d, t = when()
+    d, t = soon()
     assert wd._send_invite({"contact_id": cid, "title": "x", "day": d, "time": t,
                             "duration": 30})["ok"] is False
     assert db.execute("SELECT COUNT(*) FROM interactions WHERE contact_id=?",

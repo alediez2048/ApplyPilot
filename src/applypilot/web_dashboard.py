@@ -686,8 +686,48 @@ def run_dashboard_prepare(limit: int = 0, validation_mode: str = "normal") -> di
         "covers": covers,
         "cover_errors": cover_errors,
     }
+    # NOTHING TO DO IS AN ANSWER, and printing seven zeros is not giving it.
+    #
+    # Reported as "I'm getting an error trying to apply for this role" with a prepare run that
+    # returned `{'enriched': 0, ... 'covers': 0}` and no error at all. Nothing was broken: the
+    # posting had been applied to twelve days earlier, so every queue was legitimately empty —
+    # and prepare, import ("duplicate") and apply (which runs the QUEUE, not the row you are
+    # looking at) each said so in a way that reads as a silent failure. §Lessons 15: a zero
+    # result has to be as loud as an error, or a finished job is indistinguishable from a
+    # broken one.
+    if not any((result["enriched"], result["tailored"], result["covers"],
+                result["detail_errors"], result["tailor_errors"], result["cover_errors"],
+                result["score_bypassed"])):
+        result["note"] = _nothing_to_prepare(conn)
+        print(f"NOTHING TO DO: {result['note']}", flush=True)
     print(f"Dashboard URL prepare complete: {result}", flush=True)
     return result
+
+
+def _nothing_to_prepare(conn) -> str:
+    """Why prepare had no work — in terms of the JOBS, not of the empty queues.
+
+    "0 enriched, 0 tailored" describes the queues, which is the one thing the operator can
+    already see. What they cannot see is that the row they are looking at finished a week ago,
+    so this counts the states instead and names the next real action.
+    """
+    try:
+        counts = _jobs.dashboard_upload_states(conn)
+    except Exception:  # noqa: BLE001 — a diagnostic must never break the run it describes
+        log.debug("Could not summarise prepare state", exc_info=True)
+        return "no jobs are waiting on materials."
+    if not counts.get("total"):
+        return ("no jobs have been imported yet — paste a posting URL into the box above the "
+                "table first.")
+    ready, applied = counts.get("ready", 0), counts.get("applied", 0)
+    bits = []
+    if applied:
+        bits.append(f"{applied} already applied to (use 🔄 Re-apply on the row to redo one)")
+    if ready:
+        bits.append(f"{ready} already prepared and waiting for Apply")
+    if not bits:
+        return "every imported job already has its materials."
+    return "nothing needed preparing — " + ", and ".join(bits) + "."
 
 
 def run_dashboard_apply(limit: int = 10, dry_run: bool = False, copilot: bool = True) -> dict:

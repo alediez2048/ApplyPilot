@@ -756,3 +756,20 @@ def delete(url: str, conn: sqlite3.Connection | None = None) -> int:
     conn.execute("DELETE FROM contacts WHERE job_url = ?", (url,))
     conn.commit()
     return n
+
+
+def dashboard_upload_states(conn: sqlite3.Connection | None = None) -> dict:
+    """How many pasted jobs are in each state — what prepare reports when it has no work.
+
+    Counts JOBS, not queue rows. "0 enriched, 0 tailored" describes the queues, which is the one
+    thing already on screen; what the operator cannot see is that the posting they just pasted
+    was applied to twelve days ago and is therefore finished rather than stuck.
+    """
+    row = _c(conn).execute(
+        "SELECT COUNT(*) AS total, "
+        "SUM(CASE WHEN applied_at IS NOT NULL AND applied_at != '' THEN 1 ELSE 0 END) AS applied, "
+        "SUM(CASE WHEN (applied_at IS NULL OR applied_at = '') "
+        "          AND tailored_resume_path IS NOT NULL THEN 1 ELSE 0 END) AS ready "
+        "FROM jobs WHERE strategy = 'dashboard_upload'").fetchone()
+    d = _dict(row) or {}
+    return {k: int(d.get(k) or 0) for k in ("total", "applied", "ready")}

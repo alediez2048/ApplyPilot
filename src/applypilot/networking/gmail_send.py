@@ -471,6 +471,27 @@ def send_followup(contact_id: str, dry_run: bool = False) -> dict:
         return {"ok": False, "message": f"follow-up failed: {e}"}
 
     n = store.mark_followup_sent(contact_id)
+    # OUR OWN WORDS, stored at the moment we send them. The poller writes a row for this message
+    # within five minutes with `snippet: ""` — correct for it, since the automatic path reads no
+    # text — so without this the thread carries a message with nothing in it, and the card renders
+    # the placeholder "Sent from ApplyPilot." where a follow-up should be. Measured after the
+    # first scheduled batch fired: 33 sends, 33 empty rows.
+    #
+    # No scope question and no privacy trade: this text is ours, and `record_outbound` is keyed on
+    # Gmail's message id, so the poll that eventually covers it updates rather than duplicating.
+    # Best-effort — a bookkeeping failure must never report a delivered email as failed.
+    try:
+        from applypilot.networking import messages as _msg_store
+        # `rfc_message_id` is deliberately NOT set. On the OAuth path `message_id` is Gmail's own
+        # id, not the RFC `Message-ID` header, and that column is what a later reply chains
+        # `References` from — writing the wrong value there is how a thread gets told it is a
+        # different thread. The poller reads the real header within five minutes and fills it in.
+        _msg_store.record_outbound(
+            contact, {"id": message_id, "thread_id": contact.get("thread_id"),
+                      "from_addr": _from_address()},
+            to_addr, [], subject, body=body)
+    except Exception:  # noqa: BLE001
+        log.debug("Could not record the sent follow-up text", exc_info=True)
     threaded = bool(contact.get("thread_id") or contact.get("rfc_message_id"))
     return {"ok": True, "touch": n,
             "message": f"follow-up #{n} sent to {to_addr}"

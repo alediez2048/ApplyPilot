@@ -246,3 +246,39 @@ def test_PRESERVED_text_is_not_re_capped(tmp_path, monkeypatch):
     _m.upsert_messages([row("")], conn)                        # the automatic sync, declining
     assert len(_m.thread_for_contact("c1", conn)[0]["snippet"]) == 900, \
         "the preserved body was re-capped at the snippet bound"
+
+
+def test_the_RFC_MESSAGE_ID_is_preserved_the_same_way_a_snippet_is(tmp_path, monkeypatch):
+    """Same rule, and the more damaging column of the two to lose.
+
+    `INSERT OR REPLACE` writes every column, so a caller that legitimately does not know the RFC
+    header erases one the poller had already read off the message. The send paths are exactly
+    that caller: they hold Gmail's own message id, not the `Message-ID` header it generated. And
+    this column is what a later reply chains `References` from — blanking it tells the recipient's
+    mail client that this conversation is a different conversation, which is the 87-ids-across-25-
+    threads failure in reverse.
+    """
+    import applypilot.database as database
+    from applypilot.networking import messages as _m, store
+    path = tmp_path / "rfc.db"
+    monkeypatch.setattr(database, "DB_PATH", path)
+    database.close_connection(path)
+    database.init_db(path)
+    conn = database.get_connection(path)
+    store.init_contacts(conn)
+    _m.init_messages(conn)
+
+    def row(rfc):
+        return {"message_id": "m1", "thread_id": "t1", "contact_id": "c1",
+                "job_url": "http://j/1", "direction": "out", "from_addr": "me@x.test",
+                "from_name": "", "to_addrs": [], "cc_addrs": [], "subject": "s",
+                "sent_at": "2026-08-01T09:00", "rfc_message_id": rfc, "snippet": "hello."}
+
+    _m.upsert_messages([row("<real@header>")], conn)            # the poller, reading headers
+    assert _m.thread_for_contact("c1", conn)[0]["rfc_message_id"] == "<real@header>"
+    _m.upsert_messages([row("")], conn)                         # a caller that does not know it
+    assert _m.thread_for_contact("c1", conn)[0]["rfc_message_id"] == "<real@header>", \
+        "an empty rfc_message_id erased the header a reply chains References from"
+    # ...and a caller that DOES know it can still correct one.
+    _m.upsert_messages([row("<corrected@header>")], conn)
+    assert _m.thread_for_contact("c1", conn)[0]["rfc_message_id"] == "<corrected@header>"

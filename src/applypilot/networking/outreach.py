@@ -1557,13 +1557,72 @@ def conversation_transcript(contact: dict, thread: list | None = None,
             continue
         when = f" on {e['at'][:10]}" if e.get("at") else ""
         subj = f", subject: {e['subject']}" if e.get("subject") else ""
-        lines.append(f"[{i}] {e['who']}{when}{subj}:\n{e['body']}")
+        # The marker goes INSIDE the message, on the line where the text stops, because that is
+        # the only place it can be read as being about this message. A note in the standing
+        # instructions is a rule the model applies to the transcript in general; this is a fact
+        # about the sentence it is looking at.
+        clip = ("\n[TRUNCATED BY APPLYPILOT — this message continues. The cut above is OURS, not "
+                "the sender's. Do NOT mention it, ask what they were about to say, or treat the "
+                "last sentence as unfinished.]") if e.get("clipped") else ""
+        lines.append(f"[{i}] {e['who']}{when}{subj}:\n{e['body']}{clip}")
     return "\n\n".join(lines)
 
 
 #: Marker for the elided middle. An object rather than a string so it cannot collide with a real
 #: message whose body happens to look like the marker.
 _GAP = object()
+
+
+#: Characters a complete message is allowed to end on. Anything else, at preview length, is a
+#: sentence that stops mid-air — which is what our own truncation looks like.
+_ENDS_CLEANLY = ('.', '!', '?', '"', "'", ')', ']', ':', ';', '”', '’', '…')
+
+#: A SIGN-OFF is a complete ending even with no full stop. Live on the Sentilink card, "Best, Liz"
+#: and a signature line ending "| NVIDIA" were both marked as continuing — and a marker that says
+#: "this message continues" about a message that does not is a false statement in a prompt, which
+#: is the thing §Lessons 40 and 42 are both about. Over-marking is still the safe DIRECTION; that
+#: is an argument for erring toward it on genuinely ambiguous text, not for stating something
+#: known to be untrue.
+_SIGNOFF_RE = re.compile(
+    r"(?i)\b(best|thanks|thank you|regards|best regards|kind regards|cheers|sincerely|warmly|"
+    r"all the best|talk soon|speak soon)\b[,!.]*\s*[\w.'-]*\s*$")
+
+
+def _is_clipped(body: str) -> bool:
+    """Did WE cut this message short?
+
+    **This is the single most damaging thing the drafter can be lied to about.** Live, on the Miro
+    card: Yukiko's reply was stored as Gmail's preview, ending *"Could you kindly let me know"*,
+    and the transcript presented that as her complete message. The model then wrote back *"your
+    message got cut off at the end — what were you about to ask?"* — a sentence about OUR storage,
+    addressed to a recruiter whose email was perfectly intact, and one click from being sent.
+    Measured at the time: 85 of 136 inbound messages were previews.
+
+    The first version of this compared length to the two declared bounds, and that is wrong:
+    **Gmail's snippet ends on a WORD boundary, not at exactly 200 characters.** On the live
+    database 236 rows sat between 150 and 195 characters, so `len == SNIPPET_MAX` missed most of
+    them — including our own message in the very transcript used to check the fix, which ended
+    "On a" at 194. A test for the cap cannot see a cut that stops short of it.
+
+    So the question asked is whether the text ENDS like a finished message. At preview length,
+    stopping anywhere other than on terminal punctuation means the sentence was cut. `PASTED_MAX`
+    is still checked outright, because a deliberate fetch that fills its bound is by definition
+    holding more.
+
+    **Over-reporting is the safe direction and this rule leans into it.** A false positive only
+    tells the model not to lean on the final sentence, which is never harmful; a false negative
+    invites it to answer a cut as if the sender wrote it. That asymmetry is the whole design, and
+    it is why no attempt is made to be clever about signatures or sign-offs.
+    """
+    from applypilot.networking.messages import PASTED_MAX, SNIPPET_MAX
+    text = (body or "").strip()
+    if not text:
+        return False
+    if len(text) >= PASTED_MAX:
+        return True
+    if len(text) > SNIPPET_MAX:
+        return False
+    return not text.endswith(_ENDS_CLEANLY) and not _SIGNOFF_RE.search(text)
 
 
 def _transcript_events(contact: dict, thread, touches, their_reply: str) -> list[dict]:
@@ -1609,6 +1668,8 @@ def _transcript_events(contact: dict, thread, touches, their_reply: str) -> list
             "who": (f"{(m.get('from_name') or 'THEY').upper()} REPLIED" if inbound
                     else "YOU wrote"),
             "at": at, "body": body, "subject": (m.get("subject") or "").strip(),
+            # WE cut this, and the model has to be told so.
+            "clipped": _is_clipped(body),
         })
 
     events.sort(key=lambda e: e.get("at") or "")
@@ -1656,6 +1717,91 @@ def _last_inbound(thread: list | None) -> dict:
     inbound = [m for m in (thread or [])
                if isinstance(m, dict) and (m.get("direction") or "") == "in"]
     return inbound[-1] if inbound else {}
+
+
+def _our_last_in_thread(thread) -> dict | None:
+    """The last message WE sent AFTER they last spoke, or None.
+
+    Reset on every inbound message rather than simply taking the newest outbound: what matters is
+    the message they have not answered, and an outbound one from before their reply was answered
+    — by the reply itself.
+    """
+    ours = None
+    for m in (thread or []):
+        if not isinstance(m, dict):
+            continue
+        if (m.get("direction") or "") == "in":
+            ours = None
+        elif (m.get("snippet") or "").strip():
+            ours = m
+    return ours
+
+
+def _turn_block(thread) -> str:
+    """WHOSE TURN IT IS, stated as a fact before the task is named.
+
+    The reply drafter knew what was said and not who owed whom a reply. On the live Sentilink
+    card that produced the report *"this follow up is repeating myself"*, and it was exact: Liz
+    acknowledged the application, we answered *"Looking forward to hearing from your team. Let me
+    know if you need anything else from me in the meantime"* — and the next draft came back
+    *"look forward to hearing back from your team soon. If there's anything else you need from my
+    side, just let me know."* A paraphrase of our own message, three days later.
+
+    Nothing was broken in the transcript: our reply WAS in it, under a line reading "Everything
+    above marked YOU is already in their inbox. Do not repeat any of it." It lost to the task,
+    which said *"Answer what they said"* — and answering a message we had already answered can
+    only produce the answer again. §Lessons 40: two instructions disagreeing is a code bug, and
+    the one naming the task wins.
+
+    So the state is asserted here, and the TASK is replaced in `_turn_task` rather than caveated.
+    `conversation_state` has always known this — `awaiting_them`, `stalled`, 91 hours on that card
+    — and no drafter had ever been told (§Lessons 21, a value one layer computes that the other
+    cannot see).
+    """
+    from applypilot.domain import conversations as cv
+    state = cv.conversation_state(thread or [])
+    if not state or state.get("state") != cv.AWAITING_THEM:
+        return ""
+    days = state.get("days")
+    ours = _our_last_in_thread(thread)
+    when = f" {days} day{'s' if days != 1 else ''} ago" if days else ""
+    out = ("WHOSE TURN IT IS: **yours was already taken.** You answered them"
+           f"{when} and they have not replied since. There is nothing left to answer — "
+           "they owe YOU a response.\n\n")
+    if ours:
+        # Quoted immediately beside the task, because the general "do not repeat" line one
+        # paragraph up is what the model already ignored. This is the sentence it must not
+        # rewrite, shown as the thing not to rewrite.
+        out += ("YOUR LAST MESSAGE, WHICH THEY ALREADY HAVE — do not restate it, do not "
+                "paraphrase it, and do not make the same offer again:\n"
+                f"\"{(ours.get('snippet') or '').strip()[:400]}\"\n\n")
+    return out
+
+
+def _turn_task(thread) -> str:
+    """The closing instruction. REPLACED when they owe us, never caveated.
+
+    Appending "…and do not repeat yourself" to "Answer what they said" is the fix that does not
+    work — it was already there, one paragraph above, and lost.
+    """
+    from applypilot.domain import conversations as cv
+    state = cv.conversation_state(thread or [])
+    if not state or state.get("state") != cv.AWAITING_THEM:
+        return "Write the reply. Answer what they said. Return the JSON."
+    return (
+        "Write a NUDGE, not a reply. They have gone quiet on you, so this message has one job: "
+        "to move it forward.\n"
+        "  - Open by acknowledging where things stand in your own words. If they said they would "
+        "get back to you, say that you know that.\n"
+        "  - Then say what you actually want NOW — to get moving on it, to know the timeline, to "
+        "talk to whoever decides. Be direct about it; that is the entire point of writing.\n"
+        "  - BANNED, because you have already said all of it and saying it again is what makes "
+        "this read as automated: thanking them again; saying you look forward to hearing from "
+        "them or from their team; offering to send anything else; and ASKING WHETHER THEY NEED "
+        "ANYTHING FROM YOU in any wording. Ask for something instead.\n"
+        "  - Short. Two or three sentences.\n"
+        "Return the JSON."
+    )
 
 
 def draft_reply(profile: dict, job: dict, contact: dict, thread: list | None = None,
@@ -1710,13 +1856,14 @@ def draft_reply(profile: dict, job: dict, contact: dict, thread: list | None = N
            if label["label"] else "")
         + f"\nTHE CONVERSATION SO FAR, in order:\n{transcript}\n\n"
         + "Everything above marked YOU is already in their inbox. Do not repeat any of it.\n\n"
+        + _turn_block(thread)
         + (f"SCHEDULING LINK (use it only if they want to talk): {link}\n\n" if link else "")
         + _premise_block(space, brief=True) + _known_block(job, brief=True)
         + _met_block(contact, brief=True)
         + (f"STYLE DIRECTION (follow closely, it overrides the default voice):\n{directive}\n\n"
            if directive else "")
         + _voice_block(space)
-        + "Write the reply. Answer what they said. Return the JSON."
+        + _turn_task(thread)
     )
 
     client = get_client("light")

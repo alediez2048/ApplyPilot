@@ -113,6 +113,15 @@ def upsert_messages(rows: list[dict], conn: sqlite3.Connection | None = None,
     existing = {(r[0], r[1] or ""): (r[2] or "")
                 for r in conn.execute(
                     "SELECT message_id, contact_id, snippet FROM messages").fetchall()}
+    # `rfc_message_id` gets the same protection as the snippet, and it is the more dangerous of
+    # the two to lose: it is what a later reply chains `References` from, so blanking it tells the
+    # recipient's mail client that this conversation is a different conversation. `INSERT OR
+    # REPLACE` writes every column, so a caller that legitimately does not know the RFC header —
+    # the send paths know Gmail's id and not the header it generated — would erase one the poller
+    # had already read from the message itself.
+    existing_rfc = {(r[0], r[1] or ""): (r[2] or "")
+                    for r in conn.execute(
+                        "SELECT message_id, contact_id, rfc_message_id FROM messages").fetchall()}
     known = set(existing)
     new = 0
     for r in rows:
@@ -146,6 +155,7 @@ def upsert_messages(rows: list[dict], conn: sqlite3.Connection | None = None,
         incoming = _decode(r.get("snippet")).strip()
         snippet = (incoming[:(PASTED_MAX if full else SNIPPET_MAX)] if incoming
                    else existing.get(key, ""))
+        rfc = (r.get("rfc_message_id") or "").strip() or existing_rfc.get(key, "")
         conn.execute(
             "INSERT OR REPLACE INTO messages (message_id, thread_id, contact_id, job_url, "
             "direction, from_addr, from_name, to_addrs, cc_addrs, subject, sent_at, synced_at, "
@@ -153,7 +163,7 @@ def upsert_messages(rows: list[dict], conn: sqlite3.Connection | None = None,
             (mid, r.get("thread_id"), r.get("contact_id"), r.get("job_url"),
              r.get("direction"), r.get("from_addr"), r.get("from_name"),
              json.dumps(r.get("to_addrs") or []), json.dumps(r.get("cc_addrs") or []),
-             r.get("subject"), r.get("sent_at"), now, r.get("rfc_message_id"), snippet))
+             r.get("subject"), r.get("sent_at"), now, rfc, snippet))
     conn.commit()
     return new
 

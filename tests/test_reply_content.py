@@ -140,6 +140,35 @@ def test_fetching_one_conversation_stores_its_text(db, monkeypatch):
     assert msg_store.thread_for_contact("c1", db)[0]["snippet"].startswith("Happy to chat")
 
 
+def test_fetching_reads_the_thread_it_is_TOLD_to(db, monkeypatch):
+    """Not the one on the contact row.
+
+    `contacts.thread_id` is the thread captured at SEND time, so on a contact with several
+    conversations it names the one ApplyPilot started rather than the one the operator is looking
+    at — the merged-thread assumption `reply_target` and `_draft_reply` were each fixed for. This
+    matters now that drafting fetches before it builds a transcript.
+
+    Asserted on the id Gmail is actually ASKED for, because the parameter existing proves nothing
+    (§Lessons 73) — a version that accepted `thread_id` and dropped it passed a grep for it.
+    """
+    from applypilot.networking import gmail_oauth, gmail_read, replies
+
+    asked = []
+    monkeypatch.setattr(gmail_read, "can_read_content", lambda: (True, "ok"))
+    monkeypatch.setattr(gmail_read, "thread_messages",
+                        lambda tid, service=None: (asked.append(tid),
+                                                   [_thread_msg("Happy to chat Thursday?")])[1])
+    monkeypatch.setattr(gmail_oauth, "connected_email", lambda: ME)
+
+    contact = {"id": "c1", "job_url": "http://j/1", "thread_id": "SEND-TIME", "email": "gina@co.com"}
+    replies.fetch_thread_text(contact, db, thread_id="ON-SCREEN")
+    assert asked == ["ON-SCREEN"], asked
+    # ...and with none named, the contact's own thread is still the right fallback for the button.
+    asked.clear()
+    replies.fetch_thread_text(contact, db)
+    assert asked == ["SEND-TIME"], asked
+
+
 def test_fetching_refuses_without_the_scope_and_says_why(db, monkeypatch):
     from applypilot.networking import gmail_read, replies
 
@@ -803,17 +832,54 @@ def test_the_reply_prompt_tells_the_model_to_answer_not_to_pitch(monkeypatch):
 
 def test_the_payload_carries_no_reply_text_without_a_snippet():
     from applypilot import web_dashboard as wd
-    thread = [{"direction": "in", "from_addr": "g@co.com", "sent_at": "2026-07-30T10:00:00+00:00"}]
-    assert wd._last_reply(thread) is None
-    assert wd._last_reply([]) is None
+    thread = [{"direction": "in", "from_addr": "g@co.com", "thread_id": "t1",
+               "sent_at": "2026-07-30T10:00:00+00:00"}]
+    assert wd._last_replies(thread) == {}
+    assert wd._last_replies([]) == {}
 
 
 def test_the_payload_surfaces_the_snippet_and_what_to_do_about_it():
     from applypilot import web_dashboard as wd
     thread = [{"direction": "in", "from_addr": "g@co.com", "from_name": "Gina",
-               "sent_at": "2026-07-30T10:00:00+00:00",
+               "thread_id": "t1", "sent_at": "2026-07-30T10:00:00+00:00",
                "snippet": "Unfortunately we've decided to move forward with another candidate."}]
-    out = wd._last_reply(thread)
+    out = wd._last_replies(thread)["t1"]
     assert out["intent"] == intent.REJECTION
     assert out["action"] and "follow-up" in out["action"]
     assert out["from"] == "Gina"
+    assert out["answered"] is False, "nobody has answered this one"
+
+
+def test_the_payload_keys_the_last_reply_BY_CONVERSATION():
+    """One value for the whole card meant a composer on one thread quoted a message from another
+    — 10 live contacts have more than one thread (§Lessons 49, fourth call site of one rule)."""
+    from applypilot import web_dashboard as wd
+    thread = [
+        {"direction": "in", "from_addr": "g@co.com", "from_name": "Gina", "thread_id": "t1",
+         "sent_at": "2026-07-30T10:00:00+00:00", "snippet": "About the invoice, can you confirm?"},
+        {"direction": "in", "from_addr": "g@co.com", "from_name": "Gina", "thread_id": "t2",
+         "sent_at": "2026-08-02T10:00:00+00:00", "snippet": "Separately — are you free Friday?"},
+    ]
+    out = wd._last_replies(thread)
+    assert set(out) == {"t1", "t2"}
+    assert "invoice" in out["t1"]["text"]
+    assert "Friday" in out["t2"]["text"], "the newer thread must not overwrite the older one"
+
+
+def test_an_ANSWERED_message_is_reported_as_answered_not_dropped():
+    """It must not be dressed up as pending — a card quoted a week-old message, tagged it *they
+    said no* and pre-filled a draft, beneath a banner reading "Answered 4 days ago". But it must
+    not vanish either: "they said no" is still true and the job may still need marking rejected.
+    """
+    from applypilot import web_dashboard as wd
+    thread = [
+        {"direction": "in", "from_addr": "g@co.com", "from_name": "Gina", "thread_id": "t1",
+         "sent_at": "2026-07-30T10:00:00+00:00",
+         "snippet": "Unfortunately we've decided to move forward with another candidate."},
+        {"direction": "out", "from_addr": "me@x.com", "thread_id": "t1",
+         "sent_at": "2026-07-31T10:00:00+00:00", "snippet": "Understood, thanks for letting me know."},
+    ]
+    out = wd._last_replies(thread)["t1"]
+    assert out["answered"] is True
+    assert out["answers"] == 1 and out["answered_at"].startswith("2026-07-31")
+    assert out["intent"] == intent.REJECTION, "the intent survives being answered"

@@ -970,70 +970,6 @@ let LAST_JOBS_HTML = null;
 //: How often the dashboard's background poller runs, mirrored from the server so the
 //: Interactions tab can state the real cadence instead of a hardcoded guess.
 let POLL_EVERY_S = 300;
-//: How late a scheduled send may still fire, mirrored from `domain/sendtime.py` via the payload
-//: rather than written here. The card and the poller MUST agree on due-vs-missed: a second copy
-//: of this number is how the screen ends up telling the operator to send something by hand at
-//: the same moment the poller sends it for them.
-let SCHED_GRACE_H = 24;
-//: Which jobs have the schedule picker open, and what has been typed into it. Outside the DOM
-//: like PANEL_OPEN and CONV_EXPANDED, because `#jobs` is rebuilt every 2.5s — state left in the
-//: markup is state that survives only until the next tick.
-const SCHED_OPEN = new Set();
-const SCHED_AT = {};
-
-// ── Scheduled sends ─────────────────────────────────────────────────────────
-//
-// The one thing in this app that acts with nobody watching, so the vocabulary is worth being
-// exact about: PENDING is a promise not yet due, DUE is one the poller is about to fire, and
-// MISSED is one it will never fire because too much time passed with the dashboard closed.
-//
-// This mirrors `sendtime.state()` and is checked against it by a test — see
-// `tests/test_scheduled_followups.py`, which runs the same cases through both.
-function schedState(iso) {
-  if (!iso) return '';
-  const t = Date.parse(iso);
-  if (isNaN(t)) return '';
-  const now = Date.now();
-  if (t > now) return 'pending';
-  return t > now - SCHED_GRACE_H * 3600 * 1000 ? 'due' : 'missed';
-}
-
-// Local time, always. The server stores and ships UTC because it has no idea where the operator
-// is; the browser is the only layer that does, so this is the only place a time becomes words.
-function fmtSched(iso) {
-  try {
-    const d = new Date(iso);
-    const today = new Date();
-    const sameDay = d.toDateString() === today.toDateString();
-    const tomorrow = new Date(today.getTime() + 86400000).toDateString() === d.toDateString();
-    const time = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-    if (sameDay) return `today ${time}`;
-    if (tomorrow) return `tomorrow ${time}`;
-    return d.toLocaleString([], { weekday: 'short', month: 'short', day: 'numeric',
-                                  hour: 'numeric', minute: '2-digit' });
-  } catch { return iso; }
-}
-
-// What a <input type="datetime-local"> wants: local wall-clock, no zone, no seconds. Defaults to
-// the next 9am — the hour a follow-up should land in somebody's morning, and the reason this has
-// a default at all is that "tomorrow morning" is the request nine times out of ten.
-function nextNineAm() {
-  const d = new Date();
-  d.setSeconds(0, 0);
-  if (d.getHours() >= 9) { d.setDate(d.getDate() + 1); }
-  d.setHours(9, 0, 0, 0);
-  const pad = n => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}
-
-// The picker gives local wall-clock with no zone. `new Date()` reads exactly that as local, so
-// toISOString() is the operator's chosen moment expressed in UTC — which is what the server
-// stores. Sending the raw string instead would have the server read 9am as 9am UTC, i.e. 3am
-// for an operator in Austin, and the email would already be gone by breakfast.
-function schedToUtc(local) {
-  const d = new Date(local);
-  return isNaN(d.getTime()) ? '' : d.toISOString();
-}
 // `wantEmail` / `wantLi` select ONE channel — the contact panel shows them as tabs now, so
 // rendering both at once is what made every contact card ~200px tall. Omit both to get the
 // old stacked behaviour.
@@ -1084,7 +1020,6 @@ function draftBlock(c, wantEmail, wantLi, historyShown) {
         ${echo ? '' : `<button onclick="copyDraft(this)">Copy email</button>`}
         ${attachBtn}
         ${sendBtn}
-        ${emailSentButton(c)}
         ${followupButton(c)}
       </div>`;
   }
@@ -1111,38 +1046,6 @@ function draftBlock(c, wantEmail, wantLi, historyShown) {
 }
 // Only offered once a follow-up is actually owed — an email that went out an hour ago
 // shouldn't show a follow-up button, and one already logged shows its state instead.
-// "I sent this one myself." The marker every other channel has had since it shipped, and email
-// did not — because Gmail's send response was taken as proof, which it only is for the sends
-// that went THROUGH ApplyPilot. An email typed in Gmail, sent from a phone, or picked up by the
-// address search afterwards leaves the row reading "never emailed": measured live, 9 contacts
-// with outbound mail on record and no send state at all, so their card offered a cold first
-// contact to somebody two to four emails deep.
-//
-// Offered only when this role has NO send recorded, for the same reason the text marker is
-// (§Lessons 43's fourth form): re-rendering the same button after a click is indistinguishable
-// from the click being ignored, and clicking twice would move the ladder's anchor forward.
-// A contact moved from another role IS offered it — their send belongs to the other job, and
-// asserting one here is exactly how the new role's ladder starts.
-function emailSentButton(c) {
-  if (c.emailed || !c.email) return '';
-  return `<button class="secondary" onclick="fuAct('${esc(c.id)}','connected',this)"
-    title="Record that you emailed ${esc(c.full_name || c.email)} yourself — outside ApplyPilot, or before this card existed. Starts the follow-up clock.">✓ I emailed them</button>`;
-}
-
-// The same marker, for the card that shows a CONVERSATION instead of a draft form. It says what
-// is wrong before offering the fix, because on a card already displaying six sent emails "✓ I
-// emailed them" on its own reads as a duplicate of what you are looking at rather than as a
-// correction to a state you cannot otherwise see.
-function markSentBar(c) {
-  if (c.emailed || !c.email || c.thread_from) return '';
-  const out = (c.thread || []).filter(m => (m.direction || '') === 'out').length;
-  return `<div class="marksent">
-      <span>${out ? `${out} email${out === 1 ? '' : 's'} here went out, but nothing is recorded
-        as sent — so no follow-up is scheduled.` : 'No send is recorded for this contact.'}</span>
-      ${emailSentButton(c)}
-    </div>`;
-}
-
 function followupButton(c) {
   if (!c.emailed) return '';
   if (c.followed_up_at) return `<span class="sent-tag">✓ followed up</span>`;
@@ -2074,12 +1977,7 @@ function peopleList(j) {
   let out = intro + bulkBar(j);
   if (flagged.length) out += `<div class="ppl-group flagged">💡 Highlighted <span class="ppl-g-n">${flagged.length}</span></div>` + flagged.map(c => contactRow(c)).join('');
   if (hot.length)  out += `<div class="ppl-group hot">🔥 People you know here <span class="ppl-g-n">${hot.length}</span></div>` + hot.map(c => contactRow(c)).join('');
-  // "No prior connection", NOT "new". The split here is about the LAYER a contact came from —
-  // someone you already know versus someone Apollo found — and it says nothing about whether
-  // they have been written to. Labelled "New contacts" it read as a claim about contact state,
-  // and directly contradicted the row beside it: three people showing "✉ 4 sent · earlier role"
-  // sat under a heading calling them new.
-  if (cold.length) out += `<div class="ppl-group cold">🧊 No prior connection <span class="ppl-g-n">${cold.length}</span></div>` + cold.map(c => contactRow(c)).join('');
+  if (cold.length) out += `<div class="ppl-group cold">🧊 New contacts <span class="ppl-g-n">${cold.length}</span></div>` + cold.map(c => contactRow(c)).join('');
   return `<div class="plist">${out}</div>`;
 }
 // "Jul 28" from an ISO timestamp, without dragging in a formatter.
@@ -2092,23 +1990,7 @@ function shortDate(iso) {
 function contactRow(c) {
   const open = CONTACT_OPEN.has(c.id);
   const pills = [];
-  // Three states, not two, and the third is what a MOVED contact needs.
-  //
-  // `emailed` is scoped to this role so the new application can run its own sequence — right —
-  // but the pill reads it, so somebody four emails deep who was moved across arrived showing
-  // "✉ draft", as though nobody had ever written to them. That is the opposite of what is
-  // needed at a glance and is how the same person gets written to twice.
-  //
-  // Marked rather than merged with `✉ sent`: what went out was about a DIFFERENT role, so
-  // "we have spoken" and "we have spoken about this job" are different facts and the row has
-  // to be able to say which.
-  const prior = c.prior_outreach;
-  pills.push(
-    c.emailed ? `<span class="pill on">✉ sent</span>`
-    : (prior && prior.emails)
-      ? `<span class="pill on prev" title="${esc(prior.emails)} email${prior.emails === 1 ? '' : 's'} already sent to them${
-          prior.job_title ? ` for “${esc(prior.job_title)}”` : ' for another role'} — nothing has been sent about THIS one yet"
-         >✉ ${prior.emails} sent · earlier role</span>`
+  pills.push(c.emailed ? `<span class="pill on">✉ sent</span>`
     : (c.email ? `<span class="pill off">✉ draft</span>` : `<span class="pill off">✉ no email</span>`));
   pills.push((c.dm_status === 'sent' || c.dm_status === 'manual') ? `<span class="pill on">🔗 connected</span>`
     : (c.linkedin_url ? `<span class="pill off">🔗 —</span>` : ''));
@@ -2328,15 +2210,9 @@ function conversationView(c) {
   // the last thing on a card is often our own unanswered email, or a calendar acceptance, so a
   // banner reading "your turn — X replied 1d ago" would sit above a COLLAPSED reply box while
   // an unanswerable thread was the one hanging open.
-  //
-  // Picked by DATE, not by position. Groups are ordered by when each conversation began, so the
-  // last one in the list is the most recently STARTED — which is not the most recently active,
-  // and on the live Marcus card those are different threads. Taking `[length - 1]` would open a
-  // thread that went quiet weeks ago and collapse the one still moving.
-  const lastAt = g => msgAt(g.msgs[g.msgs.length - 1]);
-  const mostRecent = list => list.reduce((best, g) => !best || lastAt(g) > lastAt(best) ? g : best, null);
   const answerable = groups.filter(g => (c.reply_targets || {})[g.id]);
-  const newest = (mostRecent(answerable.length ? answerable : groups) || {}).id || '';
+  const newest = (answerable.length ? answerable[answerable.length - 1]
+                                    : groups[groups.length - 1] || {}).id || '';
   const rows = groups.map(g => {
     const key = `${c.id}|${g.id}`;
     const open = groups.length === 1 || g.id === newest
@@ -2354,7 +2230,7 @@ function conversationView(c) {
           <span class="th-caret">${open ? '▾' : '▸'}</span>
           <span class="th-subj">${esc(g.subject || '(no subject)')}</span>
           <span class="th-meta">${mark}${g.msgs.length} message${g.msgs.length === 1 ? '' : 's'} · ${
-            esc(threadSpan(g))}</span>
+            esc(shortDate(msgAt(g.msgs[g.msgs.length - 1])))}</span>
         </button>
       </div>`;
     if (!open) return head;
@@ -2437,19 +2313,6 @@ function threadKey(m) {
   return tid || `subj:${stripRe((m && m.subject) || '').trim().toLowerCase()}`;
 }
 
-// When a thread RAN, not just when it last moved.
-//
-// The header used to show the last message's date alone. Beside threads now ordered by their
-// first message that reads as a contradiction — a thread labelled "Aug 10" sitting below one
-// labelled "Jul 28" — and it hid the overlap that makes two conversations confusing to read in
-// the first place. A range states it: `Jul 22 – Aug 10` above `Jul 28` is obviously interleaved,
-// and nobody has to reconstruct that from the message list.
-function threadSpan(g) {
-  const first = shortDate(msgAt(g.msgs[0]));
-  const last = shortDate(msgAt(g.msgs[g.msgs.length - 1]));
-  return first === last ? last : `${first} – ${last}`;
-}
-
 function groupThreads(msgs) {
   const by = new Map();
   for (const m of msgs || []) {
@@ -2465,11 +2328,8 @@ function groupThreads(msgs) {
     g.subject = g.msgs.map(m => m.subject || '').filter(Boolean)
       .sort((a, b) => a.length - b.length)[0] || '';
   }
-  // By each thread's FIRST message — the order the conversations BEGAN. See the long note on
-  // `group_threads` in domain/conversations.py: sorting by the LAST message put a stray Jul 28
-  // message above a thread that started Jul 22, so reading a card went backwards at the second
-  // message. Both sides sort the same way and `test_thread_grouping_agrees.py` proves it.
-  return out.sort((a, b) => msgAt(a.msgs[0]).localeCompare(msgAt(b.msgs[0])));
+  return out.sort((a, b) => msgAt(a.msgs[a.msgs.length - 1])
+    .localeCompare(msgAt(b.msgs[b.msgs.length - 1])));
 }
 
 //: Per-thread open state. Two sets rather than one, because the DEFAULT differs: the newest
@@ -2581,38 +2441,20 @@ function replyBox(c, t) {
     return `<button class="cc-chip${off ? ' off' : ''}" title="${off ? 'Add back' : 'Remove from this reply'}"
       onclick="toggleCc(${ka}, decodeURIComponent('${encodeURIComponent(x)}'))">${esc(x)} ${off ? '＋' : '✕'}</button>`;
   }).join('');
-  // A reply already promised for later. The queued TEXT is the authority while it exists — the
-  // browser draft is per-session, so after a reload the composer would otherwise be empty on a
-  // conversation that has an answer waiting to go, and the operator would write it again.
-  const queued = (c.scheduled_replies || {})[tk];
-  const body = queued ? queued.body : (REPLY_DRAFT.get(k) || '');
-  const queuedRow = queued ? `<div class="fu-sendat">⏰ This reply sends
-      ${esc(fmtSched(queued.scheduled_at))} on its own
-      <button class="ghost" onclick="unscheduleReply(${ka}, this)">Cancel</button></div>` : '';
+  const body = REPLY_DRAFT.get(k) || '';
   return `<div class="reply-box" data-reply-for="${esc(c.id)}" data-cc="${esc(JSON.stringify(cc))}" data-to="${esc(t.to)}" data-thread="${esc(tk)}">
     <div class="reply-hdr">↩ Reply to <strong>${esc(t.to)}</strong>${
       cc.length ? ` · cc ${cc.length}` : (t.cc || []).length ? ' · <span class="cc-none">cc removed</span>' : ''}</div>
     ${(t.cc || []).length ? `<div class="cc-row">${chips}</div>` : ''}
     ${lastReplyCard(c, tk)}
     <div class="reply-subj">${esc(t.subject)}</div>
-    ${queuedRow}
     <textarea class="reply-body" rows="6" placeholder="Write your reply…"
       oninput="REPLY_DRAFT.set('${esc(k)}', this.value)">${esc(body)}</textarea>
     <div class="reply-actions">
       <button class="secondary" onclick="draftReply(${ka}, this)">✍ Draft an answer</button>
       <button class="primary" onclick="sendReply(${ka}, this)">Send reply</button>
-      ${queued ? '' : `<button class="secondary" onclick="scheduleReply(${ka}, this)">⏰ Send later…</button>`}
       <span class="reply-hint">Goes into this thread. No attachments.</span>
     </div>
-    ${SCHED_OPEN.has(k) && !queued ? `<div class="fu-sendat-form">
-      <label>Send at
-        <input type="datetime-local" class="fu-sendat-input" value="${esc(SCHED_AT[k] || nextNineAm())}"
-               onchange="SCHED_AT[${tagArg(k)}] = this.value" /></label>
-      <button class="send" onclick="scheduleReply(${ka}, this, true)">Schedule</button>
-      <div class="fu-sendat-note">Leave this dashboard running — scheduled sends fire from it,
-        within about ${Math.round(POLL_EVERY_S / 60)} minutes. If they write again before then,
-        this waits for you rather than answering a conversation that has moved.</div>
-    </div>` : ''}
     ${replyMsg(c.id, tk)}
     <input class="r-style" placeholder="✨ Tweak the vibe, then Draft again — e.g. 'warmer', 'shorter', 'more direct'"
       value="${esc(REPLY_STYLE.get(k) || '')}"
@@ -2630,26 +2472,8 @@ function editSaid(k) { SAID_EDIT.add(k); refresh(); }
 function doneSaid(k) { SAID_EDIT.delete(k); refresh(); }
 
 function lastReplyCard(c, tk) {
-  // THIS conversation's newest inbound message, not the newest across every thread with this
-  // person. One value for the whole card meant the composer on a calendar invite quoted
-  // something said in an unrelated deal — 10 live contacts have more than one thread.
-  const r = (c.last_replies || {})[tk];
+  const r = c.last_reply;
   const k = rkey(c.id, tk);
-  // ALREADY ANSWERED is a different card, not the same one. Rendered as "answer this" it put a
-  // week-old message, an intent chip and a pre-filled draft directly under a banner reading
-  // "Answered 4 days ago — waiting on them". The intent survives, because "they said no" is
-  // still true and the job may still need marking rejected; the pending framing does not, and
-  // neither does the paste box — there is nothing here awaiting a reply.
-  if (r && r.answered) {
-    const tag = r.label ? `<span class="intent-chip ${esc(r.intent)}">${esc(r.label)}</span>` : '';
-    const act = r.action ? `<div class="intent-act">${esc(r.action)}</div>` : '';
-    const n = r.answers > 1 ? `${r.answers} times` : 'already';
-    return `<div class="said said-done">
-      <div class="said-hdr">You ${n} answered this${r.answered_at
-        ? ` · ${esc(shortDate(r.answered_at))}` : ''} ${tag}</div>
-      ${r.text ? `<div class="said-txt">“${esc(r.text)}”</div>` : ''}${act}
-    </div>`;
-  }
   const editing = SAID_EDIT.has(k) || !r;
   if (!editing) {
     const tag = r.label ? `<span class="intent-chip ${esc(r.intent)}">${esc(r.label)}</span>` : '';
@@ -2799,44 +2623,6 @@ function toggleCc(cid, tk, address) {
   REPLY_DROP.set(k, set);
   refresh();
 }
-// Two clicks: the first opens the picker, the second commits. Same shape as the bulk bar, and
-// for the same reason — a date input sitting permanently between Draft and Send is a control
-// that gets used by accident on the least reversible action in the app.
-async function scheduleReply(cid, tk, btn, commit) {
-  const k = rkey(cid, tk);
-  if (!commit) { SCHED_OPEN.has(k) ? SCHED_OPEN.delete(k) : SCHED_OPEN.add(k); rerenderJobs(true); return; }
-  const card = btn.closest('.reply-box');
-  const body = (REPLY_DRAFT.get(k) || '').trim();
-  const say = (m, bad) => { setReplyMsg(cid, tk, m, bad); refresh(); };
-  if (!body) { say('Write a reply before scheduling one.', true); return; }
-  const input = card.querySelector('.fu-sendat-input');
-  const at = schedToUtc((input && input.value) || SCHED_AT[k] || '');
-  if (!at) { say('Pick a date and time first.', true); return; }
-  let cc = [];
-  try { cc = JSON.parse(card.dataset.cc || '[]'); } catch { cc = []; }
-  const who = card.dataset.to || 'them';
-  if (!confirm(`Send this reply to ${who} ${fmtSched(at)}?\n\n` +
-               `It goes on its own — leave this dashboard running.`)) return;
-  btn.disabled = true; btn.textContent = 'Scheduling…';
-  const r = await post('/api/contact/reply',
-    {contact_id: cid, body, cc, thread: card.dataset.thread || '', at});
-  if (r.ok) { SCHED_OPEN.delete(k); REPLY_DRAFT.delete(k); }
-  say(r.message || (r.ok ? 'Scheduled.' : 'Failed.'), !r.ok);
-}
-
-// Cancelling hands the TEXT back, because `reply_queue` is the only copy of it — the operator
-// asked for it not to go yet, not to lose what they wrote.
-async function unscheduleReply(cid, tk, btn) {
-  const k = rkey(cid, tk);
-  btn.disabled = true; btn.textContent = 'Cancelling…';
-  const card = btn.closest('.reply-box');
-  const r = await post('/api/contact/reply',
-    {contact_id: cid, body: 'x', thread: card.dataset.thread || '', at: 'cancel'});
-  if (r.ok && r.body) REPLY_DRAFT.set(k, r.body);
-  setReplyMsg(cid, tk, r.message || (r.ok ? 'No longer scheduled.' : 'Failed.'), !r.ok);
-  refresh();
-}
-
 async function sendReply(cid, tk, btn) {
   const k = rkey(cid, tk);
   const card = btn.closest('.reply-box');
@@ -3000,13 +2786,7 @@ function emailChannel(c) {
   // splitting the conversation further — so the offer is to go to the card that owns it.
   if (c.thread_from) return borrowedBanner(c) + history;
   // With an inbound message the composers already live inside the history, per thread.
-  //
-  // The send MARKER still has to be reachable here, though, and this is where the first version
-  // of it was not: it rode in `draftBlock`'s button row, which never renders once a reply
-  // exists. Live, Patrick Omalley had SIX outbound emails, `emailed=false`, and no way to
-  // correct it — the exact contact the operator was pointing at. §Lessons 43 again: a control
-  // that exists in one branch of a render is missing from every other.
-  if (hasConversation(c)) return markSentBar(c) + history;
+  if (hasConversation(c)) return history;
   // A due follow-up is the more urgent thing to WRITE, but it no longer replaces the record of
   // what was already said — it sits under it.
   if (c.followup_state === 'due' || (c.followup_message || '').trim())
@@ -3763,11 +3543,7 @@ function employerStats(jobs) {
     roles: jobs.length,
     people: all.length,
     emailed: all.filter(c => c.emailed || c.submitted_at).length,
-    // `Object.keys(...).length`, never the object itself: `last_replies` is a MAP now, and `{}`
-    // is truthy in JS — so a bare `|| c.last_replies` would count every contact on the band as
-    // having replied, on a header whose whole job is the reply count.
-    replied: all.filter(c => c.replied_at
-      || Object.keys(c.last_replies || {}).length).length,
+    replied: all.filter(c => c.replied_at || c.last_reply).length,
     due: due.size,
     // THE number this header exists for. One person on two roles is one person who can receive
     // the same pitch twice, and nothing else on the page can show it — each row shows its own
@@ -4175,8 +3951,6 @@ async function refresh() {
   CALENDAR_SCOPE = !!data.calendar_scope;
   CONV_SNIPPET_MAX = data.snippet_max || 0;
   if (data.poll_every_s) POLL_EVERY_S = data.poll_every_s;
-  // `!= null` rather than `||`: 0 is a real value here and means "never fire late" (§Lessons 50).
-  if (data.scheduled_grace_h != null) SCHED_GRACE_H = data.scheduled_grace_h;
   const allJobs = data.jobs || [];
   // Kept for handlers that need the payload AFTER a click rather than during render — the
   // bulk Gmail fetch has to know which contacts a job has, and an inline onclick cannot be
@@ -4755,6 +4529,16 @@ async function logInteraction(cid, kind) {
   refresh();
 }
 
+// Migrating a contact between roles opens their card on the channel the action named, so the
+// button and the pane it lands on cannot disagree (§Lessons 88).
+function openContactFrom(url, cid, channel) {
+  TAB_OPEN.set(url, 'people');
+  CONTACT_OPEN.add(cid);
+  if (channel) CHANNEL_TAB.set(cid, channel);
+  autoSyncGmail(cid);
+  refresh();
+}
+
 function jobPane(j) {
   const t = activeTab(j);
   if (t === 'job')       return jobDetail(j);
@@ -4888,70 +4672,12 @@ function fuBulkBar(j, f, byId) {
     ? `<button class="send" onclick="fuBulk(${key}, 'send', this)">Send all ${drafted.length} drafted</button>`
     : `<button class="send" disabled title="Draft them first — there is nothing written to send">Send all drafted</button>`;
 
-  // Scheduling acts on the SAME set as sending — what is written — for the same reason: you
-  // cannot promise to send words that do not exist yet, and drafting is the click where the
-  // operator reads them. Scheduling text nobody has seen is the one thing this feature must
-  // not make easy.
-  // A MISSED promise counts as schedulable, not as scheduled. It will never fire on its own, so
-  // treating it as spoken-for would leave the only way to re-promise it a per-card Clear on
-  // every one — the fix for a dead end that removes the way out of it (§Lessons 99). `due` is
-  // different and is deliberately grouped with pending: the poller is about to send it.
-  const promised = drafted.filter(c => ['pending', 'due'].includes(schedState(c.followup_scheduled_at)));
-  const missed = drafted.filter(c => schedState(c.followup_scheduled_at) === 'missed');
-  const schedulable = drafted.filter(c => !['pending', 'due'].includes(schedState(c.followup_scheduled_at)));
-  const open = SCHED_OPEN.has(j.url);
-
-  // BOTH, when both apply. An either/or left a job with one promise and four unscheduled drafts
-  // showing only "Unschedule" — so scheduling the other four meant withdrawing the promise you
-  // had already made. The two buttons act on disjoint sets, so there is no reason to hide one.
-  const schedBtn = (schedulable.length
-    ? `<button class="secondary" onclick="fuSchedToggle(${key})">${open ? 'Close' : `⏰ Schedule ${schedulable.length}…`}</button>`
-    : (promised.length ? ''
-      : `<button class="secondary" disabled title="Draft them first — there is nothing written to schedule">⏰ Schedule</button>`))
-    + (promised.length
-    ? `<button class="ghost" onclick="fuBulk(${key}, 'unschedule', this)" title="Withdraw the promise. The drafts stay exactly as they are.">✕ Unschedule ${promised.length}</button>`
-    : '');
-
-  // Stated, never implied. Nothing fires while the dashboard is closed, and an operator who
-  // schedules five sends and shuts the laptop has to know that before they walk away — not
-  // afterwards, from five emails that never arrived.
-  const picker = open && schedulable.length ? `
-    <div class="fu-sendat-form">
-      <label>Send ${schedulable.length} at
-        <input type="datetime-local" class="fu-sendat-input" value="${esc(SCHED_AT[j.url] || nextNineAm())}"
-               onchange="SCHED_AT[decodeURIComponent('${encodeURIComponent(j.url)}')] = this.value" />
-      </label>
-      <button class="send" onclick="fuBulk(${key}, 'schedule', this)">Schedule</button>
-      <div class="fu-sendat-note">Leave this dashboard running — scheduled sends fire from it,
-        within about ${Math.round(POLL_EVERY_S / 60)} minutes of the time you pick. If it is
-        closed, they go when you next open it, or read <em>missed</em> after ${SCHED_GRACE_H}h.</div>
-    </div>` : '';
-
-  // Missed gets its own count. Folded into "scheduled" it would read as work in hand when it is
-  // the opposite — nothing is going to happen to those without the operator.
-  const schedNote = (promised.length
-    ? `<span class="fu-bulk-sched">⏰ ${promised.length} scheduled ${esc(fmtSched(promised[0].followup_scheduled_at))}</span>`
-    : '') + (missed.length
-    ? `<span class="fu-bulk-sched fu-bulk-missed" title="These came due while the dashboard was closed. They will not send on their own — schedule them again or send them.">⚠ ${missed.length} missed</span>`
-    : '');
-
   return `<div class="fu-bulk">
     <span class="fu-bulk-n">${due.length} due</span>
     <span class="fu-bulk-sub">${drafted.length} drafted · ${undrafted} not yet</span>
-    ${schedNote}
-    ${draftBtn}${sendBtn}${schedBtn}
+    ${draftBtn}${sendBtn}
     <span class="fu-bulk-status" data-bulk-status></span>
-    ${picker}
   </div>`;
-}
-
-// `force`, for the same reason `startEdit` needs it: the operator clicked a button asking the
-// panel to change, and a deliberate render is not a refresh. Without it the guard that protects
-// an open editor can veto the render that opens this one (§Lessons 94), and the click reads as
-// doing nothing.
-function fuSchedToggle(url) {
-  if (SCHED_OPEN.has(url)) SCHED_OPEN.delete(url); else SCHED_OPEN.add(url);
-  rerenderJobs(true);
 }
 
 async function fuBulk(url, action, btn) {
@@ -4959,63 +4685,33 @@ async function fuBulk(url, action, btn) {
   if (!j) return;
   const byId = {}; (j.contacts || []).forEach(c => byId[c.id] = c);
   let due = ((j.followups || {}).due || []).map(d => byId[d.id]).filter(Boolean);
-  // Each action acts on a DIFFERENT set, and the differences are the whole safety story.
-  // Sending and scheduling touch only what is already written; drafting touches only what is
-  // not, or "Draft all" silently discards drafts the operator edited by hand; unscheduling
-  // touches only what actually carries a promise.
-  const written = c => (c.followup_message || '').trim();
-  if (action === 'send') due = due.filter(written);
-  else if (action === 'draft') due = due.filter(c => !written(c));
-  // Same split as the bar: a missed promise is schedulable (it will never fire on its own) and
-  // an outstanding one is not (re-promising it would silently move a send the operator set).
-  else if (action === 'schedule')
-    due = due.filter(c => written(c) && !['pending', 'due'].includes(schedState(c.followup_scheduled_at)));
-  else if (action === 'unschedule')
-    due = due.filter(c => !!schedState(c.followup_scheduled_at));
+  // Sending acts ONLY on what is already written. Drafting acts only on what is not — otherwise
+  // "Draft all" silently discards drafts the operator has edited by hand.
+  due = action === 'send'
+    ? due.filter(c => (c.followup_message || '').trim())
+    : due.filter(c => !(c.followup_message || '').trim());
   if (!due.length) return;
-
-  const body = { action, contact_ids: due.map(c => c.id) };
 
   if (action === 'send') {
     const who = due.map(c => c.full_name).join(', ');
     if (!confirm(`Send ${due.length} follow-up email(s) for ${j.contact_company || j.company}?\n\n` +
                  `${who}\n\nThis cannot be undone.`)) return;
   }
-  if (action === 'schedule') {
-    // The picker is read at CLICK time, not at render time, so a value typed and not yet
-    // committed to SCHED_AT still counts — the input is the thing on screen and it is what the
-    // operator believes they chose.
-    const input = btn.parentElement.querySelector('.fu-sendat-input');
-    const local = (input && input.value) || SCHED_AT[j.url] || '';
-    body.at = schedToUtc(local);
-    if (!body.at) { alert('Pick a date and time first.'); return; }
-    const who = due.map(c => c.full_name).join(', ');
-    // Names the time in the operator's own words AND the people, for the same reason the send
-    // confirm does: this is scoped to one job, so it can afford to list eight names you can
-    // read rather than a count you cannot check.
-    if (!confirm(`Schedule ${due.length} follow-up email(s) for ` +
-                 `${j.contact_company || j.company} to send ${fmtSched(body.at)}?\n\n${who}\n\n` +
-                 `They send on their own — leave this dashboard running.`)) return;
-  }
 
-  const status = btn.closest('.fu-bulk').querySelector('[data-bulk-status]');
+  const status = btn.parentElement.querySelector('[data-bulk-status]');
   const was = btn.textContent;
   btn.disabled = true;
-  btn.textContent = { draft: 'Drafting…', send: 'Sending…',
-                      schedule: 'Scheduling…', unschedule: 'Clearing…' }[action] || 'Working…';
+  btn.textContent = action === 'draft' ? 'Drafting…' : 'Sending…';
   // Highlight the cards this is about to touch, so it is obvious WHO is included before anything
   // happens — the whole reason this belongs on the job rather than in a global panel.
   due.forEach(c => fuFlash(c.id, 'working'));
   if (status) status.textContent = `${due.length} queued…`;
 
   try {
-    const r = await post('/api/followup/bulk', body);
+    const r = await post('/api/followup/bulk', { action, contact_ids: due.map(c => c.id) });
     if (status) status.textContent = r.message || (r.ok ? 'done' : 'failed');
     const failed = new Set((r.results || []).filter(x => x.contact_id && !x.ok).map(x => x.contact_id));
     due.forEach(c => fuFlash(c.id, failed.has(c.id) ? 'failed' : 'ok'));
-    // Close the picker once it has done its job — leaving it open beside a bar that now reads
-    // "5 scheduled" invites a second identical promise on top of the first.
-    if (action === 'schedule' && r.ok) SCHED_OPEN.delete(j.url);
   } catch (e) {
     if (status) status.textContent = String(e);
     due.forEach(c => fuFlash(c.id, 'failed'));
@@ -5041,18 +4737,6 @@ function followupCard(c, d, totalTouches) {
   const has = !!(c.followup_message || '').trim();
   const warn = c.threaded ? '' : `<span class="fu-warn" title="This email predates threading, so the follow-up arrives as a new message rather than a reply">⚠ won't thread</span>`;
   const err = c.followup_error ? `<div class="fu-err">${esc(c.followup_error)}</div>` : '';
-  // A promise made in the bulk bar has to be legible on the PERSON it is aimed at. Shown only
-  // in the bar, the operator opening one card would see an ordinary unsent draft and send it by
-  // hand — and then the poller would find nothing, which looks like the scheduling silently
-  // failed rather than like the send already happening twice over.
-  const sched = schedState(c.followup_scheduled_at);
-  const schedRow = !sched ? '' : (sched === 'missed'
-    ? `<div class="fu-sendat fu-sendat-missed">⚠ Missed — this was due to send
-         ${esc(fmtSched(c.followup_scheduled_at))}, but the dashboard was not running. It will
-         not go on its own now; send it below or leave it.
-         <button class="ghost" onclick="fuAct('${esc(c.id)}','unschedule',this)">Clear</button></div>`
-    : `<div class="fu-sendat">⏰ Scheduled to send ${esc(fmtSched(c.followup_scheduled_at))}
-         <button class="ghost" onclick="fuAct('${esc(c.id)}','unschedule',this)">Cancel</button></div>`);
   return `
     <div class="fu-card" data-cid="${esc(c.id)}">
       <div class="fu-head">
@@ -5060,7 +4744,6 @@ function followupCard(c, d, totalTouches) {
         <span class="fu-touch">touch ${d.touch} of ${totalTouches || 3}</span>${warn}
       </div>
       <div class="fu-meta">First emailed ${fmtDate(c.submitted_at)} · no reply recorded</div>
-      ${schedRow}
       ${err}
       ${has ? `
         <input class="fu-subj" value="${esc(c.followup_subject)}" placeholder="Subject…" />

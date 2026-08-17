@@ -1258,6 +1258,12 @@
     background:var(--surface2); border-radius:0 6px 6px 0; }
   .said-hdr { font-size:11px; color:var(--faint); display:flex; align-items:center; gap:6px; }
   .said-why { font-style:italic; }
+  /* Already answered — settled rather than pending. Green edge and a quieter quote, so a card
+     that needs nothing from you does not look like a card that does. Built from the palette's
+     own tokens, and the background is set together with a colour that reads on it (§Lessons 105). */
+  .said.said-done { border-left-color:var(--green); background:var(--green-soft); }
+  .said.said-done .said-hdr { color:var(--green); font-weight:600; }
+  .said.said-done .said-txt { opacity:.75; }
   .said-box { width:100%; font:inherit; font-size:12px; padding:6px; margin-top:4px;
     border-radius:6px; border:1px solid var(--line); background:var(--surface); color:inherit;
     resize:vertical; }

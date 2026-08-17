@@ -2142,8 +2142,12 @@ def _contact_payload(c: dict, company: str | None = None, ladders: dict | None =
         # Whose turn it is. `awaiting_us` means they wrote and nobody answered — the worst
         # outcome the system can produce, since it paid for the reply and then dropped it.
         "conversation": _conversation_state(thread or []),
-        # CRM-4b. Empty on every metadata-only install, which is the default.
-        "last_reply": _last_reply(thread or []),
+        # CRM-4b, keyed BY CONVERSATION. Empty on every metadata-only install, which is the
+        # default. Deliberately replaces the old singular `last_reply` rather than sitting beside
+        # it: leaving that key on the wire would leave the unscoped, already-answered value one
+        # `c.last_reply` away, and it read correctly on a single-thread card — the shape that
+        # keeps a bug alive because nothing looks wrong (§Lessons 49).
+        "last_replies": _last_replies(thread or []),
         # HOT layer marker: found via your connections (vs cold Apollo). Either the stored source
         # or a live connection match makes it "hot".
         "hot": c.get("source") == "connection" or bool(conn_rec),
@@ -2796,27 +2800,42 @@ def _add_introduced_contact(data: dict) -> dict:
                                            " Use “Regenerate” to draft an email.")}
 
 
-def _last_reply(thread: list) -> dict | None:
-    """The newest inbound message's stored snippet, and what it looks like they want (CRM-4b).
+def _last_replies(thread: list) -> dict:
+    """`{thread_key: {...}}` — the newest thing they said in EACH conversation (CRM-4b).
 
-    Returns None when there is no snippet — which is every install that never granted
-    `gmail.readonly`, and the reason 4b can ship without changing anything for them.
+    Was `_last_reply`, singular and unscoped, which is two bugs: it quoted one message under every
+    composer on a multi-thread card, and it kept presenting a message as pending after we had
+    answered it. See `conversations.last_inbound_by_thread`, which owns both rules and is where
+    they are tested.
+
+    `answered` rides along rather than filtering the entry out. The intent — *they said no*, and
+    the "mark the job rejected" it implies — is true whether or not we acknowledged it; what
+    changes is that it must not be dressed up as something awaiting a reply.
+
+    An entry with no snippet is still returned when it has been ANSWERED, so the card can say so.
+    It is dropped when unanswered and empty, which is every install that never granted
+    `gmail.readonly` — that is what lets the composer fall back to "paste what they wrote".
     """
     try:
-        inbound = [m for m in thread if isinstance(m, dict) and m.get("direction") == "in"]
-        if not inbound:
-            return None
-        last = inbound[-1]
-        text = (last.get("snippet") or "").strip()
-        if not text:
-            return None
+        from applypilot.domain import conversations as _cv
         from applypilot.domain import intent as _intent
-        return {"text": text, "at": last.get("sent_at") or "",
+        out = {}
+        for key, info in _cv.last_inbound_by_thread(thread or []).items():
+            last = info["message"]
+            text = (last.get("snippet") or "").strip()
+            if not text and not info["answered"]:
+                continue
+            out[key] = {
+                "text": text, "at": last.get("sent_at") or "",
                 "from": last.get("from_name") or last.get("from_addr") or "",
-                **_intent.suggestion(_intent.classify(text))}
+                "answered": info["answered"], "answered_at": info["answered_at"],
+                "answers": info["answers"],
+                **(_intent.suggestion(_intent.classify(text)) if text else {}),
+            }
+        return out
     except Exception:  # noqa: BLE001
-        log.debug("Could not summarise the last reply", exc_info=True)
-        return None
+        log.debug("Could not summarise the last replies", exc_info=True)
+        return {}
 
 
 def _awaiting_us(contacts: list[dict]) -> list[dict]:
@@ -3575,6 +3594,26 @@ def _fetch_reply_text(data: dict) -> dict:
     return res
 
 
+def _pull_thread_text(contact: dict, thread_key: str, conn) -> int:
+    """Store the full text of ONE conversation before drafting against it. Never raises.
+
+    `thread_key` is what the browser named. It is a real Gmail thread id, or `subj:<normalised>`
+    for messages that carry none — and only the first can be fetched, so a subject-keyed group is
+    skipped rather than guessed at. Passing it through is what stops this pulling the thread
+    captured at send time on a contact with several conversations.
+    """
+    key = (thread_key or "").strip()
+    if key.startswith("subj:"):
+        return 0
+    try:
+        from applypilot.networking import replies as _replies
+        res = _replies.fetch_thread_text(contact, conn, thread_id=key)
+        return int(res.get("stored") or 0)
+    except Exception:  # noqa: BLE001 — a draft must still be produced from what we hold
+        log.debug("Could not pull thread text before drafting", exc_info=True)
+        return 0
+
+
 def _draft_reply(data: dict) -> dict:
     """Draft an answer to a live conversation, from the whole sequence. Never sends.
 
@@ -3600,13 +3639,34 @@ def _draft_reply(data: dict) -> dict:
     if not contact:
         return {"ok": False, "message": "contact not found"}
 
+    # READ THE WHOLE CONVERSATION FIRST, because a draft written from previews is not a draft
+    # written from the conversation.
+    #
+    # The automatic sync stores Gmail's ~200-character preview and nothing more, by design. That
+    # is fine for noticing a reply and useless for answering one: measured on the live database,
+    # 85 of 136 inbound messages were sitting exactly on the cap, and the transcript presented
+    # every one of them as a complete message. On the Miro card the model was handed Yukiko's
+    # reply ending "Could you kindly let me know" and answered "your message got cut off at the
+    # end — what were you about to ask?", to a recruiter whose email was intact.
+    #
+    # This does NOT widen the documented narrowing, and that is why it belongs here rather than
+    # in the poller. The rule was never "read less than the grant allows" — the grant is
+    # all-or-nothing — it is "only ever read one conversation, and only when the operator asks
+    # for it by name". Clicking ✍ Draft an answer IS that request, at exactly the bar
+    # "⤓ Fetch from Gmail" already meets. The five-minute poller still stores previews.
+    #
+    # Best-effort and silent: no scope, no network or a Gmail hiccup must not turn "draft me an
+    # answer" into an error, because the drafter still has the previews and the truncation is now
+    # marked in the transcript either way.
+    want = (data.get("thread") or "").strip()
+    _pull_thread_text(contact, want, conn)
+
     thread = _msgs.thread_for_contact(cid, conn)
     # SCOPE TO THE CONVERSATION THE COMPOSER SITS UNDER, and do it BEFORE the paste is stored.
     # `thread_for_contact` returns every thread merged, so without this the draft answers
     # whichever message is newest across all of them — on the live card, a reply written under
     # "OpenScreen Raven Applet" would answer somebody else on a different subject. Same defect
     # `reply_target` had, one layer over.
-    want = (data.get("thread") or "").strip()
     if want:
         from applypilot.domain import conversations as _cv
         picked = next((g for g in _cv.group_threads(thread) if g["key"] == want), None)

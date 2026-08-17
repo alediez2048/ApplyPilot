@@ -195,7 +195,7 @@ def sync_all_with(contact: dict, conn=None, limit: int = 25) -> dict:
                         f"{f', {total_new} new message(s)' if total_new else ' — nothing new'}.")}
 
 
-def fetch_thread_text(contact: dict, conn=None) -> dict:
+def fetch_thread_text(contact: dict, conn=None, thread_id: str = "") -> dict:
     """Read ONE conversation's text, because the operator asked for this one.
 
     The scope is all-or-nothing, so this cannot narrow what we are permitted to read. What it
@@ -204,11 +204,18 @@ def fetch_thread_text(contact: dict, conn=None) -> dict:
     it is the difference between a tool that can read your mail and a tool that is reading it.
 
     Inbound messages only. Our own sent text is already ours.
+
+    `thread_id` names WHICH conversation, and a caller with more than one open must pass it.
+    Falling back to `contacts.thread_id` is right for the button (one contact, one obvious
+    thread) and wrong for anything scoped: that column holds the thread captured at SEND time,
+    so on a contact with several conversations it fetches whichever one we started rather than
+    the one on screen — the merged-thread assumption `reply_target` and `_draft_reply` were both
+    fixed for (§Lessons 49).
     """
     ok, why = gmail_read.can_read_content()
     if not ok:
         return {"ok": False, "message": why, "stored": 0}
-    thread_id = (contact.get("thread_id") or "").strip()
+    thread_id = (thread_id or contact.get("thread_id") or "").strip()
     if not thread_id:
         return {"ok": False, "message": "no Gmail thread recorded for this contact", "stored": 0}
 

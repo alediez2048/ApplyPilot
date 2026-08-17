@@ -464,6 +464,52 @@ def _from_robot(msg: dict) -> bool:
     return is_robot(addr(msg.get("from_addr")))
 
 
+def last_inbound_by_thread(messages: list[dict]) -> dict[str, dict]:
+    """Per CONVERSATION: the newest thing they said, and whether we have since answered it.
+
+    Two separate bugs live in the naive version — `max(inbound, key=sent_at)` over the merged
+    list — and the dashboard had both:
+
+    **It ignores which conversation you are looking at.** `thread_for_contact` returns every
+    thread merged, so one inbound message was quoted under EVERY composer on the card. Measured:
+    10 live contacts have more than one thread, so the reply box on a calendar invite offered to
+    answer something said in an unrelated deal. That is the same merged-thread assumption
+    `reply_target`, `_draft_reply` and `set_reply_text` were each fixed for — this is the fourth
+    call site of one rule (§Lessons 49).
+
+    **It ignores that we already answered.** The newest inbound stays "the thing to answer"
+    forever, so a card would quote a message from a week ago, tag it *They said no*, and pre-fill
+    a draft answering it — directly beneath a banner reading *"Answered 4 days ago — waiting on
+    them."* Both came from the same rows and disagreed. Measured: 22 of 184 contacts with stored
+    messages, one of them with FIVE later outbound messages.
+
+    So `answered` is reported rather than filtered out. A message we have replied to is still
+    worth showing — "they said no" is true whether or not we acknowledged it, and the job may
+    still need marking rejected — it is just not something awaiting an answer, and the caller
+    must render those two differently.
+    """
+    out: dict[str, dict] = {}
+    for group in group_threads([m for m in (messages or []) if isinstance(m, dict)]):
+        # `group_threads` sorts each group oldest-first, so the last inbound is the last one
+        # seen, and anything after it in the list is a message we sent since.
+        last_in, later_out = None, []
+        for m in group["msgs"]:
+            if (m.get("direction") or "") == "in":
+                last_in, later_out = m, []
+            elif last_in is not None:
+                later_out.append(m)
+        if last_in is None:
+            continue                      # our own outreach; a follow-up, not a conversation
+        out[group["key"]] = {
+            "message": last_in,
+            "answered": bool(later_out),
+            # WHEN we answered, so the card can say so rather than merely go quiet.
+            "answered_at": str(later_out[-1].get("sent_at") or "") if later_out else "",
+            "answers": len(later_out),
+        }
+    return out
+
+
 def conversation_state(messages: list[dict], now=None) -> dict | None:
     """Whose turn it is in this conversation, and how long it has been that way.
 

@@ -5089,6 +5089,33 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 ok, msg = _network.start(url, per_job, use_linkedin, skip_known)
                 _json_response(self, {"ok": ok, "message": msg}, 200 if ok else 409)
                 return
+            if path in {"/api/network/linkedin-contacts", "/api/network/linkedin-recruiters"}:
+                url = data.get("url", "")
+                text = data.get("text", "")
+                if not url:
+                    _json_response(self, {"ok": False, "message": "url required"}, 400)
+                    return
+                if not _networking_available():
+                    _json_response(self, {"ok": False,
+                                          "message": "Set APOLLO_API_KEY (paid plan) to enrich LinkedIn contacts"}, 409)
+                    return
+                from applypilot.database import get_connection
+                from applypilot.networking import service
+                from applypilot.networking.store import init_contacts
+                conn = get_connection()
+                init_contacts(conn)
+                row = _jobs.find_by_any_url(url, conn)
+                if not row:
+                    _json_response(self, {"ok": False, "message": "job not found"}, 404)
+                    return
+                people = service.parse_manual_linkedin_contacts(text)
+                res = service.import_linkedin_contacts_for_job(dict(row), people)
+                ok = bool(res.get("contacts"))
+                msg = f"{len(res.get('contacts') or [])} contact(s) added, {res.get('revealed', 0)} with email"
+                if res.get("note"):
+                    msg += f" ({res['note']})"
+                _json_response(self, {"ok": ok, "message": msg}, 200 if ok else 409)
+                return
             if path == "/api/outreach":
                 _json_response(self, _save_or_regen_draft(data))
                 return

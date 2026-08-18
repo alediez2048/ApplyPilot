@@ -1861,6 +1861,45 @@ function addContactForm(j) {
       </div>
     </div>`;
 }
+
+const LINKEDIN_CONTACT_FORM = new Map();
+function linkedinContactState(url) {
+  if (!LINKEDIN_CONTACT_FORM.has(url)) {
+    LINKEDIN_CONTACT_FORM.set(url, {open: false, text: '', err: '', note: '', busy: false});
+  }
+  return LINKEDIN_CONTACT_FORM.get(url);
+}
+function linkedinContactSearchUrl(j) {
+  const company = (j.contact_company || j.company || '').trim();
+  const q = company;
+  return `https://www.linkedin.com/search/results/people/?keywords=${encodeURIComponent(q)}&origin=GLOBAL_SEARCH_HEADER`;
+}
+function toggleLinkedinContacts(url) {
+  const s = linkedinContactState(url);
+  s.open = !s.open; s.err = ''; s.note = '';
+  refresh();
+}
+function onLinkedinContactPaste(url, value) {
+  linkedinContactState(url).text = value;
+}
+async function submitLinkedinContacts(url, btn) {
+  const s = linkedinContactState(url);
+  s.busy = true; s.err = ''; s.note = '';
+  if (btn) { btn.disabled = true; btn.textContent = 'Importing...'; }
+  try {
+    const r = await post('/api/network/linkedin-contacts', {url, text: s.text});
+    if (r.ok) {
+      s.text = ''; s.note = r.message || 'Contacts imported.'; s.open = false;
+    } else {
+      s.err = r.message || 'Could not import contacts.';
+    }
+  } catch (err) {
+    s.err = err && err.message ? err.message : 'Could not import contacts.';
+  } finally {
+    s.busy = false;
+    refresh();
+  }
+}
 // ── CO-2: move contacts from a dead role to a live one ──────────────────────
 // State lives OUTSIDE the DOM, like PANEL_OPEN and CONV_EXPANDED: `#jobs` is replaced wholesale
 // every 2.5s, so anything held in the markup is destroyed mid-decision.
@@ -2069,14 +2108,14 @@ function peopleList(j) {
   if (!cs.length) {
     // The undo has to render here too: moving EVERYONE lands on this branch, which is exactly
     // the moment the operator is most likely to want the move back.
-    return intro + `<div class="pane-empty">No contacts yet. ${findContactsPrompt(j)}</div>`
+    return intro + `<div class="pane-empty">No contacts yet. ${findContactsPrompt(j)} ${linkedinContactPrompt(j)}</div>`
          + addContactForm(j);
   }
   // CO-2 sits at the TOP of the closed job's People tab, above the people it moves. The row
   // menu was the obvious home and is the wrong one: this is not destructive, and burying a
   // control is how the interview button was reported as doing nothing (§Lessons 43). The test
   // for placement is not "can it be reached" but "is it on the thing it acts on" (§Lessons 97).
-  intro += migrateBar(j) + anotherRoundPrompt(j, cs) + addContactForm(j);
+  intro += migrateBar(j) + anotherRoundPrompt(j, cs) + linkedinContactPrompt(j) + addContactForm(j);
   // 💡 outranks the hot/cold split and is pulled OUT of both groups rather than sorted to the
   // front of its own. Every other grouping here is derived — `hot` means "you already know
   // them", which the system worked out — and this is the one the operator DECIDED, so it wins.
@@ -4360,6 +4399,37 @@ function findContactsPrompt(j) {
   // sent it and nothing rendered it, so a run that considered 5 people and dropped all 5 as
   // working elsewhere looked exactly like a button that never fired.
   else if (j.network_note && !running) out += `<div class="netnote">${esc(j.network_note)}</div>`;
+  return out;
+}
+function linkedinContactPrompt(j) {
+  const s = linkedinContactState(j.url);
+  const u = `decodeURIComponent('${encodeURIComponent(j.url)}')`;
+  const search = linkedinContactSearchUrl(j);
+  const dis = NET_AVAIL ? '' : 'disabled';
+  const title = NET_AVAIL
+    ? 'Open LinkedIn, copy people rows, then Apollo-enrich them here.'
+    : 'Set APOLLO_API_KEY to enrich pasted LinkedIn contacts';
+  let out = `<div class="li-recruiter-action">
+      <a class="secondary" href="${esc(search)}" target="_blank" rel="noopener"
+        title="Open LinkedIn People search for this company">🔎 Open LinkedIn people search ↗</a>
+      <button class="secondary" ${dis} title="${title}" onclick="toggleLinkedinContacts(${u})">
+        ${s.open ? 'Cancel LinkedIn import' : 'Paste contacts from LinkedIn'}</button>
+    </div>`;
+  if (s.note && !s.open) out += `<div class="netnote">${esc(s.note)}</div>`;
+  if (!s.open) return out;
+  out += `<div class="addc li-recruiter-box">
+      <div class="addc-head">Paste LinkedIn contacts</div>
+      <textarea class="addc-f li-recruiter-text" rows="5"
+        placeholder="Name - Title - https://www.linkedin.com/in/profile"
+        oninput="onLinkedinContactPaste(${u}, this.value)">${esc(s.text)}</textarea>
+      <div class="addc-actions">
+        <button class="primary" ${s.busy || !NET_AVAIL ? 'disabled' : ''}
+          onclick="submitLinkedinContacts(${u}, this)">${s.busy ? 'Importing...' : 'Enrich with Apollo'}</button>
+        <button class="ghost" onclick="toggleLinkedinContacts(${u})">Cancel</button>
+        <span class="addc-hint">${s.err ? `<span class="addc-err">${esc(s.err)}</span>`
+          : 'Copy one LinkedIn person per line or paste full LinkedIn result cards. Name plus LinkedIn URL works best.'}</span>
+      </div>
+    </div>`;
   return out;
 }
 function fmtDate(iso) {

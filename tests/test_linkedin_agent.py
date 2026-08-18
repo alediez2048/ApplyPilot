@@ -43,6 +43,22 @@ def test_parse_people_extracts_last_json_array():
     assert people[0]["linkedin_url"].endswith("/jane")
 
 
+def test_parse_people_keeps_query_and_rank():
+    out = (
+        '[{"name": "Jane Smith", "title": "Senior Technical Recruiter", '
+        '"profile_url": "https://www.linkedin.com/in/jane", '
+        '"query": "SpaceX recruiter", "rank": 3}]'
+    )
+    people = la._parse_people(out, limit=5)
+    assert people == [{
+        "full_name": "Jane Smith",
+        "title": "Senior Technical Recruiter",
+        "linkedin_url": "https://www.linkedin.com/in/jane",
+        "query": "SpaceX recruiter",
+        "rank": 3,
+    }]
+
+
 def test_parse_people_empty_on_garbage():
     assert la._parse_people("no json here at all", 5) == []
     assert la._parse_people("[]", 5) == []

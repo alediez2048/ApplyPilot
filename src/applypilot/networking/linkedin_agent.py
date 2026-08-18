@@ -23,7 +23,10 @@ import time
 from datetime import date
 
 from applypilot import config
-from applypilot.networking.prompt import READONLY_TOOLS, build_linkedin_prompt
+from applypilot.networking.prompt import (
+    READONLY_TOOLS,
+    build_linkedin_prompt,
+)
 
 log = logging.getLogger(__name__)
 
@@ -121,12 +124,14 @@ def _parse_people(stdout_text: str, limit: int) -> list[dict]:
         except json.JSONDecodeError:
             continue
         out = []
-        for p in arr:
+        for idx, p in enumerate(arr, start=1):
             if isinstance(p, dict) and p.get("name"):
                 out.append({
                     "full_name": p.get("name"),
                     "title": p.get("title"),
                     "linkedin_url": p.get("profile_url"),
+                    "query": p.get("query"),
+                    "rank": p.get("rank") or idx,
                 })
             if len(out) >= limit:
                 break
@@ -174,11 +179,18 @@ def open_login_browser() -> None:
 
 def find_people(company: str, role: str | None, n: int = 5) -> list[dict]:
     """Read-only LinkedIn People search. Returns [] on any gate/failure (never raises)."""
+    return _find_with_prompt(company, role, n, build_linkedin_prompt(company, role, n),
+                             label="LinkedIn fallback")
+
+
+def _find_with_prompt(company: str, role: str | None, n: int, prompt_text: str,
+                      label: str) -> list[dict]:
+    """Shared launcher for read-only LinkedIn searches."""
     if not enabled():
-        log.debug("LinkedIn fallback disabled (NETWORKING_LINKEDIN=0)")
+        log.debug("%s disabled (NETWORKING_LINKEDIN=0)", label)
         return []
     if not has_consent():
-        log.warning("LinkedIn fallback needs one-time consent — run `applypilot network --linkedin-login`.")
+        log.warning("%s needs one-time consent — run `applypilot network --linkedin-login`.", label)
         return []
     if not under_daily_cap():
         log.warning("LinkedIn daily company cap reached (%d).", _daily_limit())
@@ -217,22 +229,20 @@ def find_people(company: str, role: str | None, n: int = 5) -> list[dict]:
             text=True, encoding="utf-8", errors="replace", env=env,
             cwd=str(chrome.reset_worker_dir(_WORKER_ID)),
         )
-        proc.stdin.write(build_linkedin_prompt(company, role, n))
-        proc.stdin.close()
 
         try:
-            out, _ = proc.communicate(timeout=_AGENT_TIMEOUT)
+            out, _ = proc.communicate(prompt_text, timeout=_AGENT_TIMEOUT)
         except subprocess.TimeoutExpired:
             proc.kill()
-            log.warning("LinkedIn agent timed out for %s", company)
+            log.warning("%s timed out for %s", label, company)
             return []
 
         _bump_usage()  # count the company view against the daily cap
         people = _parse_people(out or "", n)
-        log.info("LinkedIn fallback: %d people for %s", len(people), company)
+        log.info("%s: %d people for %s", label, len(people), company)
         return people
     except Exception as e:  # noqa: BLE001
-        log.warning("LinkedIn fallback error for %s: %s", company, e)
+        log.warning("%s error for %s: %s", label, company, e)
         return []
     finally:
         if chrome_proc is not None:

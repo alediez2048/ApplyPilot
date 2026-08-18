@@ -952,9 +952,12 @@ def test_a_message_that_just_arrived_does_not_read_as_zero_hours(tmp_path):
 
 
 _NOTE_DRIVER = """
-const F = (new Function(SRC + `; NET_AVAIL = true; return { findContactsPrompt };`))();
+const F = (new Function(SRC + `; NET_AVAIL = true; return { findContactsPrompt, linkedinContactPrompt };`))();
 const out = {};
-for (const [name, j] of Object.entries(CASES)) out[name] = F.findContactsPrompt(j);
+for (const [name, j] of Object.entries(CASES)) {
+  out[name] = F.findContactsPrompt(j);
+  out[name + '_li'] = F.linkedinContactPrompt(j);
+}
 console.log(JSON.stringify(out));
 """
 
@@ -999,6 +1002,9 @@ def test_a_finished_empty_search_shows_its_outcome(tmp_path):
     assert "netnote" not in out["running"], out["running"]
     # A hard error already has its own red line; showing both says the same thing twice.
     assert "neterr" in out["errored"] and "netnote" not in out["errored"], out["errored"]
+
+    assert "Open LinkedIn people search" in out["never_run_li"], out["never_run_li"]
+    assert "Paste contacts from LinkedIn" in out["never_run_li"], out["never_run_li"]
 
 
 _MENU_DRIVER = """

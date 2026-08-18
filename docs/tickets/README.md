@@ -18,9 +18,10 @@ draft and send outreach email. Source of truth: [`../networking-outreach-prd.md`
 | [NET-4](NET-4-gmail-send.md) | 4 | Gmail send automation + safeguards | NET-2, NET-3 | M | ✅ Done (SMTP + self-contained OAuth) |
 | [NET-5](NET-5-linkedin-fallback.md) | 5 | LinkedIn browser-agent fallback (hardened) | NET-1 | M | ✅ Done (live run unverified) |
 | [NET-6](NET-6-future.md) | 6 | Future: OAuth send, follow-ups, reply tracking, auto-send | NET-4 | L | Backlog |
+| [NET-7](NET-7-linkedin-recruiter-search.md) | 7 | LinkedIn manual contact assist + Apollo enrichment | NET-1, NET-2 | M | Built |
 
-**Build order:** NET-1 → NET-2 → NET-3 → NET-4 → NET-5. NET-5 (LinkedIn) can slot in
-any time after NET-1; NET-6 is backlog.
+**Build order:** NET-1 → NET-2 → NET-3 → NET-4 → NET-5. NET-7 can slot in after NET-2
+because LinkedIn stays manual and Apollo handles enrichment; NET-6 is backlog.
 
 **Size key:** S ≈ <0.5d · M ≈ 0.5–1.5d · L ≈ 2–4d (rough, solo).
 

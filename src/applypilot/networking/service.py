@@ -8,6 +8,7 @@ is a no-op here (use_linkedin is accepted but not yet wired).
 from __future__ import annotations
 
 import logging
+import re
 
 from applypilot.domain import geo
 from applypilot.domain import linkedin_thread as _lt
@@ -25,6 +26,12 @@ log = logging.getLogger(__name__)
 # employer name returns nobody while real colleagues sit unexamined further down the pool.
 # 3 is a credits/coverage tradeoff: per_job=5 enriches at most 15 of the ~25 candidates.
 _TOPUP_ROUNDS = 3
+
+_RECRUITER_TITLE_WORDS = (
+    "recruiter", "recruiting", "talent acquisition", "sourcer", "sourcing",
+    "people", "staffing", "university recruiting", "executive recruiting",
+    "talent aquisition",
+)
 
 
 def _draft_and_store(profile: dict, job: dict, contact: dict, warm: bool = False) -> None:
@@ -145,6 +152,261 @@ def _augment_with_linkedin(selected: list[dict], company: str | None,
     if added:
         result["note"] = f"{added} via LinkedIn fallback"
     return selected
+
+
+def _is_recruiter_title(title: str | None) -> bool:
+    t = (title or "").strip().lower()
+    return bool(t and any(word in t for word in _RECRUITER_TITLE_WORDS))
+
+
+def _linkedin_key(url: str | None) -> str:
+    return store._norm_linkedin(url)
+
+
+_LINKEDIN_URL_RE = re.compile(r"https?://(?:[\w.-]+\.)?linkedin\.com/in/[^\s,;]+", re.I)
+_LINKEDIN_DEGREE_RE = re.compile(r"\s*[•·]\s*(?:1st|2nd|3rd\+?).*$", re.I)
+_LINKEDIN_ACTION_WORDS = {
+    "connect", "message", "follow", "following", "pending", "view profile",
+}
+
+
+def _clean_linkedin_url(url: str | None) -> str:
+    raw = (url or "").strip().rstrip(").,;")
+    return raw if "linkedin.com/in/" in raw.lower() else ""
+
+
+def _manual_linkedin_key(person: dict) -> str:
+    return _linkedin_key(person.get("linkedin_url")) or (person.get("full_name") or "").strip().lower()
+
+
+def parse_manual_linkedin_contacts(text: str) -> list[dict]:
+    """Parse names/titles/profile URLs pasted from a manual LinkedIn People search.
+
+    Accepts forgiving line formats:
+      Name - Title - https://www.linkedin.com/in/name
+      Name | Title | https://www.linkedin.com/in/name
+      https://www.linkedin.com/in/name
+    """
+    lines = [raw.strip() for raw in (text or "").splitlines() if raw.strip()]
+    people: list[dict] = []
+    consumed: set[int] = set()
+
+    # LinkedIn result-card copies are usually multiline:
+    #   Name • 2nd
+    #   Title at Company
+    #   Location
+    #   Connect
+    for idx, line in enumerate(lines):
+        if not re.search(r"[•·]\s*(?:1st|2nd|3rd\+?)\b", line, re.I):
+            continue
+        name = _LINKEDIN_DEGREE_RE.sub("", line).strip()
+        if not name or name.lower().endswith(" is open to work"):
+            continue
+        title = ""
+        url = ""
+        stop = min(idx + 6, len(lines))
+        for j in range(idx + 1, min(idx + 6, len(lines))):
+            nxt = lines[j].strip()
+            low = nxt.lower()
+            if re.search(r"[•·]\s*(?:1st|2nd|3rd\+?)\b", nxt, re.I):
+                stop = j
+                break
+            if low in _LINKEDIN_ACTION_WORDS or low.startswith(("current:", "past:")):
+                continue
+            match = _LINKEDIN_URL_RE.search(nxt)
+            if match:
+                url = _clean_linkedin_url(match.group(0))
+                continue
+            if not title:
+                title = nxt
+        people.append({"full_name": name, "title": title, "linkedin_url": url})
+        consumed.update(range(idx, stop))
+
+    for idx, raw in enumerate(lines):
+        if idx in consumed:
+            continue
+        line = raw.strip()
+        if not line:
+            continue
+        low = line.lower()
+        if low in _LINKEDIN_ACTION_WORDS or low.startswith(("current:", "past:")):
+            continue
+        if re.search(r"[•·]\s*(?:1st|2nd|3rd\+?)\b", line, re.I):
+            continue
+        url_match = _LINKEDIN_URL_RE.search(line)
+        url = _clean_linkedin_url(url_match.group(0) if url_match else "")
+        without_url = _LINKEDIN_URL_RE.sub("", line).strip(" -|,\t")
+        parts = [p.strip() for p in re.split(r"\s+[|-]\s+|\t+", without_url) if p.strip()]
+        name = parts[0] if parts else ""
+        title = parts[1] if len(parts) > 1 else ""
+        if not name and url:
+            slug = url.rstrip("/").rsplit("/", 1)[-1]
+            name = slug.replace("-", " ").replace("_", " ").title()
+        if url or len(parts) > 1:
+            people.append({"full_name": name, "title": title, "linkedin_url": url})
+    return people
+
+
+def parse_manual_linkedin_recruiters(text: str) -> list[dict]:
+    """Backward-compatible alias for the first NET-7 endpoint name."""
+    return parse_manual_linkedin_contacts(text)
+
+
+def import_linkedin_contacts_for_job(
+    job: dict,
+    people: list[dict],
+    draft: bool = True,
+) -> dict:
+    """Apollo-enrich manually chosen LinkedIn people and persist them.
+
+    NET-7 pivot: LinkedIn ranking stays human-operated. ApplyPilot opens the search, the
+    operator pastes chosen contact identities, and this path handles dedupe, Apollo
+    enrichment, storage, and drafting.
+    """
+    from applypilot.networking import apollo
+
+    job_url = job.get("url")
+    company = derive.derive_company(job)
+    result = {"company": company, "found": 0, "revealed": 0, "contacts": [], "note": ""}
+
+    def _log(detail: str, status: str = "ok") -> None:
+        from applypilot.database import log_event
+        log_event(job_url, "outreach", status, detail)
+
+    if not job_url:
+        result["note"] = "job url missing"
+        return result
+    if not company:
+        result["note"] = "could not determine employer"
+        _log("Could not import LinkedIn contacts: the employer name could not be derived "
+             "from this job.", "error")
+        return result
+
+    raw = [p for p in (people or []) if _manual_linkedin_key(p)]
+    if not raw:
+        result["note"] = "paste at least one contact name or LinkedIn profile URL"
+        return result
+
+    candidates = raw
+
+    known_job = store.get_contacts_for_job(job_url)
+    known_li = {_linkedin_key(c.get("linkedin_url")) for c in known_job if c.get("linkedin_url")}
+    known_names = {(c.get("full_name") or "").strip().lower() for c in known_job if c.get("full_name")}
+    known_elsewhere = store.known_at_company(company, exclude_job_url=job_url,
+                                             space_id=(job or {}).get("space_id") or "")
+    elsewhere_li = {c["linkedin_url"] for c in known_elsewhere if c.get("linkedin_url")}
+    elsewhere_names = {(c.get("full_name") or "").strip().lower()
+                       for c in known_elsewhere if c.get("full_name")}
+
+    fresh = []
+    skipped_dup = 0
+    seen = set()
+    for p in candidates:
+        li = _linkedin_key(_clean_linkedin_url(p.get("linkedin_url")))
+        name = (p.get("full_name") or "").strip().lower()
+        key = li or name
+        if not key or key in seen:
+            skipped_dup += 1
+            continue
+        seen.add(key)
+        if (li and (li in known_li or li in elsewhere_li)) or (name and (name in known_names or name in elsewhere_names)):
+            skipped_dup += 1
+            continue
+        p = dict(p)
+        p["key"] = li or name
+        p["linkedin_url"] = _clean_linkedin_url(p.get("linkedin_url"))
+        p.setdefault("company", company)
+        fresh.append(p)
+
+    if not fresh:
+        result["found"] = len(candidates)
+        result["note"] = f"all {len(candidates)} LinkedIn contact candidate(s) were already known"
+        _log(f"No new LinkedIn contacts at {company}: all {len(candidates)} candidate(s) "
+             "were already stored on this job or another role here.", "warn")
+        return result
+
+    result["found"] = len(fresh)
+
+    enrichment_input = [{
+        "key": p["key"],
+        "full_name": p.get("full_name"),
+        "company": company,
+        "linkedin_url": p.get("linkedin_url"),
+    } for p in fresh]
+    revealed = apollo.match_by_identity(enrichment_input)
+    result["revealed"] = sum(1 for r in revealed.values() if r.get("email"))
+
+    stored_contacts = []
+    rejected = []
+    excluded = []
+    profile_cache: dict = {}
+
+    def _profile_for_drafting() -> dict:
+        if "p" not in profile_cache:
+            from applypilot.config import load_profile
+            try:
+                profile_cache["p"] = load_profile()
+            except Exception:  # noqa: BLE001
+                profile_cache["p"] = {}
+        return profile_cache["p"]
+
+    for p in fresh:
+        rev = revealed.get(p["key"], {})
+        query = f"{company} recruiter"
+        contact = {
+            "job_url": job_url,
+            "full_name": _lt.better_name(p.get("full_name") or "", rev.get("full_name") or ""),
+            "title": p.get("title"),
+            "company": company,
+            "linkedin_url": rev.get("linkedin_url") or p.get("linkedin_url"),
+            "email": rev.get("email"),
+            "email_status": rev.get("email_status", "none"),
+            "location": rev.get("location") or "",
+            "match_reason": ("manual LinkedIn recruiter import"
+                             if _is_recruiter_title(p.get("title")) else "manual LinkedIn import"),
+            "source": "linkedin_manual_recruiter" if _is_recruiter_title(p.get("title"))
+            else "linkedin_manual",
+            "apollo_id": rev.get("apollo_id"),
+        }
+        place = geo.is_excluded(contact.get("location"), _exclusions())
+        if place:
+            excluded.append(contact.get("full_name") or "?")
+            continue
+        v = verify.verify_contact({**contact, "company": company}, company, "")
+        if v["verdict"] == verify.REJECT:
+            rejected.append(contact.get("full_name") or "?")
+            continue
+        contact["verify_note"] = "; ".join([f"LinkedIn query {query!r}", *v["reasons"]])
+        contact["confidence"] = v["confidence"]
+        cid = store.upsert_contact(contact)
+        contact["id"] = cid
+        if draft and (contact.get("email") or contact.get("linkedin_url")):
+            _draft_and_store(_profile_for_drafting(), job, contact)
+        stored_contacts.append(contact)
+
+    result["contacts"] = stored_contacts
+    recruiter_like = sum(1 for p in fresh if _is_recruiter_title(p.get("title")))
+    parts = [f"{len(stored_contacts)} stored", f"{result['revealed']} with email",
+             f"{recruiter_like} recruiter-like"]
+    if skipped_dup:
+        parts.append(f"{skipped_dup} duplicate")
+    if rejected:
+        parts.append(f"{len(rejected)} work elsewhere")
+    if excluded:
+        parts.append(f"{len(excluded)} excluded by location")
+    result["note"] = ", ".join(parts)
+    status = "ok" if stored_contacts else "warn"
+    _log(f"Manual LinkedIn import for {company}: {result['note']}.", status)
+    return result
+
+
+def import_linkedin_recruiters_for_job(
+    job: dict,
+    people: list[dict],
+    draft: bool = True,
+) -> dict:
+    """Backward-compatible alias for the first NET-7 endpoint name."""
+    return import_linkedin_contacts_for_job(job, people, draft=draft)
 
 
 def find_contacts_for_job(

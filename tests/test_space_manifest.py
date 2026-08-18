@@ -299,3 +299,49 @@ def test_unapplied_fields_are_really_unapplied():
     assert not offenders, (
         "these fields are read but still listed in UNAPPLIED — remove them from that tuple: "
         + "; ".join(f"{k} at {', '.join(v)}" for k, v in sorted(offenders.items())))
+
+
+def test_the_apply_queue_is_scoped_to_ONE_space(db):
+    """`queue_for_apply(space_id=…)` returns that Space's rows and nobody else's.
+
+    The scoping shipped with the row-scoped apply and had NO test: every call site in the suite
+    used the 3-arg positional form, so the parameter was accepted and unexercised — §Lessons 73,
+    where a signature audit proved acceptance and three of four functions never read the field.
+
+    Rows exist in BOTH jobs-shaped Spaces on purpose. With one row the scoped call and an
+    unscoped one return the same list, so the assertion passes against a `space_id` that is
+    ignored entirely — which is precisely the mutation this exists to catch.
+    """
+    other = "gauntlet-ish"
+    spaces.create_space(other, "Another job hunt", "jobs", conn=db)
+
+    mine = _row(db, "https://x.test/mine", tailored_resume_path="/tmp/a.pdf")
+    theirs = _row(db, "https://x.test/theirs", space_id=other, tailored_resume_path="/tmp/b.pdf")
+
+    def urls(**kw):
+        return {r["url"] for r in repo.queue_for_apply(10, 5, conn=db, **kw)}
+
+    assert urls(space_id=spaces.DEFAULT_SPACE_ID) == {mine}
+    assert urls(space_id=other) == {theirs}
+    # The CLI has no Space on screen, and "all of them" stays a legitimate answer.
+    assert urls() == {mine, theirs}
+
+
+def test_naming_a_TARGETS_space_applies_to_nothing(db):
+    """The jobs-shaped filter is INTERSECTED with the named Space, never replaced by it.
+
+    A targets row is a company card with no posting behind it. Substituting the scope would make
+    one applicable the moment somebody passed its Space id — the whole point of the shape gate,
+    reachable by a caller instead of by the pipeline. An unknown id is the same question asked a
+    second way, and both must answer nothing rather than everything.
+    """
+    anchor = _row(db, f"target:{UNKNOWN}:trinity-house", space_id=UNKNOWN,
+                  tailored_resume_path="/tmp/c.pdf")
+    _row(db, "https://x.test/real", tailored_resume_path="/tmp/d.pdf")
+    spaces.create_space(UNKNOWN, "Lighthouse tenders", "outreach", conn=db)
+
+    assert repo.queue_for_apply(10, 5, conn=db, space_id=UNKNOWN) == []
+    assert repo.queue_for_apply(10, 5, conn=db, space_id="no-such-space") == []
+    # ...and the targets row is not merely absent from its own Space, it is absent from the
+    # unscoped queue too, or this passes for the wrong reason.
+    assert anchor not in {r["url"] for r in repo.queue_for_apply(10, 5, conn=db)}

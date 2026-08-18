@@ -1703,6 +1703,7 @@ async function saveContactDetails(cid, btn) {
 // ── People: one line each until you open one ────────────────────────────────
 const CONTACT_OPEN = new Set();
 const CHANNEL_TAB = new Map();
+const ENRICH_FORM = new Map();
 function toggleContact(cid) {
   if (CONTACT_OPEN.has(cid)) CONTACT_OPEN.delete(cid);
   else { CONTACT_OPEN.add(cid); autoSyncGmail(cid); }
@@ -1713,6 +1714,19 @@ function setChannel(cid, ch) {
   if (!CONTACT_OPEN.has(cid)) autoSyncGmail(cid);
   CONTACT_OPEN.add(cid);
   refresh();
+}
+function enrichState(cid) {
+  if (!ENRICH_FORM.has(cid)) ENRICH_FORM.set(cid, {open:false, text:'', summary:'', err:'', busy:false});
+  return ENRICH_FORM.get(cid);
+}
+function toggleEnrich(cid) {
+  const s = enrichState(cid);
+  s.open = !s.open;
+  s.err = '';
+  rerenderJobs(true);
+}
+function onEnrichInput(cid, text) {
+  enrichState(cid).text = text;
 }
 
 // Opening a card pulls the latest Gmail for that person, once.
@@ -2231,14 +2245,20 @@ function contactRow(c) {
   const flag = `<button class="flagbtn${c.flagged ? ' on' : ''}" aria-pressed="${!!c.flagged}"
       title="${c.flagged ? 'Remove your flag' : 'Flag this person — the row stays marked until you press it again'}"
       onclick="event.stopPropagation();toggleFlag('${esc(c.id)}', this)">${c.flagged ? '💡' : '○'}</button>`;
+  const enriching = enrichState(c.id).open;
+  const enrich = `<button class="secondary enrichbtn${enriching ? ' on' : ''}"
+      title="Paste recent public activity and summarize it into draft context"
+      onclick="event.stopPropagation();toggleEnrich('${esc(c.id)}')">Enrich</button>`;
   return `
     <div class="prow ${open ? 'is-open' : ''}${c.flagged ? ' is-flagged' : ''}" onclick="toggleContact('${esc(c.id)}')">
       ${flag}
       <span class="av" style="background:${avatarColor(c.full_name)}">${initials(c.full_name)}</span>
       <span class="pwho"><span class="pname">${esc(c.full_name)}</span> <span class="prole">— ${esc(c.title)}</span>
         ${c.hot ? `<span class="chip conn">🤝</span>` : ''}</span>
+      ${enrich}
       <span class="pills">${c.confidence === 'medium' ? `<span class="pill warn" title="Nothing confirms this person works there — no company email and no employer on file">? unconfirmed</span>` : ''}${pills.filter(Boolean).join('')}<span class="caret">${open ? '▾' : '▸'}</span></span>
     </div>
+    ${enriching ? enrichPanel(c) : ''}
     ${open ? contactPanel(c) : ''}`;
 }
 
@@ -2284,6 +2304,16 @@ function setFlagIn(jobs, cid, on) {
   for (const j of (jobs || [])) {
     for (const c of (j.contacts || [])) if (c.id === cid) c.flagged = on;
   }
+}
+function contactById(cid) {
+  for (const j of (LAST_JOBS || [])) {
+    for (const c of (j.contacts || [])) if (c.id === cid) return c;
+  }
+  return null;
+}
+function setContactField(cid, key, value) {
+  const c = contactById(cid);
+  if (c) c[key] = value;
 }
 // Channels become tabs inside the open contact, so the email draft, the LinkedIn note and
 // the phone field stop competing for the same vertical space.
@@ -3121,6 +3151,51 @@ async function logLinkedinMsg(cid, kind, btn) {
   if (!r.ok) { btn.disabled = false; alert(r.message || 'Failed'); return; }
   if (box) box.value = '';
   refresh();
+}
+
+function enrichPanel(c) {
+  const s = enrichState(c.id);
+  const existing = (c.noticed || '').trim();
+  return `<div class="enrich-panel" data-cid="${esc(c.id)}" onclick="event.stopPropagation()">
+      <div class="d-label">Enrich ${esc(firstName(c.full_name))}${existing ? ' <span class="noticed-on">✓ context saved</span>' : ''}</div>
+      <textarea class="enrich-text" rows="5"
+        placeholder="Paste recent public LinkedIn activity, posts, comments, profile updates, or launch notes. ApplyPilot will summarize it into draft context."
+        oninput="onEnrichInput('${esc(c.id)}', this.value)">${esc(s.text)}</textarea>
+      <div class="dbtns">
+        <button class="primary" ${s.busy ? 'disabled' : ''} onclick="submitEnrich('${esc(c.id)}', this)">
+          ${s.busy ? 'Enriching...' : 'Enrich'}</button>
+        <button class="ghost" onclick="toggleEnrich('${esc(c.id)}')">Cancel</button>
+        <span class="enrich-msg ${s.err ? 'bad' : ''}">${esc(s.err || 'Saved context is used the next time you regenerate email, LinkedIn, or text drafts.')}</span>
+      </div>
+      ${s.summary ? `<div class="enrich-summary">${esc(s.summary)}</div>` : ''}
+      ${existing ? `<div class="enrich-summary">${esc(existing)}</div>` : ''}
+    </div>`;
+}
+
+async function submitEnrich(cid, btn) {
+  const s = enrichState(cid);
+  const text = (s.text || '').trim();
+  if (!text) { s.err = 'Paste recent activity first.'; rerenderJobs(true); return; }
+  const existing = contactById(cid)?.noticed || '';
+  const replace = existing.trim()
+    ? confirm('Replace the saved context for this contact?\n\nExisting context is already used in regenerated drafts.')
+    : false;
+  if (existing.trim() && !replace) return;
+  s.busy = true;
+  s.err = '';
+  rerenderJobs(true);
+  const r = await post('/api/contact/enrich', {contact_id: cid, text, replace});
+  s.busy = false;
+  if (!r.ok) {
+    s.err = r.message || 'Could not enrich this contact.';
+    rerenderJobs(true);
+    return;
+  }
+  s.summary = r.summary || '';
+  s.text = '';
+  s.open = false;
+  setContactField(cid, 'noticed', r.summary || '');
+  rerenderJobs(true);
 }
 
 // What this person has actually DONE.

@@ -5143,6 +5143,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if path == "/api/contact/details":
                 _json_response(self, _save_contact_details(data))
                 return
+            if path == "/api/contact/enrich":
+                from applypilot.networking import service
+                _json_response(self, service.enrich_contact_activity(
+                    data.get("contact_id", ""),
+                    data.get("text", ""),
+                    replace=bool(data.get("replace")),
+                ))
+                return
             if path == "/api/contact/flag":
                 _json_response(self, _flag_contact(data))
                 return

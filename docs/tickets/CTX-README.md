@@ -13,6 +13,7 @@ produce the same email — because the only Space-level lever that reaches a job
 | 2 | `CTX-2` context and ask on the row | M | feature | **DONE** 2026-08-07 |
 | 3 | `CTX-3` every channel sees the Space | S/M | gap | **DONE** 2026-08-08 |
 | 4 | `CTX-4` the identity owns the unchanging things | — | **deferred** → ID-1 | NOT NOW |
+| 5 | `CTX-5` pasted LinkedIn activity becomes contact context | M | feature | **BUILT** 2026-08-18 |
 
 ## Order, and the one real constraint
 

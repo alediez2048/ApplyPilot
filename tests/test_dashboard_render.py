@@ -1331,6 +1331,31 @@ def test_guess_email_button_is_offered_for_missing_addresses(tmp_path):
 
 
 @pytest.mark.skipif(not shutil.which("node"), reason="node not available")
+def test_contact_row_exposes_enrich_before_email_pills(tmp_path):
+    script = tmp_path / "enrich.mjs"
+    script.write_text(
+        _STUBS
+        + f"const SRC = {json.dumps(_page_js())};\n"
+        + f"const C = {json.dumps(_ux1_contact())};\n"
+        + """
+const F = (new Function(SRC + `; return { contactRow, ENRICH_FORM };`))();
+const closed = F.contactRow(C);
+F.ENRICH_FORM.set(C.id, {open:true, text:'recent post', summary:'', err:'', busy:false});
+const open = F.contactRow(C);
+console.log(JSON.stringify({closed, open}));
+"""
+    )
+    proc = subprocess.run(["node", str(script)], capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, f"node failed:\n{proc.stderr[:2000]}"
+    out = json.loads(proc.stdout.strip().splitlines()[-1])
+
+    assert "Enrich" in out["closed"]
+    assert out["closed"].index("Enrich") < out["closed"].index("✉ draft")
+    assert "enrich-panel" in out["open"]
+    assert "/api/contact/enrich" in _page_js()
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node not available")
 def test_what_you_typed_survives_a_refresh(tmp_path):
     """`refresh()` replaces #jobs wholesale every 2.5s and only holds off while a field HAS
     focus, so moving between fields opens a window where the tick lands between blur and focus.

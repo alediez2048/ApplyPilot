@@ -172,6 +172,8 @@ _LINKEDIN_ACTION_WORDS = {
 }
 
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_ACTIVITY_MAX_CHARS = 12000
+_ACTIVITY_SUMMARY_MAX_CHARS = 900
 
 
 def _clean_linkedin_url(url: str | None) -> str:
@@ -412,6 +414,95 @@ def import_linkedin_recruiters_for_job(
 ) -> dict:
     """Backward-compatible alias for the first NET-7 endpoint name."""
     return import_linkedin_contacts_for_job(job, people, draft=draft)
+
+
+def _clean_activity_summary(text: str | None) -> str:
+    out = (text or "").strip()
+    out = re.sub(r"^```(?:\w+)?\s*|\s*```$", "", out).strip()
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    return out[:_ACTIVITY_SUMMARY_MAX_CHARS].strip()
+
+
+def summarize_contact_activity(contact: dict, activity_text: str) -> str:
+    """Compress operator-pasted public activity into draft-ready person context."""
+    from applypilot.llm import get_client
+
+    text = (activity_text or "").strip()[:_ACTIVITY_MAX_CHARS]
+    system = (
+        "You summarize public professional activity for outreach context. "
+        "Return only the summary text, no JSON, no preamble."
+    )
+    user = f"""CONTACT
+Name: {contact.get('full_name') or ''}
+Title: {contact.get('title') or ''}
+Company: {contact.get('company') or ''}
+
+PASTED PUBLIC ACTIVITY
+{text}
+
+Write 2-4 concise bullets or one 40-90 word paragraph about what this person appears to be
+working on, posting about, hiring for, building, speaking about, or repeatedly emphasizing.
+
+Rules:
+- Use only facts supported by the pasted text.
+- Use careful language like "appears to", "recently posted about", or "seems focused on" when
+  certainty is limited.
+- Do not infer private traits or protected-class information.
+- Do not mention LinkedIn, scraping, profiles, feeds, or that the sender noticed/saw the post.
+- Do not quote or mimic the pasted wording.
+- Drop boilerplate such as reactions, comments, followers, Connect, Message, mutual connections,
+  and navigation text.
+- Keep it useful as hidden context for a human-sounding email, LinkedIn message, or text.
+"""
+    raw = get_client("light").chat(
+        [{"role": "system", "content": system}, {"role": "user", "content": user}],
+        max_tokens=220,
+        temperature=0.2,
+    )
+    summary = _clean_activity_summary(raw)
+    if not summary:
+        raise ValueError("empty activity summary")
+    return summary
+
+
+def enrich_contact_activity(contact_id: str, activity_text: str, replace: bool = False) -> dict:
+    """Summarize pasted contact activity and store it in the existing noticed field."""
+    from applypilot.database import get_connection, log_event
+
+    cid = (contact_id or "").strip()
+    text = (activity_text or "").strip()
+    if not cid:
+        return {"ok": False, "message": "contact_id required"}
+    if not text:
+        return {"ok": False, "message": "Paste recent activity first."}
+
+    conn = get_connection()
+    store.init_contacts(conn)
+    contact = store.get_contact(cid, conn)
+    if not contact:
+        return {"ok": False, "message": "contact not found"}
+    existing = (contact.get("noticed") or "").strip()
+    if existing and not replace:
+        return {"ok": False, "message": "This contact already has context. Confirm replace first.",
+                "needs_replace": True, "summary": existing}
+
+    try:
+        summary = summarize_contact_activity(contact, text)
+    except Exception as e:  # noqa: BLE001
+        log.warning("Contact activity enrichment failed for %s: %s", cid, e)
+        return {"ok": False, "message": f"enrichment failed: {e}"}
+
+    store.upsert_contact({
+        "id": cid,
+        "job_url": contact["job_url"],
+        "linkedin_url": contact.get("linkedin_url"),
+        "full_name": contact.get("full_name"),
+        "noticed": summary,
+    }, conn)
+    log_event(contact.get("job_url") or "", "outreach", "ok",
+              f"Enriched {contact.get('full_name') or 'a contact'} with pasted activity.", conn)
+    return {"ok": True, "contact_id": cid, "summary": summary,
+            "message": "Contact enriched. Regenerate drafts to use it."}
 
 
 def _email_tokens(name: str | None) -> list[str]:

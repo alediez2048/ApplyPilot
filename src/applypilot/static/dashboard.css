@@ -376,6 +376,14 @@
   .noticed textarea { width:100%; font-size:12px; padding:5px 6px; border:1px solid #d7e2ec;
     border-radius:5px; font-family:inherit; resize:vertical; }
   .noticed-on { color:var(--green); font-weight:600; text-transform:none; letter-spacing:0; }
+  .enrich-panel { background:var(--surface2); border:1px solid var(--line); border-left:3px solid var(--accent);
+    border-radius:7px; padding:10px 11px; margin:0 0 8px 40px; cursor:default; }
+  .enrich-panel textarea { width:100%; font-size:12px; padding:7px 8px; border:1px solid #d7e2ec;
+    border-radius:5px; font-family:inherit; resize:vertical; background:var(--surface); color:var(--text); }
+  .enrich-summary { margin-top:8px; font-size:12px; line-height:1.45; color:var(--soft);
+    background:var(--surface); border:1px solid var(--line); border-radius:6px; padding:8px 9px; white-space:pre-wrap; }
+  .enrich-msg { font-size:11.5px; color:var(--faint); }
+  .enrich-msg.bad { color:var(--red); font-weight:600; }
 
   /* Interview scheduled: the success metric, and the only state that means STOP. Greyed
      rather than celebrated in colour — a row that no longer needs attention should recede,
@@ -632,6 +640,8 @@
     display:flex; align-items:center; justify-content:center; font-size:10px; font-weight:600; }
   .pwho { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .pname { font-weight:600; }  .prole { color:var(--muted); }
+  .enrichbtn { flex-shrink:0; min-height:24px; padding:2px 10px; font-size:11px; }
+  .enrichbtn.on { background:var(--accent-soft); box-shadow:inset 0 0 0 1px var(--accent); }
   .prow .pills { margin-left:auto; display:flex; gap:5px; align-items:center; flex-shrink:0; }
   .pill { font-size:10px; font-weight:600; padding:1px 7px; border-radius:999px; white-space:nowrap; }
   .pill.on { background:var(--green-soft); color:var(--green); }

@@ -167,11 +167,33 @@ def queue_for_cover(limit: int = 0, max_attempts: int = 5,
 
 
 def queue_for_apply(limit: int, max_attempts: int,
-                    conn: sqlite3.Connection | None = None) -> list[dict]:
+                    conn: sqlite3.Connection | None = None,
+                    space_id: str | None = None) -> list[dict]:
     """Deliberately narrower than the others: 'dashboard_upload' only, and it leaves
-    `in_progress` and attempt-exhausted jobs alone so a retry never double-applies."""
+    `in_progress` and attempt-exhausted jobs alone so a retry never double-applies.
+
+    **`space_id` scopes it to the panel on screen, and the dashboard always passes one.** Without
+    it this spans EVERY jobs-shaped Space, which is what let the console Apply button — clicked
+    while standing in `job-search`, beside an Arm posting — start filling a billing assistant role
+    that lives in `gauntlet` and is not rendered on that tab at all. §Lessons 70 is this exact
+    shape: a Space is only as separate as its WRITE paths, and applying is the most consequential
+    write there is.
+
+    The unscoped form is kept for the CLI, which runs with no Space on screen, and `_one_space`
+    rather than `_in_spaces` is the right helper for the same reason it is elsewhere: "all of
+    them" is a legitimate answer to *which panel*, and is what every caller predating Spaces
+    means. The jobs-shaped filter still applies either way, so naming a targets Space yields
+    nothing rather than applying to a company card.
+    """
     c = _c(conn)
-    scope, ids = _in_spaces(_spaces.jobs_shaped_ids(c))
+    shaped = _spaces.jobs_shaped_ids(c)
+    if space_id:
+        # Intersected rather than substituted: a Space that is not jobs-shaped must not become
+        # applicable just because somebody named it.
+        scope, ids = (_one_space(space_id) if space_id in shaped
+                      else (" AND 1 = 0", []))
+    else:
+        scope, ids = _in_spaces(shaped)
     return _dicts(c.execute(
         f"SELECT url, title, site FROM jobs "
         f"WHERE strategy = 'dashboard_upload'{scope} AND tailored_resume_path IS NOT NULL "

@@ -430,6 +430,20 @@ async function prepareJobs() {
   if (btn) btn.disabled = false;
 }
 
+// Which jobs the console Apply button would actually take, by the same rule the server uses:
+// prepared, not yet applied, not closed, not already filled and waiting. Derived from the payload
+// the page already holds, so naming them costs no request — and if it ever disagrees with the
+// server the operator sees the disagreement in the confirm rather than in an open browser.
+function applyQueuePreview(max = 8) {
+  const eligible = (LAST_JOBS || []).filter(j =>
+    !isClosed(j) && !j.applied_at && j.status === 'ready');
+  if (!eligible.length) return 'ApplyPilot will work through whatever is prepared.';
+  const names = eligible.slice(0, max).map(j =>
+    `  • ${j.contact_company || j.company || j.site || '?'} — ${(j.title || 'untitled').slice(0, 48)}`);
+  const more = eligible.length > max ? `\n  …and ${eligible.length - max} more` : '';
+  return `This will fill, in order:\n${names.join('\n')}${more}`;
+}
+
 async function applyJobs() {
   const cmdEl = document.getElementById('command');
   // Guard: apply only works on jobs that are already prepared (tailored + cover). If none are
@@ -442,9 +456,14 @@ async function applyJobs() {
     alert('Nothing is ready to apply yet.\n\nClick "Prepare Materials" first and wait for "Prepare materials complete ✓", then Apply.');
     return;
   }
-  if (!dryRun && !confirm(`Fill ${ready} application(s) for your review?\n\nApplyPilot fills each application in Chrome, then STOPS before submitting and leaves the browser open for you to review + click Submit. It never auto-submits.`)) return;
+  // NAME THEM. "Fill 1 application(s) for your review?" is the same sentence whichever job the
+  // queue picked, and this button does NOT act on the row you are looking at — it selects by
+  // state. Clicking it beside an Arm posting that had already been applied to started a billing
+  // assistant role at a sports academy, and the confirm gave no way to notice before Chrome
+  // opened. A count you cannot check is not a confirmation.
+  if (!dryRun && !confirm(`Fill ${ready} application(s) for your review?\n\n${applyQueuePreview()}\n\nApplyPilot fills each application in Chrome, then STOPS before submitting and leaves the browser open for you to review + click Submit. It never auto-submits.`)) return;
   const btn = document.getElementById('applyBtn');
-  const data = await post('/api/apply', {limit: document.getElementById('limit').value, dry_run: dryRun, copilot: !dryRun});
+  const data = await post('/api/apply', {limit: document.getElementById('limit').value, dry_run: dryRun, copilot: !dryRun, space: SPACE_ID});
   if (!data.ok) { cmdEl.textContent = data.message || 'Could not start apply'; return; }
   if (btn) btn.disabled = true;
   cmdEl.textContent = dryRun ? 'Applying (DRY RUN — no submit)…' : 'Filling the application in Chrome for your review…';
@@ -517,7 +536,7 @@ async function runEverything() {
       return;
     }
     // copilot=true (default) unless dry-run.
-    const ap = await post('/api/apply', {limit: document.getElementById('limit').value, dry_run: dryRun, copilot: !dryRun});
+    const ap = await post('/api/apply', {limit: document.getElementById('limit').value, dry_run: dryRun, copilot: !dryRun, space: SPACE_ID});
     if (!ap.ok) { cmdEl.textContent = ap.message || 'Could not start apply.'; return; }
     pipeSet('apply', 'active');
     cmdEl.textContent = dryRun ? 'Applying (DRY RUN — no submit)…' : 'Filling the application in Chrome — then handing it to you to review + submit…';
@@ -5361,7 +5380,7 @@ async function fillOne(url, btn) {
   // Per-row co-pilot fill for ONE job: opens Chrome, fills it, hands it back to review + submit.
   btn.disabled = true; btn.textContent = 'Filling…';
   const cmdEl = document.getElementById('command');
-  const r = await post('/api/fill-one', {url});
+  const r = await post('/api/fill-one', {url, space: SPACE_ID});
   if (!r.ok) { btn.disabled = false; btn.textContent = '▶ Fill application'; cmdEl.textContent = r.message || 'Could not start'; return; }
   cmdEl.textContent = 'Filling the application in Chrome — then handing it to you to review + submit…';
   await pollCommandUntilDone('Fill for review');

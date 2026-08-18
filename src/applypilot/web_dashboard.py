@@ -704,6 +704,39 @@ def run_dashboard_prepare(limit: int = 0, validation_mode: str = "normal") -> di
     return result
 
 
+def _why_not_applicable(url: str, conn) -> str:
+    """Why THIS job is not in the apply queue, in the operator's terms.
+
+    Every clause here mirrors one in `queue_for_apply`, which is a duplication worth having: the
+    query decides, and this explains the decision. If they ever disagree the explanation is what
+    is wrong, and it is the half nobody can act on.
+    """
+    row = _jobs.apply_state(url, conn) or {}
+    full = _jobs.get(url, conn) or {}
+    if not full:
+        return "that job is not in the database — paste its URL into the box above the table."
+    status = (row.get("apply_status") or "").strip()
+    if row.get("applied_at"):
+        return ("you already applied to this one on "
+                f"{str(row['applied_at'])[:10]}. Use 🔄 Re-apply on the row to redo it.")
+    if status == "in_progress":
+        return "an application for this job is running right now."
+    if status in ("ready_to_submit", "needs_human"):
+        return ("this one is already filled and waiting for you in Chrome — review and submit it, "
+                "or dismiss it from the row menu.")
+    # From `repo.jobs`, never a second list here: every closed state is generated from that one
+    # tuple, and a hand-written copy is what left `cancelled` out of four separate places
+    # (§Lessons 93).
+    if status in _jobs.CLOSED_STATUSES:
+        return f"this job is marked {status}. Restore it from the row menu first."
+    if not (full.get("tailored_resume_path") or "").strip():
+        return "its résumé is not built yet — run Prepare Materials first."
+    if int(full.get("apply_attempts") or 0) >= config.DEFAULTS["max_apply_attempts"]:
+        return (f"it has already been attempted {full.get('apply_attempts')} times. Use "
+                "🔄 Restart end-to-end to try again from scratch.")
+    return "it is not eligible to apply to right now."
+
+
 def _nothing_to_prepare(conn) -> str:
     """Why prepare had no work — in terms of the JOBS, not of the empty queues.
 
@@ -730,11 +763,29 @@ def _nothing_to_prepare(conn) -> str:
     return "nothing needed preparing — " + ", and ".join(bits) + "."
 
 
-def run_dashboard_apply(limit: int = 10, dry_run: bool = False, copilot: bool = True) -> dict:
-    """Apply only to prepared jobs imported through the dashboard URL box.
+#: How far down the eligibility queue a URL-scoped apply will look. Not a policy — it exists only
+#: so the caller's `limit` (how many to fill in one go) cannot decide whether ONE named job is
+#: eligible. Bounded rather than unbounded because this is still a query on the request path.
+_SCOPED_LOOKUP_MAX = 500
+
+
+def run_dashboard_apply(limit: int = 10, dry_run: bool = False, copilot: bool = True,
+                        url: str = "", space: str = "") -> dict:
+    """Apply to prepared jobs imported through the dashboard URL box.
 
     copilot=True (default): the agent fills each application but STOPS before submit and leaves
     the browser open for the human to review + submit. dry_run takes precedence if both set.
+
+    **`url` scopes this to ONE job — the row the operator clicked.** Without it this is a queue
+    runner that selects by STATE and knows nothing about what is on screen, which is how clicking
+    Apply while looking at an Arm posting started an application to a billing assistant role at a
+    sports academy. The job selected was eligible and the one on screen was not (it had been
+    applied to twelve days earlier), so nothing errored and nothing looked wrong until the browser
+    opened on somebody else's job.
+
+    The queue behaviour is KEPT rather than replaced: it is what the console's Apply button is
+    for, and filling ten prepared applications in one go is the thing this product exists to do.
+    What changes is that a row can now drive it, and that the caller says which it meant.
     """
     config.load_env()
     config.ensure_dirs()
@@ -746,7 +797,33 @@ def run_dashboard_apply(limit: int = 10, dry_run: bool = False, copilot: bool = 
     # no manual DB reset. 'in_progress' and cap-exhausted jobs are left alone.
     from applypilot.database import log_event
     max_attempts = config.DEFAULTS["max_apply_attempts"]
-    rows = _jobs.queue_for_apply(limit, max_attempts, conn)
+    # SCOPED TO THE PANEL ON SCREEN. Unscoped, this spans every jobs-shaped Space — which is how
+    # Apply, clicked in `job-search` beside an Arm posting, would have filled a billing assistant
+    # role living in `gauntlet` that is not rendered on that tab at all.
+    space_id = (space or "").strip() or None
+    rows = _jobs.queue_for_apply(limit, max_attempts, conn, space_id=space_id)
+
+    url = (url or "").strip()
+    if url:
+        # Filtered from the SAME eligibility query rather than applied to directly, so a scoped
+        # run cannot reach a job the queue would have refused — in_progress, over the retry cap,
+        # already applied. The refusal then says which of those it was, because "nothing
+        # happened" is the answer that leaves the operator unable to act (§Lessons 15).
+        #
+        # Re-queried WITHOUT the caller's limit, because that limit is about how many to fill in
+        # one go and has nothing to say about whether a named job is eligible. `queue_for_apply`
+        # orders by discovery date and truncates, so with the default limit of 10 the eleventh
+        # prepared job would have been refused as ineligible while being perfectly applicable —
+        # a wrong answer that gets rarer as it gets more confusing, since it depends on how many
+        # OTHER jobs happen to be waiting.
+        rows = [r for r in _jobs.queue_for_apply(_SCOPED_LOOKUP_MAX, max_attempts, conn,
+                                                 space_id=space_id)
+                if r["url"] == url]
+        if not rows:
+            msg = _why_not_applicable(url, conn)
+            print(f"BLOCKED: {msg}", flush=True)
+            return {"queued": 0, "applied": 0, "failed": 0, "needs_review": 0,
+                    "held_back": 0, "blocked": msg}
 
     # How many browsers may be open at once, and which slots are already holding a review.
     # This used to be "refuse to start while ANY review is open", which was right when every
@@ -1370,25 +1447,20 @@ def _review_browser_alive(max_workers: int | None = None) -> bool:
     return bool(_busy_worker_ids(max_workers))
 
 
-def run_dashboard_fill_one(url: str) -> dict:
+def run_dashboard_fill_one(url: str, space: str = "") -> dict:
     """Co-pilot fill ONE specific job (the per-row "Fill application" action).
 
-    Runs the co-pilot apply for a single prepared job: opens Chrome, fills the whole
-    application, and stops for the human to review + submit. Same as the bulk fill but scoped
-    to one URL so a row's own button drives it.
+    Delegates to `run_dashboard_apply(url=…)` rather than spawning the CLI itself, which is not
+    tidying: this path used to shell straight to `applypilot apply --url`, so it inherited NONE of
+    the slot guards the bulk path has. It could not see which workers were holding a live review,
+    which means a row's Fill button could take the port of a browser somebody was mid-review on
+    and destroy a filled application — §Lessons 8's exact failure, on the one path that skipped
+    the fix for it. It also missed the stale-review cleanup and the full-house refusal.
+
+    Two doors, one implementation (§Lessons 49). What the row supplies is WHICH job; every rule
+    about whether an apply may start now belongs in one place.
     """
-    config.load_env()
-    config.ensure_dirs()
-    print(f"Dashboard fill-one (co-pilot) for: {url}", flush=True)
-    args = [sys.executable, "-m", "applypilot.cli", "apply", "--url", url,
-            "--min-score", "1", "--copilot"]
-    completed = subprocess.run(args, check=False)
-    init_db()
-    conn = get_connection()
-    result = {"url": url, "status": _jobs.apply_status(url, conn),
-              "exit_code": completed.returncode}
-    print(f"Dashboard fill-one complete: {result}", flush=True)
-    return result
+    return run_dashboard_apply(limit=1, dry_run=False, copilot=True, url=url, space=space)
 
 
 def run_dashboard_restart(url: str) -> dict:
@@ -4869,10 +4941,11 @@ def _start_continue(url: str) -> tuple[bool, str]:
     return _runner.start("continue", args)
 
 
-def _start_fill_one(url: str) -> tuple[bool, str]:
+def _start_fill_one(url: str, space: str = "") -> tuple[bool, str]:
     args = [
         sys.executable, "-c",
-        f"from applypilot.web_dashboard import run_dashboard_fill_one; run_dashboard_fill_one({url!r})",
+        ("from applypilot.web_dashboard import run_dashboard_fill_one; "
+         f"run_dashboard_fill_one({url!r}, space={(space or '')!r})"),
     ]
     return _runner.start("fill", args)
 
@@ -4885,12 +4958,20 @@ def _start_restart(url: str) -> tuple[bool, str]:
     return _runner.start("restart", args)
 
 
-def _start_apply(limit: int, min_score: int, dry_run: bool, copilot: bool = True) -> tuple[bool, str]:
+def _start_apply(limit: int, min_score: int, dry_run: bool, copilot: bool = True,
+                 url: str = "", space: str = "") -> tuple[bool, str]:
+    """Spawn the apply run. `url` scopes it to ONE job — the row the operator clicked.
+
+    `{url!r}` rather than string concatenation: a job URL carries quotes, ampersands and
+    percent-escapes, and this is interpolated into a `python -c` program. Repr is what makes that
+    safe, and it is the same reason `_start_continue` and `_start_fill_one` already use it.
+    """
     args = [
         sys.executable, "-c",
         (
             "from applypilot.web_dashboard import run_dashboard_apply; "
-            f"run_dashboard_apply(limit={limit}, dry_run={dry_run!r}, copilot={copilot!r})"
+            f"run_dashboard_apply(limit={limit}, dry_run={dry_run!r}, "
+            f"copilot={copilot!r}, url={(url or '')!r}, space={(space or '')!r})"
         ),
     ]
     return _runner.start("apply", args)
@@ -5173,7 +5254,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 dry_run = str(data.get("dry_run", "")).lower() in {"1", "true", "yes", "on"}
                 # Co-pilot (review before submit) is the default; the client can opt out for full auto.
                 copilot = str(data.get("copilot", "1")).lower() in {"1", "true", "yes", "on"}
-                ok, msg = _start_apply(limit, min_score, dry_run, copilot)
+                # A row can now drive this. Absent, it stays the queue runner the console
+                # button needs.
+                ok, msg = _start_apply(limit, min_score, dry_run, copilot,
+                                       url=(data.get("url") or "").strip(),
+                                       space=(data.get("space") or "").strip())
                 _json_response(self, {"ok": ok, "message": msg}, 200 if ok else 409)
                 return
             if path == "/api/mark-applied":
@@ -5213,7 +5298,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 if not url:
                     _json_response(self, {"ok": False, "message": "url required"}, 400)
                     return
-                ok, msg = _start_fill_one(url)
+                ok, msg = _start_fill_one(url, space=(data.get("space") or "").strip())
                 _json_response(self, {"ok": ok, "message": msg}, 200 if ok else 409)
                 return
             if path == "/api/restart":

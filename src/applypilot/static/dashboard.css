@@ -299,6 +299,11 @@
   .round2-txt { font-size:12.5px; color:var(--muted); flex:1 1 260px; line-height:1.45; }
   .round2-txt b { color:var(--soft); font-weight:600; }
   .round2 .netnote { flex-basis:100%; }
+  .round2 .people-tools { margin:0; }
+  .round2 .li-recruiter-box { flex-basis:100%; }
+  .people-tools { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin:2px 0 12px; }
+  .people-tools .li-recruiter-action { margin:0; }
+  .people-tools .people-guess-email { min-height:32px; padding:5px 14px; white-space:nowrap; }
 
   /* Add a contact by hand — a referral Apollo never found. Quiet when closed: it sits under a
      list of people who ARE there, and the common case is not needing it. */

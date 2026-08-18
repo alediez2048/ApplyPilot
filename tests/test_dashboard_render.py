@@ -1319,6 +1319,18 @@ def test_adding_by_hand_is_offered_even_with_no_contacts(tmp_path):
 
 
 @pytest.mark.skipif(not shutil.which("node"), reason="node not available")
+def test_guess_email_button_is_offered_for_missing_addresses(tmp_path):
+    contacts = [
+        _ux1_contact(full_name="Charles Lukasiewicz", email="charles.lukasiewicz@schwab.com"),
+        _ux1_contact(id="c2", full_name="Kelly Day", email="", email_status="none"),
+    ]
+    html = _people(tmp_path, _ux1_job(company="Charles Schwab", contacts=contacts),
+                   "console.log(JSON.stringify(F.peopleList(J)));")
+    assert "Guess emails" in html
+    assert "/api/network/guess-emails" in _page_js()
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node not available")
 def test_what_you_typed_survives_a_refresh(tmp_path):
     """`refresh()` replaces #jobs wholesale every 2.5s and only holds off while a field HAS
     focus, so moving between fields opens a window where the tick lands between blur and focus.

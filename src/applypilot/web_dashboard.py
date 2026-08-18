@@ -5116,6 +5116,27 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     msg += f" ({res['note']})"
                 _json_response(self, {"ok": ok, "message": msg}, 200 if ok else 409)
                 return
+            if path == "/api/network/guess-emails":
+                url = data.get("url", "")
+                if not url:
+                    _json_response(self, {"ok": False, "message": "url required"}, 400)
+                    return
+                from applypilot.database import get_connection
+                from applypilot.networking import service
+                from applypilot.networking.store import init_contacts
+                conn = get_connection()
+                init_contacts(conn)
+                row = _jobs.find_by_any_url(url, conn)
+                if not row:
+                    _json_response(self, {"ok": False, "message": "job not found"}, 404)
+                    return
+                res = service.guess_missing_emails_for_job(dict(row))
+                ok = bool(res.get("guessed"))
+                msg = f"{res.get('guessed', 0)} email guess(es) added"
+                if res.get("note"):
+                    msg += f" ({res['note']})"
+                _json_response(self, {"ok": ok, "message": msg}, 200 if ok else 409)
+                return
             if path == "/api/outreach":
                 _json_response(self, _save_or_regen_draft(data))
                 return

@@ -963,6 +963,15 @@ async function findContacts(url, skipKnown) {
   if (!r.ok) alert(r.message || 'Could not start');
   refresh();
 }
+async function guessEmails(url, btn) {
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Guessing...';
+  }
+  const r = await post('/api/network/guess-emails', {url});
+  if (!r.ok) alert(r.message || 'Could not guess emails');
+  refresh();
+}
 function emailBadge(s) {
   if (s === 'verified') return '<span class="ebadge ok">verified</span>';
   if (s === 'unverified') return '<span class="ebadge warn">unverified</span>';
@@ -2108,14 +2117,14 @@ function peopleList(j) {
   if (!cs.length) {
     // The undo has to render here too: moving EVERYONE lands on this branch, which is exactly
     // the moment the operator is most likely to want the move back.
-    return intro + `<div class="pane-empty">No contacts yet. ${findContactsPrompt(j)} ${linkedinContactPrompt(j)}</div>`
+    return intro + `<div class="pane-empty">No contacts yet. ${findContactsPrompt(j)} ${peopleTools(j, cs)}</div>`
          + addContactForm(j);
   }
   // CO-2 sits at the TOP of the closed job's People tab, above the people it moves. The row
   // menu was the obvious home and is the wrong one: this is not destructive, and burying a
   // control is how the interview button was reported as doing nothing (§Lessons 43). The test
   // for placement is not "can it be reached" but "is it on the thing it acts on" (§Lessons 97).
-  intro += migrateBar(j) + anotherRoundPrompt(j, cs) + linkedinContactPrompt(j) + addContactForm(j);
+  intro += migrateBar(j) + anotherRoundPrompt(j, cs) + addContactForm(j);
   // 💡 outranks the hot/cold split and is pulled OUT of both groups rather than sorted to the
   // front of its own. Every other grouping here is derived — `hot` means "you already know
   // them", which the system worked out — and this is the one the operator DECIDED, so it wins.
@@ -4336,8 +4345,12 @@ async function unmarkRejected(url, btn) {
 // strangers costs Apollo credits and finishing a started sequence does not.
 //
 // It spends Apollo credits, so the label says what it will do rather than being a bare verb.
+function peopleTools(j, cs) {
+  return `<div class="people-tools">${linkedinContactPrompt(j)}${guessEmailsPrompt(j, cs)}</div>`;
+}
+
 function anotherRoundPrompt(j, cs) {
-  if (!NET_AVAIL || !cs.length) return '';
+  if (!cs.length) return '';
 
   // Two earlier versions of this control were both unusable, in opposite directions. The first
   // returned '' unless every ladder was spent — correct behaviour, no feedback, reported as
@@ -4374,14 +4387,17 @@ function anotherRoundPrompt(j, cs) {
   // just reorganised, a first round that resolved to the wrong company entirely). Spending
   // Apollo credits is their call to make, so the panel says what it thinks and gets out of the
   // way. `ready` still drives the accent styling, so "now is the moment" stays visible.
-  const dis = busy ? 'disabled' : '';
+  const dis = (busy || !NET_AVAIL) ? 'disabled' : '';
   const label = busy ? '⏳ looking for new people…' : '🔄 Find a new round of contacts';
   const what = 'Searches this company again, skipping everyone above, and drafts fresh outreach. Spends Apollo credits.';
+  const findTitle = NET_AVAIL ? (ready ? what : esc(why) + ' — ' + what)
+    : 'Set APOLLO_API_KEY (paid plan) to find more contacts';
   return `<div class="round2${ready ? ' ready' : ''}">
       <div class="round2-txt">${head} ${esc(why)}</div>
       <button class="secondary" ${dis}
-        title="${ready ? what : esc(why) + ' — ' + what}"
+        title="${findTitle}"
         onclick="findContacts(decodeURIComponent('${encodeURIComponent(j.url)}'), true)">${label}</button>
+      ${peopleTools(j, cs)}
       ${j.network_note && !busy ? `<div class="netnote">${esc(j.network_note)}</div>` : ''}
     </div>`;
 }
@@ -4431,6 +4447,14 @@ function linkedinContactPrompt(j) {
       </div>
     </div>`;
   return out;
+}
+function guessEmailsPrompt(j, cs) {
+  const missing = (cs || []).filter(c => !(c.email || '').trim()).length;
+  if (!missing) return '';
+  const title = 'Infer missing addresses from existing emails at this company. Guesses are saved as unverified.';
+  return `<button class="secondary people-guess-email" title="${esc(title)}"
+      onclick="guessEmails(decodeURIComponent('${encodeURIComponent(j.url)}'), this)">
+      ✉ Guess emails</button>`;
 }
 function fmtDate(iso) {
   try {

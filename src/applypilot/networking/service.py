@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import logging
 import re
+import unicodedata
+from collections import Counter
 
 from applypilot.domain import geo
 from applypilot.domain import linkedin_thread as _lt
@@ -168,6 +170,8 @@ _LINKEDIN_DEGREE_RE = re.compile(r"\s*[•·]\s*(?:1st|2nd|3rd\+?).*$", re.I)
 _LINKEDIN_ACTION_WORDS = {
     "connect", "message", "follow", "following", "pending", "view profile",
 }
+
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 def _clean_linkedin_url(url: str | None) -> str:
@@ -358,6 +362,7 @@ def import_linkedin_contacts_for_job(
             "full_name": _lt.better_name(p.get("full_name") or "", rev.get("full_name") or ""),
             "title": p.get("title"),
             "company": company,
+            "space_id": (job or {}).get("space_id") or "",
             "linkedin_url": rev.get("linkedin_url") or p.get("linkedin_url"),
             "email": rev.get("email"),
             "email_status": rev.get("email_status", "none"),
@@ -407,6 +412,163 @@ def import_linkedin_recruiters_for_job(
 ) -> dict:
     """Backward-compatible alias for the first NET-7 endpoint name."""
     return import_linkedin_contacts_for_job(job, people, draft=draft)
+
+
+def _email_tokens(name: str | None) -> list[str]:
+    raw = unicodedata.normalize("NFKD", name or "")
+    ascii_name = raw.encode("ascii", "ignore").decode("ascii")
+    return [p.lower() for p in re.findall(r"[a-zA-Z0-9]+", ascii_name)]
+
+
+def _email_pattern_candidates(name: str | None) -> dict[str, str]:
+    parts = _email_tokens(name)
+    if len(parts) < 2:
+        return {}
+    first = parts[0]
+    last = parts[-1]
+    return {
+        "first.last": f"{first}.{last}",
+        "first_last": f"{first}_{last}",
+        "firstlast": f"{first}{last}",
+        "flast": f"{first[:1]}{last}",
+        "firstl": f"{first}{last[:1]}",
+        "first": first,
+    }
+
+
+def _infer_company_email_pattern(contacts: list[dict]) -> dict:
+    seeds = []
+    verified = [c for c in contacts if (c.get("email_status") or "").lower() == "verified"]
+    source = verified or contacts
+    for c in source:
+        email = (c.get("email") or "").strip().lower()
+        if not _EMAIL_RE.match(email):
+            continue
+        local, domain = email.rsplit("@", 1)
+        for pattern, candidate in _email_pattern_candidates(c.get("full_name")).items():
+            if local == candidate:
+                seeds.append({
+                    "pattern": pattern,
+                    "domain": domain,
+                    "name": c.get("full_name") or "",
+                    "email": email,
+                    "verified": (c.get("email_status") or "").lower() == "verified",
+                })
+                break
+    if not seeds:
+        return {"ok": False, "message": "No usable company email pattern found."}
+
+    domains = Counter(s["domain"] for s in seeds)
+    patterns = Counter(s["pattern"] for s in seeds)
+    domain, domain_count = domains.most_common(1)[0]
+    pattern, pattern_count = patterns.most_common(1)[0]
+    if len(domains) > 1 and domains.most_common(2)[1][1] == domain_count:
+        return {"ok": False, "message": "Company email domain is ambiguous."}
+    if len(patterns) > 1 and patterns.most_common(2)[1][1] == pattern_count:
+        return {"ok": False, "message": "Company email pattern is ambiguous."}
+    example = next(s for s in seeds if s["domain"] == domain and s["pattern"] == pattern)
+    return {
+        "ok": True,
+        "domain": domain,
+        "pattern": pattern,
+        "example_name": example["name"],
+        "example_email": example["email"],
+        "verified_seed": bool(verified),
+    }
+
+
+def guess_missing_emails_for_job(job: dict, draft: bool = True) -> dict:
+    """Infer missing emails from the dominant same-company email format.
+
+    Guesses are reachability hints, not verification. They are stored as unverified, never
+    overwrite an existing address, and only run when one clear pattern wins.
+    """
+    from applypilot.database import get_connection, log_event
+
+    job_url = job.get("url")
+    company = derive.derive_company(job)
+    result = {"company": company, "guessed": 0, "skipped": 0, "contacts": [], "note": ""}
+    if not job_url:
+        result["note"] = "job url missing"
+        return result
+    if not company:
+        result["note"] = "could not determine employer"
+        return result
+
+    conn = get_connection()
+    store.init_contacts(conn)
+    space_id = (job or {}).get("space_id") or ""
+    scope = " AND (c.job_url = ? OR c.space_id = ?)" if space_id else ""
+    args = [(company or "").strip().lower()] + ([job_url, space_id] if scope else [])
+    rows = conn.execute(
+        "SELECT c.* FROM contacts c WHERE LOWER(TRIM(COALESCE(c.company,''))) = ?"
+        + scope + " ORDER BY c.discovered_at ASC",
+        args,
+    ).fetchall()
+    company_contacts = [dict(zip(r.keys(), r)) for r in rows]
+    pattern = _infer_company_email_pattern(company_contacts)
+    if not pattern.get("ok"):
+        result["note"] = pattern.get("message") or "No usable company email pattern found."
+        log_event(job_url, "network", "warn",
+                  f"Could not guess emails at {company}: {result['note']}", conn)
+        return result
+
+    job_contacts = store.get_contacts_for_job(job_url, conn)
+    existing_emails = {
+        (c.get("email") or "").strip().lower() for c in company_contacts if c.get("email")
+    }
+    profile_cache: dict = {}
+
+    def _profile_for_drafting() -> dict:
+        if "p" not in profile_cache:
+            from applypilot.config import load_profile
+            try:
+                profile_cache["p"] = load_profile()
+            except Exception:  # noqa: BLE001
+                profile_cache["p"] = {}
+        return profile_cache["p"]
+
+    guessed = []
+    skipped = 0
+    for contact in job_contacts:
+        if (contact.get("email") or "").strip():
+            skipped += 1
+            continue
+        locals_by_pattern = _email_pattern_candidates(contact.get("full_name"))
+        local = locals_by_pattern.get(pattern["pattern"])
+        if not local:
+            skipped += 1
+            continue
+        email = f"{local}@{pattern['domain']}".lower()
+        if email in existing_emails:
+            skipped += 1
+            continue
+        note = (f"Guessed {pattern['pattern']}@{pattern['domain']} from "
+                f"{pattern['example_name']} <{pattern['example_email']}>.")
+        update = {
+            "id": contact["id"],
+            "job_url": contact["job_url"],
+            "linkedin_url": contact.get("linkedin_url"),
+            "full_name": contact.get("full_name"),
+            "email": email,
+            "email_status": "unverified",
+            "verify_note": note,
+        }
+        store.upsert_contact(update, conn)
+        saved = store.get_contact(contact["id"], conn) or {**contact, **update}
+        guessed.append(saved)
+        existing_emails.add(email)
+        if draft:
+            _draft_and_store(_profile_for_drafting(), job, saved)
+
+    result["guessed"] = len(guessed)
+    result["skipped"] = skipped
+    result["contacts"] = guessed
+    result["note"] = (f"{len(guessed)} guessed with {pattern['pattern']}@{pattern['domain']} "
+                      f"from {pattern['example_email']}")
+    status = "ok" if guessed else "warn"
+    log_event(job_url, "network", status, f"Email guessing for {company}: {result['note']}.", conn)
+    return result
 
 
 def find_contacts_for_job(

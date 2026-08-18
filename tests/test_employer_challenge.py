@@ -307,11 +307,20 @@ def test_a_parent_brands_domain_is_not_the_subsidiarys():
     ("careersearch.stanford.edu", "Stanford", True),
     ("careers.ey.com", "Ey", True),
     ("costargroup.com", "CoStar", True),           # a corporate suffix
-    ("metacareers.com", "Meta", True),             # a careers suffix
     ("careers.expediagroup.com", "Expedia", True),
     ("jobs.jobvite.com", "LegalZoom", False),
     ("careers.peak6.com", "Apex Fintech Solutions", False),
     ("eohh.fa.us2.oraclecloud.com", "Texas Children's Hospital", False),
+    # A CAREERS suffix is the employer's recruiting site and not their mail domain. This file
+    # used to assert `("metacareers.com", "Meta", True)` — so the Schwab fix broke a green test,
+    # and anyone who tried it would have put the bug back (§Lessons 85, where
+    # `_infer_company("not-a-url") == "Uploaded"` was pinned as correct; §Lessons 99, where the
+    # pinned half was the hiding rather than the fix). Rewritten around the new decision rather
+    # than deleted, because the case still has something to say.
+    ("schwabjobs.com", "Schwab", False),
+    ("metacareers.com", "Meta", False),
+    ("acmehiring.com", "Acme", False),
+    ("acmetalent.com", "Acme", False),
     # §Lessons 1, inside the comparison that decides whose payroll gets emailed. The remainder
     # must be a known suffix, so a prefix alone is not a match.
     ("armanino.com", "Arm", False),
@@ -319,3 +328,35 @@ def test_a_parent_brands_domain_is_not_the_subsidiarys():
 ])
 def test_the_host_must_be_the_employers(host, company, ok):
     assert derive._host_is_the_employers(host, company) is ok
+
+
+def test_a_careers_suffix_is_rejected_where_a_corporate_one_is_kept():
+    """The two sets must not collapse back into one, in either direction.
+
+    Asserted as a PAIR on the same fake company: testing only the rejection would survive a
+    mutation that merges the sets the other way, where Expedia and CoStar lose a domain that is
+    genuinely theirs.
+    """
+    assert derive._host_is_the_employers("zenithgroup.com", "Zenith") is True
+    assert derive._host_is_the_employers("zenithjobs.com", "Zenith") is False
+    # Disjoint, or the precedence test below is deciding nothing.
+    assert not (derive._HOST_SUFFIXES & derive._CAREERS_HOST_SUFFIXES)
+
+
+def test_a_careers_word_readded_to_the_corporate_set_is_still_rejected(monkeypatch):
+    """The careers check must WIN, not merely be reached when the corporate set happens to omit
+    the word.
+
+    Written after mutation-testing the test above, which claimed to catch an emptied
+    `_CAREERS_HOST_SUFFIXES` and did not: with "jobs" removed from `_HOST_SUFFIXES`, emptying the
+    careers set changes nothing, so the explicit branch looked load-bearing and was not. The
+    mutation that can actually happen is the opposite one — somebody re-adds "jobs" or "careers"
+    to the corporate set, which is exactly how this bug was written the first time. That is what
+    this pins, and it fails if the branch is deleted.
+    """
+    monkeypatch.setattr(derive, "_HOST_SUFFIXES", derive._HOST_SUFFIXES | {"jobs", "careers"})
+    assert derive._host_is_the_employers("schwabjobs.com", "Schwab") is False
+    assert derive._host_is_the_employers("metacareers.com", "Meta") is False
+    # The corporate half still works with the sets overlapping, so this is not passing merely
+    # because everything is rejected.
+    assert derive._host_is_the_employers("costargroup.com", "CoStar") is True

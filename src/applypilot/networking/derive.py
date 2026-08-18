@@ -665,12 +665,20 @@ def _derive_company_from_urls(job: dict) -> tuple[str | None, str]:
     return None, ""
 
 
-#: Suffixes a company bolts onto its own careers hostname. `costargroup.com` is CoStar's,
-#: `metacareers.com` is Meta's, `expediagroup.com` is Expedia's. Nothing else may be appended:
-#: the remainder must be one of these words exactly, so "arm" does NOT match "armanino"
-#: (remainder "anino") — §Lessons 1, in the comparison that decides whose payroll gets emailed.
-_HOST_SUFFIXES = {"group", "groupinc", "careers", "career", "jobs", "job", "hiring", "talent",
-                  "inc", "corp", "corporation", "co", "holdings", "hq", "global", "people"}
+#: Suffixes a company bolts onto its own CORPORATE hostname — the one its people have addresses
+#: at. `costargroup.com` is CoStar's, `expediagroup.com` is Expedia's. Nothing else may be
+#: appended: the remainder must be one of these words exactly, so "arm" does NOT match
+#: "armanino" (remainder "anino") — §Lessons 1, in the comparison that decides whose payroll
+#: gets emailed.
+_HOST_SUFFIXES = {"group", "groupinc", "inc", "corp", "corporation", "co", "holdings",
+                  "hq", "global"}
+
+#: Suffixes that make a host the employer's RECRUITING site rather than their mail domain.
+#: `schwabjobs.com` really is Charles Schwab's careers site and NOBODY has an address at it —
+#: which is the whole distinction. Kept as its own set rather than deleted because the words are
+#: still evidence the host belongs to the employer; what they are not is evidence about email.
+#: On ambiguity a word belongs HERE, since rejecting only costs a corroboration call.
+_CAREERS_HOST_SUFFIXES = {"careers", "career", "jobs", "job", "hiring", "talent", "people"}
 
 
 def _host_is_the_employers(host: str, company: str) -> bool:
@@ -689,14 +697,36 @@ def _host_is_the_employers(host: str, company: str) -> bool:
         legalzoom  vs jobvite.com       -> no
         apexfintechsolutions vs peak6.com -> no
         costar     vs costargroup.com   -> yes, "group"
-        meta       vs metacareers.com   -> yes, "careers"
+        schwab     vs schwabjobs.com    -> NO, "jobs" is a careers site (see below)
         arm        vs arm.com           -> yes, exactly
+
+    **A careers suffix is not a mail domain, and that distinction cost a live search.** This used
+    to accept `<name>jobs` / `<name>careers` too, on the reasoning that such a host is obviously
+    the employer's — which is true, and is the wrong question. The single caller is
+    `derive_domain`, whose answer goes to Apollo as `q_organization_domains_list[]`: a claim about
+    where these people's EMAIL is. Nobody has an address at a careers site.
+
+    What it cost: a Charles Schwab posting on `www.schwabjobs.com` resolved to the employer
+    "Schwab" (correctly) and the domain `schwabjobs.com` (not). Apollo maps that host to **Charles
+    Schwab India** — a different legal entity — which has no product managers indexed, so the
+    titled search returned 0 and the widen-to-the-whole-company fallback returned five people in
+    a location `OUTREACH_EXCLUDE_LOCATIONS` correctly drops. Three searches, zero contacts, and a
+    log line reading "apollo knows the company but returned nobody for these titles" that was
+    true of the company it had found. §Lessons 68's mechanism with the entity one step sideways.
 
     Rejecting is SAFE and accepting wrongly is not: with no domain Apollo falls back to a name
     search on the employer the posting corroborated, and `confirm_employer_domain` can still
     recover one with Apollo's agreement. With a wrong domain it returns real people who really
     do work somewhere else, and verification confirms them because they genuinely do
-    (§Lessons 68).
+    (§Lessons 68). Measured on both live rows before this changed, and it is why the careers set
+    is a rejection rather than a second accept list:
+
+        Meta   metacareers.com rejected -> confirm_employer_domain('Meta')   -> 'meta.com'  ✓
+        Schwab schwabjobs.com  rejected -> confirm_employer_domain('Schwab') -> ''
+                                        -> name search -> 'Charles Schwab' first  ✓
+
+    Meta ends up BETTER than before (meta.com is where its people actually are), which is the
+    argument that this is not merely a Schwab special case.
     """
     # The REGISTRABLE label, not the first one. `careers.arm.com` is Arm's — reading "careers"
     # off the front rejected arm.com, stanford.edu and ey.com, every one of them correct and
@@ -709,7 +739,13 @@ def _host_is_the_employers(host: str, company: str) -> bool:
     if label == name:
         return True
     if label.startswith(name):
-        return label[len(name):] in _HOST_SUFFIXES
+        remainder = label[len(name):]
+        # Spelled out rather than left to fall through the corporate check, so the rejection
+        # reads as a decision. A careers host is the employer's and is still not their mail
+        # domain; deleting this branch would look identical and mean something else.
+        if remainder in _CAREERS_HOST_SUFFIXES:
+            return False
+        return remainder in _HOST_SUFFIXES
     return False
 
 

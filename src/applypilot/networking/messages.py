@@ -198,7 +198,16 @@ def record_outbound(contact: dict, sent: dict, to_addr: str, cc: list[str], subj
         # Without it the thread showed "Sent from ApplyPilot." where the reply they had just
         # written should be, which reads as the message having been lost.
         "snippet": (body or "").strip()[:PASTED_MAX],
-    }], conn)
+        # `full=True` because this IS the authoritative write: the text above is what we just
+        # sent, trimmed to PASTED_MAX on the line above it. Without the keyword `upsert_messages`
+        # re-caps it to SNIPPET_MAX, so a follow-up or a reply was cut to 200 characters at the
+        # instant it was sent, by the one call that had the real thing in its hand. `_keep_longer`
+        # never gets a chance to protect it — the loss happens before any sync runs.
+        #
+        # The two bounds are chosen by the KIND OF READ (§Lessons 111): SNIPPET_MAX for an
+        # automatic sync of somebody else's mail, PASTED_MAX for a deliberate read. Our own
+        # outbound message is the most deliberate write there is.
+    }], conn, full=True)
 
 
 def thread_for_contact(contact_id: str, conn: sqlite3.Connection | None = None) -> list[dict]:

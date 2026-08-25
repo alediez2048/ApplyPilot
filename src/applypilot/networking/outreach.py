@@ -52,18 +52,51 @@ Voice:
 Produce TWO things:
 
 1. An EMAIL (subject + body):
-   - 3-4 short sentences. Open warm and human, not stiff.
-   - Name the SPECIFIC role the sender applied to and the company, plus one real, relevant thing
-     about the sender (from their profile).
+   - SHORT. Under 120 words, a hard cap. Three or four short sentences, ONE paragraph. Count
+     the words before you return; if it runs over, delete a sentence about the sender. A long
+     first email from someone they have never met does not get read, it gets archived, and
+     length reads as need.
+   - WHEN THE RULES BELOW COMPETE FOR SPACE, this is the order to cut in: the sender's
+     background goes first, then the detail about the role. The question and the out are the
+     last things to go, because they are what earns a reply. Never solve a length problem by
+     dropping them.
+   - Open on the ROLE and on THEM, never on your own excitement or your CV. Name the specific
+     role and the company in the first sentence (the block below says exactly how). The
+     APPLICATION IS NOT THE NEWS: "I applied for X and wanted to reach out" tells the reader
+     only that a form was submitted, and it is the opening every other candidate sends. Say
+     something about the role or their team that would make no sense sent to a different
+     company. These openers are burned, and so is any near-synonym of them, any tense of them,
+     and any of them with a clause bolted on the front: "I'm really excited about", "I wanted
+     to reach out", "I just applied and wanted to reach out", "I applied for the role and
+     wanted to reach out".
+   - Then ONE real, relevant thing about the sender, from their profile. ONE, and at most one
+     sentence. Never a paragraph of career history: their background is the least interesting
+     thing in this email to the person reading it.
+   - Exactly ONE question, and it must be answerable in a single sentence. Two questions, or
+     one that needs a paragraph back, is how a busy person defers replying forever.
    - CALL TO ACTION: invite them to a quick call to connect. If a SCHEDULING LINK is provided
      below, weave it in so they can book directly; the full URL must appear verbatim, but the
      sentence around it is YOURS TO WRITE and must be different every time. If no link is
      provided, just suggest a short call/chat. Keep it low-pressure, not pushy.
+   - GIVE THEM AN EXPLICIT OUT. One clause saying it is genuinely fine to ignore this, to say
+     no, or to point the sender at someone else. This is what separates persistent from
+     pushy, it costs nothing, and to a stranger it is the most credible line in the message.
+   - No urgency, no scarcity, no deadline the sender does not actually have, and no flattery
+     that could be pasted into an email to anybody else.
    - Sign off casually with the sender's first name only. No signature block. The ONLY link
      allowed is the scheduling link (when provided).
-   - Subject: short, casual, specific to THIS person and what you actually wrote to them. Not a
-     formula with the role slotted into it. Several people at one company receive these, and a
-     shared subject line is visible in a forwarded message without anyone opening it.
+   - SUBJECT: the most visible thing you write, and the one part several recipients at one
+     company can compare in a forwarded message without opening anything.
+     * NEVER "quick question", "quick q", "quick note", or any variation of them. It is the
+       most overused cold-email subject there is and it tells the reader nothing.
+     * NEVER a fixed frame with the role name dropped into a slot. The test is this: if
+       swapping the role out would leave a subject that any other candidate applying to any
+       other company could have sent, it is the wrong subject. Stated as a property and not
+       as an example on purpose, because a specimen in a prompt comes back verbatim even when
+       it is the thing being forbidden, and the last subject example in this prompt produced
+       ten identical subject lines at one employer.
+     * Short, lowercase-ish, and drawn from what THIS email actually says, the thing you
+       asked or the thing you noticed, not from the fact that a job posting exists.
 
 2. A LINKEDIN connection note (linkedin_note):
    - MUST be 300 characters or fewer (hard limit, count carefully, aim for ~230).
@@ -916,6 +949,35 @@ def _job_user_prompt(sender_bits, contact, relationship, role, company, jd, noti
     )
 
 
+#: The email body cap the three first-contact voices state, as a number the CODE can check.
+#: Stated in the prompt AND enforced here for the reason §Lessons 9 and 12 keep recording: a
+#: prompt instruction is not a guarantee. Measured against the live model with the cap written
+#: into the prompt three separate ways (a hard cap, "count the words before you return", and an
+#: explicit order to cut in): 2 of 5 drafts still came back at 131 and 160 words. Models do not
+#: count reliably, and no amount of restating it changes that.
+#:
+#: `test_the_prompt_and_the_code_agree_on_the_cap` pins this against the prompt text, because a
+#: bound written in two places is two bounds — that is how the intro-deck PDF rode along on 34
+#: real emails while `doctor --config` reported it off.
+_BODY_WORD_CAP = 120
+
+
+def _too_long(raw: str) -> int:
+    """Word count of the drafted body if it exceeds the cap, else 0.
+
+    Counted on the MODEL's body, before `ensure_intro_deck` appends its sentence: the cap is a
+    rule about what the model writes, and a guarantee the code adds afterwards is not the
+    model's overrun to fix. Unparseable output returns 0 — the caller raises on that later with
+    a better message than a length retry would give.
+    """
+    try:
+        body = str(extract_json(raw).get("body", ""))
+    except Exception:
+        return 0
+    n = len(body.split())
+    return n if n > _BODY_WORD_CAP else 0
+
+
 def _chat_meeting_requirements(client, system: str, user: str, space,
                                *, max_tokens: int, temperature: float, tries: int = 2) -> str:
     """Generate, and regenerate ONCE if a required term is missing.
@@ -940,21 +1002,42 @@ def _chat_meeting_requirements(client, system: str, user: str, space,
     for attempt in range(max(1, tries)):
         raw = client.chat(messages, max_tokens=max_tokens, temperature=temperature)
         missing = missing_mentions(raw, space)
-        if not missing:
+        overrun = _too_long(raw)
+        if not missing and not overrun:
             return raw
         if attempt + 1 >= tries:
-            log.warning("draft still missing required mention(s): %s", ", ".join(missing))
+            if missing:
+                log.warning("draft still missing required mention(s): %s", ", ".join(missing))
+            if overrun:
+                # Returned long rather than cut. Truncating an email to a word count leaves it
+                # ending mid-sentence, and a message that stops mid-thought reads as broken to
+                # the recipient in a way that a slightly long one does not. The operator edits
+                # it; `ensure_intro_deck` can append a URL safely because a URL is one correct
+                # string, and prose is not (§Lessons 87).
+                log.warning("draft still over the %d-word cap: %d words", _BODY_WORD_CAP, overrun)
             break
         # Named in the RETRY rather than louder in the original prompt: two instructions
         # disagreeing is not fixed by volume (§Lessons 40), and this one is a correction to a
         # specific attempt rather than a standing rule.
+        faults = []
+        if missing:
+            faults.append(
+                "It never mentions " + ", ".join(f'"{m}"' for m in missing) +
+                ", which is required in every message in this campaign. Rewrite so the term "
+                "appears, worked into the argument rather than bolted on, and change the "
+                "surrounding sentence rather than inserting a stock one.")
+        if overrun:
+            # The count is given back because the model cannot measure it, and the cut order
+            # repeats the prompt's own so the retry cannot contradict the standing rule.
+            faults.append(
+                f"The body is {overrun} words, over the {_BODY_WORD_CAP}-word cap. Cut it to "
+                f"under {_BODY_WORD_CAP}. Remove the sentences about the sender's background "
+                "first; keep the question and keep the line giving them an out. Do not solve "
+                "it by deleting the scheduling link.")
         messages = messages + [
             {"role": "assistant", "content": raw},
-            {"role": "user", "content":
-                "That draft never mentions " + ", ".join(f'"{m}"' for m in missing) +
-                ". It is required in every message in this campaign. Rewrite it so the term "
-                "appears, worked into the argument rather than bolted on, and change the "
-                "surrounding sentence rather than inserting a stock one. Return the JSON."},
+            {"role": "user", "content": "That draft has a problem. " + " ".join(faults) +
+                                        " Return the JSON."},
         ]
     return raw
 
@@ -1613,16 +1696,15 @@ def _is_clipped(body: str) -> bool:
     tells the model not to lean on the final sentence, which is never harmful; a false negative
     invites it to answer a cut as if the sender wrote it. That asymmetry is the whole design, and
     it is why no attempt is made to be clever about signatures or sign-offs.
+
+    ONE implementation, in `domain/conversations`. It used to live only here, so the contact
+    CARD grew its own version in JavaScript comparing `len >= SNIPPET_MAX` — the rule this
+    docstring spends three paragraphs explaining is wrong — and a 194-character message
+    rendered on screen with no marker while this path correctly reported it cut.
     """
+    from applypilot.domain import conversations as _cv
     from applypilot.networking.messages import PASTED_MAX, SNIPPET_MAX
-    text = (body or "").strip()
-    if not text:
-        return False
-    if len(text) >= PASTED_MAX:
-        return True
-    if len(text) > SNIPPET_MAX:
-        return False
-    return not text.endswith(_ENDS_CLEANLY) and not _SIGNOFF_RE.search(text)
+    return _cv.is_clipped(body, SNIPPET_MAX, PASTED_MAX)
 
 
 def _transcript_events(contact: dict, thread, touches, their_reply: str) -> list[dict]:

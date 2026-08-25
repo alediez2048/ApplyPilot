@@ -222,7 +222,8 @@ def _norm_name(name: str) -> str:
 #: point is to stop a name being assembled letter-by-letter out of a sentence.
 _MAX_NAME_GAPS = 2
 
-_TENANT_PREFIXES = ("our", "the", "my", "join", "work", "life", "team", "careers", "jobs")
+_TENANT_PREFIXES = ("our", "the", "my", "join", "work", "life", "team", "careers",
+                    "career", "jobs")
 _TENANT_SUFFIXES = ("jobs", "careers", "career", "corp", "corporate", "inc", "llc", "global",
                     "external", "hcm", "recruiting", "talent", "hiring", "group", "holdings")
 
@@ -251,6 +252,34 @@ def refine_company_from_posting(company: str | None, full_description: str | Non
         return None
 
     variants: list[str] = []
+
+    # The slug's OWN separators are a boundary, and `_norm_name` destroys them. `career-schwab`
+    # normalises to "careerschwab", which starts with the prefix "careers" — so the affix pass
+    # below strips seven characters and yields "chwab", eating the S of Schwab, while the
+    # obvious variant is never generated at all. Splitting the raw name on its separators and
+    # discarding the ATS furniture gets "schwab" structurally, with no vendor named anywhere.
+    #
+    # Safe for the same reason the affix pass is: every variant still has to be CORROBORATED by
+    # the posting's own text before it can replace anything, so a wrong split cannot ship
+    # (§Lessons 52 — "OurCrowd" must never become "Crowd").
+    parts = [x for x in re.split(r"[^a-z0-9]+", (company or "").lower()) if x]
+    # Furniture is decided by the LIST, never by length. Filtering short tokens out of
+    # `meaningful` made "Hamming AI" look like one name plus a scrap and proposed "Hamming",
+    # and "Scale AI", "Writer AI" and every other two-token name would have followed. A short
+    # token is part of the name unless it is named furniture.
+    meaningful = [x for x in parts if x not in _NEVER_A_TENANT]
+    if len(parts) > 1 and len(meaningful) == 1 and len(meaningful[0]) > 2:
+        # EXACTLY ONE non-furniture part, or this shreds real names. The first version proposed
+        # every part and the eval caught it immediately: "Apex Fintech Solutions" split to
+        # ["apex","fintech","solutions"], every one of them corroborated by a posting that opens
+        # "Apex Fintech Solutions (Apex) powers innovation", and the longest-first tie-break
+        # returned "Solutions" — §Lessons 52's OurCrowd failure, reappearing through a new door.
+        #
+        # The rule that survives it: a separator split only tells you something when everything
+        # BUT one part is ATS furniture. `career-schwab` is furniture plus a name; a company
+        # whose name simply has several words is not.
+        variants.append(meaningful[0])
+
     for affix in _TENANT_PREFIXES:
         if slug.startswith(affix) and len(slug) > len(affix) + 2:
             variants.append(slug[len(affix):])

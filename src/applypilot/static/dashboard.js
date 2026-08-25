@@ -150,6 +150,17 @@ async function createSpace(btn, template) {
 //: The shape of the Space on screen. Rows carry it too (`j.shape`), because a renderer that
 //: reads a global would render correctly and then be impossible to test one row at a time.
 let SPACE_SHAPE = 'pipeline/jobs';
+//: The Space registry as the payload sends it, so the row menu can offer a move without a
+//: round-trip. Every row in the payload belongs to the CURRENT Space (it is scoped by `?space=`),
+//: so a card's origin is `SPACE_ID` and nothing per-row is needed.
+let SPACES = [];
+//: The Space the SERVER resolved for this payload. Distinct from `SPACE_ID`, which is the URL
+//: parameter and is EMPTY on a first load with no `?space=` — filtering the move menu on that
+//: would fail to exclude the Space you are standing in, and offer a move to itself.
+let SPACE_RESOLVED = '';
+//: Keyed to the SPACE rather than to a row, because the card LEAVES this tab when it moves —
+//: a bar keyed to the source row (the shape `MIGRATE_UNDO` uses) would render nowhere.
+let CARDMOVE_UNDO = null;
 
 // Swap the console for the Space's shape. Wholesale, not by disabling buttons: "Prepare
 // Materials" and "Fill application" are not unavailable in a targets Space, they are
@@ -2611,12 +2622,18 @@ function convMessage(c, m, prevCc) {
   const firstOutIdx = (c.thread || []).findIndex(x => (x.direction || '') !== 'in');
   const isFirstOut = mine && (c.thread || []).indexOf(m) === firstOutIdx;
   const body = m.snippet || (isFirstOut ? (c.outreach_message || '') : '');
-  // A message sitting exactly on the auto-sync cap was CUT, and nothing said so — it simply
-  // stopped mid-sentence, which reads as the message having been lost rather than as the
-  // deliberate 200-character bound CRM-4b chose. Naming it also surfaces the way to get more:
-  // "⤓ Fetch from Gmail" pulls the same thread at PASTED_MAX and is otherwise a button whose
-  // purpose is invisible until you press it.
-  const clipped = (m.snippet || '').length >= CONV_SNIPPET_MAX
+  // A message that was CUT has to say so, or it simply stops mid-sentence and reads as the
+  // message having been lost rather than as the deliberate bound CRM-4b chose. Naming it also
+  // surfaces the way to get more: "⤓ Fetch from Gmail" pulls the same thread at PASTED_MAX and
+  // is otherwise a button whose purpose is invisible until you press it.
+  //
+  // The FLAG is computed on the server (`domain/conversations.is_clipped`), never here. This
+  // line used to ask `length >= CONV_SNIPPET_MAX`, which is the rule §Lessons 116 had already
+  // disproved: Gmail's snippet ends on a WORD boundary, not at exactly 200, so a live message
+  // ending mid-word at 194 characters rendered with no marker at all while the drafter's own
+  // predicate correctly reported it cut. Two predicates for one question is how the screen and
+  // the prompt come to disagree about the same message.
+  const clipped = m.clipped
     ? `<span class="cm-clip" title="ApplyPilot stores the first ${CONV_SNIPPET_MAX} characters of an automatically synced message. Use “⤓ Fetch from Gmail” above to pull this thread in full.">…truncated</span>`
     : '';
   const text = body
@@ -3226,6 +3243,33 @@ async function submitEnrich(cid, btn) {
 //: Which contacts have the paste box open. Outside the DOM like PANEL_OPEN — #jobs is replaced
 //: wholesale every 2.5s.
 const TR_OPEN = new Set();
+
+//: What the operator has TYPED into the transcript form, kept outside the DOM.
+//:
+//: `#jobs` is replaced wholesale every 2.5 seconds. The refresh guards protect a field that
+//: currently has FOCUS, which is not the same as a field with content in it: the moment focus
+//: leaves the page — switching to Granola to copy the summary is the normal way to use this —
+//: the next tick rebuilt this form empty, and the paste was gone.
+//:
+//: The failure was almost silent, and that is the part worth keeping. `saveTranscript` reads
+//: the textarea, finds it empty, and returns at its own guard WITHOUT posting, leaving a small
+//: "Paste the transcript first." beside a form that looks ready. Measured on the live database:
+//: two transcript saves have EVER reached the server, and one of them was a probe — every real
+//: attempt since died here, with no request, no error and no row.
+//:
+//: `REPLY_DRAFT` had solved this for the reply composer months earlier; this form never got the
+//: same treatment (§Lessons 49, a rule implemented at one of its call sites).
+const TR_DRAFT = new Map();   // cid -> {title, date, summary, body}
+
+function trDraft(cid) {
+  return TR_DRAFT.get(cid) || { title: '', date: '', summary: '', body: '' };
+}
+
+function trSet(cid, key, value) {
+  const d = trDraft(cid);
+  d[key] = value;
+  TR_DRAFT.set(cid, d);
+}
 function toggleTranscript(cid) {
   if (TR_OPEN.has(cid)) TR_OPEN.delete(cid); else TR_OPEN.add(cid);
   rerenderJobs(true);
@@ -3234,6 +3278,7 @@ function toggleTranscript(cid) {
 function transcriptSection(c) {
   const rows = c.transcripts || [];
   const open = TR_OPEN.has(c.id);
+  const d = trDraft(c.id);
   const list = rows.map(t => `
     <div class="tr-row">
       <span class="tr-title" title="${esc(t.title || 'Meeting')}">${esc(t.title || 'Meeting')}</span>
@@ -3249,12 +3294,16 @@ function transcriptSection(c) {
         ${list || '<div class="hint" style="margin:0">No transcripts yet.</div>'}
         ${open ? `
           <div class="tr-form" data-cid="${esc(c.id)}">
-            <input class="tr-title-in" placeholder="Title — e.g. Intro call" />
-            <input class="tr-date" type="date" />
+            <input class="tr-title-in" placeholder="Title — e.g. Intro call"
+              value="${esc(d.title)}" oninput="trSet('${esc(c.id)}','title',this.value)" />
+            <input class="tr-date" type="date"
+              value="${esc(d.date)}" oninput="trSet('${esc(c.id)}','date',this.value)" />
             <textarea class="tr-sum-in" rows="2"
-              placeholder="Summary (paste Granola's). Leave empty and the opening of the call stands in."></textarea>
+              oninput="trSet('${esc(c.id)}','summary',this.value)"
+              placeholder="Summary (paste Granola's). Leave empty and the opening of the call stands in.">${esc(d.summary)}</textarea>
             <textarea class="tr-body-in" rows="6"
-              placeholder="Paste the transcript here — open the note, select all, copy."></textarea>
+              oninput="trSet('${esc(c.id)}','body',this.value)"
+              placeholder="Paste the transcript here — open the note, select all, copy.">${esc(d.body)}</textarea>
             <div class="dbtns">
               <button class="primary" onclick="saveTranscript(this)">Save transcript</button>
               <button class="ghost" onclick="toggleTranscript('${esc(c.id)}')">Cancel</button>
@@ -3271,23 +3320,32 @@ function transcriptSection(c) {
 async function saveTranscript(btn) {
   const f = btn.closest('.tr-form');
   const msg = f.querySelector('.tr-msg');
-  const body = fieldVal(f, '.tr-body-in');
+  const cid = f.getAttribute('data-cid');
+  const kept = trDraft(cid);
+  // The STORE wins when the DOM is empty: a rebuild landing between the paste and the click
+  // leaves an empty textarea, and reading only the DOM is what silently dropped the save.
+  const body = fieldVal(f, '.tr-body-in') || kept.body || '';
   if (!body.trim()) { msg.textContent = 'Paste the transcript first.'; return; }
   btn.disabled = true;
   const was = btn.textContent;
   btn.textContent = 'Saving…';
   const r = await post('/api/contact/transcript', {
     contact_ids: [f.getAttribute('data-cid')],
-    body, title: fieldVal(f, '.tr-title-in'),
-    summary: fieldVal(f, '.tr-sum-in'),
-    started_at: fieldVal(f, '.tr-date') ? fieldVal(f, '.tr-date') + 'T12:00:00+00:00' : '',
+    body,
+    title: fieldVal(f, '.tr-title-in') || kept.title || '',
+    summary: fieldVal(f, '.tr-sum-in') || kept.summary || '',
+    started_at: (fieldVal(f, '.tr-date') || kept.date)
+      ? (fieldVal(f, '.tr-date') || kept.date) + 'T12:00:00+00:00' : '',
   });
   btn.disabled = false;
   btn.textContent = was;
   // The paste is NEVER cleared on failure -- it may be the only copy the operator has in hand,
   // and re-copying a long note out of another app is not a thing to make anyone do twice.
   if (!r.ok) { msg.textContent = r.message || 'Could not save that.'; return; }
-  TR_OPEN.delete(f.getAttribute('data-cid'));
+  // Cleared ONLY on a save that succeeded. A failed save keeps the paste, because it may be the
+  // only copy the operator has in hand and re-copying a long note is not a thing to ask twice.
+  TR_OPEN.delete(cid);
+  TR_DRAFT.delete(cid);
   refresh();
 }
 
@@ -4027,7 +4085,7 @@ function renderJobsTable(allJobs, editing, force) {
   // Grouped, but only where grouping says something. A header over one row is furniture, and a
   // collapsed group still has to be re-openable — so the header renders whatever the state is
   // and only the MEMBER rows come and go.
-  const html = groupByEmployer(shown).map(g => {
+  const html = cardMoveUndoRow() + groupByEmployer(shown).map(g => {
     // A band needs a NAME, not a count. Rows whose employer never resolved (§Lessons 85's
     // "Uploaded", now "") each land in their own `__solo__` group with an empty name — banding
     // those would print an empty header over every one of them, so they keep the company
@@ -4281,6 +4339,8 @@ async function refresh() {
   // id that does not resolve — so adopting its answer keeps `statusUrl()` and the highlighted
   // tab from disagreeing on the next tick.
   if (data.space) SPACE_ID = data.space;
+  SPACES = data.spaces || [];
+  SPACE_RESOLVED = data.space || SPACE_ID || '';
   renderSpaceNav(data.spaces, data.space, data.space_note);
   SPACE_TEMPLATES = data.space_templates || SPACE_TEMPLATES;
   renderSpaceShape(data.space_shape, data.space_offer, data.space_offer_copy, data.space_voice);
@@ -4750,6 +4810,30 @@ async function saveJobDescription(url, btn) {
   if (job) job.description = text.slice(0, 900);
   refresh();
 }
+//: Which Space this card lives in, and the way to change it.
+//:
+//: The move is ALSO in the `⋯` menu, and putting it only there was the mistake: this codebase
+//: carries a comment directly above the interview button saying "burying it made it
+//: unfindable", and it was reported as missing within minutes of shipping — the tenth time a
+//: control has been hidden in that menu and reported as absent (§Lessons 43, 88, 89, 97).
+//:
+//: Here it is beside the card's other facts, states where the card currently is (worth knowing
+//: on its own), and names each destination as its own button. `moveDestinations` is same-shape
+//: only, so this renders nothing at all on a Space with nowhere to go.
+function spaceRow(j) {
+  const here = (SPACES || []).find(s => s.id === SPACE_RESOLVED);
+  const dests = moveDestinations();
+  if (!here && !dests.length) return '';
+  const u = `decodeURIComponent('${encodeURIComponent(j.url)}')`;
+  const buttons = dests.map(d =>
+    `<button class="ghost jd-move" onclick="moveCardToSpace(${u}, decodeURIComponent('${encodeURIComponent(d.id)}'), this)"
+       title="Move this card, its contacts and their conversations to ${esc(d.name)}">→ ${esc(d.name)}</button>`).join('');
+  return `<div class="jd-row"><span class="jd-k">Space</span><span class="jd-v">
+      <b>${esc(here ? here.name : SPACE_RESOLVED)}</b>
+      ${dests.length ? `<span class="jd-move-lbl">move to</span>${buttons}` : ''}
+    </span></div>`;
+}
+
 function jobDetail(j) {
   const link = (href, label, cls) => href
     ? `<a class="${cls}" href="${esc(href)}" target="_blank" rel="noopener">${label} ↗</a>` : '';
@@ -4825,6 +4909,7 @@ function jobDetail(j) {
       ${row('Fit', score)}
       ${row('Status', esc(j.status) + (j.applied_at ? ` · applied ${esc(fmtDate(j.applied_at))}` : ''))}
       ${row('Attempts', j.apply_attempts ? String(j.apply_attempts) : '')}
+      ${spaceRow(j)}
       ${urls}
     </div>
     ${contextBox(j)}
@@ -5482,6 +5567,78 @@ function positionRowMenu(el) {
     body.classList.add('flip-up');
   }
 }
+//: Where this card could go: the SAME SHAPE only, never itself.
+//:
+//: Filtered here so the menu cannot offer a move the server will refuse, and re-checked in
+//: `cardmove.plan` regardless — a guard that exists only on the path the UI happens to take is
+//: not a guard (§Lessons 110). Cross-shape is genuinely unsupported rather than merely hidden:
+//: `jobs_shaped_ids` gates the apply queue and `is_target` decides rendering from the anchor.
+function moveDestinations() {
+  return (SPACES || []).filter(s => s.id !== SPACE_RESOLVED && s.shape === SPACE_SHAPE);
+}
+
+async function moveCardToSpace(url, spaceId, btn) {
+  const was = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Checking…';
+  const plan = await post('/api/job/move-space', {url, space_id: spaceId, preview: true});
+  btn.disabled = false; btn.textContent = was;
+  if (!plan.ok) { alert(plan.message || 'That move is not possible.'); return; }
+
+  // The confirm STATES what changes rather than asking "are you sure?". A move that silently
+  // alters the voice or the ladder is the shape of bug this codebase keeps paying for, and the
+  // discarded drafts are named because "2 drafts" is a number while a name is a decision.
+  const lines = [`Move “${plan.card}” from ${plan.src.name} to ${plan.dst.name}?`, ''];
+  lines.push(`${plan.contacts} contact(s) come with it.` +
+             (plan.sent ? ` ${plan.sent} of them have already been emailed.` : ''));
+  lines.push('Their conversations, follow-ups and meetings are untouched.');
+  if ((plan.changes || []).length) {
+    lines.push('', 'What changes for this card:');
+    for (const c of plan.changes) lines.push(`  • ${c.field}: ${c.from} → ${c.to}`);
+  }
+  if (plan.ladder_warning) lines.push('', `Note: ${plan.ladder_warning}.`);
+  if ((plan.discards || []).length) {
+    lines.push('', `These unsent drafts were written in ${plan.src.name}'s voice and will be ` +
+                   'discarded (undo restores them):');
+    for (const n of plan.discards) lines.push(`  • ${n}`);
+  }
+  if (!confirm(lines.join('\n'))) return;
+
+  btn.disabled = true; btn.textContent = 'Moving…';
+  const r = await post('/api/job/move-space', {url, space_id: spaceId});
+  btn.disabled = false; btn.textContent = was;
+  if (!r.ok) { alert(r.message || 'Could not move it.'); return; }
+  CARDMOVE_UNDO = {token: r.undo, card: r.card, dst: r.dst.name, backup: r.backup || '',
+                   discarded: r.discarded || 0};
+  ROWMENU_OPEN.delete(url);
+  refresh();
+}
+
+async function undoCardMove(btn) {
+  if (!CARDMOVE_UNDO) return;
+  btn.disabled = true; btn.textContent = 'Undoing…';
+  const r = await post('/api/job/move-space/undo', {undo: CARDMOVE_UNDO.token});
+  if (!r.ok) { btn.disabled = false; btn.textContent = '↩ Undo'; alert(r.message || 'Could not undo.'); return; }
+  CARDMOVE_UNDO = null;
+  refresh();
+}
+
+function dismissCardMoveUndo() { CARDMOVE_UNDO = null; refresh(); }
+
+//: A full-width row rather than a floating banner: `#jobs` is a tbody, and anything that is not
+//: a `tr` inside one is reparented by the parser. No `display` override on the cell either — a
+//: `display:flex` on a `td` silently un-does `colspan` (§Lessons 101).
+function cardMoveUndoRow() {
+  if (!CARDMOVE_UNDO) return '';
+  const m = CARDMOVE_UNDO;
+  return `<tr class="cm-undo"><td colspan="4"><div class="cm-undo-inner">
+      <span>✓ Moved “${esc(m.card)}” to ${esc(m.dst)}` +
+      (m.discarded ? ` · ${m.discarded} unsent draft(s) discarded` : '') + `</span>
+      <button class="ghost" onclick="undoCardMove(this)">↩ Undo</button>
+      <button class="ghost" onclick="dismissCardMoveUndo()" title="Dismiss">✕</button>
+      ${m.backup ? `<span class="mig-hint">backup: ${esc(m.backup)}</span>` : ''}
+    </div></td></tr>`;
+}
+
 function rowMenu(j) {
   const u = `decodeURIComponent('${encodeURIComponent(j.url)}')`;
   const label = `decodeURIComponent('${encodeURIComponent(`${j.company} - ${j.title}`)}')`;
@@ -5517,6 +5674,12 @@ function rowMenu(j) {
     items.push(`<button onclick="markRejected(${u}, this)">✕ Mark rejected<span>They said no — counts in your funnel</span></button>`);
     items.push(`<button onclick="markCancelled(${u}, this)">⊘ Job removed / cancelled<span>Posting pulled or frozen — not a rejection</span></button>`);
     items.push(`<button onclick="markGhost(${u}, this)">👻 Ghost job<span>Never a real opening — evergreen or reposted forever</span></button>`);
+  }
+  // Moving a card between Spaces. One entry per destination, because with two or three of them
+  // a submenu is more clicks than the whole action is worth. Same shape only — see
+  // `moveDestinations`.
+  for (const d of moveDestinations()) {
+    items.push(`<button onclick="moveCardToSpace(${u}, decodeURIComponent('${encodeURIComponent(d.id)}'), this)">→ Move to ${esc(d.name)}<span>Contacts, conversations and follow-ups come with it</span></button>`);
   }
   items.push(`<button class="danger" onclick="deleteJob(${u}, ${label})">🗑 Delete<span>Remove this job and its contacts</span></button>`);
   return `<details class="rowmenu" ${ROWMENU_OPEN.has(j.url) ? 'open' : ''} ontoggle="onRowMenuToggle(this, ${u})">

@@ -635,8 +635,111 @@ RETRYABLE_STATUSES = {408, 429, 500, 502, 503, 504}
 PERMANENT_FAILURES = {404, 410, 451}
 
 
-def scrape_detail_page(page, url: str) -> dict:
-    """Full cascade for one detail page."""
+def same_host_frame_url(page_url: str, frame_urls) -> str:
+    """The first child-frame URL served by the SAME host as the page itself.
+
+    Some ATSes serve the posting inside an iframe and leave the outer document an empty shell.
+    iCIMS is the one that surfaced it: `career-schwab.icims.com/jobs/123453/job` returns 200 and
+    206KB whose title is the generic "Finance, Service, Engineering, & Developer Jobs | Schwab
+    Jobs", with 31 iframes and no posting anywhere in it. The real content is one request away at
+    `?in_iframe=1` — 42KB titled "Production Support Engineer in Austin, Texas" — and every tier
+    of the cascade missed it, because `extract_main_content` deletes `iframe` outright.
+
+    SAME HOST is the whole guard, and it is doing real work rather than being decorative: a
+    careers page carries ad, analytics, video and consent iframes, and following one of those
+    means scraping a third party's page and storing whatever it says as this employer's job
+    description. Compared as whole host strings, never as a substring (§Lessons 1).
+
+    Pure, so it can be tested without a browser: the caller passes the frame URLs it found.
+    """
+    from urllib.parse import urlparse
+    host = (urlparse(page_url or "").hostname or "").lower()
+    if not host:
+        return ""
+    for raw in (frame_urls or []):
+        u = (raw or "").strip()
+        if not u:
+            continue
+        parsed = urlparse(u)
+        if parsed.scheme not in ("http", "https"):
+            continue                      # about:blank, javascript:, data: are not pages
+        if (parsed.hostname or "").lower() != host:
+            continue
+        if u.split("#")[0] == (page_url or "").split("#")[0]:
+            continue                      # the page itself; following it is a loop
+        return u
+    return ""
+
+
+def content_frame(page):
+    """The loaded child FRAME holding the posting, or None.
+
+    Returns the frame OBJECT rather than its URL, and that distinction is the entire fix.
+    Navigating to the frame's address does not work on iCIMS: the page ships JS that strips
+    `in_iframe=1` whenever `window.top === window`, so opening it top-level bounces back to the
+    shell. Measured on the live posting:
+
+        main document, top-level          1,386 chars   (the careers shell)
+        the same frame READ IN PLACE      5,041 chars   ("Production Support Engineer,
+                                                         US-TX-Austin ... Your Opportunity ...")
+
+    A Playwright Frame exposes `query_selector`, `evaluate`, `title` and `url`, which is every
+    API the extraction tiers use, so the frame can be handed to them exactly where a page goes.
+    """
+    want = same_host_frame_url(page_url_of(page), _frame_urls(page))
+    if not want:
+        return None
+    try:
+        for f in (page.frames or []):
+            try:
+                if f != page.main_frame and f.url == want:
+                    return f
+            except Exception:
+                continue
+    except Exception:
+        return None
+    return None
+
+
+def page_url_of(page) -> str:
+    try:
+        return page.url or ""
+    except Exception:
+        return ""
+
+
+def _frame_urls(page) -> list:
+    """Child-frame URLs on the loaded page, best-effort.
+
+    Reads the live frame list rather than `iframe[src]` attributes, so a frame whose src is set
+    by script is still seen. Never raises: this runs on the failure path, where the alternative
+    is the empty description we already have.
+    """
+    out = []
+    try:
+        for f in (page.frames or []):
+            try:
+                if f == page.main_frame:
+                    continue
+            except Exception:
+                pass
+            try:
+                if f.url:
+                    out.append(f.url)
+            except Exception:
+                continue
+    except Exception:
+        return []
+    return out
+
+
+def scrape_detail_page(page, url: str, _followed_frame: bool = False,
+                       _already_loaded: bool = False) -> dict:
+    """Full cascade for one detail page.
+
+    `_already_loaded` runs every tier against a context that is ALREADY showing the content and
+    must not be navigated — a child frame. Navigating it is what this exists to avoid.
+    """
     result: dict = {
         "full_description": None,
         "application_url": None,
@@ -658,16 +761,17 @@ def scrape_detail_page(page, url: str) -> dict:
         return result
 
     try:
-        resp = page.goto(url, timeout=45000)
+        resp = None if _already_loaded else page.goto(url, timeout=45000)
         if resp and resp.status in PERMANENT_FAILURES:
             result["error"] = f"HTTP {resp.status}"
             result["elapsed"] = time.time() - t0
             return result
-        page.wait_for_load_state("domcontentloaded", timeout=15000)
-        try:
-            page.wait_for_load_state("networkidle", timeout=10000)
-        except Exception:
-            pass
+        if not _already_loaded:
+            page.wait_for_load_state("domcontentloaded", timeout=15000)
+            try:
+                page.wait_for_load_state("networkidle", timeout=10000)
+            except Exception:
+                pass
     except Exception as e:
         err_str = str(e)
         if "timeout" in err_str.lower():
@@ -728,6 +832,28 @@ def scrape_detail_page(page, url: str) -> dict:
     else:
         result["status"] = "error"
         result["error"] = "no data extracted"
+
+    # Every tier came back empty. If the posting is inside a same-host iframe, that is where it
+    # is, and the cascade above has been reading an empty shell.
+    #
+    # Placed HERE, on the failure path, deliberately: it cannot regress a scrape that already
+    # worked, because a page yielding any description returns long before this line. One hop
+    # only, guarded by `_followed_frame` — a frame that itself frames something is a loop, and
+    # the second page is already the content in every case this exists for.
+    if not result.get("full_description") and not _followed_frame:
+        frame = content_frame(page)
+        if frame is not None:
+            log.info("no content in the main document; reading same-host frame %s", frame.url)
+            framed = scrape_detail_page(frame, frame.url, _followed_frame=True,
+                                        _already_loaded=True)
+            if framed.get("full_description"):
+                # The APPLY url is the outer page's, not the frame's: the frame is a rendering
+                # detail of this ATS and is not where a human applies.
+                framed["application_url"] = (result.get("application_url")
+                                             or framed.get("application_url"))
+                framed["followed_frame"] = frame.url
+                framed["elapsed"] = time.time() - t0
+                return framed
 
     result["elapsed"] = time.time() - t0
     return result

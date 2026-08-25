@@ -180,7 +180,23 @@ def test_a_short_thread_expanded_still_offers_no_collapse(tmp_path):
 
 # ── the truncation mark ─────────────────────────────────────────────────────
 
-def test_a_message_at_the_cap_says_it_was_cut(tmp_path):
+def _flagged(thread, clipped):
+    """Stamp the server's `clipped` decision onto every row.
+
+    The browser no longer measures anything: the predicate moved to
+    `domain/conversations.is_clipped` so the card and the drafter stop disagreeing about the
+    same message. These fixtures therefore supply the FLAG, and the predicate itself is tested
+    in `tests/test_fuller_outbound.py` against real text.
+    """
+    return [dict(m, clipped=clipped) for m in thread]
+
+
+def test_a_message_the_server_marked_cut_says_so(tmp_path):
+    """The old version of this fed a 200-character snippet and expected the mark, and fed
+    `"x" * 40` expecting none. Both fixtures encoded the rule §Lessons 116 disproved: a real
+    Gmail snippet ends on a WORD boundary, so the live case was 194 characters and got no mark,
+    while `"x" * 40` has no terminal punctuation and IS the shape of a cut message. The test
+    passed throughout and the screen was wrong."""
     src = (wd._STATIC_DIR / "dashboard.js").read_text(encoding="utf-8")
     script = tmp_path / "clip.mjs"
     script.write_text(
@@ -195,18 +211,18 @@ globalThis.document = { getElementById:()=>el(), querySelector:()=>el(),
 const SRC = """ + json.dumps(src) + """;
 const F = (new Function(SRC + '; return { conversationView, setMax(v){ CONV_SNIPPET_MAX = v; } };'))();
 F.setMax(200);
-const long  = F.conversationView(""" + json.dumps(_contact(_thread(2, "x" * 200))) + """);
-const short = F.conversationView(""" + json.dumps(_contact(_thread(2, "x" * 40))) + """);
-console.log(JSON.stringify({ atCap: (long.match(/cm-clip/g)||[]).length,
-                             under: (short.match(/cm-clip/g)||[]).length }));
+const cut  = F.conversationView(""" + json.dumps(_contact(_flagged(_thread(2, "x" * 194), True))) + """);
+const done = F.conversationView(""" + json.dumps(_contact(_flagged(_thread(2, "all done."), False))) + """);
+console.log(JSON.stringify({ cut: (cut.match(/cm-clip/g)||[]).length,
+                             done: (done.match(/cm-clip/g)||[]).length }));
 """, encoding="utf-8")
     proc = subprocess.run(["node", str(script)], capture_output=True, text=True, timeout=60)
     assert proc.returncode == 0, proc.stderr[:2000]
     out = json.loads(proc.stdout.strip().splitlines()[-1])
-    assert out["atCap"] == 2
+    assert out["cut"] == 2
     # Guard the guard: marking everything makes the mark meaningless and calls a complete
     # message truncated.
-    assert out["under"] == 0
+    assert out["done"] == 0
 
 
 def test_the_cap_is_SERVED_not_hardcoded():
@@ -215,10 +231,14 @@ def test_the_cap_is_SERVED_not_hardcoded():
     js = (wd._STATIC_DIR / "dashboard.js").read_text(encoding="utf-8")
     assert "CONV_SNIPPET_MAX = data.snippet_max" in js
     assert "cm-clip" in js
-    # The literal must not reappear beside the constant that replaced it.
+    # The literal must not reappear beside the constant that replaced it. The cap is still
+    # SERVED — it names the bound in the tooltip — but it is no longer the PREDICATE: the
+    # browser renders the server's flag and measures nothing (see test_fuller_outbound).
     conv = js[js.index("function convMessage("):js.index("function convMessage(") + 2500]
-    assert ".length >= CONV_SNIPPET_MAX" in conv
-    assert ">= 200" not in conv
+    code = "\n".join(ln for ln in conv.splitlines() if not ln.lstrip().startswith("//"))
+    assert "m.clipped" in code
+    assert ".length >= CONV_SNIPPET_MAX" not in code, "the disproved length predicate is back"
+    assert ">= 200" not in code
 
 
 def test_the_payload_serves_it():

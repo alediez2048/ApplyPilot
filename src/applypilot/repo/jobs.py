@@ -652,6 +652,22 @@ EDITABLE_FIELDS = {
 }
 
 
+def set_space(url: str, space_id: str, conn: sqlite3.Connection | None = None) -> int:
+    """Move one card into another Space. Returns rows written.
+
+    Deliberately NOT part of `EDITABLE_FIELDS`: that whitelist is for descriptive fields the
+    operator types, and membership is not one of them — it decides which panel a row appears in,
+    which pipeline queues can see it, and which prompt writes its email. It moves through
+    `repo.cardmove`, which states what changes before anything happens.
+
+    The URL is the ANCHOR and is never rewritten: `store.contact_id` hashes it, so re-keying
+    would orphan every contact, ladder, message and transcript on the card.
+    """
+    c = _c(conn)
+    cur = c.execute("UPDATE jobs SET space_id = ? WHERE url = ?", (space_id, url))
+    return cur.rowcount
+
+
 def set_fields(url: str, fields: dict, conn: sqlite3.Connection | None = None) -> dict:
     """Edit the descriptive fields on a row. Returns {field: stored value} for what changed.
 

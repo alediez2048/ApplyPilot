@@ -12,10 +12,10 @@ campaign happens to be a job search** — see `docs/crm-prd.md` for where that g
 - **Packaging:** Hatchling, `src/` layout, single package `applypilot`
 - **Entry point:** `applypilot = "applypilot.cli:app"` (Typer CLI)
 - **License:** AGPL-3.0-only · **Version:** 0.4.0 (`pyproject.toml`)
-- **Tests:** 2804 passing (`tests/`, 142 files) · ruff clean (line-length 120, py311) · ESLint clean
+- **Tests:** 3001 passing (`tests/`, 158 files) · ruff clean (line-length 120, py311) · ESLint clean
 - **Schema version:** 4 (`applypilot migrate --status`) · **Settings:** 55 declared in `settings.py`
-- **Branch:** everything current lives on `context`, **111 commits ahead of `main`**, working tree
-  clean as of 2026-08-17 (§Dev workflow). `main` has none of it. Check `git log --oneline -1`
+- **Branch:** everything current lives on `context`, **122 commits ahead of `main`**, working tree
+  clean as of 2026-08-25 (§Dev workflow). `main` has none of it. Check `git log --oneline -1`
   before believing anything here (§Dev workflow).
 
 ## Quick orientation
@@ -65,6 +65,7 @@ than a shared queue.
 | `view.py` | Static HTML results export. |
 | `web_dashboard.py` | **The operator dashboard.** 4,907 lines, **zero SQL** — data access goes through `repo/` and `store.py` (ARCH-4). |
 | `repo/jobs.py` | Every `jobs` query as a named function. Owns `QUEUE_SQL` (provenance — how a row arrived) and `_in_spaces` / `_one_space` (membership — which panel it is in). Those two never do each other's job (SPACE-1a D2). |
+| `repo/cardmove.py` | **Moving a CARD between Spaces** (2026-08-25). `plan()` → `apply()` → `undo()`, one transaction, mirroring `networking/migrate.py`. Orchestration only — the `jobs` write is `repo.jobs.set_space`, the `contacts` writes are `store.set_space_for_job` / `clear_unsent_draft`, one place per table. |
 | `repo/spaces.py` | The `spaces` / `identities` registries. `jobs_shaped_ids()` and `document_making_ids()` gate the pipeline stages and RAISE on an empty registry rather than returning `[]`. |
 | `scoring/resume_sections.py` | Parses the BASE résumé into its own sections. The base résumé is the template; tailoring rewrites content inside it. |
 | `settings.py` | **Every env var, one registry.** Types, defaults, validators, secret flags. Malformed values fail at startup naming the variable. `.env.example` is generated from it. |
@@ -142,6 +143,7 @@ harness no longer has to import a web server to test scheduling.
 | `authrealm.py` | **What one sign-in covers.** URL → the ATS tenant an account belongs to. `host_is_tenant` is load-bearing: every employer on `wd1.myworkdaysite.com` shares that host, so a cookie there proves nothing about any one of them. |
 | `linkedin_thread.py` | Reading an open LinkedIn thread: who a display name is (word-level, never substring) and de-colliding the one-time-per-GROUP timestamps that would otherwise destroy messages. |
 | `lastinteraction.py` | When something last happened on a job **and who did it**, from six sources that were never joined. Direction is the point — "you emailed them 6 days ago" and "they replied 6 days ago" are the same age and opposite situations. |
+| `spacemove.py` | **Which card moves are allowed and what they change.** Same SHAPE only; cross-shape is refused with the reason, because `jobs_shaped_ids` gates the apply queue and `is_target` decides rendering from the anchor's kind. Names every manifest difference, warns when the destination's ladder is SHORTER (a sequence past its length reads `finished` on arrival — §Lessons 107), and marks unsent drafts stale only when the VOICE fields differ. |
 | `space.py` | **What a Space IS** — a frozen manifest, shaped after `followup.Channel`. `shape` + `tailor_docs` gate the pipeline queues; `tone`/`offer` reach the prompts; `schedules`/`channels` drive the ladders; `offer_deck` and `can_autosend` gate the deck link and the send path; **`voice` decides which system prompt writes the email** (SHEET-1). Everything but the five COLUMNS rides in a `config` JSON blob, so a new field is never a schema change. |
 | `target.py` | A company you STATE, not an employer recovered from a URL. `anchor(space, name)` → `target:<space>:<slug>`, hashed into every contact key. `parse_input()` returns rejects rather than dropping them. A line containing a TAB is refused — it is a spreadsheet row in the wrong box, and accepting one made 106 cards each named after a whole row. A URL **path** is never a company name either (§Lessons 92). |
 | `sheet.py` | **A pasted spreadsheet → companies and the people at them** (SHEET-1). One PERSON per row with their company repeated; grouping them under the company IS the bundling. Columns are matched by HEADER, never position — every export orders them differently and a positional parser files job titles as names. `First`/`Last` are joined. Rejects come back per ROW with the sheet's own line number. Google Sheets puts TSV on the clipboard, so **pasting is the entire integration**: no OAuth, no API key, nothing to revoke — and a pasted LINK is refused with the reason, because reading a sheet from its URL needs credentials. |
@@ -521,6 +523,20 @@ a live Google conversation were countable and unreadable. `CONV_EXPANDED` lives 
 like `PANEL_OPEN`. A message sitting on `SNIPPET_MAX` carries `…truncated` pointing at
 ⤓ Fetch from Gmail, because a sentence that stops mid-word is indistinguishable from one that was
 lost; the cap is SERVED from `messages.py`, never written twice.
+
+**THE MEETING FORM SURVIVES THE REFRESH** (2026-08-25). Reported as "when I save a transcript
+nothing gets saved". The endpoint, the store, the payload and the render all worked when driven
+directly — and the database said why: **two transcript saves had EVER reached the server**, one of
+them a probe. Every real attempt died in the browser with no request, no error and no row.
+
+`TR_OPEN` tracked whether the form was open and **nothing stored what was typed**. `#jobs` is
+replaced wholesale every 2.5s; the guards protect a field with FOCUS, which is not a field with
+CONTENT, so switching to Granola to copy the summary was enough for the next tick to rebuild the
+form empty. `saveTranscript` then hit its own `if (!body.trim())` and returned WITHOUT posting,
+leaving a small "Paste the transcript first." beside a form that looked ready — and destroying the
+paste the code explicitly tries to protect. `REPLY_DRAFT` had solved this for the reply composer
+months earlier; this form never got it. `TR_DRAFT` now keeps all four fields outside the DOM,
+cleared only on a save that SUCCEEDS.
 
 **💡 flags a contact** (2026-08-11). Every other signal on a contact row is derived — replied,
 due, exhausted, opened the deck. This is the only one the operator DECIDES. On the collapsed row
@@ -905,6 +921,24 @@ the more specific layer always wins.
 instruction to write; facts go early. `brief=True` for the short channels (text, LinkedIn,
 reply) shortens the GUIDANCE and **never drops a field**.
 
+**THE SIX COLD-OUTREACH RULES NOW EXIST IN ALL THREE VOICES** (2026-08-25). Lead with THEM, a
+hard word cap, exactly ONE answerable question, an explicit out, no "quick question" subject, and
+no urgency or flattery were written into `_PITCH_SYSTEM` and `_PREMISE_SYSTEM` and **never into
+`_SYSTEM`** — the voice that wrote 147 of 149 sent emails. Measured on those sends: 61% opened with
+"I"/"I just applied", 44% of subjects were `quick q about the <role> role` (9 Salesforce recipients
+got a byte-identical one), 18% blew the 120-word cap, and **2 of 149** gave the reader an out.
+
+Adapted, not pasted: `_PITCH_SYSTEM`'s "the first sentence must be about their company" would
+CONTRADICT the job-seeker user prompt, which orders the role named in sentence one (§Lessons 40).
+The subject frame is banned as a PROPERTY, never by quoting a specimen — that exact string had
+already been deleted once after producing ten identical subjects at Google (§Lessons 42).
+
+**The word cap is enforced in code, not asked for.** Stated three ways at once (a hard cap, "count
+the words", an explicit cut order) it still came back at 131 and 160 words in 2 of 5 live drafts.
+`_BODY_WORD_CAP` + a retry that hands back the actual count and what to cut first — a RETRY, never
+a truncation, because an email cut to a word count ends mid-sentence. Live after: out 0/5 → 5/5,
+CV-openers 4/5 → 1/5, over-cap 2/5 → 0/5.
+
 **`Space.must_mention` is a REQUIREMENT, and that is why it is not the premise** (2026-08-10).
 The `gauntlet` premise names GauntletAI twice and **zero of eight drafts mentioned it** —
 including the two that had the premise, because `_premise_block` hands over FACTS and permits
@@ -1097,6 +1131,31 @@ shipped. Gmail's send response only proves the sends that went THROUGH ApplyPilo
 carried outbound mail and no send state. It does NOT fake a `sent_message_id` (threading reads
 it), and recording it did nothing until `normalize_for_ladder` was fixed to use the same
 `emailed` rule as the payload — §Lessons 21, one derived field computed two ways.
+
+## The card shows what we SENT, not a preview of it (2026-08-25)
+
+Reported as "incomplete email sequences on the contact cards", with our own emails stopping
+mid-word. Nothing was lost: `contacts.outreach_message` held the real 698-character email while the
+`messages` row the card rendered held Gmail's 194-character preview of that same email. **488 of 606
+outbound rows** were in that state.
+
+Two defects on adjacent lines of `dashboard.js`. `m.snippet || (isFirstOut ? c.outreach_message : '')`
+let a non-empty preview WIN over the ground truth — the fallback fired only when the snippet was
+empty. And the truncation marker asked `length >= SNIPPET_MAX`, the rule §Lessons 116 had already
+disproved: Gmail's snippet ends on a WORD boundary, so 194 >= 200 is false and nothing rendered,
+while `outreach._is_clipped` correctly reported it cut. **The prompt knew and the screen did not.**
+
+`domain/conversations.is_clipped` + `fuller_outbound` are one rule for both callers. The thread
+stays the SPINE and only the text is upgraded, matched exactly as the drafter does (first email by
+`sent_message_id`, follow-ups by minute), only ever UPWARDS, never touching inbound, and the browser
+renders a server-computed flag rather than measuring anything.
+
+**`record_outbound` was capping our own sent mail at 200 characters ON WRITE.** It trims the body to
+`PASTED_MAX` and then called `upsert_messages` without `full=True`, so the one call holding the real
+text re-capped it. Distinct from §Lessons 111, which re-capped text it was PRESERVING; this capped
+at first write, so `_keep_longer` never got a chance. It matters most for a REPLY: a first email
+survives in `contacts.outreach_message` and a follow-up in `touches.body`, but **149 of 150 sent
+replies** are stored nowhere else.
 
 ## The outreach sequence (2026-08-14)
 
@@ -1595,6 +1654,23 @@ hardcoded `lenient` in three places — so every dashboard run skipped the judge
 the flag. Now `normal`, and validator warnings reach the job's **Activity tab** rather than
 only `{prefix}_REPORT.json`.
 
+**THE PDF CAN REMOVE WHAT THE VALIDATOR APPROVED** (2026-08-25). `render.mjs` guarantees one
+page: it shrinks fonts through `1 → 0.94 → 0.88 → 0.82 → 0.76`, then TRIMS content. Everything
+above validates the TEXT, so a résumé ships "approved" with content gone. Live: the `.txt` and
+`_DATA.json` held 5/5/4 bullets and the PDF held **4/1/1**, personal statement and key strengths
+untouched (§Lessons 126).
+
+Trim order is now the operator's: **personal statement → key strengths → experience bullets**,
+taken EVENLY from whichever role currently has the most and **never below three per company**
+(`MIN_BULLETS_PER_ROLE`). If it still overflows at the floor it keeps three everywhere and runs to
+TWO pages rather than hollowing out the work history. The section is `skills: [{category, value}]`
+in the RENDER block and `bullets` only in the tailor's JSON — reading the wrong key is why skills
+were never trimmed at all.
+
+**And the trim reports itself.** `render.mjs` writes what it removed to stderr,
+`resume_render.take_trim_notes()` drains it, and the pdf stage logs it to the job's Activity tab as
+a `Résumé note:`. Silence is what made 8 of 14 bullets invisible until a hand comparison.
+
 **Worked examples in prompts must be off-domain** — see §Lessons 9. This cost three rounds of
 rework and one factual error.
 
@@ -1634,6 +1710,26 @@ confirmed, never for an unanchored keyword search.
 **Every exit logs.** A search that found nobody used to log nothing, making a completed run
 byte-identical to a dead button (§Lessons 15).
 
+### One person, one role — the cross-role dedup (2026-08-25)
+
+`contact_id` hashes `job_url`, so the same human found for a second role at one company is a second
+row with its own ladder and an empty history. `known_at_company` exists to stop that and ran BEFORE
+enrichment, to spend no Apollo credit on somebody we already hold.
+
+**That is where its inputs do not exist.** Apollo's SEARCH response has no email and a redacted
+surname, so the only key available is a truncated first name — which matches a stored row only when
+that row is ALSO first-name-only (62% are). Live on two webAI roles: three skipped, and
+`Emilia Pavlovic` through, because hers had been enriched. Her two rows share email, LinkedIn URL
+and full name.
+
+The cheap pass is kept and a SECOND runs after enrichment, before `upsert_contact`, sharing one
+`_already_ours` predicate. `_find_hot_contacts` gets the same lookups — it had **no** cross-role
+check at all, deduping only against the current search's own cold results.
+
+**`_norm_linkedin` now drops the scheme and `www.`** (`removeprefix`, never `lstrip` — §Lessons 2).
+286 of 424 stored URLs are `http://www.…` and Apollo returns `https://…`, so that key had been
+contributing nothing to the dedupe it exists for.
+
 ### The seventh vendor, and the end of the blocklist (2026-08-10)
 
 `derive_company` is now the WHOLE chain — URL rules, then `refine_company_from_posting` (tenant
@@ -1665,6 +1761,32 @@ different company — its contacts work elsewhere) from `refined` (same company,
 spelling). `--fix-employers` writes them back and never touches contacts. Live: 8 rows
 corrected, and an audit of all 133 sent emails found **0** that reached a domain disagreeing
 with the corrected employer.
+
+### The posting inside an iframe (2026-08-25)
+
+A pasted Schwab URL produced `title="Career-schwab uploaded job"`, `company="Career-schwab"`, **0
+characters of description** and `no data extracted` — so score, tailor, cover and apply never ran,
+and the row read as a dead end.
+
+`career-schwab.icims.com` returns 200 and 206KB whose title is the generic careers shell, with 31
+iframes and no posting in it. Every tier reads the main document and `extract_main_content` deletes
+`iframe` outright, so the content was removed before extraction rather than missed by it.
+
+The fallback runs **only on the failure path**, so it cannot regress a scrape that already works,
+and it READS the loaded frame in place rather than navigating to its URL: iCIMS strips `in_iframe=1`
+whenever `window.top === window`, so opening it top-level bounces back to the shell. Measured —
+main document 1,386 chars, the same frame read in place **5,041**. Same-host only, one hop.
+Result on the live posting: `ok | T1 | desc=3,748 chars`, via JSON-LD, costing no LLM call.
+
+**The ninth ATS tenant stored as the employer**, after Ats · Hr · Edu · Ouryahoo · Oraclecloud ·
+Recruitics · Jobvite · Docs. This one had a twist: `_norm_name` drops the hyphen to `careerschwab`,
+which STARTS WITH the prefix `careers`, so the affix pass produced `chwab` by eating the S. Fixed
+structurally — the slug's own separators are a boundary, and a split only means something when
+everything BUT one part is ATS furniture. `career-schwab` is furniture plus a name; a company whose
+name simply has several words is not. Two regressions were caught before shipping: the eval set
+caught `Apex Fintech Solutions → Solutions` (§Lessons 52's shape through a new door) and
+`doctor --employers` caught `Hamming AI → Hamming`, because parts were filtered by LENGTH and "AI"
+looked like a scrap. Furniture is decided by the LIST, never by length.
 
 ### The fourth way, and the one that did not return zero (2026-08-06)
 
@@ -3063,6 +3185,41 @@ company `"Jobs"` — the same substring bug class, inside the function written t
     constraint-free query would choose — so the decoy has to be seq 1. Ask what the mutated code
     would return, not merely whether the fixture has more than one row.
 
+125. **The check ran where its inputs did not exist yet.** Cross-role contact dedup was applied
+    BEFORE enrichment, deliberately, so a person we already hold costs no Apollo credit. But
+    Apollo's SEARCH response carries no email and a REDACTED surname, so the only key available
+    there is a truncated first name. It caught stored rows that are ALSO first-name-only — 62%
+    of them are — and missed everyone whose surname a later enrichment had filled in. Live:
+    "3 already on another role" logged while a fourth walked through, because Marcus/Michael are
+    stored as bare first names and `Emilia Pavlovic` is not. Her two rows share email, LinkedIn
+    URL and full name; every key matched and none of them existed at the only point checked. The
+    cheap pass is kept and a second one runs after enrichment, sharing ONE predicate.
+    Two more fell out of it. `_find_hot_contacts` had **zero** cross-role checks — it deduped
+    only against the current search's own cold results — so the same fix had a second call site
+    (§Lessons 49, again). And `_norm_linkedin` kept the scheme and `www.`, so `http://www.…` and
+    `https://…` hashed differently: **286 of 424 stored URLs are http, Apollo returns https**,
+    and that key had been contributing nothing to the dedupe it exists for.
+
+126. **The renderer removed half the résumé after every check had passed.** Reported as a PDF
+    that did not match its own text: the `.txt` and `_DATA.json` both held 5/5/4 bullets and the
+    PDF held **4/1/1**, with a 731-character personal statement and 542 characters of key
+    strengths untouched. `_REPORT.json` said `approved`, because the validator and the
+    fabrication judge both run on the TEXT — §Lessons 45/46 with the most expensive artifact.
+    `render.mjs` guarantees one page: it shrinks fonts, then TRIMS content. The order drained the
+    OLDEST role to exactly one bullet before touching anything else, and never trimmed skills at
+    all — the render block spells that section `skills: [{category, value}]` while the tailor's
+    JSON calls it `bullets`, so a check written against `bullets` silently matched nothing.
+    Now: summary first, then key strengths, then bullets EVENLY from whichever role has the most,
+    never below three per company — and if it still overflows it keeps the floor and runs to two
+    pages rather than hollowing out the work history. **The trim reports itself** to stderr and
+    Python puts it on the job's Activity tab; silence is what made 8 of 14 bullets invisible.
+
+127. **A restore is only as good as what you backed up.** Mid-session I copied `render.mjs` to
+    `render.GOOD.mjs` BEFORE writing the fix, then used that file to revert a mutation — which
+    silently reverted the entire feature in both the source tree and the runtime. Caught only by
+    grepping for the constant afterwards. A mutation harness must snapshot the FIXED file, and
+    the check after restoring is not "did the command run" but "is the change still there".
+
 Shipped in one session, in this order: **CRM-3a → CRM-1 → CRM-2 → CRM-3b → CRM-4a.**
 Tickets in `docs/tickets/CRM-*.md`; two of them had instructions that were factually wrong
 before being revised (they told you to write `followup_status`, removed by ARCH-3).
@@ -3377,6 +3534,42 @@ application waits indefinitely — and the longer it waits, the likelier somethi
 
 ---
 
+## Moving a card between Spaces (2026-08-25)
+
+Asked for as *"I added a card to my professional space for Ian, but it should live on my business
+network"* — with the reasonable worry that Spaces have different templates and therefore different
+schemas. **They do not, and that is what made this cheap.** Only `jobs` and `contacts` carry
+`space_id`; touches, messages, sequences, interactions, reply_queue and transcripts hang off the
+contact and the ANCHOR. So the move is two columns and nothing is re-keyed.
+
+**The anchor is deliberately NOT rewritten.** `store.contact_id` hashes it, so re-keying a
+`target:<space>:<slug>` card would orphan every contact, ladder, message and transcript on it —
+the failure `repo.attach_posting` exists to avoid. After creation the Space inside that string is
+decorative: `target.parse_anchor` is called by ONE function in the whole source tree (`is_target`),
+which asks only whether a row is a target and discards the Space. Membership is the COLUMN
+(SPACE-1a D2). The card keeps an anchor naming where it came from, the same trade already accepted
+for `job_url` vs `anchor`.
+
+**Same shape only.** Cross-shape is refused with the reason rather than approximated: a posting
+moved into a targets Space silently leaves the apply queue (`queue_for_apply` intersects with
+`jobs_shaped_ids`), and `is_target` decides rendering from the anchor's KIND, which a move cannot
+change. The same discipline CO-2 uses when it refuses a cross-Space contact move.
+
+`plan()` states what changes before anything happens — every differing manifest field, how many
+contacts come along, how many have already been emailed, a warning when the destination ladder is
+shorter, and the NAMES of any unsent drafts that would be discarded. Drafts are discarded only when
+the VOICE fields differ (`voice`, `tone`, `offer`, `must_mention`): a different `terminal` changes
+what happens next, it does not make a sentence already written wrong. Recorded for undo either way.
+
+**The control is on the card, not only in `⋯`.** It shipped in the overflow menu alone and was
+reported missing within minutes — the tenth time (§Lessons 43, 88, 89, 97). The Job tab now carries
+a `Space` row stating where the card lives with a button per destination, which is also the only
+place the card's Space is written down. A test asserts `spaceRow` is RENDERED by `jobDetail`, not
+merely defined.
+
+**Live:** `professional-network` and `partnerships` are byte-identical manifests, so that move is a
+relabel and the dialog correctly reports no changes at all.
+
 ## Where the work goes next
 
 `docs/architecture-prd.md` — current state, the architecture grilling, and the plan.
@@ -3667,7 +3860,13 @@ What is actually open now, ordered by leverage:
    the documented `identity_id` freeze **does not exist** — `domain/space.py:240` freezes
    `("id", "shape")` only, so a Space with 133 sent emails is repointable today with no error.
 
-10. **`context` is 111 commits ahead of `main`** (2026-08-17). The 2026-08-13/14 run added CO-2
+10. **`context` is 122 commits ahead of `main`** (2026-08-25). The 2026-08-19/25 run added the
+    six cold-outreach rules and the enforced word cap, the conversation-truncation repair
+    (`fuller_outbound` + one `is_clipped`) and `record_outbound`'s missing `full=True`, the iCIMS
+    iframe scrape and the ninth tenant-as-employer fix, the transcript form's `TR_DRAFT`, the
+    cross-role contact dedup at both its call sites, the résumé trim floor with its report, and
+    the card move between Spaces — each with tests and mutations.
+    The 2026-08-13/14 run added CO-2
     and the contact deduplication, the phone CALL channel and the ordered sequence, CAL-1's
     calendar invites, the Gmail auto-fetch and full-body read, the "✓ I emailed them" marker, and
     the conversation-transcript fix. The 2026-08-15/17 run added scheduled sends (both kinds),

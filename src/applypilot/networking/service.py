@@ -36,6 +36,22 @@ _RECRUITER_TITLE_WORDS = (
 )
 
 
+def _already_ours(contact: dict, by_email: dict, by_li: dict, by_name: dict) -> dict | None:
+    """The person we already hold at this employer, or None.
+
+    ONE predicate for both passes — before selection (cheap, incomplete) and after enrichment
+    (complete). Two spellings of "is this the same person" is how the two passes would come to
+    disagree, which is the family §Lessons 1 keeps recording.
+
+    Email first, then LinkedIn, then name: the same order the contact card already uses to put
+    one person's two rows together (SHEET-1b). Never `contact_id`, which hashes `job_url` and so
+    differs for exactly the rows this exists to catch.
+    """
+    return (by_email.get(store._norm_email(contact.get("email")))
+            or by_li.get(store._norm_linkedin(contact.get("linkedin_url")))
+            or by_name.get((contact.get("full_name") or "").strip().lower()))
+
+
 def _draft_and_store(profile: dict, job: dict, contact: dict, warm: bool = False) -> None:
     """Best-effort outreach draft for one contact; failures are non-fatal.
 
@@ -808,6 +824,11 @@ def find_contacts_for_job(
     # and therefore differs for exactly the rows this exists to catch. Same order the card
     # already uses to put one person's two rows together (SHEET-1b).
     known_elsewhere: list[dict] = []
+    #: The same three keys, kept for a SECOND pass after enrichment — see `_already_ours` and
+    #: the loop below. Empty dicts when there is nobody at this employer yet.
+    by_email: dict = {}
+    by_li: dict = {}
+    by_name: dict = {}
     if company:
         mine = store.known_at_company(company, exclude_job_url=job_url or "",
                                       space_id=(job or {}).get("space_id") or "")
@@ -817,9 +838,7 @@ def find_contacts_for_job(
             by_name = {(m["full_name"] or "").strip().lower(): m for m in mine if m["full_name"]}
             fresh = []
             for c in ranked:
-                hit = (by_email.get(store._norm_email(c.get("email")))
-                       or by_li.get(store._norm_linkedin(c.get("linkedin_url")))
-                       or by_name.get((c.get("full_name") or "").strip().lower()))
+                hit = _already_ours(c, by_email, by_li, by_name)
                 (known_elsewhere.append(hit) if hit else fresh.append(c))
             if known_elsewhere:
                 log.info("%d of %d candidates at %s are already stored on another role",
@@ -929,6 +948,29 @@ def find_contacts_for_job(
                          contact.get("full_name"), place.title(), contact.get("location"))
                 excluded.append(contact.get("full_name") or "?")
                 continue
+            # ── the SAME exclusion, run again now that enrichment has revealed who this is ──
+            #
+            # The pass before selection is the cheap one and it cannot be complete: Apollo's
+            # SEARCH response carries no email and a REDACTED surname (the `better_name` comment
+            # below says so), so the only key available there is a truncated first name. It
+            # catches a stored row that is ALSO first-name-only — 62% of them are — and misses
+            # everyone whose surname a later enrichment filled in.
+            #
+            # That is exactly how Emilia Pavlovic landed on two webAI roles while Marcus,
+            # Michael and Marcus were correctly skipped in the same search: those three are
+            # stored as bare first names, and she is not. Same email, same LinkedIn URL, same
+            # full name on both rows — every key matched, and none of them existed yet at the
+            # only point the check ran.
+            #
+            # Costs no credit: enrichment has already happened. What it saves is the duplicate
+            # row, its fresh cold draft, and a second unrelated email to somebody there is
+            # already a conversation with.
+            dup = _already_ours(contact, by_email, by_li, by_name)
+            if dup:
+                log.info("Skipping %s — already stored on %s",
+                         contact.get("full_name"), dup.get("job_title") or "another role")
+                known_elsewhere.append(dup)
+                continue
             # Self-check before this reaches the dashboard.
             v = verify.verify_contact({**contact, "company": c.get("company"),
                                        "from_domain_search": c.get("from_domain_search"),
@@ -964,7 +1006,8 @@ def find_contacts_for_job(
     if not dry_run:
         try:
             hot = _find_hot_contacts(job, company, selected, per_job=per_job,
-                                     profile_fn=_profile_for_drafting, draft=draft)
+                                     profile_fn=_profile_for_drafting, draft=draft,
+                                     known=(by_email, by_li, by_name))
             stored_contacts = hot + stored_contacts  # warm contacts first
             result["hot"] = len(hot)
         except Exception as e:  # noqa: BLE001
@@ -1098,12 +1141,19 @@ def _prune_stale_connection_contacts(job_url: str, company: str | None) -> list[
 
 
 def _find_hot_contacts(job: dict, company: str | None, cold_selected: list[dict],
-                       per_job: int, profile_fn, draft: bool) -> list[dict]:
+                       per_job: int, profile_fn, draft: bool,
+                       known: tuple[dict, dict, dict] = ({}, {}, {})) -> list[dict]:
     """Surface + enrich + draft outreach for your existing connections at `company`.
 
     Skips anyone already covered by the cold Apollo layer (dedupe by normalized name). Enriches
     email via Apollo identity match (name/company/LinkedIn), stores as source='connection', and
     drafts WARM outreach (reconnect email + a DM to a known connection).
+
+    `known` is the same three lookups the cold layer uses for "already ours at this employer, on
+    another role". Without it this layer had NO cross-role check at all — it deduped only against
+    the current search's own cold results — so a connection at a company you already work could
+    be stored again for a second role, with a fresh warm draft. The cold path was fixed first and
+    this is its other call site (§Lessons 49, the pattern this codebase keeps paying for).
     """
     from applypilot.networking import apollo, connections
     job_url = job.get("url")
@@ -1144,6 +1194,14 @@ def _find_hot_contacts(job: dict, company: str | None, cold_selected: list[dict]
         if place:
             log.info("Skipping connection %s — located in %s (%s)",
                      contact.get("full_name"), place.title(), contact.get("location"))
+            continue
+        # Already ours on another role at this employer. Checked HERE, after the identity match
+        # has filled in the email, for the same reason the cold layer checks after enrichment:
+        # before it, a connection row is a name and a LinkedIn URL.
+        dup = _already_ours(contact, *known)
+        if dup:
+            log.info("Skipping connection %s — already stored on %s",
+                     contact.get("full_name"), dup.get("job_title") or "another role")
             continue
         cid = store.upsert_contact(contact)
         contact["id"] = cid

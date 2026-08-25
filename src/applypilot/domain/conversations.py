@@ -626,3 +626,105 @@ def pending_introductions(threads: dict, contact_emails: list[str],
                           "from_contact_id": contact_id,
                           "at": msg.get("sent_at") or ""}
     return list(out.values())
+
+
+# ── how much of a message we are actually holding ───────────────────────────
+#
+# Two callers, ONE rule. The drafter (`outreach.conversation_transcript`) has to know when a
+# message was cut so it never answers a preview as though it were the whole thing; the contact
+# CARD has to know so it can say the cut is ours rather than letting a message stop mid-word and
+# read as data loss. Those were separate predicates and they disagreed — the card compared
+# `len(snippet) >= SNIPPET_MAX`, which is the rule §Lessons 116 had already disproved, so a
+# 194-character message ending on the word "really" rendered with no marker at all.
+#
+# Living here because `domain/` is where a rule goes when two layers must agree on it, and this
+# module imports nothing but `re`.
+
+ENDS_CLEANLY = ('.', '!', '?', '"', "'", ')', ']', ':', ';', '”', '’', '…')
+
+#: A SIGN-OFF is a complete ending even with no terminal punctuation. Without this, "Best, Liz"
+#: is reported as continuing, and a marker claiming a finished message was cut is a false
+#: statement in a prompt and a false statement on screen.
+SIGNOFF_RE = re.compile(
+    r"(?i)\b(best|thanks|thank you|regards|best regards|kind regards|cheers|sincerely|warmly|"
+    r"all the best|talk soon|speak soon)\b[,!.]*\s*[\w.'-]*\s*$")
+
+
+def is_clipped(text: str, snippet_max: int = 200, pasted_max: int = 2000) -> bool:
+    """Did WE cut this message short?
+
+    Not a length comparison. **Gmail's snippet ends on a WORD boundary, not at exactly 200
+    characters** — 236 live rows sat between 150 and 195 — so `len >= snippet_max` misses most
+    real cuts, including the reported one at 194.
+
+    The question asked instead is whether the text ENDS like a finished message. At preview
+    length, stopping anywhere other than terminal punctuation or a sign-off means it was cut.
+    `pasted_max` is checked outright: a deliberate fetch that fills its bound is by definition
+    holding more.
+
+    Over-reporting is the safe direction and this leans into it, with one limit that is not
+    negotiable: it must never claim a message continues when it demonstrably does not, which is
+    what the sign-off check exists for.
+    """
+    body = (text or "").strip()
+    if not body:
+        return False
+    if len(body) >= pasted_max:
+        return True
+    if len(body) > snippet_max:
+        return False
+    return not body.endswith(ENDS_CLEANLY) and not SIGNOFF_RE.search(body)
+
+
+def fuller_outbound(thread, *, outreach_message: str = "", sent_message_id: str = "",
+                    submitted_at: str = "", touch_bodies: dict | None = None,
+                    snippet_max: int = 200, pasted_max: int = 2000) -> list[dict]:
+    """The thread with OUR OWN messages shown at the fullest length we actually hold.
+
+    The reported bug, and it was never data loss: for one live contact `contacts.outreach_message`
+    held the real 698-character email while the `messages` row the card rendered held Gmail's
+    194-character preview of that same email. 488 of 606 outbound rows were in that state. The
+    card read the shorter of two copies of the same message, and then failed to mark it as cut.
+
+    The thread stays the SPINE — it decides order, grouping and which conversation a message
+    belongs to. Only the text is upgraded, and only ever UPWARDS: a fuller copy that is somehow
+    shorter is ignored rather than written, because "never downgrade what we already hold" is
+    the rule that had to be repaired twice already when it was applied in one direction only.
+
+    Matching mirrors the drafter exactly (`outreach._transcript_events`), because two rules for
+    "which stored copy is this message" is how the two surfaces drift apart:
+      * the FIRST email by `contacts.sent_message_id`, which identifies it precisely;
+      * a FOLLOW-UP by the minute it was sent, since `touches` carries no message id.
+
+    Inbound messages are never touched. We hold no fuller copy of what somebody else wrote, and
+    inventing one is not available — they get the `clipped` flag and nothing else.
+    """
+    rows = [m for m in (thread or []) if isinstance(m, dict)]
+    first_id = (sent_message_id or "").strip()
+    full = (outreach_message or "").strip()
+    minute = (submitted_at or "").strip()[:16]
+    bodies = {k[:16]: (v or "").strip() for k, v in (touch_bodies or {}).items() if v}
+
+    out = []
+    for m in rows:
+        row = dict(m)
+        stored = (row.get("snippet") or "").strip()
+        inbound = (row.get("direction") or "") == "in"
+        fuller = ""
+        if not inbound:
+            at = (row.get("sent_at") or "").strip()[:16]
+            if full and first_id and row.get("message_id") == first_id:
+                fuller = full
+            elif full and not first_id and at and at == minute:
+                fuller = full
+            elif at in bodies:
+                fuller = bodies[at]
+        if fuller and len(fuller) > len(stored):
+            row["snippet"] = fuller
+            # Ground truth, not a heuristic: this is the text we sent, so there is nothing to
+            # guess about whether it continues.
+            row["clipped"] = False
+        else:
+            row["clipped"] = is_clipped(stored, snippet_max, pasted_max)
+        out.append(row)
+    return out

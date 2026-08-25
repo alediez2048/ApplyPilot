@@ -139,15 +139,31 @@ async function main() {
   // Phase 2 — still 2+ pages at the tightest font: trim content until it fits (or nothing left).
   // Only runs for compact/auto (not 'comfortable'). Keeps recent roles; sheds projects and the
   // oldest roles' trailing bullets first. Hard ceiling on iterations as a safety valve.
+  const trims = []
   if (fit !== 'comfortable' && countPages(finalBuf) > 1) {
     let working = JSON.parse(JSON.stringify(resume))
     for (let guard = 0; guard < 60 && countPages(finalBuf) > 1; guard++) {
       const trimmed = trimOneUnit(working)
-      if (!trimmed) break // nothing left to trim — write the smallest we achieved
-      working = trimmed
+      if (!trimmed) break // only the floor is left — write the smallest we achieved
+      working = trimmed.r
       const buf = await renderAt(working, fitScale)
       if (!buf) break     // keep the last good buffer rather than losing the document
       finalBuf = buf
+      trims.push(trimmed.what)
+    }
+  }
+  // SAY WHAT WAS REMOVED. The validator and the fabrication judge both run on the TEXT, before
+  // this file exists, so a resume can be reported "approved" with more than half its bullets
+  // gone — which is exactly how 8 of 14 disappeared unnoticed. Python reads this back and puts
+  // it on the job's Activity tab beside the other notes.
+  if (trims.length) {
+    const counts = trims.reduce((m, t) => ((m[t] = (m[t] || 0) + 1), m), {})
+    const summary = Object.entries(counts)
+      .map(([what, n]) => (n > 1 ? `${what} (x${n})` : what)).join('; ')
+    process.stderr.write(`resume-renderer: TRIMMED to fit one page: ${summary}\n`)
+    if (countPages(finalBuf) > 1) {
+      process.stderr.write('resume-renderer: TRIMMED but still 2 pages; kept every role at the '
+        + `${MIN_BULLETS_PER_ROLE}-bullet floor rather than cutting further\n`)
     }
   }
 
@@ -159,52 +175,119 @@ async function main() {
 }
 
 /**
- * Remove ONE unit of the least-important content, returning a new resume (or null if nothing
- * safe is left to trim). Trim order protects a real resume's signal: projects go first, then
- * trailing bullets from the OLDEST experience roles, then whole oldest roles (never below 3),
- * then the summary is shortened. Recent roles + skills + education are preserved.
+ * The floor. A role showing ONE bullet next to a role showing five does not read as a trimmed
+ * resume, it reads as a broken one — reported from a live PDF that came out 4/1/1 while the text
+ * it was rendered from had 5/5/4.
+ *
+ * The operator's own ordering: "at the very least 3 bullets per company, happy to sacrifice
+ * personal statement and skills at the bottom."
+ */
+const MIN_BULLETS_PER_ROLE = 3
+
+/** The employer, for the report. `header` is "T-Mobile — Technical Project Manager". */
+function roleName(e) {
+  // Escapes, not literal dashes: `test_the_node_renderer_emits_no_dashes_of_its_own`
+  // scans this source for them, and it is right to — every Python guard runs before the
+  // renderer builds its own strings (§Lessons 45). This one only SPLITS on a dash.
+  const h = String(e?.header || e?.employer || '').split(/\s+[\u2014\u2013-]\s+/)[0].trim()
+  return h || 'a role'
+}
+
+/**
+ * Remove ONE unit of the least-important content, returning `{ r, what }` or null when only the
+ * floor is left.
+ *
+ * ORDER IS THE WHOLE DESIGN, and it is the operator's:
+ *
+ *   1. the personal statement — prose, and the first thing they said to sacrifice
+ *   2. the key strengths      — two 250-character lines here, so it buys a lot of page per unit
+ *   3. experience bullets     — evenly, from whichever role currently has the MOST, and never
+ *                               below MIN_BULLETS_PER_ROLE
+ *
+ * The previous order did the opposite: it drained the OLDEST role to exactly one bullet before
+ * touching anything else, and never trimmed skills at all. On a real resume that removed 8 of 14
+ * bullets and left two employers showing a single line, while a 731-character summary and 542
+ * characters of skills were untouched.
+ *
+ * Returning null when only the floor remains is deliberate: the caller keeps the last good
+ * render, which may be two pages, and says so. A second page beats a hollowed-out work history.
  */
 function trimOneUnit(r) {
   const R = JSON.parse(JSON.stringify(r))
-  // Sections shape: shed a trailing bullet from the OLDEST role that still has more than
-  // one. Without this branch the whole function returned null immediately and phase 2 was
-  // a no-op for every structure-preserving résumé.
   if (Array.isArray(R.sections)) {
-    const exp = R.sections.filter((s) => s.kind === 'experience')
-    for (let si = exp.length - 1; si >= 0; si--) {
-      const entries = exp[si].entries || []
-      for (let i = entries.length - 1; i >= 0; i--) {
-        const e = entries[i]
-        if (Array.isArray(e.bullets) && e.bullets.length > 1) { e.bullets.pop(); return R }
+    // 1) Summary, shortened progressively rather than guillotined at 140 characters — one cut to
+    //    a fifth of its length is a worse document than three measured ones.
+    const sum = R.sections.find((s) => s.kind === 'summary')
+    const text = String(sum?.text || '')
+    if (sum && text.length > 180) {
+      const target = Math.max(180, Math.floor(text.length * 0.75))
+      sum.text = text.slice(0, target).replace(/\s+\S*$/, '') + '.'
+      return { r: R, what: 'shortened the personal statement' }
+    }
+    // 2) Key strengths. The RENDER block spells these `skills: [{category, value}]` — it is
+    //    `bullets` only in the tailor's own JSON, and reading the wrong key here is why an
+    //    earlier version of this ladder skipped the section and went straight to the bullets.
+    const skills = R.sections.find((s) => s.kind === 'skills')
+    if (skills && Array.isArray(skills.skills) && skills.skills.length) {
+      let idx = -1
+      let longest = 0
+      skills.skills.forEach((sk, i) => {
+        const n = String(sk?.value || '').length
+        if (n > longest) { longest = n; idx = i }
+      })
+      if (longest > 120) {
+        const v = String(skills.skills[idx].value)
+        const target = Math.max(120, Math.floor(v.length * 0.75))
+        skills.skills[idx] = { ...skills.skills[idx],
+                               value: v.slice(0, target).replace(/[\s,;]+\S*$/, '') }
+        return { r: R, what: 'shortened a key-strengths line' }
+      }
+      if (skills.skills.length > 1) {
+        const gone = skills.skills.pop()
+        return { r: R, what: `dropped the "${gone?.category || 'skills'}" line` }
       }
     }
-    for (const sec of R.sections) {
-      if (sec.kind === 'summary' && String(sec.text || '').length > 140) {
-        sec.text = String(sec.text).slice(0, 140).replace(/\s+\S*$/, '') + '.'
-        return R
+    // 3) Experience bullets, EVENLY: always from whichever role currently has the most, so the
+    //    roles stay within one bullet of each other instead of one being hollowed out.
+    const exp = R.sections.filter((s) => s.kind === 'experience')
+    let best = null
+    for (const sec of exp) {
+      for (const e of (sec.entries || [])) {
+        const n = Array.isArray(e.bullets) ? e.bullets.length : 0
+        if (n > MIN_BULLETS_PER_ROLE && (!best || n > best.n)) best = { e, n }
       }
+    }
+    if (best) {
+      best.e.bullets.pop()
+      return { r: R, what: `dropped a bullet from ${roleName(best.e)}` }
     }
     return null
   }
-  // 1) Projects: drop trailing bullets, then the whole project (oldest/last first).
+  // Legacy flat shape. Same ordering and the same floor.
   if (Array.isArray(R.projects) && R.projects.length) {
     const last = R.projects[R.projects.length - 1]
-    if (Array.isArray(last.bullets) && last.bullets.length > 1) { last.bullets.pop(); return R }
-    R.projects.pop(); return R
-  }
-  // 2) Experience: trim a trailing bullet from the OLDEST role that still has more than one.
-  if (Array.isArray(R.experience) && R.experience.length) {
-    for (let i = R.experience.length - 1; i >= 0; i--) {
-      const e = R.experience[i]
-      if (Array.isArray(e.bullets) && e.bullets.length > 1) { e.bullets.pop(); return R }
+    if (Array.isArray(last.bullets) && last.bullets.length > 1) {
+      last.bullets.pop()
+      return { r: R, what: 'dropped a project bullet' }
     }
-    // 3) All roles down to one bullet — drop the oldest whole role, but never below 3 roles.
-    if (R.experience.length > 3) { R.experience.pop(); return R }
+    R.projects.pop()
+    return { r: R, what: 'dropped a project' }
   }
-  // 4) Last resort — shorten a long summary.
-  if (R.summary && R.summary.length > 140) {
-    R.summary = R.summary.slice(0, 140).replace(/\s+\S*$/, '') + '.'
-    return R
+  if (R.summary && R.summary.length > 180) {
+    const target = Math.max(180, Math.floor(R.summary.length * 0.75))
+    R.summary = R.summary.slice(0, target).replace(/\s+\S*$/, '') + '.'
+    return { r: R, what: 'shortened the summary' }
+  }
+  if (Array.isArray(R.experience) && R.experience.length) {
+    let best = null
+    for (const e of R.experience) {
+      const n = Array.isArray(e.bullets) ? e.bullets.length : 0
+      if (n > MIN_BULLETS_PER_ROLE && (!best || n > best.n)) best = { e, n }
+    }
+    if (best) {
+      best.e.bullets.pop()
+      return { r: R, what: `dropped a bullet from ${roleName(best.e)}` }
+    }
   }
   return null
 }

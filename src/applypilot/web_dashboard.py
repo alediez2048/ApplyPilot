@@ -555,8 +555,17 @@ def run_dashboard_prepare(limit: int = 0, validation_mode: str = "normal") -> di
                 )
                 (TAILORED_DIR / f"{prefix}_REPORT.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
                 try:
+                    from applypilot.scoring import resume_render as _resume_render
                     from applypilot.scoring.pdf import convert_to_pdf
                     convert_to_pdf(txt_path)
+                    # WHAT THE PDF LOST. Everything above validates the TEXT; the renderer then
+                    # forces one page and can remove content after every check has passed. A
+                    # live résumé shipped with 8 of its 14 bullets gone and a report saying
+                    # "approved", and the only way it was noticed was a hand comparison
+                    # (§Lessons 45/46 — check the artifact that actually ships).
+                    for note in _resume_render.take_trim_notes():
+                        log_event(job["url"], "pdf", "info", f"Résumé note: {note}", conn)
+                        print(f"  résumé note: {note}", flush=True)
                 except Exception as exc:
                     print(f"  PDF warning: {exc}", flush=True)
 
@@ -2339,6 +2348,11 @@ def _status_payload(space: str = "") -> dict:
     _conn_counts = _conns.company_counts(list(set(_job_companies.values())), conn)
     # ONE query for the whole page, hoisted out of the job loop for the usual reason.
     _sibling = _sibling_threads(conn)
+    # One query for the page (§Lessons 11), beside the sibling threads for the same reason.
+    try:
+        _touch_bodies = _touches.sent_touch_bodies(conn)
+    except Exception:  # noqa: BLE001
+        _touch_bodies = {}
     # Same treatment, same reason: replies promised for later. Loaded whole rather than filtered
     # per job — the table holds one row per outstanding promise, so one unfiltered read is
     # cheaper than N filtered ones against a budget with six statements spare.
@@ -2407,7 +2421,7 @@ def _status_payload(space: str = "") -> dict:
                                         contact_company, conn)
         job_threads = _conversations_for_job(row["url"], conn)
         contacts = [_contact_payload(c, contact_company, job_ladders, job_matches,
-                                     thread=_thread_for(c, job_threads, _sibling),
+                                     thread=_thread_for(c, job_threads, _sibling, _touch_bodies),
                                      job_titles=_job_titles,
                                      queued_replies=_queued_replies)
                     for c in raw_contacts]
@@ -3205,6 +3219,43 @@ def _interactions_for_job(job_url: str, contacts: list, conn) -> dict:
         return {"people": [], "total": 0, "engaged": 0}
 
 
+def _move_card_space(data: dict) -> dict:
+    """Preview or perform a card's move to another Space.
+
+    `preview` first, always: the plan names what changes, how many people come with the card,
+    and whose unsent draft would be discarded. A move that silently alters the voice or the
+    ladder is the shape of bug this codebase keeps paying for.
+    """
+    init_db()
+    conn = get_connection()
+    from applypilot.repo import cardmove as _cm
+    url = str(data.get("url") or "").strip()
+    dst = str(data.get("space_id") or "").strip()
+    if not url or not dst:
+        return {"ok": False, "message": "pick a card and a Space"}
+    try:
+        if data.get("preview"):
+            out = _cm.plan(url, dst, conn)
+        else:
+            out = _cm.apply(url, dst, conn)
+    except Exception as e:  # noqa: BLE001
+        log.exception("card move failed")
+        return {"ok": False, "message": str(e)[:200]}
+    if not out.get("ok"):
+        out["message"] = out.get("error") or "that move is not possible"
+    return out
+
+
+def _move_card_undo(data: dict) -> dict:
+    init_db()
+    conn = get_connection()
+    from applypilot.repo import cardmove as _cm
+    out = _cm.undo(str(data.get("undo") or ""), conn)
+    if not out.get("ok"):
+        out["message"] = out.get("error") or "could not undo"
+    return out
+
+
 def _save_transcript(data: dict) -> dict:
     """Attach a pasted meeting transcript to one or more contacts. GRAN-1 phase 1.
 
@@ -3979,7 +4030,7 @@ def _is_borrowed(thread: list | None) -> str:
     return ""
 
 
-def _thread_for(c: dict, job_threads: dict, sibling: dict) -> list:
+def _thread_for(c: dict, job_threads: dict, sibling: dict, touch_bodies: dict | None = None) -> list:
     """This contact's own messages, plus the same PERSON's from another role's card.
 
     A card with nothing of its own falls back to the sibling history entirely — that is the
@@ -3992,7 +4043,7 @@ def _thread_for(c: dict, job_threads: dict, sibling: dict) -> list:
     """
     own = job_threads.get(c.get("id")) or []
     if own:
-        return own
+        return _fuller(c, own, touch_bodies)
     addr = (c.get("email") or "").strip().lower()
     if not addr:
         return own
@@ -4004,7 +4055,33 @@ def _thread_for(c: dict, job_threads: dict, sibling: dict) -> list:
     # `thread_for_contact(contact_id)`, which is EMPTY here — a reply box would render, look
     # entirely normal, and refuse on click.
     return [dict(m, from_other_role=m.get("job_url") or "")
-            for m in (sibling.get(addr) or [])]
+            for m in _fuller(c, sibling.get(addr) or [], touch_bodies)]
+
+
+def _fuller(c: dict, thread: list, touch_bodies: dict | None) -> list:
+    """Show our own messages at the fullest length we hold, and mark what is genuinely cut.
+
+    The card used to render `messages.snippet` unconditionally, and for our own outbound mail
+    that is Gmail's ~200-character preview of an email whose full text we already store. Live:
+    488 of 606 outbound rows held less than `contacts.outreach_message` did, so the card showed
+    a 194-character fragment ending mid-word of a 698-character email we wrote ourselves.
+
+    Degrades to the raw thread rather than raising — a card must still render if this cannot be
+    worked out, the same rule every other conversation load on this page follows.
+    """
+    from applypilot.domain import conversations as _cv
+    from applypilot.networking import messages as _msgs_mod
+    try:
+        return _cv.fuller_outbound(
+            thread,
+            outreach_message=c.get("outreach_message") or "",
+            sent_message_id=c.get("sent_message_id") or "",
+            submitted_at=c.get("submitted_at") or "",
+            touch_bodies=(touch_bodies or {}).get(c.get("id")) or {},
+            snippet_max=_msgs_mod.SNIPPET_MAX, pasted_max=_msgs_mod.PASTED_MAX)
+    except Exception:  # noqa: BLE001
+        log.debug("fuller_outbound failed", exc_info=True)
+        return thread
 
 
 def _scheduled_replies(conn) -> dict:
@@ -5186,6 +5263,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/contact/fetch-reply":
                 _json_response(self, _fetch_reply_text(data))
+                return
+            if path == "/api/job/move-space":
+                _json_response(self, _move_card_space(data))
+                return
+            if path == "/api/job/move-space/undo":
+                _json_response(self, _move_card_undo(data))
                 return
             if path == "/api/contact/transcript":
                 _json_response(self, _save_transcript(data))

@@ -311,6 +311,19 @@ def cover_letter_from_text(text: str, profile: dict, date: str | None = None) ->
 
 # ── Render ─────────────────────────────────────────────────────────────────
 
+#: What the last render had to remove to fit one page. A module-level list rather than a return
+#: value because `render_with_node` returns a bool and four call sites read it that way; the
+#: caller drains this immediately after rendering. Cleared per render by `_run_node_render`.
+LAST_TRIM_NOTES: list[str] = []
+
+
+def take_trim_notes() -> list[str]:
+    """Drain the notes from the last render. Empty when nothing was trimmed."""
+    notes = list(LAST_TRIM_NOTES)
+    LAST_TRIM_NOTES.clear()
+    return notes
+
+
 def _run_node_render(request: dict, out_path: Path, what: str) -> bool:
     """Write the request to a temp file and invoke the Node renderer. Returns success."""
     runtime = ensure_runtime()
@@ -319,6 +332,7 @@ def _run_node_render(request: dict, out_path: Path, what: str) -> bool:
 
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    LAST_TRIM_NOTES.clear()
 
     tmp = None
     try:
@@ -339,6 +353,15 @@ def _run_node_render(request: dict, out_path: Path, what: str) -> bool:
         if not out_path.exists() or out_path.stat().st_size == 0:
             log.warning("Node %s render produced no output for %s; falling back.", what, out_path.name)
             return False
+        # WHAT THE RENDERER REMOVED, kept where a caller can surface it.
+        #
+        # Every check upstream — the validator and the fabrication judge — runs on the TEXT,
+        # before this PDF exists. So a résumé can be reported "approved" with more than half its
+        # bullets gone, which is exactly what happened: 8 of 14 dropped, and the only way anyone
+        # found out was comparing the PDF against the .txt by hand (§Lessons 45/46).
+        for line in (proc.stderr or "").splitlines():
+            if "TRIMMED" in line:
+                LAST_TRIM_NOTES.append(line.split("resume-renderer:", 1)[-1].strip())
         return True
     except Exception as e:  # noqa: BLE001 - any failure → fallback
         log.warning("Node %s render error (%s); falling back: %s", what, out_path.name, e)

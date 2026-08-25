@@ -190,6 +190,33 @@ def all_sent_touches(conn: sqlite3.Connection | None = None) -> list[dict]:
     return [dict(zip(r.keys(), r)) for r in rows]
 
 
+def sent_touch_bodies(conn: sqlite3.Connection | None = None) -> dict:
+    """`{contact_id: {"YYYY-MM-DDTHH:MM": body}}` for every SENT touch that has text.
+
+    ONE query for the whole page, like `all_sent_touches` beside it — the contact card renders
+    every follow-up we sent, and looking each one up per contact is the N+1 the query budget
+    exists to catch (§Lessons 11: 313 statements per request before anyone counted).
+
+    Keyed by MINUTE because `touches` carries no message id, which is the same join the drafter
+    makes (§Lessons 77 records the gap; §Lessons 123 measured it at max 1.3 seconds of skew
+    before trusting it).
+    """
+    if conn is None:
+        conn = get_connection()
+    init_touches(conn)
+    rows = conn.execute(
+        "SELECT contact_id, sent_at, body FROM touches "
+        "WHERE sent_at IS NOT NULL AND body IS NOT NULL AND body != ''"
+    ).fetchall()
+    out: dict = {}
+    for r in rows:
+        d = dict(zip(r.keys(), r))
+        cid, at = d.get("contact_id"), (d.get("sent_at") or "")[:16]
+        if cid and at:
+            out.setdefault(cid, {})[at] = d.get("body") or ""
+    return out
+
+
 def ladder_states(contact_ids: list[str],
                   conn: sqlite3.Connection | None = None) -> dict[tuple[str, str], dict]:
     """Bulk load, keyed by (contact_id, channel).

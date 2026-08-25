@@ -580,6 +580,63 @@ def mark_deck_viewed(contact_id: str, at: str = "", views: int = 0, last: str = 
     return first
 
 
+def set_space_for_job(job_url: str, space_id: str,
+                      conn: sqlite3.Connection | None = None) -> int:
+    """Move every contact on one card into another Space. Returns rows written.
+
+    `contacts.space_id` MIRRORS the card's; membership is really decided by the anchor, which is
+    why this takes a `job_url` rather than a list of ids. Live, one contact sat on a
+    `professional-network` anchor carrying `space_id='job-search'` — so this repairs the mirror
+    rather than preserving whatever drift is in it.
+    """
+    if conn is None:
+        conn = get_connection()
+    init_contacts(conn)
+    cur = conn.execute("UPDATE contacts SET space_id = ? WHERE job_url = ?", (space_id, job_url))
+    return cur.rowcount
+
+
+def set_contact_space(contact_id: str, space_id: str,
+                      conn: sqlite3.Connection | None = None) -> int:
+    """Move ONE contact's Space. The per-row form, used on the way back from a card move."""
+    if conn is None:
+        conn = get_connection()
+    init_contacts(conn)
+    return conn.execute("UPDATE contacts SET space_id = ? WHERE id = ?",
+                        (space_id, contact_id)).rowcount
+
+
+def clear_unsent_draft(contact_id: str, conn: sqlite3.Connection | None = None) -> dict:
+    """Blank the draft columns on one contact and return what was there, for undo.
+
+    All of them together or none: a half-cleared draft is a subject with no body, which renders
+    as a real draft and sends as nonsense.
+    """
+    if conn is None:
+        conn = get_connection()
+    init_contacts(conn)
+    cols = ("outreach_subject", "outreach_message", "outreach_status", "draft_variant",
+            "linkedin_message")
+    row = conn.execute(
+        f"SELECT {', '.join(cols)} FROM contacts WHERE id = ?", (contact_id,)).fetchone()
+    before = dict(zip(cols, row)) if row else {k: "" for k in cols}
+    sets = ", ".join(k + " = ?" for k in cols)
+    conn.execute(f"UPDATE contacts SET {sets} WHERE id = ?", (*[""] * len(cols), contact_id))
+    return before
+
+
+def restore_draft(contact_id: str, before: dict, conn: sqlite3.Connection | None = None) -> None:
+    """Put a cleared draft back, exactly as `clear_unsent_draft` found it."""
+    if conn is None:
+        conn = get_connection()
+    init_contacts(conn)
+    cols = [k for k in before if k != "id"]
+    if not cols:
+        return
+    conn.execute(f"UPDATE contacts SET {', '.join(k + ' = ?' for k in cols)} WHERE id = ?",
+                 (*[before[k] for k in cols], contact_id))
+
+
 def mark_sent(contact_id: str, message_id: str, conn: sqlite3.Connection | None = None,
               thread_id: str = "", rfc_message_id: str = "") -> None:
     """Record a successful send. thread_id / rfc_message_id are what let a later
@@ -623,11 +680,21 @@ def mark_send_failed(contact_id: str, error: str, conn: sqlite3.Connection | Non
 # channels never clobber each other's state.
 
 def _norm_linkedin(url: str | None) -> str:
-    """Normalize a LinkedIn profile URL for dedupe (lowercase, strip query/trailing slash)."""
+    """Normalize a LinkedIn profile URL for dedupe.
+
+    Lowercase, drop query and fragment, drop the trailing slash — and drop the SCHEME and a
+    leading `www.`, which the first version kept. Apollo returns `https://…` while 143 stored
+    rows carry `http://www.…` for the same person, so the two hashed differently and this key
+    silently contributed nothing to the dedupe it exists for.
+
+    `removeprefix`, never `lstrip` — `lstrip("www.")` strips a CHARACTER SET and ate the leading
+    `w` of `webai.com` (§Lessons 2). It is a comparison key only: nothing is stored from it.
+    """
     u = (url or "").strip().lower()
     if not u:
         return ""
     u = u.split("?")[0].split("#")[0]
+    u = u.removeprefix("https://").removeprefix("http://").removeprefix("www.")
     return u.rstrip("/")
 
 

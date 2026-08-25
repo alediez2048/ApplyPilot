@@ -86,9 +86,14 @@ def test_queue_all_jobs_excludes_done_and_dedupes(tmp_path, monkeypatch):
     assert res["ok"] is True
     urls = sorted(store._norm_linkedin(c["linkedin_url"]) for c in res["contacts"])
     # dup collapsed to one; manual excluded; skipped ('sk') still present.
-    assert urls == ["https://www.linkedin.com/in/dup",
-                    "https://www.linkedin.com/in/other",
-                    "https://www.linkedin.com/in/sk"]
+    # Compared in NORMALISED form, which no longer carries the scheme or `www.`: Apollo returns
+    # `https://…` while 286 of 424 stored rows are `http://www.…`, so keeping those in the key
+    # meant the same person hashed two ways and the LinkedIn half of the cross-role dedupe
+    # contributed nothing. What this test asserts is unchanged — dup collapses to one, manual is
+    # excluded, skipped is still present.
+    assert urls == ["linkedin.com/in/dup",
+                    "linkedin.com/in/other",
+                    "linkedin.com/in/sk"]
     assert other in {c["id"] for c in res["contacts"]}
     assert m not in {c["id"] for c in res["contacts"]}  # manual is retired
     assert sk in {c["id"] for c in res["contacts"]}      # skipped re-appears
